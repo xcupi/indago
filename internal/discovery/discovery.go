@@ -1,10 +1,16 @@
-// Package discovery defines the discovery abstraction: pluggable Sources that
-// find endpoints and parameters, emitting them continuously so that testing can
-// begin immediately rather than waiting for discovery to finish.
+// Package discovery is Indago's discovery layer. Pluggable Sources find
+// endpoints and parameters (seed URLs, crawling/link extraction, forms,
+// sitemap.xml, robots.txt, browser network observation, content and parameter
+// wordlists) and stream them to a Sink that normalizes, scope-checks, and
+// deduplicates them, persists survivors, and immediately enqueues test jobs.
 //
-// Phase 0 provides the Source interface, a Sink for emission, a Registry, and
-// stub Sources for every planned discovery method. No Source performs network
-// activity yet — each returns ErrNotImplemented.
+// Discovery runs continuously and in parallel with testing: every new in-scope
+// endpoint/parameter creates a test job as soon as it is found, so testing never
+// waits for discovery to finish. Provenance (the discovery Source) is preserved.
+//
+// Boundaries: scope enforcement happens here (fail closed) before anything is
+// persisted or enqueued; this package performs NO XSS detection, payload
+// generation, or anti-bot/WAF evasion.
 package discovery
 
 import (
@@ -14,37 +20,120 @@ import (
 	"github.com/indago/indago/internal/domain"
 )
 
-// ErrNotImplemented indicates a Phase 0 stub with no behavior yet.
-var ErrNotImplemented = errors.New("discovery: not implemented in Phase 0")
+// Errors.
+var (
+	// ErrNotImplemented is returned by stub sources.
+	ErrNotImplemented = errors.New("discovery: not implemented")
+	// ErrLimitReached signals that a discovery limit (e.g. MaxEndpoints) was hit.
+	// Sources treat it as a normal stop, not a failure.
+	ErrLimitReached = errors.New("discovery: limit reached")
 
-// Sink receives discovered items as they are found. Implementations typically
-// de-duplicate and persist, then enqueue test jobs for new injection points.
-// A Sink must be safe for concurrent use.
-type Sink interface {
-	AddEndpoint(ctx context.Context, e domain.Endpoint) error
-	AddParameter(ctx context.Context, p domain.Parameter) error
+	errNonHTTP = errors.New("discovery: non-http(s) URL")
+	errNoHost  = errors.New("discovery: URL has no host")
+)
+
+// EndpointCandidate is a discovered endpoint proposed to the Sink. The Sink owns
+// normalization, scope checking, dedup, and ID assignment, so sources need not
+// manage identity.
+type EndpointCandidate struct {
+	URL         string
+	Method      domain.HTTPMethod
+	Source      domain.DiscoverySource
+	ContentType string
 }
 
-// Input is the context a Source runs within.
+// ParamCandidate is a discovered parameter proposed to the Sink. The endpoint is
+// identified by its URL+method so the Sink can resolve the canonical endpoint
+// even after deduplication.
+type ParamCandidate struct {
+	EndpointURL    string
+	EndpointMethod domain.HTTPMethod
+	Name           string
+	Location       domain.ParamLocation
+	Example        string
+	Source         domain.DiscoverySource
+}
+
+// Sink receives discovered items. Implementations normalize, scope-check,
+// deduplicate, persist, and enqueue. A Sink must be safe for concurrent use.
+type Sink interface {
+	// AddEndpoint registers an endpoint and returns the canonical endpoint ID
+	// (the existing one when a duplicate). An out-of-scope or duplicate endpoint
+	// is skipped and reported via the returned ID being empty with a nil error.
+	AddEndpoint(ctx context.Context, ep EndpointCandidate) (domain.ID, error)
+	// AddParameter registers a parameter on an endpoint (resolved by URL+method).
+	AddParameter(ctx context.Context, param ParamCandidate) error
+}
+
+// Input is the per-scan context a Source runs within.
 type Input struct {
 	ScanID    domain.ID
 	Scope     domain.Scope
 	SeedURLs  []string
 	SessionID domain.ID
-	// Wordlist is an optional path for content/parameter discovery sources.
+	// Wordlist is an optional file path for content/parameter discovery (used
+	// when the Config wordlists are empty).
 	Wordlist string
+	// Gate lets a Source cooperatively pause before network work. It is nil when
+	// pausing is not wired; sources must tolerate that.
+	Gate *Gate
 }
 
-// Source is a single discovery method (crawler, forms, sitemap, …). Run should
-// stream results to the Sink and return when complete or ctx is canceled.
+// wait blocks on the gate (if any) and returns ctx errors promptly.
+func (in Input) wait(ctx context.Context) error {
+	if in.Gate == nil {
+		return ctx.Err()
+	}
+	return in.Gate.Wait(ctx)
+}
+
+// Source is a single discovery method. Run streams results to sink and returns
+// when complete or ctx is canceled.
 type Source interface {
-	// Name is a stable identifier (also the DiscoverySource value it emits).
 	Name() domain.DiscoverySource
-	// Run executes discovery within scope, emitting to sink as items are found.
 	Run(ctx context.Context, in Input, sink Sink) error
 }
 
-// Registry holds the available discovery sources by name.
+// Config tunes discovery behavior. Zero values get sensible defaults via
+// withDefaults.
+type Config struct {
+	MaxDepth            int      // crawl depth (0 = seeds only)
+	MaxEndpoints        int      // cap on endpoints discovered (0 → default)
+	MaxPages            int      // cap on pages fetched by the crawler (0 → default)
+	Concurrency         int      // crawl fetch concurrency (0 → default)
+	Wordlist            []string // content-discovery words
+	ParamWordlist       []string // parameter-name guesses applied to endpoints
+	EnqueueEndpointJobs bool     // enqueue a test job per endpoint (not just per param)
+}
+
+// DefaultConfig returns conservative discovery defaults.
+func DefaultConfig() Config {
+	return Config{
+		MaxDepth:            3,
+		MaxEndpoints:        1000,
+		MaxPages:            500,
+		Concurrency:         4,
+		EnqueueEndpointJobs: true,
+	}
+}
+
+func (c Config) withDefaults() Config {
+	if c.MaxDepth < 0 {
+		c.MaxDepth = 0
+	}
+	if c.MaxEndpoints <= 0 {
+		c.MaxEndpoints = 1000
+	}
+	if c.MaxPages <= 0 {
+		c.MaxPages = 500
+	}
+	if c.Concurrency <= 0 {
+		c.Concurrency = 4
+	}
+	return c
+}
+
+// Registry holds discovery sources by name.
 type Registry struct {
 	sources map[domain.DiscoverySource]Source
 }
@@ -63,6 +152,15 @@ func (r *Registry) Get(name domain.DiscoverySource) (Source, bool) {
 	return s, ok
 }
 
+// Sources returns all registered sources.
+func (r *Registry) Sources() []Source {
+	out := make([]Source, 0, len(r.sources))
+	for _, s := range r.sources {
+		out = append(out, s)
+	}
+	return out
+}
+
 // Names returns the registered source names.
 func (r *Registry) Names() []domain.DiscoverySource {
 	out := make([]domain.DiscoverySource, 0, len(r.sources))
@@ -72,32 +170,11 @@ func (r *Registry) Names() []domain.DiscoverySource {
 	return out
 }
 
-// stubSource is a Phase 0 no-op source.
+// stubSource is a no-op source (used where a real source is not applicable).
 type stubSource struct{ name domain.DiscoverySource }
 
-func (s stubSource) Name() domain.DiscoverySource { return s.name }
-func (s stubSource) Run(context.Context, Input, Sink) error {
-	return ErrNotImplemented
-}
+func (s stubSource) Name() domain.DiscoverySource           { return s.name }
+func (s stubSource) Run(context.Context, Input, Sink) error { return ErrNotImplemented }
 
-// NewStub returns a no-op source with the given name, for Phase 0 wiring.
+// NewStub returns a no-op source with the given name.
 func NewStub(name domain.DiscoverySource) Source { return stubSource{name: name} }
-
-// DefaultRegistry returns a registry pre-populated with a stub for every planned
-// discovery method, so the wiring and UI can enumerate sources today.
-func DefaultRegistry() *Registry {
-	r := NewRegistry()
-	for _, n := range []domain.DiscoverySource{
-		domain.SourceUserProvided,
-		domain.SourceCrawler,
-		domain.SourceForm,
-		domain.SourceBrowserNetwork,
-		domain.SourceSitemap,
-		domain.SourceRobots,
-		domain.SourceContentDiscovery,
-		domain.SourceParamDiscovery,
-	} {
-		r.Register(NewStub(n))
-	}
-	return r
-}

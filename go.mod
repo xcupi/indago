@@ -6,6 +6,7 @@ go 1.26.0
 
 require (
 	github.com/playwright-community/playwright-go v0.5001.0
+	golang.org/x/net v0.59.0
 	modernc.org/sqlite v1.60.1
 )
 
