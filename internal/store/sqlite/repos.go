@@ -655,27 +655,30 @@ func nonNilIDs(in []domain.ID) []domain.ID {
 
 type findingRepo struct{ db *sql.DB }
 
-const findingCols = `id, scan_id, project_id, vuln_class, verdict, severity, confidence, title, summary, endpoint_id, injection_point_id, location, evidence_ids, provenance, created_at, updated_at`
+const findingCols = `id, scan_id, project_id, vuln_class, verdict, severity, confidence, title, summary, endpoint_id, injection_point_id, parameter_id, location, evidence_ids, provenance, detail, created_at, updated_at`
 
 func (r *findingRepo) Create(ctx context.Context, f *domain.Finding) error {
 	evIDs, _ := jsonEncode(f.EvidenceIDs)
 	prov, _ := jsonEncode(f.Provenance)
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO findings (`+findingCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO findings (`+findingCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		f.ID, f.ScanID, f.ProjectID, f.VulnClass, f.Verdict, f.Severity, f.Confidence, f.Title, f.Summary,
-		f.EndpointID, f.InjectionPointID, f.Location, evIDs, prov, ts(f.CreatedAt), ts(f.UpdatedAt))
+		f.EndpointID, f.InjectionPointID, f.ParameterID, f.Location, evIDs, prov, string(f.Detail), ts(f.CreatedAt), ts(f.UpdatedAt))
 	return err
 }
 
 func scanFinding(sc scanner) (*domain.Finding, error) {
 	var f domain.Finding
-	var evIDs, prov, created, updated string
+	var evIDs, prov, detail, created, updated string
 	if err := sc.Scan(&f.ID, &f.ScanID, &f.ProjectID, &f.VulnClass, &f.Verdict, &f.Severity, &f.Confidence,
-		&f.Title, &f.Summary, &f.EndpointID, &f.InjectionPointID, &f.Location, &evIDs, &prov, &created, &updated); err != nil {
+		&f.Title, &f.Summary, &f.EndpointID, &f.InjectionPointID, &f.ParameterID, &f.Location, &evIDs, &prov, &detail, &created, &updated); err != nil {
 		return nil, err
 	}
 	_ = jsonDecode(evIDs, &f.EvidenceIDs)
 	_ = jsonDecode(prov, &f.Provenance)
+	if detail != "" {
+		f.Detail = []byte(detail)
+	}
 	f.CreatedAt, _ = parseTS(created)
 	f.UpdatedAt, _ = parseTS(updated)
 	return &f, nil
@@ -716,8 +719,8 @@ func (r *findingRepo) Update(ctx context.Context, f *domain.Finding) error {
 	evIDs, _ := jsonEncode(f.EvidenceIDs)
 	prov, _ := jsonEncode(f.Provenance)
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE findings SET vuln_class=?, verdict=?, severity=?, confidence=?, title=?, summary=?, endpoint_id=?, injection_point_id=?, location=?, evidence_ids=?, provenance=?, updated_at=? WHERE id=?`,
-		f.VulnClass, f.Verdict, f.Severity, f.Confidence, f.Title, f.Summary, f.EndpointID, f.InjectionPointID, f.Location, evIDs, prov, ts(f.UpdatedAt), f.ID)
+		`UPDATE findings SET vuln_class=?, verdict=?, severity=?, confidence=?, title=?, summary=?, endpoint_id=?, injection_point_id=?, parameter_id=?, location=?, evidence_ids=?, provenance=?, detail=?, updated_at=? WHERE id=?`,
+		f.VulnClass, f.Verdict, f.Severity, f.Confidence, f.Title, f.Summary, f.EndpointID, f.InjectionPointID, f.ParameterID, f.Location, evIDs, prov, string(f.Detail), ts(f.UpdatedAt), f.ID)
 	return affected(res, err)
 }
 

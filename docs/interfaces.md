@@ -231,7 +231,13 @@ func For(format) (Generator, error)
 func Summarize(scanID, []*Finding) domain.ReportSummary
 ```
 
-- ✅ `JSONGenerator`. 🔌 Markdown/HTML return `ErrNotImplemented`.
+- ✅ `JSONGenerator`, `MarkdownGenerator` — pure serialization of `Data`
+  (`Project`/`Scan`/`Findings`/`Summary`); neither makes or recomputes a
+  verdict, and neither depends on `internal/detection` or
+  `internal/verification` (a Finding's `Detail` is read only through a small,
+  local, report-owned shape). Output is deterministic: findings are ordered
+  and every map-keyed breakdown is rendered in sorted key order. 🔌 HTML
+  returns `ErrNotImplemented`.
 
 ---
 

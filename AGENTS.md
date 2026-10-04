@@ -12,7 +12,7 @@ platform**. It helps an authorized operator discover and *verify* web
 vulnerabilities against targets **they are explicitly permitted to test**.
 
 - **Phase 1 scope (product):** Reflected XSS detection and verification.
-- **Current phase (code):** Reflected XSS — baseline, **reflection detection**, **context analysis**, **candidate planning**, **candidate execution**, and **browser verification** (a reflected candidate is confirmed/rejected/inconclusive only by a real, deterministic browser signal — never by an LLM).
+- **Current phase (code):** Reflected XSS — baseline, **reflection detection**, **context analysis**, **candidate planning**, **candidate execution**, **browser verification** (a reflected candidate is confirmed/rejected/inconclusive only by a real, deterministic browser signal — never by an LLM), and **finding correlation & reporting** (repeated results at the same site collapse into one `Finding` without discarding evidence; JSON + Markdown output).
 - **Future (designed for, not built):** Stored XSS, DOM XSS, additional engines.
 
 The architecture is deliberately generic (not XSS-specific) so new engines plug
@@ -129,13 +129,31 @@ Implemented so far (infrastructure and **discovery**):
   throws `ReferenceError: <token> is not defined` — observed via the browser's
   own uncaught-exception/console-error channels, never anything the candidate
   or verifier causes to happen (no alert/cookie/network call is ever part of a
-  candidate). `Confirmed` only when that signal names the exact marker;
-  `Rejected` when the candidate reflected but no signal appeared; `Inconclusive`
-  when the marker could not even be re-observed. Updates the `Finding`
-  (Verdict/Confidence/EvidenceIDs/VerifiedAt) and persists screenshot/rendered-
-  DOM/browser-log evidence. No LLM, no DOM XSS, no simulated clicks/activation.
-  See `docs/browser-verification.md`.
-- ✅ Evidence filesystem store, config, JSON reporting
+  candidate). `Confirmed` only when that signal names the exact marker —
+  attributed strictly to THIS navigation (observations are baselined before
+  navigating, so no pre-existing/unrelated page activity can be mistaken for
+  it); `Rejected` when the candidate reflected but no signal appeared;
+  `Inconclusive` when the marker could not even be re-observed. Correlates the
+  result into the `Finding` (see next bullet) and persists screenshot/
+  rendered-DOM/browser-log evidence. No LLM, no DOM XSS, no simulated
+  clicks/activation. See `docs/browser-verification.md`.
+- ✅ Finding correlation (`internal/scan/finding.go`): a candidate that
+  reflects is correlated into a `Finding` by injection point + candidate
+  category + context (`findingDedupKey`) — the same underlying site reflecting
+  via several candidates absorbs into ONE finding, never a near-duplicate row,
+  while every distinct candidate and contributing TestCase ID is still
+  recorded (`Finding.Detail`, an opaque JSON blob mirroring `TestCase.Detail`).
+  A verification result only ever moves the Verdict UP the
+  pending→inconclusive/rejected→confirmed lattice — once Confirmed, a later,
+  weaker result at a correlated site never downgrades it — while evidence
+  (this attempt's browser evidence AND the original candidate's own request/
+  response evidence) is unioned in every time, so correlating never discards
+  raw evidence. Full provenance (scan/endpoint/parameter/injection point/
+  discovery source/candidate source) is carried on every `Finding`. See
+  `docs/finding-correlation.md`.
+- ✅ Reporting (`internal/report`): `JSONGenerator` and `MarkdownGenerator`,
+  pure serialization of findings — no detection/verification dependency, no
+  LLM, deterministic output (sorted findings, sorted map-keyed breakdowns).
 - ⏳ Stubs: detection engines (non-XSS classes), non-anonymous auth, AI providers
 
 **The dividing line:** transport, browser, discovery, orchestration, and the

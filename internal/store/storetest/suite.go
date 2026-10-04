@@ -293,8 +293,9 @@ func testFindingEvidence(t *testing.T, f Factory) {
 		ID: domain.NewID(), ScanID: scanID, ProjectID: projID,
 		VulnClass: domain.VulnReflectedXSS, Verdict: domain.VerdictPending,
 		Severity: domain.SeverityHigh, Confidence: domain.ConfidenceMedium,
-		Title: "candidate", Provenance: domain.Provenance{Engine: "reflected-xss", ToolVersion: "test"},
-		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Title: "candidate", ParameterID: domain.NewID(),
+		Provenance: domain.Provenance{Engine: "reflected-xss", ToolVersion: "test", DiscoverySource: domain.SourceCrawler},
+		CreatedAt:  time.Now(), UpdatedAt: time.Now(),
 	}
 	must(t, s.Findings().Create(ctx, find))
 
@@ -306,11 +307,18 @@ func testFindingEvidence(t *testing.T, f Factory) {
 
 	find.Verdict = domain.VerdictConfirmed
 	find.EvidenceIDs = []domain.ID{ev.ID}
+	find.Detail = []byte(`{"dedup_key":"k","occurrences":2}`)
 	must(t, s.Findings().Update(ctx, find))
 
 	got, _ := s.Findings().Get(ctx, find.ID)
 	if got.Verdict != domain.VerdictConfirmed || len(got.EvidenceIDs) != 1 {
 		t.Fatalf("finding update: verdict=%s evidence=%d", got.Verdict, len(got.EvidenceIDs))
+	}
+	if got.ParameterID != find.ParameterID || got.Provenance.DiscoverySource != domain.SourceCrawler {
+		t.Fatalf("finding provenance round-trip: parameter=%q discovery_source=%q", got.ParameterID, got.Provenance.DiscoverySource)
+	}
+	if string(got.Detail) != `{"dedup_key":"k","occurrences":2}` {
+		t.Fatalf("finding detail round-trip: %q", got.Detail)
 	}
 	byFinding, _ := s.Evidence().ListByFinding(ctx, find.ID)
 	if len(byFinding) != 1 {

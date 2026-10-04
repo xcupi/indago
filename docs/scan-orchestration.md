@@ -95,10 +95,15 @@ baseline:
   evidence, but **does not re-plan** (no recursion). The state-changing opt-in is
   re-checked, so a breakout never reaches a state-changing endpoint unless the
   operator allowed it.
-- A candidate that **reflects via GET/HEAD** creates a `Finding` at
-  `VerdictPending` and enqueues a **browser-verify job** (section 1c) — see
-  [`browser-verification.md`](browser-verification.md). A POST/body-carrying
-  reflection has no browser-navigable form in this phase and stays `pending`.
+- A candidate that **reflects via GET/HEAD** is **correlated into a `Finding`**
+  (`internal/scan/finding.go`'s `upsertPendingFinding` — see
+  [`finding-correlation.md`](finding-correlation.md)): the same injection point
+  producing the same candidate category+context absorbs into one existing
+  `Finding` rather than minting a near-duplicate, with every distinct
+  candidate's TestCase ID preserved as raw evidence regardless. A genuinely
+  new site creates one at `VerdictPending`. Either way, a **browser-verify
+  job** (section 1c) is then enqueued. A POST/body-carrying reflection has no
+  browser-navigable form in this phase and stays `pending`.
 - The `detection.ReflectionReport` (reflection + context + plan; for a candidate
   job, reflection + context + the executed `candidate`) is stored in `TestCase.Detail`; evidence
   references the shared baseline (request+response) and the mutated
@@ -123,10 +128,15 @@ calls the Verifier with the scan's scope (for the browser's `AllowRequest`
 gate) and the scan's saved session (`domain.Session.StatePath`, for an
 authenticated context). On success it persists the verification report into
 `TestCase.Detail`, stores the screenshot/rendered-DOM/browser-log as evidence,
-and updates the Finding's Verdict/Confidence/EvidenceIDs/VerifiedAt — the
-**only** place a Finding leaves `pending`. A timeout or cancellation leaves the
-Finding untouched. No browser configured for the scan → the job is `skipped`,
-not failed.
+and **correlates** the result into the Finding (`finding.go`'s
+`correlateVerification` — see [`finding-correlation.md`](finding-correlation.md)):
+the Verdict only ever moves up Pending→Inconclusive/Rejected→Confirmed — a
+finding already Confirmed is never downgraded by a later, weaker result at a
+correlated site — while every attempt's evidence (this one's AND the
+candidate's own request/response) is unioned in regardless, so correlating
+never discards raw evidence. `Provenance.VerifiedAt` is stamped on every
+completed attempt. A timeout or cancellation leaves the Finding untouched. No
+browser configured for the scan → the job is `skipped`, not failed.
 
 | Outcome | Meaning | Job result |
 |---------|---------|------------|

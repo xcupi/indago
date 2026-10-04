@@ -106,6 +106,7 @@ func cloneFinding(f *domain.Finding) *domain.Finding {
 	c := *f
 	c.EvidenceIDs = cloneIDs(f.EvidenceIDs)
 	c.Provenance.VerifiedAt = cloneTimePtr(f.Provenance.VerifiedAt)
+	c.Detail = cloneBytes(f.Detail)
 	return &c
 }
 

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -243,6 +244,48 @@ func TestIntegrationVerifyURLContextNotExecutedWithoutActivation(t *testing.T) {
 	}
 	if !res.Report.MarkerInDOM {
 		t.Fatal("the marker should still be observed in the DOM (reflected)")
+	}
+}
+
+// --- unrelated / pre-existing browser errors must never create a confirmation ---
+
+// A page that is simply noisy — some OTHER, unrelated script throws on every
+// load, regardless of our candidate — must not be mistaken for our execution
+// signal. The reflected candidate here is plain text (never evaluated as
+// code), so the correct verdict is Rejected; the unrelated error existing on
+// the page must not flip that to Confirmed.
+func TestIntegrationVerifyUnrelatedPageErrorDoesNotConfirm(t *testing.T) {
+	m := marker(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<!doctype html><html><body><p>%s</p>
+<script>setTimeout(function(){ thisNameIsUnrelatedToTheMarker(); }, 0);</script>
+</body></html>`, r.URL.Query().Get("q"))
+	}))
+	defer srv.Close()
+
+	mgr := newManagerOrSkip(t)
+	defer mgr.Close()
+	v := verification.NewBrowserVerifier(mgr, verification.BrowserVerifierConfig{})
+
+	value := "<" + m + "x>" // plain markup: never evaluated as code
+	res, err := v.Verify(context.Background(), verification.Input{
+		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: value},
+		Marker:    m, Method: "GET", URL: queryURL(srv.URL+"/", value), Scope: openScope(),
+	})
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if res.Verdict == domain.VerdictConfirmed {
+		t.Fatalf("an unrelated page error must never confirm a candidate that never executed: %+v", res.Report)
+	}
+	if res.Verdict != domain.VerdictRejected {
+		t.Fatalf("verdict = %s, want rejected (reflected, unrelated error present, but not executed)", res.Verdict)
+	}
+	for _, msg := range res.Evidence.BrowserLog {
+		if strings.Contains(msg, m) {
+			t.Fatalf("the unrelated error must not mention our marker: %q", msg)
+		}
 	}
 }
 

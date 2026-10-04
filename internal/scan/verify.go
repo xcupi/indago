@@ -34,12 +34,15 @@ import (
 	"github.com/indago/indago/internal/worker"
 )
 
-// verifyJob is the queue payload for a JobVerify job: which candidate to verify,
-// its probe marker, and the Finding it will promote or demote.
+// verifyJob is the queue payload for a JobVerify job: which candidate to
+// verify, its probe marker, the Finding it will correlate into, and the
+// candidate's own TestCase (for request/response evidence linkage — see
+// finding.go's correlateVerification).
 type verifyJob struct {
-	Candidate detection.Candidate `json:"candidate"`
-	Marker    string              `json:"marker"`
-	FindingID domain.ID           `json:"finding_id"`
+	Candidate           detection.Candidate `json:"candidate"`
+	Marker              string              `json:"marker"`
+	FindingID           domain.ID           `json:"finding_id"`
+	CandidateTestCaseID domain.ID           `json:"candidate_test_case_id,omitempty"`
 }
 
 func parseVerifyJob(job *domain.TestJob) (verifyJob, error) {
@@ -56,56 +59,27 @@ func parseVerifyJob(job *domain.TestJob) (verifyJob, error) {
 	return vj, nil
 }
 
-// severityFor rates a reflected candidate by how directly its category reaches
-// code execution. This is a prioritization aid for the PENDING finding, not a
-// verdict — only verification decides confirmed/rejected/inconclusive.
-func severityFor(cand detection.Candidate) domain.Severity {
-	switch cand.Category {
-	case detection.CatHTMLText, detection.CatHTMLAttr, detection.CatJS:
-		return domain.SeverityHigh
-	case detection.CatCSS, detection.CatURL:
-		return domain.SeverityMedium
-	default:
-		return domain.SeverityLow
-	}
-}
-
-func findingTitle(cand detection.Candidate, focus *domain.Parameter) string {
-	return fmt.Sprintf("Reflected XSS candidate (%s) in parameter %q", cand.Category, focus.Name)
-}
-
-// enqueueVerification records a PENDING finding for a candidate that reflected
-// and enqueues the JobVerify job that will confirm or reject it. Best-effort:
-// failures are logged, not fatal — the candidate's own TestCase result (already
-// persisted) is unaffected either way.
-func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob, cand detection.Candidate, focus *domain.Parameter) {
+// enqueueVerification correlates a candidate that reflected into a Finding
+// (creating one at VerdictPending, or absorbing this candidate into an
+// existing finding at the same site — see upsertPendingFinding) and enqueues
+// the JobVerify job that will confirm or reject it. Best-effort: failures are
+// logged, not fatal — the candidate's own TestCase result (already persisted)
+// is unaffected either way.
+func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, cand detection.Candidate, focus *domain.Parameter, candTestCaseID domain.ID) {
 	if e.queue == nil || e.store == nil {
 		return
 	}
-	sc, err := e.store.Scans().Get(ctx, job.ScanID)
+	f, err := upsertPendingFinding(ctx, e.store, job.ScanID, ep, job.Target.InjectionPointID, focus, cand, candTestCaseID)
 	if err != nil {
-		e.log.Warn("enqueue verification: load scan", "job", job.ID, "err", err)
+		e.log.Warn("enqueue verification: upsert finding", "job", job.ID, "err", err)
 		return
 	}
 
 	now := time.Now()
-	f := &domain.Finding{
-		ID: domain.NewID(), ScanID: job.ScanID, ProjectID: sc.ProjectID, VulnClass: domain.VulnReflectedXSS,
-		Verdict: domain.VerdictPending, Severity: severityFor(cand), Confidence: domain.ConfidenceLow,
-		Title:            findingTitle(cand, focus),
-		Summary:          cand.Rationale,
-		EndpointID:       job.Target.EndpointID,
-		InjectionPointID: job.Target.InjectionPointID,
-		Location:         focus.Location,
-		Provenance:       domain.Provenance{Engine: "reflected-xss", DetectedAt: now, AIAssisted: false},
-		CreatedAt:        now, UpdatedAt: now,
-	}
-	if err := e.store.Findings().Create(ctx, f); err != nil {
-		e.log.Warn("enqueue verification: create finding", "job", job.ID, "err", err)
-		return
-	}
-
-	payload, err := json.Marshal(verifyJob{Candidate: cand, Marker: detection.NewProbe(job.ScanID, job.Target.InjectionPointID).Token, FindingID: f.ID})
+	payload, err := json.Marshal(verifyJob{
+		Candidate: cand, Marker: detection.NewProbe(job.ScanID, job.Target.InjectionPointID).Token,
+		FindingID: f.ID, CandidateTestCaseID: candTestCaseID,
+	})
 	if err != nil {
 		e.log.Warn("marshal verify job", "job", job.ID, "err", err)
 		return
@@ -319,7 +293,7 @@ func (e *verifyExecutor) finish(ctx context.Context, job *domain.TestJob, tc *do
 	}
 
 	if !vj.FindingID.Empty() && r.result != nil {
-		e.updateFinding(ctx, vj.FindingID, r.result, evidenceIDs)
+		e.correlateVerification(ctx, vj.FindingID, vj.CandidateTestCaseID, r.result, tc.ID, evidenceIDs)
 	}
 }
 
@@ -359,28 +333,4 @@ func joinLines(lines []string) string {
 		out += l + "\n"
 	}
 	return out
-}
-
-// updateFinding promotes/rejects the PENDING finding this verify job targets,
-// attaching the verification evidence and marking VerifiedAt. It is the only
-// place a Finding's Verdict leaves Pending, and it is driven entirely by
-// verification's deterministic Result — never an LLM.
-func (e *verifyExecutor) updateFinding(ctx context.Context, findingID domain.ID, vres *verification.Result, evidenceIDs []domain.ID) {
-	f, err := e.store.Findings().Get(ctx, findingID)
-	if err != nil {
-		e.log.Warn("load finding for verification update", "finding", findingID, "err", err)
-		return
-	}
-	now := time.Now()
-	f.Verdict = vres.Verdict
-	f.Confidence = vres.Confidence
-	if vres.Notes != "" {
-		f.Summary = vres.Notes
-	}
-	f.EvidenceIDs = evidenceIDs
-	f.Provenance.VerifiedAt = &now
-	f.UpdatedAt = now
-	if err := e.store.Findings().Update(ctx, f); err != nil {
-		e.log.Warn("persist finding verification result", "finding", findingID, "err", err)
-	}
 }

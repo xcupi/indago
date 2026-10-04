@@ -51,8 +51,8 @@ func TestJSONGeneratorProducesValidReport(t *testing.T) {
 	}
 }
 
-func TestMarkdownNotImplemented(t *testing.T) {
-	if _, err := report.For(domain.ReportMarkdown); err == nil {
-		t.Fatal("markdown should not be implemented in Phase 0")
+func TestHTMLNotImplemented(t *testing.T) {
+	if _, err := report.For(domain.ReportHTML); err == nil {
+		t.Fatal("html is not implemented yet")
 	}
 }

@@ -94,8 +94,24 @@ preservation, enqueue/dedup/ordering, concurrency) and `verify_test.go`
 FAKE `verification.Verifier` — fast and deterministic: outcome mapping for
 confirmed/rejected/inconclusive/timeout/cancelled/skipped, the state-changing
 and GET/HEAD-only guards, scope/session pass-through into `verification.Input`,
-and evidence/Finding persistence). The signal itself and real-browser behavior
-are covered by the Real Chromium tests above, not re-verified here.
+and evidence/Finding persistence). The signal itself, real-browser behavior,
+and unrelated/pre-existing page errors correctly NOT confirming are covered by
+the Real Chromium tests above, not re-verified here.
+
+### Finding correlation and reporting
+`internal/scan/finding_test.go`: the dedup key (same site vs. distinct
+parameter/distinct context), `upsertPendingFinding` (new finding creation with
+full provenance, correlating a duplicate candidate without losing it as raw
+evidence, an exact retry not re-adding the same candidate twice), and
+`correlateVerification` (confirmed/rejected/inconclusive, evidence linkage
+across BOTH the candidate's HTTP evidence and the verification's browser
+evidence, the monotonic confirm-is-sticky rule, and the allowed
+inconclusive/rejected→confirmed upgrade) — all against the in-memory store, no
+browser needed. `internal/report/markdown_test.go` and `report_test.go`:
+Markdown/JSON validity and, since `Summarize`'s breakdowns are Go maps,
+deterministic byte-identical output across repeated `Generate` calls.
+`storetest/suite.go`'s finding/evidence conformance test round-trips the new
+`ParameterID`/`Detail` fields through both the memory and SQLite backends.
 
 ### End-to-end — binary smoke
 The built binary is exercised manually/CI: `db init` creates the schema; `serve`

@@ -1,6 +1,6 @@
-// Package report renders scan results. Phase 0 implements a structured JSON
-// reporter (pure serialization — no security logic). Markdown and HTML reporters
-// are planned; For returns ErrNotImplemented for them until then.
+// Package report renders scan results. JSON and Markdown reporters are
+// implemented (pure serialization — no security logic, no LLM). An HTML
+// reporter is planned; For returns ErrNotImplemented for it until then.
 package report
 
 import (
@@ -92,13 +92,14 @@ func (JSONGenerator) Generate(w io.Writer, data Data) error {
 
 var _ Generator = JSONGenerator{}
 
-// For returns a generator for the given format. Only JSON is implemented in
-// Phase 0.
+// For returns a generator for the given format. HTML is not yet implemented.
 func For(format domain.ReportFormat) (Generator, error) {
 	switch format {
 	case domain.ReportJSON:
 		return JSONGenerator{}, nil
-	case domain.ReportMarkdown, domain.ReportHTML:
+	case domain.ReportMarkdown:
+		return MarkdownGenerator{}, nil
+	case domain.ReportHTML:
 		return nil, fmt.Errorf("%w: %s", ErrNotImplemented, format)
 	default:
 		return nil, fmt.Errorf("report: unknown format %q", format)

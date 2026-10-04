@@ -55,13 +55,13 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	}
 
 	// schema_migrations should contain exactly the embedded migrations once each
-	// (0001_init … 0004_test_case_detail).
+	// (0001_init … 0005_finding_correlation).
 	var count int
 	if err := db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 4 {
-		t.Fatalf("expected 4 applied migrations, got %d", count)
+	if count != 5 {
+		t.Fatalf("expected 5 applied migrations, got %d", count)
 	}
 }
 

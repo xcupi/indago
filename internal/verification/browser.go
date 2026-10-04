@@ -119,6 +119,16 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	}
 	defer page.Close()
 
+	// Baseline the page's own observation channels BEFORE navigating, so the
+	// signal below is attributable to THIS navigation only. A page is brand new
+	// here (one page per Verify call, never reused across attempts), so these
+	// are normally empty — but this makes that an enforced property, not an
+	// assumption: nothing observed on the pre-navigation page (e.g. any
+	// pre-existing/early error) can be mistaken for this candidate's signal.
+	baseConsole := len(page.ConsoleMessages())
+	basePageErrs := len(page.PageErrors())
+	baseDialogs := len(page.DialogMessages())
+
 	navigatedAt := time.Now()
 	nav, err := page.Navigate(ctx, in.URL, browser.NavOptions{
 		WaitUntil: browser.WaitLoad,
@@ -135,13 +145,13 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	observedAt := time.Now()
 
 	var consoleErrs []string
-	for _, cm := range page.ConsoleMessages() {
+	for _, cm := range sinceIndex(page.ConsoleMessages(), baseConsole) {
 		if cm.Type == "error" {
 			consoleErrs = append(consoleErrs, cm.Text)
 		}
 	}
-	pageErrs := page.PageErrors()
-	dialogs := page.DialogMessages()
+	pageErrs := sinceIndex(page.PageErrors(), basePageErrs)
+	dialogs := sinceIndex(page.DialogMessages(), baseDialogs)
 
 	token := in.Marker
 	sig, sigText, matched := matchExecutionSignal(token, pageErrs, consoleErrs)
@@ -183,6 +193,17 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 // containsToken reports whether the rendered HTML contains the marker token.
 func containsToken(html, token string) bool {
 	return token != "" && strings.Contains(html, token)
+}
+
+// sinceIndex returns the elements observed after baseline (a count taken
+// before navigation), so pre-navigation noise is never attributed to the
+// candidate just navigated to. A baseline beyond the current length (should
+// never happen — these only grow) safely yields nothing.
+func sinceIndex[T any](all []T, baseline int) []T {
+	if baseline >= len(all) {
+		return nil
+	}
+	return all[baseline:]
 }
 
 // decide is the deterministic verdict rule — the one place a candidate is

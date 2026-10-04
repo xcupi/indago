@@ -33,10 +33,19 @@ type Finding struct {
 
 	EndpointID       ID            `json:"endpoint_id,omitempty"`
 	InjectionPointID ID            `json:"injection_point_id,omitempty"`
+	ParameterID      ID            `json:"parameter_id,omitempty"`
 	Location         ParamLocation `json:"location,omitempty"`
 
 	EvidenceIDs []ID       `json:"evidence_ids,omitempty"`
 	Provenance  Provenance `json:"provenance"`
+
+	// Detail is an engine-specific, structured record (JSON), opaque to the
+	// domain — mirroring TestCase.Detail. For Reflected XSS it carries the
+	// correlation key, the candidate(s)/context that produced this finding, the
+	// contributing TestCase IDs, and an occurrence count — the data a
+	// correlation layer needs without multiplying dedicated columns per
+	// vulnerability class.
+	Detail []byte `json:"detail,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

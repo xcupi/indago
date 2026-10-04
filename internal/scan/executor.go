@@ -178,7 +178,7 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		// candidate can be verified; isSafeMethod also covers HEAD/OPTIONS, which
 		// are equally bodiless and equally navigable.
 		if res.reflection != nil && res.reflection.Reflected && isSafeMethod(ep.Method) {
-			e.enqueueVerification(ctx, job, cand, focus)
+			e.enqueueVerification(ctx, job, ep, cand, focus, tc.ID)
 		}
 		return res
 	case focus != nil:
