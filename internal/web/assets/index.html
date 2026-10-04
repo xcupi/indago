@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Indago</title>
+  <style>
+    :root {
+      --bg: #0f1115; --panel: #171a21; --fg: #e6e9ef; --muted: #8b93a7;
+      --accent: #5b9dff; --border: #262b36; --ok: #4caf50;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg); color: var(--fg);
+    }
+    header {
+      padding: 16px 24px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: baseline; gap: 12px;
+    }
+    header h1 { margin: 0; font-size: 18px; letter-spacing: 0.5px; }
+    header .ver { color: var(--muted); font-size: 12px; }
+    header .phase {
+      margin-left: auto; font-size: 11px; color: var(--muted);
+      border: 1px solid var(--border); padding: 2px 8px; border-radius: 999px;
+    }
+    main { padding: 24px; max-width: 1000px; margin: 0 auto; display: grid; gap: 24px; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+    .card h2 { margin: 0 0 12px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; }
+    td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .empty { color: var(--muted); font-style: italic; padding: 8px 6px; }
+    .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+    footer { padding: 16px 24px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>INDAGO</h1>
+    <span class="ver" id="version">…</span>
+    <span class="phase">Phase 0 · scaffold</span>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Projects</h2>
+      <table>
+        <thead><tr><th>Name</th><th>ID</th><th>Created</th></tr></thead>
+        <tbody id="projects"><tr><td colspan="3" class="empty">loading…</td></tr></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Scans</h2>
+      <table>
+        <thead><tr><th>Name</th><th>State</th><th>Profile</th><th>ID</th></tr></thead>
+        <tbody id="scans"><tr><td colspan="4" class="empty">loading…</td></tr></tbody>
+      </table>
+    </section>
+  </main>
+
+  <footer>
+    Local-first web application security hunting platform. Authorized use only.
+    This Phase 0 build performs no vulnerability testing.
+  </footer>
+
+  <script>
+    const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => (
+      { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+    async function j(url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(url + " -> " + r.status);
+      return r.json();
+    }
+
+    async function load() {
+      try {
+        const v = await j("/api/version");
+        document.getElementById("version").textContent = "v" + (v.version || "dev");
+      } catch (e) { /* ignore */ }
+
+      const projectsEl = document.getElementById("projects");
+      try {
+        const projects = (await j("/api/projects")) || [];
+        projectsEl.innerHTML = projects.length ? projects.map(p => `
+          <tr><td>${esc(p.name)}</td><td class="mono">${esc(p.id)}</td>
+          <td>${esc((p.created_at || "").slice(0, 19).replace("T", " "))}</td></tr>`).join("")
+          : `<tr><td colspan="3" class="empty">No projects yet.</td></tr>`;
+      } catch (e) {
+        projectsEl.innerHTML = `<tr><td colspan="3" class="empty">error loading projects</td></tr>`;
+      }
+
+      const scansEl = document.getElementById("scans");
+      try {
+        const scans = (await j("/api/scans")) || [];
+        scansEl.innerHTML = scans.length ? scans.map(s => `
+          <tr><td>${esc(s.name)}</td><td><span class="pill">${esc(s.state)}</span></td>
+          <td>${esc(s.profile)}</td><td class="mono">${esc(s.id)}</td></tr>`).join("")
+          : `<tr><td colspan="4" class="empty">No scans yet.</td></tr>`;
+      } catch (e) {
+        scansEl.innerHTML = `<tr><td colspan="4" class="empty">error loading scans</td></tr>`;
+      }
+    }
+
+    load();
+  </script>
+</body>
+</html>
