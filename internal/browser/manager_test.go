@@ -190,6 +190,7 @@ type fakePage struct {
 	reqFn        func(NetworkEvent)
 	conFn        func(ConsoleMessage)
 	dlgFn        func(string)
+	errFn        func(string)
 	localStorage map[string]string
 }
 
@@ -205,6 +206,9 @@ func (p *fakePage) Goto(url, waitUntil string, timeout time.Duration) (int, stri
 	}
 	if p.dlgFn != nil {
 		p.dlgFn("a dialog")
+	}
+	if p.errFn != nil {
+		p.errFn("ReferenceError: fake is not defined")
 	}
 	return 200, url, nil
 }
@@ -228,6 +232,7 @@ func (p *fakePage) Evaluate(script string, arg any) (any, error) {
 func (p *fakePage) OnRequest(fn func(NetworkEvent))   { p.reqFn = fn }
 func (p *fakePage) OnConsole(fn func(ConsoleMessage)) { p.conFn = fn }
 func (p *fakePage) OnDialog(fn func(string))          { p.dlgFn = fn }
+func (p *fakePage) OnPageError(fn func(string))       { p.errFn = fn }
 
 func (p *fakePage) WaitForURL(glob string, timeout time.Duration) error {
 	if p.gotoDelay > 0 {
@@ -455,6 +460,9 @@ func TestRenderGathersObservations(t *testing.T) {
 	}
 	if len(res.DialogMessages) != 1 || res.DialogMessages[0] != "a dialog" {
 		t.Fatalf("dialog not observed: %v", res.DialogMessages)
+	}
+	if len(res.PageErrors) != 1 || res.PageErrors[0] != "ReferenceError: fake is not defined" {
+		t.Fatalf("page error not observed: %v", res.PageErrors)
 	}
 	// The throwaway context must be cleaned up.
 	if st := m.Stats(); st.OpenContexts != 0 {

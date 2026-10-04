@@ -39,6 +39,7 @@ import (
 	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/store"
+	"github.com/indago/indago/internal/verification"
 	"github.com/indago/indago/internal/worker"
 )
 
@@ -73,10 +74,20 @@ type Options struct {
 	// seeds are still registered, nothing is fetched.
 	HTTP httpengine.Engine
 
-	// Browser, when non-nil, enables browser network-observation discovery.
-	// Scope is NOT enforced inside the browser layer, so only enable this where
-	// third-party requests from rendered pages are acceptable.
+	// Browser, when non-nil, enables browser network-observation discovery AND
+	// (when it is the concrete *browser.Manager) browser verification of
+	// reflected candidates. Scope IS enforced for verification (and for
+	// discovery's own browser source) via the AllowRequest gate built from the
+	// scan's scope.
 	Browser browser.Browser
+
+	// Verification overrides the Verifier JobVerify jobs use (nil → derived from
+	// Browser, else the Phase 0 Stub). Tests inject a fake Verifier here to
+	// exercise verifyExecutor without a real browser.
+	Verification verification.Verifier
+	// VerifyConfig tunes a Browser-derived BrowserVerifier (navigation timeout,
+	// DOM excerpt window). Ignored when Verification is set.
+	VerifyConfig verification.BrowserVerifierConfig
 
 	// Discovery tunes discovery limits and depth (nil → discovery.DefaultConfig).
 	Discovery *discovery.Config

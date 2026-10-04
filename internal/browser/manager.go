@@ -188,6 +188,7 @@ func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*
 		FinalURL:       nav.FinalURL,
 		Status:         nav.Status,
 		HTML:           html,
+		PageErrors:     page.PageErrors(),
 		DialogMessages: page.DialogMessages(),
 		Network:        page.NetworkEvents(),
 		Blocked:        page.BlockedRequests(),
@@ -361,12 +362,13 @@ type Page struct {
 	ctxp   *Context
 	handle pageHandle
 
-	mu      sync.Mutex
-	console []ConsoleMessage
-	dialogs []string
-	network []NetworkEvent
-	blocked []string
-	closed  bool
+	mu       sync.Mutex
+	console  []ConsoleMessage
+	dialogs  []string
+	pageErrs []string
+	network  []NetworkEvent
+	blocked  []string
+	closed   bool
 }
 
 func newPage(c *Context, ph pageHandle) *Page {
@@ -379,6 +381,11 @@ func newPage(c *Context, ph pageHandle) *Page {
 	ph.OnDialog(func(msg string) {
 		p.mu.Lock()
 		p.dialogs = append(p.dialogs, msg)
+		p.mu.Unlock()
+	})
+	ph.OnPageError(func(msg string) {
+		p.mu.Lock()
+		p.pageErrs = append(p.pageErrs, msg)
 		p.mu.Unlock()
 	})
 	ph.OnRequest(func(ev NetworkEvent) {
@@ -495,6 +502,13 @@ func (p *Page) DialogMessages() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.dialogs...)
+}
+
+// PageErrors returns a copy of observed uncaught-exception messages.
+func (p *Page) PageErrors() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.pageErrs...)
 }
 
 // NetworkEvents returns a copy of observed network requests.

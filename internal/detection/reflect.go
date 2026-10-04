@@ -77,13 +77,37 @@ type ResponseSummary struct {
 
 // ReflectionLocation is one site where the marker's token was reflected.
 type ReflectionLocation struct {
-	Offset   int               `json:"offset"`             // byte offset of the token in the mutated body
-	Before   string            `json:"before"`             // bounded context before the token
-	Segment  string            `json:"segment"`            // bytes between token and tail (the transformed canary)
-	After    string            `json:"after"`              // bounded context after the tail
-	Encoding string            `json:"encoding"`           // none|html|url|js|stripped|mixed|unknown
-	PerChar  map[string]string `json:"per_char,omitempty"` // canary char -> raw|html|url|js|stripped
+	Offset     int               `json:"offset"`                // byte offset of the token in the mutated body
+	TailOffset int               `json:"tail_offset,omitempty"` // byte offset of the tail sentinel (0 = not found)
+	Before     string            `json:"before"`                // bounded context before the token
+	Segment    string            `json:"segment"`               // bytes between token and tail (the transformed canary)
+	After      string            `json:"after"`                 // bounded context after the tail
+	Encoding   string            `json:"encoding"`              // none|html|url|js|stripped|mixed|unknown
+	PerChar    map[string]string `json:"per_char,omitempty"`    // canary char -> raw|html|url|js|stripped
+
+	// Context is the deterministic context classification of this site, set by
+	// ClassifyContexts. nil on reports produced before context analysis.
+	Context *ContextAnalysis `json:"context,omitempty"`
 }
+
+// ReflectionEvidence ties a report to the stored evidence it was derived from, so
+// every site offset can be resolved to an exact byte in the evidence blob.
+//
+// Offsets in ReflectionLocation/ContextAnalysis are relative to the mutated
+// response BODY. The mutated-response evidence blob is an HTTP/1.1 message
+// (status line + headers + blank line + body), so the blob offset of a site is
+// MutatedBodyOffset + Offset.
+type ReflectionEvidence struct {
+	BaselineRequest   domain.ID `json:"baseline_request,omitempty"`
+	BaselineResponse  domain.ID `json:"baseline_response,omitempty"`
+	MutatedRequest    domain.ID `json:"mutated_request,omitempty"`
+	MutatedResponse   domain.ID `json:"mutated_response,omitempty"`
+	MutatedBodyOffset int       `json:"mutated_body_offset,omitempty"`
+}
+
+// BlobOffset converts a body-relative offset into an offset within the
+// mutated-response evidence blob.
+func (e ReflectionEvidence) BlobOffset(bodyOffset int) int { return e.MutatedBodyOffset + bodyOffset }
 
 // ReflectionReport is the persisted result of the reflection step. It is stored
 // (JSON) in TestCase.Detail. It is intentionally descriptive, not a verdict.
@@ -99,6 +123,20 @@ type ReflectionReport struct {
 	Locations       []ReflectionLocation `json:"locations,omitempty"`
 	Baseline        ResponseSummary      `json:"baseline"`
 	Mutated         ResponseSummary      `json:"mutated"`
+	ContentType     string               `json:"content_type,omitempty"` // mutated response Content-Type
+	Evidence        ReflectionEvidence   `json:"evidence,omitempty"`
+
+	// Plan is the deterministic candidate plan derived from the sites above, set
+	// by PlanCandidates. nil on reports produced before candidate planning. The
+	// candidates are data for a later, separately-gated execution phase; recording
+	// them here is not a verdict and sends nothing.
+	Plan *CandidatePlan `json:"plan,omitempty"`
+
+	// Candidate is set when this report is the RE-ANALYSIS of a sent candidate
+	// (the candidate-execution phase) rather than the initial reflection step. It
+	// records which candidate (and its source — builtin/llm) produced this
+	// response. Candidate reports carry no Plan: candidates are not re-planned.
+	Candidate *Candidate `json:"candidate,omitempty"`
 }
 
 // Tuning for the analysis.
@@ -160,6 +198,7 @@ func locationAt(body []byte, tokenOff int, token, tail []byte, canary string) Re
 	segStart := tokenEnd
 	segEnd := tokenEnd + rel
 	seg := body[segStart:segEnd]
+	loc.TailOffset = segEnd
 	loc.Segment = toValid(seg)
 	loc.After = excerpt(body, segEnd+len(tail), segEnd+len(tail)+contextWindow)
 	loc.Encoding, loc.PerChar = classifyCanary(seg, canary)

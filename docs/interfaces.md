@@ -164,9 +164,13 @@ type Browser interface {
 - ✅ `Manager` (Chromium via Playwright): reusable browser pool, isolated and
   persistent-authenticated contexts, navigation, cookies/localStorage/
   sessionStorage, network observation, screenshots, cancellation, graceful
-  shutdown, interactive login/MFA. `RenderResult` exposes generic runtime signals
-  that verification will consume. **No scope enforcement** — page subresources can
-  reach third-party hosts, so discovery's browser source is opt-in.
+  shutdown, interactive login/MFA. `RenderResult` exposes generic runtime
+  signals (console, uncaught-exception/`PageErrors`, dialog, network) that
+  verification consumes — the browser layer itself makes no verdict about them.
+  **No scope enforcement in `Render`'s facade** — page subresources can reach
+  third-party hosts, so discovery's browser source is opt-in; verification
+  instead drives the Manager directly (`NewContext`/`NewPage`/`Navigate`) with
+  its own `AllowRequest` gate.
 - 🔌 `Stub` remains for tests.
 
 ---
@@ -195,8 +199,13 @@ type Registry struct { /* by VulnClass */ }
 type Verifier interface { Verify(ctx, Input) (*Result, error) }  // → Verdict + evidence
 ```
 
-- 🔌 `Stub`. This is the authority that turns a candidate into
-  `confirmed`/`rejected`/`inconclusive`, backed by browser evidence (Phase 1).
+- ✅ `BrowserVerifier`: the authority that turns a reflected candidate into
+  `confirmed`/`rejected`/`inconclusive`, backed by real browser evidence. The
+  decision is a deterministic function of whether the browser's own uncaught-
+  exception/console-error channels name the candidate's marker token — never an
+  LLM. See [`browser-verification.md`](browser-verification.md).
+- 🔌 `Stub` remains the default when no browser is configured for a scan
+  (`JobVerify` is then recorded `skipped`, not failed).
 
 ---
 

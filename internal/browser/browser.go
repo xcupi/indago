@@ -173,11 +173,14 @@ type RenderResult struct {
 	Screenshot     []byte // PNG bytes when requested
 	ConsoleLogs    []string
 	ConsoleErrors  []string
+	PageErrors     []string       // uncaught JS exceptions (see OnPageError)
 	DialogMessages []string       // alert/confirm/prompt messages observed
 	Network        []NetworkEvent // observed (allowed) requests
 	Blocked        []string       // requests aborted by AllowRequest (never sent)
 	// ExecutedMarkers is reserved for the verification phase (marker execution
-	// detection). The browser layer leaves it empty — it makes no verdicts.
+	// detection). The browser layer leaves it empty — it makes no verdicts; it only
+	// hands verification the raw, neutral observations above (ConsoleErrors,
+	// PageErrors, DialogMessages, HTML) to inspect.
 	ExecutedMarkers []string
 }
 

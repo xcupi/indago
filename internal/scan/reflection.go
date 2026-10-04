@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,7 +57,7 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 	probe := detection.NewProbe(tc.ScanID, tc.InjectionPointID)
 	mutReq, err := buildRequest(ep, params, &injection{param: focus, value: probe.Value()})
 	if err != nil {
-		return result{outcome: domain.OutcomeError, permanent: true, err: err, note: note, vulnClass: domain.VulnReflectedXSS, sharedEvidence: bl.evidence}
+		return result{outcome: domain.OutcomeError, permanent: true, err: err, note: note, vulnClass: domain.VulnReflectedXSS, sharedEvidence: bl.evidenceIDs()}
 	}
 	tc.URL = mutReq.URL
 
@@ -67,7 +68,7 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 		vulnClass:      domain.VulnReflectedXSS,
 		req:            capturedFrom(mutReq, resp),
 		resp:           resp,
-		sharedEvidence: bl.evidence,
+		sharedEvidence: bl.evidenceIDs(),
 	}
 	if outcome != domain.OutcomeSuccess {
 		r.outcome = outcome
@@ -84,18 +85,74 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 	report.Baseline = detection.ResponseSummary{Status: bl.status, BodyLen: bl.bodyLen}
 	report.Mutated = detection.ResponseSummary{Status: resp.Status, BodyLen: len(resp.Body)}
 
+	// Context analysis (pure): classify every reflection site against the actual
+	// response bytes. Still no verdict.
+	detection.ClassifyContexts(&report, resp.Body, detection.ContextOptions{
+		ContentType: resp.Headers.Get("Content-Type"),
+	})
+
+	// Candidate planning (pure): derive the ordered, deduplicated breakout
+	// candidates for each site from its context and observed transformation. This
+	// is planning only — nothing is sent here and no verdict is made; candidate
+	// execution and verification are later, separately-gated phases.
+	detection.PlanCandidates(&report, detection.PlanOptions{
+		ScanID:           tc.ScanID,
+		InjectionPointID: tc.InjectionPointID,
+	})
+
 	r.outcome = domain.OutcomeSuccess
 	if report.Reflected {
-		r.note = fmt.Sprintf("%s: reflected at %d location(s)", note, report.Count)
+		r.note = fmt.Sprintf("%s: reflected at %d location(s); %s", note, report.Count, contextSummary(&report))
+		if n := len(report.Plan.Candidates); n > 0 {
+			r.note += fmt.Sprintf("; planned %d candidate(s)", n)
+		}
 	} else {
 		r.note = note + ": not reflected"
 	}
-	if detail, err := json.Marshal(report); err == nil {
-		r.detail = detail
-	} else {
-		e.log.Warn("marshal reflection report", "job", tc.JobID, "err", err)
-	}
+	r.reflection = &report
+	r.baselineReq, r.baselineResp = bl.reqEvidence, bl.respEvidence
 	return r
+}
+
+// contextSummary renders the distinct site contexts, e.g. "context: html_text, js_string".
+func contextSummary(rep *detection.ReflectionReport) string {
+	var out []string
+	seen := map[detection.Context]bool{}
+	for _, l := range rep.Locations {
+		if l.Context != nil && !seen[l.Context.Context] {
+			seen[l.Context.Context] = true
+			out = append(out, string(l.Context.Context))
+		}
+	}
+	return "context: " + strings.Join(out, ", ")
+}
+
+// finalizeReflection attaches the evidence references to the report — including
+// the response body's offset inside the response evidence blob, so every site
+// offset maps to an exact byte — and stores it in TestCase.Detail.
+//
+// own holds this attempt's persisted evidence IDs: [request] or [request, response].
+func (e *executor) finalizeReflection(tc *domain.TestCase, r result, own []domain.ID) {
+	ev := detection.ReflectionEvidence{BaselineRequest: r.baselineReq, BaselineResponse: r.baselineResp}
+	if len(own) >= 1 {
+		ev.MutatedRequest = own[0]
+	}
+	if r.resp != nil {
+		if len(own) >= 2 {
+			ev.MutatedResponse = own[1]
+		}
+		// The response blob is "status line + headers + blank line + body", so the
+		// body starts where the dump is longer than the body alone.
+		ev.MutatedBodyOffset = len(dumpResponse(r.resp)) - len(r.resp.Body)
+	}
+	r.reflection.Evidence = ev
+
+	detail, err := json.Marshal(r.reflection)
+	if err != nil {
+		e.log.Warn("marshal reflection report", "job", tc.JobID, "err", err)
+		return
+	}
+	tc.Detail = detail
 }
 
 // ---------------------------------------------------------------------------
@@ -103,10 +160,23 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 // ---------------------------------------------------------------------------
 
 type baselineEntry struct {
-	status   int
-	bodyLen  int
-	body     []byte      // capped copy for the token-absence check
-	evidence []domain.ID // shared baseline request+response evidence (may be nil)
+	status       int
+	bodyLen      int
+	body         []byte    // capped copy for the token-absence check
+	reqEvidence  domain.ID // shared baseline request evidence (empty if not stored)
+	respEvidence domain.ID // shared baseline response evidence (empty if not stored)
+}
+
+// evidenceIDs returns the baseline's stored evidence IDs that exist.
+func (b *baselineEntry) evidenceIDs() []domain.ID {
+	var ids []domain.ID
+	if b.reqEvidence != "" {
+		ids = append(ids, b.reqEvidence)
+	}
+	if b.respEvidence != "" {
+		ids = append(ids, b.respEvidence)
+	}
+	return ids
 }
 
 type baselineCache struct {
@@ -165,7 +235,7 @@ func (e *executor) baseline(ctx context.Context, scanID domain.ID, req *httpengi
 		body:    capBody(resp.Body, maxBaselineBodyKeep),
 	}
 	if e.evidence != nil {
-		entry.evidence = e.persistBaselineEvidence(ctx, scanID, req, resp)
+		entry.reqEvidence, entry.respEvidence = e.persistBaselineEvidence(ctx, scanID, req, resp)
 	}
 	return e.baselines.store(key, entry), domain.OutcomeSuccess, nil
 }
@@ -173,14 +243,13 @@ func (e *executor) baseline(ctx context.Context, scanID domain.ID, req *httpengi
 // persistBaselineEvidence stores the baseline request+response once, scan-scoped
 // so it can be shared across the endpoint's injection points. It uses a detached
 // context so a single job's cancellation cannot corrupt the shared cache entry.
-func (e *executor) persistBaselineEvidence(ctx context.Context, scanID domain.ID, req *httpengine.Request, resp *httpengine.Response) []domain.ID {
+func (e *executor) persistBaselineEvidence(ctx context.Context, scanID domain.ID, req *httpengine.Request, resp *httpengine.Response) (reqID, respID domain.ID) {
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 
 	note := "baseline " + req.Method + " " + req.URL
-	var ids []domain.ID
 	if id, err := e.putEvidence(wctx, scanID, domain.EvidenceRequest, dumpRequest(capturedFrom(req, resp)), note+" request"); err == nil {
-		ids = append(ids, id)
+		reqID = id
 	} else {
 		e.log.Warn("persist baseline request evidence", "err", err)
 	}
@@ -189,11 +258,11 @@ func (e *executor) persistBaselineEvidence(ctx context.Context, scanID domain.ID
 		respNote += " (body truncated at the engine's size cap)"
 	}
 	if id, err := e.putEvidence(wctx, scanID, domain.EvidenceResponse, dumpResponse(resp), respNote); err == nil {
-		ids = append(ids, id)
+		respID = id
 	} else {
 		e.log.Warn("persist baseline response evidence", "err", err)
 	}
-	return ids
+	return reqID, respID
 }
 
 func baselineKey(req *httpengine.Request) string {

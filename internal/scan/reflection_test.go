@@ -363,3 +363,162 @@ func TestReflectionPersistenceAndEvidence(t *testing.T) {
 		t.Fatal("probe is not reproducible for the injection point")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// context analysis through the executor
+// ---------------------------------------------------------------------------
+
+// contextServer reflects the "q" query parameter into several contexts at once.
+func contextServer(t *testing.T, contentType string, page func(v string) string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		io.WriteString(w, page(r.URL.Query().Get("q")))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func reflectQ(t *testing.T, srvURL string) (*execEnv, *domain.TestCase, *detection.ReflectionReport) {
+	t.Helper()
+	env := newExecEnv(t)
+	ep := env.endpoint(srvURL+"/s?q=obs", domain.MethodGET)
+	q := env.param(ep, "q", domain.LocationQuery, "obs")
+	ip := env.injection(ep, q)
+	tc, rep := reflectReport(t, env, ExecutorConfig{}, env.job(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}))
+	return env, tc, rep
+}
+
+func TestReflectionPersistsContextPerSite(t *testing.T) {
+	srv := contextServer(t, "text/html; charset=utf-8", func(v string) string {
+		return `<html><head><title>` + v + `</title></head><body>` +
+			`<p>` + v + `</p>` +
+			`<input value="` + html.EscapeString(v) + `">` +
+			`<script>var s = '` + v + `';</script>` +
+			`<a href="/go?x=` + v + `">go</a>` +
+			`</body></html>`
+	})
+	env, tc, rep := reflectQ(t, srv.URL)
+
+	if rep.Count != 5 || len(rep.Locations) != 5 {
+		t.Fatalf("expected 5 sites, got count=%d locations=%d", rep.Count, len(rep.Locations))
+	}
+	if !strings.HasPrefix(rep.ContentType, "text/html") {
+		t.Fatalf("content type not recorded: %q", rep.ContentType)
+	}
+	want := []struct {
+		ctx  detection.Context
+		sub  string
+		form string
+	}{
+		{detection.CtxHTMLText, "rcdata", detection.FormRaw},
+		{detection.CtxHTMLText, "element_content", detection.FormRaw},
+		{detection.CtxHTMLAttrValue, "double_quoted", detection.FormEncoded}, // html-escaped by the server
+		{detection.CtxJSString, "single_quoted", detection.FormRaw},
+		{detection.CtxURL, "query", detection.FormRaw},
+	}
+	for i, w := range want {
+		a := rep.Locations[i].Context
+		if a == nil {
+			t.Fatalf("site %d has no context", i)
+		}
+		if a.Context != w.ctx || a.Sub != w.sub || a.Form != w.form {
+			t.Errorf("site %d: got %s/%s form=%s, want %s/%s form=%s\nreason: %s", i, a.Context, a.Sub, a.Form, w.ctx, w.sub, w.form, a.Reason)
+		}
+		if a.Confidence != domain.ConfidenceHigh {
+			t.Errorf("site %d: confidence %s", i, a.Confidence)
+		}
+	}
+	if !strings.Contains(tc.Note, "context: ") || !strings.Contains(tc.Note, "js_string") {
+		t.Fatalf("note should summarize contexts: %q", tc.Note)
+	}
+
+	// The persisted Detail round-trips with the context intact.
+	persisted, err := env.st.TestCases().Get(context.Background(), tc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := detection.ParseReflection(persisted.Detail)
+	if err != nil || back == nil || back.Locations[3].Context == nil || back.Locations[3].Context.Context != detection.CtxJSString {
+		t.Fatalf("persisted detail lost the context: %v %+v", err, back)
+	}
+}
+
+// Site offsets are body-relative; the report must let a reader resolve them to the
+// exact byte in the STORED response evidence.
+func TestReflectionOffsetsResolveInsideEvidenceBlob(t *testing.T) {
+	srv := contextServer(t, "text/html", func(v string) string {
+		return `<p>` + v + `</p><script>x="` + v + `"</script>`
+	})
+	env, tc, rep := reflectQ(t, srv.URL)
+
+	if rep.Evidence.MutatedResponse == "" || rep.Evidence.MutatedRequest == "" ||
+		rep.Evidence.BaselineRequest == "" || rep.Evidence.BaselineResponse == "" {
+		t.Fatalf("evidence references missing: %+v", rep.Evidence)
+	}
+	// Every referenced evidence ID is one of the test case's own evidence refs.
+	held := map[domain.ID]bool{}
+	for _, id := range tc.EvidenceIDs {
+		held[id] = true
+	}
+	for _, id := range []domain.ID{rep.Evidence.BaselineRequest, rep.Evidence.BaselineResponse, rep.Evidence.MutatedRequest, rep.Evidence.MutatedResponse} {
+		if !held[id] {
+			t.Fatalf("report references %s which the test case does not hold", id)
+		}
+	}
+	row, blob := env.evidenceBlob(rep.Evidence.MutatedResponse)
+	if row.Kind != domain.EvidenceResponse {
+		t.Fatalf("mutated response evidence kind = %s", row.Kind)
+	}
+
+	for i, loc := range rep.Locations {
+		a := loc.Context
+		at := rep.Evidence.BlobOffset(a.Offset)
+		if got := blob[at : at+len(rep.Probe.Token)]; got != rep.Probe.Token {
+			t.Fatalf("site %d: blob[%d:%d] = %q, want the token — offsets do not resolve into the evidence", i, at, at+len(rep.Probe.Token), got)
+		}
+		if a.TailOffset > 0 {
+			tailAt := rep.Evidence.BlobOffset(a.TailOffset)
+			if got := blob[tailAt : tailAt+len(rep.Probe.Tail)]; got != rep.Probe.Tail {
+				t.Fatalf("site %d: tail does not resolve in the blob: %q", i, got)
+			}
+		}
+	}
+	// And the body offset really is where the headers end.
+	if !strings.HasPrefix(blob[rep.Evidence.MutatedBodyOffset:], "<p>") {
+		t.Fatalf("body offset %d does not point at the body: %q", rep.Evidence.MutatedBodyOffset, blob[rep.Evidence.MutatedBodyOffset:])
+	}
+}
+
+func TestReflectionContextForNonHTMLResponse(t *testing.T) {
+	srv := contextServer(t, "application/json", func(v string) string { return `{"echo":"` + v + `"}` })
+	_, tc, rep := reflectQ(t, srv.URL)
+
+	if tc.Outcome != domain.OutcomeSuccess || !rep.Reflected {
+		t.Fatalf("outcome=%s reflected=%v", tc.Outcome, rep.Reflected)
+	}
+	a := rep.Locations[0].Context
+	if a.Context != detection.CtxUnknown || a.Sub != "non_html_response" {
+		t.Fatalf("a JSON response is not markup; got %s/%s (%s)", a.Context, a.Sub, a.Reason)
+	}
+}
+
+func TestReflectionNoContextWhenNotReflected(t *testing.T) {
+	srv := contextServer(t, "text/html", func(string) string { return `<p>nothing</p>` })
+	_, _, rep := reflectQ(t, srv.URL)
+	if rep.Reflected || len(rep.Locations) != 0 {
+		t.Fatalf("unexpected reflection: %+v", rep)
+	}
+}
+
+// A report written before context analysis existed must still decode.
+func TestParseReflectionAcceptsLegacyReportsWithoutContext(t *testing.T) {
+	legacy := []byte(`{"engine":"reflected-xss","probe":{"token":"indabc","canary":"<>\"'","tail":"endabc"},` +
+		`"parameter":"q","location":"query","reflected":true,"count":1,"token_in_baseline":false,` +
+		`"locations":[{"offset":3,"before":"<p>","segment":"<>\"'","after":"</p>","encoding":"none"}],` +
+		`"baseline":{"status":200,"body_len":10},"mutated":{"status":200,"body_len":40}}`)
+	rep, err := detection.ParseReflection(legacy)
+	if err != nil || rep == nil || !rep.Reflected || rep.Locations[0].Context != nil {
+		t.Fatalf("legacy report should decode with nil context: %v %+v", err, rep)
+	}
+}

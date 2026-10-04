@@ -61,7 +61,7 @@ func (c *Controller) launch(_ context.Context, sc *domain.Scan, scope domain.Sco
 
 	handlers := c.opts.Handlers
 	if handlers == nil {
-		handlers = c.defaultHandlers(eng)
+		handlers = c.defaultHandlers(eng, scope)
 	}
 	pool := worker.New(c.queue, handlers, c.poolConfig(sc), c.log)
 	if err := pool.Start(runCtx); err != nil {

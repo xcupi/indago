@@ -67,10 +67,17 @@ addressing + idempotency + path-traversal rejection.
 ### Real Chromium
 `internal/browser/playwright_integration_test.go` drives a real Chromium (render,
 context isolation, cancellation, and that the scope gate stops out-of-scope
-requests from leaving the browser). It runs by default and skips when no Chromium
-is found (`$INDAGO_CHROMIUM_PATH` or `~/.cache/ms-playwright/chromium-*`; skipped
-in `-short`). Chromium is launched by explicit path, so the Playwright driver and
-the installed revision need not match.
+requests from leaving the browser). `internal/verification/browser_integration_test.go`
+drives the same real Chromium through `BrowserVerifier` directly: a reflected-
+but-non-executable candidate is rejected, an executable one (HTML text/attribute,
+JS string) is confirmed via the uncaught-exception signal, a merely-reflected
+`javascript:` URL is rejected (not activated by passive load), an authenticated
+session's cookie reaches the server, out-of-scope subresources and navigation
+are blocked, and timeout/cancellation are observed. Both run by default and skip
+when no Chromium is found (`$INDAGO_CHROMIUM_PATH` or
+`~/.cache/ms-playwright/chromium-*`; skipped in `-short`). Chromium is launched
+by explicit path, so the Playwright driver and the installed revision need not
+match.
 
 ### Test job executor
 `internal/scan/executor_test.go` (request construction, resolution, each outcome
@@ -79,6 +86,16 @@ and — through the worker pool — job states, concurrency limit, pause/resume)
 `executor_integration_test.go` (a full scan's persisted results, the
 state-changing opt-in, cancel recording `cancelled`, crash recovery of running
 test cases).
+
+### Candidate execution and browser verification
+`internal/scan/candidate_test.go` (sending one candidate per job, parameter
+preservation, enqueue/dedup/ordering, concurrency) and `verify_test.go`
+(enqueueing a Pending Finding + `JobVerify` from a reflected candidate against a
+FAKE `verification.Verifier` — fast and deterministic: outcome mapping for
+confirmed/rejected/inconclusive/timeout/cancelled/skipped, the state-changing
+and GET/HEAD-only guards, scope/session pass-through into `verification.Input`,
+and evidence/Finding persistence). The signal itself and real-browser behavior
+are covered by the Real Chromium tests above, not re-verified here.
 
 ### End-to-end — binary smoke
 The built binary is exercised manually/CI: `db init` creates the schema; `serve`

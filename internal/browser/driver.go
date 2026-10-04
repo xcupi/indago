@@ -52,6 +52,12 @@ type pageHandle interface {
 	// OnDialog registers a dialog observer; the driver dismisses the dialog after
 	// reporting its message so the page stays responsive.
 	OnDialog(func(message string))
+	// OnPageError registers an observer for uncaught exceptions in the page's own
+	// JavaScript (as opposed to OnConsole, which only sees explicit console.*
+	// calls). This is a neutral runtime observation, like console/dialog
+	// messages: the driver reports the exception's message and makes no verdict
+	// about it.
+	OnPageError(func(message string))
 	// WaitForURL blocks until navigation reaches a URL matching glob (used for
 	// interactive login).
 	WaitForURL(glob string, timeout time.Duration) error

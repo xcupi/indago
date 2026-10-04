@@ -1,11 +1,24 @@
 package browser
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	pw "github.com/playwright-community/playwright-go"
 )
+
+// IsTimeout reports whether err represents a navigation/action timeout — either
+// the context's own deadline or the browser engine's own timeout (Playwright's
+// TimeoutError). It is a neutral classification, like the rest of this package:
+// it says what kind of error occurred, never whether anything is exploitable.
+// Playwright is intentionally confined to this file; callers elsewhere (e.g.
+// internal/verification) use this instead of depending on playwright-go
+// directly.
+func IsTimeout(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, pw.ErrTimeout)
+}
 
 // This file is the real, Chromium-via-Playwright implementation of the driver
 // abstraction. It is compiled by default; integration tests that actually launch
@@ -184,6 +197,10 @@ func (p *pwPage) OnDialog(fn func(string)) {
 		// Dismiss so the page stays responsive. We make no verdict here.
 		_ = d.Dismiss()
 	})
+}
+
+func (p *pwPage) OnPageError(fn func(string)) {
+	p.p.OnPageError(func(err error) { fn(err.Error()) })
 }
 
 func (p *pwPage) WaitForURL(glob string, timeout time.Duration) error {

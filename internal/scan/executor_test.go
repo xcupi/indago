@@ -77,7 +77,13 @@ func (e *execEnv) job(target domain.JobTarget) *domain.TestJob {
 }
 
 func (e *execEnv) executor(eng httpengine.Engine, cfg ExecutorConfig) *executor {
-	return newExecutor(e.st, eng, e.ev, cfg, execLog())
+	return newExecutor(e.st, eng, e.ev, nil, cfg, execLog())
+}
+
+// executorQ is like executor but with a live queue, so reflection jobs enqueue
+// their candidate children.
+func (e *execEnv) executorQ(eng httpengine.Engine, q queue.Queue, cfg ExecutorConfig) *executor {
+	return newExecutor(e.st, eng, e.ev, q, cfg, execLog())
 }
 
 // only returns the single test case recorded for the scan.
@@ -234,7 +240,7 @@ func TestExecuteWithoutEvidenceStoreStillRecordsOutcome(t *testing.T) {
 	env := newExecEnv(t)
 	ep := env.endpoint(srv.URL+"/", domain.MethodGET)
 
-	ex := newExecutor(env.st, scopedClient(t, openScope()), nil, ExecutorConfig{}, execLog())
+	ex := newExecutor(env.st, scopedClient(t, openScope()), nil, nil, ExecutorConfig{}, execLog())
 	if err := ex.Handle(context.Background(), env.job(domain.JobTarget{EndpointID: ep.ID})); err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +495,7 @@ func TestEvidenceFailureKeepsOutcomeAndFlagsIt(t *testing.T) {
 	env := newExecEnv(t)
 	ep := env.endpoint(srv.URL+"/", domain.MethodGET)
 
-	ex := newExecutor(env.st, scopedClient(t, openScope()), failingEvidence{}, ExecutorConfig{}, execLog())
+	ex := newExecutor(env.st, scopedClient(t, openScope()), failingEvidence{}, nil, ExecutorConfig{}, execLog())
 	if err := ex.Handle(context.Background(), env.job(domain.JobTarget{EndpointID: ep.ID})); err != nil {
 		t.Fatalf("the executed request succeeded; evidence trouble must not fail or retry the job: %v", err)
 	}

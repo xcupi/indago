@@ -146,6 +146,7 @@ const (
 	EvidencePayload    EvidenceKind = "payload"
 	EvidenceScreenshot EvidenceKind = "screenshot"
 	EvidenceBrowserLog EvidenceKind = "browser_log"
+	EvidenceDOM        EvidenceKind = "dom" // rendered DOM/HTML captured during browser verification
 	EvidenceHAR        EvidenceKind = "har"
 	EvidenceOther      EvidenceKind = "other"
 )
@@ -154,7 +155,7 @@ const (
 func (e EvidenceKind) IsValid() bool {
 	switch e {
 	case EvidenceRequest, EvidenceResponse, EvidenceContext, EvidencePayload,
-		EvidenceScreenshot, EvidenceBrowserLog, EvidenceHAR, EvidenceOther:
+		EvidenceScreenshot, EvidenceBrowserLog, EvidenceDOM, EvidenceHAR, EvidenceOther:
 		return true
 	default:
 		return false

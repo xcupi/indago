@@ -14,9 +14,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/worker"
 )
@@ -53,13 +55,14 @@ type executor struct {
 	store     store.Store
 	engine    httpengine.Engine
 	evidence  evidence.Store // nil: outcomes are recorded without evidence blobs
+	queue     queue.Queue    // nil: candidate children are not enqueued (unit tests)
 	cfg       ExecutorConfig
 	log       *slog.Logger
 	baselines *baselineCache // reuses a baseline across an endpoint's injection points
 }
 
-func newExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, cfg ExecutorConfig, log *slog.Logger) *executor {
-	return &executor{store: st, engine: eng, evidence: ev, cfg: cfg.withDefaults(), log: log, baselines: newBaselineCache()}
+func newExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, q queue.Queue, cfg ExecutorConfig, log *slog.Logger) *executor {
+	return &executor{store: st, engine: eng, evidence: ev, queue: q, cfg: cfg.withDefaults(), log: log, baselines: newBaselineCache()}
 }
 
 var _ worker.Handler = (*executor)(nil)
@@ -128,6 +131,12 @@ type result struct {
 	vulnClass      domain.VulnClass
 	detail         []byte      // engine-specific result (JSON) for TestCase.Detail
 	sharedEvidence []domain.ID // already-persisted evidence to reference (e.g. baseline)
+
+	// reflection is finalized in finish(), once the evidence IDs it must reference
+	// exist; it is then marshaled into TestCase.Detail.
+	reflection   *detection.ReflectionReport
+	baselineReq  domain.ID
+	baselineResp domain.ID
 }
 
 func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.TestCase) result {
@@ -137,18 +146,53 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 	}
 	tc.Method, tc.URL = string(ep.Method), ep.URL
 
+	cand, hasCand, err := parseCandidateJob(job)
+	if err != nil {
+		return result{outcome: domain.OutcomeError, permanent: true, err: err, vulnClass: domain.VulnReflectedXSS}
+	}
+
 	kind := "baseline"
-	if focus != nil {
+	switch {
+	case hasCand:
+		kind = fmt.Sprintf("candidate %s/%s; parameter %s (%s)", cand.Source, cand.Category, focus.Name, focus.Location)
+	case focus != nil:
 		kind = fmt.Sprintf("reflection; parameter %s (%s)", focus.Name, focus.Location)
 	}
+	// State-changing safeguard applies to baseline, reflection, AND candidate jobs:
+	// a candidate breakout is never sent to a state-changing endpoint unless the
+	// operator opted in.
 	if !e.cfg.AllowStateChanging && !isSafeMethod(ep.Method) {
 		return result{skipped: true, note: fmt.Sprintf("%s skipped: %s is state-changing and AllowStateChanging is off", kind, ep.Method)}
 	}
 
-	if focus != nil {
-		return e.runReflection(ctx, tc, ep, params, focus)
+	switch {
+	case hasCand:
+		// A candidate job needs its injection point to resolve a focus parameter.
+		if focus == nil {
+			return result{outcome: domain.OutcomeError, permanent: true, err: errors.New("candidate job has no injection point"), vulnClass: domain.VulnReflectedXSS}
+		}
+		res := e.runCandidate(ctx, tc, ep, params, focus, cand)
+		// A candidate that reflected is a PENDING finding, confirmed or rejected
+		// only by real browser verification — never by this HTTP-only result.
+		// Browser navigation carries no request body, so only a GET-navigable
+		// candidate can be verified; isSafeMethod also covers HEAD/OPTIONS, which
+		// are equally bodiless and equally navigable.
+		if res.reflection != nil && res.reflection.Reflected && isSafeMethod(ep.Method) {
+			e.enqueueVerification(ctx, job, cand, focus)
+		}
+		return res
+	case focus != nil:
+		res := e.runReflection(ctx, tc, ep, params, focus)
+		// Enqueue one child test job per planned candidate, before this (parent)
+		// job completes, so scan completion waits for them. Candidate jobs do not
+		// re-plan, so this does not recurse.
+		if res.reflection != nil && res.reflection.Plan != nil {
+			e.enqueueCandidates(ctx, job, res.reflection.Plan)
+		}
+		return res
+	default:
+		return e.runBaselineOnly(ctx, tc, ep, params)
 	}
-	return e.runBaselineOnly(ctx, tc, ep, params)
 }
 
 // runBaselineOnly executes an endpoint-level job: a single baseline request with
@@ -197,13 +241,20 @@ func (e *executor) send(ctx context.Context, req *httpengine.Request) (*httpengi
 
 // resolve loads the job's endpoint, the endpoint's parameters, and (for an
 // injection-point job) the focused parameter. It verifies everything belongs to
-// the job's scan.
+// the job's scan. Shared with the verify-job handler (verify.go).
 func (e *executor) resolve(ctx context.Context, job *domain.TestJob) (*domain.Endpoint, []*domain.Parameter, *domain.Parameter, error) {
+	return resolveJobTarget(ctx, e.store, job)
+}
+
+// resolveJobTarget is the free-function form of resolve, shared by the test-job
+// executor and the browser-verify handler so both resolve a job's target
+// identically.
+func resolveJobTarget(ctx context.Context, st store.Store, job *domain.TestJob) (*domain.Endpoint, []*domain.Parameter, *domain.Parameter, error) {
 	endpointID := job.Target.EndpointID
 	var focus *domain.Parameter
 
 	if ipID := job.Target.InjectionPointID; !ipID.Empty() {
-		ip, err := e.store.InjectionPoints().Get(ctx, ipID)
+		ip, err := st.InjectionPoints().Get(ctx, ipID)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("resolve injection point %s: %w", ipID, err)
 		}
@@ -215,7 +266,7 @@ func (e *executor) resolve(ctx context.Context, job *domain.TestJob) (*domain.En
 		} else if endpointID != ip.EndpointID {
 			return nil, nil, nil, fmt.Errorf("injection point %s does not belong to endpoint %s", ipID, endpointID)
 		}
-		if focus, err = e.store.Parameters().Get(ctx, ip.ParameterID); err != nil {
+		if focus, err = st.Parameters().Get(ctx, ip.ParameterID); err != nil {
 			return nil, nil, nil, fmt.Errorf("resolve parameter %s: %w", ip.ParameterID, err)
 		}
 	}
@@ -223,14 +274,14 @@ func (e *executor) resolve(ctx context.Context, job *domain.TestJob) (*domain.En
 		return nil, nil, nil, errors.New("job has neither an endpoint nor an injection point")
 	}
 
-	ep, err := e.store.Endpoints().Get(ctx, endpointID)
+	ep, err := st.Endpoints().Get(ctx, endpointID)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resolve endpoint %s: %w", endpointID, err)
 	}
 	if ep.ScanID != job.ScanID {
 		return nil, nil, nil, fmt.Errorf("endpoint %s belongs to another scan", endpointID)
 	}
-	params, err := e.store.Parameters().ListByEndpoint(ctx, endpointID)
+	params, err := st.Parameters().ListByEndpoint(ctx, endpointID)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("list parameters: %w", err)
 	}
@@ -272,8 +323,10 @@ func (e *executor) finish(ctx context.Context, tc *domain.TestCase, r result) {
 	tc.Detail = r.detail
 
 	ids := append([]domain.ID(nil), r.sharedEvidence...) // e.g. shared baseline evidence
+	var own []domain.ID                                  // this attempt's request[, response]
 	if !r.skipped && e.evidence != nil && r.req != nil {
-		own, err := e.persistEvidence(ctx, tc, r)
+		var err error
+		own, err = e.persistEvidence(ctx, tc, r)
 		ids = append(ids, own...)
 		if err != nil {
 			// The request already happened; keep its outcome but flag the gap so
@@ -283,6 +336,10 @@ func (e *executor) finish(ctx context.Context, tc *domain.TestCase, r result) {
 		}
 	}
 	tc.EvidenceIDs = ids
+
+	if r.reflection != nil {
+		e.finalizeReflection(tc, r, own)
+	}
 
 	if err := e.store.TestCases().Update(ctx, tc); err != nil {
 		e.log.Error("persist test case result", "test_case", tc.ID, "job", tc.JobID, "err", err)
@@ -312,21 +369,29 @@ func (e *executor) persistEvidence(ctx context.Context, tc *domain.TestCase, r r
 	return ids, nil
 }
 
-// putEvidence writes one evidence blob + row and returns its ID.
+// putEvidence writes one HTTP-message evidence blob + row and returns its ID.
 func (e *executor) putEvidence(ctx context.Context, scanID domain.ID, kind domain.EvidenceKind, data []byte, note string) (domain.ID, error) {
-	ref, err := e.evidence.Put(scanID, kind, ".http", data)
+	return putEvidenceBlob(ctx, e.store, e.evidence, scanID, kind, ".http", "message/http", data, note)
+}
+
+// putEvidenceBlob writes one evidence blob + row and returns its ID. Shared by
+// the test-job executor (HTTP message evidence) and the browser-verify handler
+// (screenshot/DOM/browser-log evidence), which differ only in extension/media
+// type.
+func putEvidenceBlob(ctx context.Context, st store.Store, ev evidence.Store, scanID domain.ID, kind domain.EvidenceKind, ext, mediaType string, data []byte, note string) (domain.ID, error) {
+	ref, err := ev.Put(scanID, kind, ext, data)
 	if err != nil {
 		return "", err
 	}
-	ev := &domain.Evidence{
-		ID: domain.NewID(), ScanID: scanID, Kind: kind, MediaType: "message/http",
+	row := &domain.Evidence{
+		ID: domain.NewID(), ScanID: scanID, Kind: kind, MediaType: mediaType,
 		BlobPath: ref.BlobPath, Size: ref.Size, SHA256: ref.SHA256,
 		Note: note, CreatedAt: time.Now(),
 	}
-	if err := e.store.Evidence().Create(ctx, ev); err != nil {
+	if err := st.Evidence().Create(ctx, row); err != nil {
 		return "", err
 	}
-	return ev.ID, nil
+	return row.ID, nil
 }
 
 // ---------------------------------------------------------------------------

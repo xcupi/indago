@@ -4,10 +4,15 @@ How a scan runs: the `internal/scan` controller wires **discovery**, the
 **persistent queue**, and the **worker pool** together, and owns pause / resume /
 cancel, completion, and restart recovery.
 
-> Boundary: a scan performs scope-enforced **discovery** and **executes each test
-> job as a baseline request** (section 1b), but does **no XSS detection, payload
-> generation, or exploitation**. Detection attaches through
-> `scan.Options.Handlers`.
+> Boundary: a scan performs scope-enforced **discovery**, runs each test job (a
+> baseline; the **Reflected XSS reflection → context → candidate-plan** step for
+> an injection point; a **candidate** job that sends one planned benign-marker
+> breakout and re-analyzes it; or a **browser-verify** job that confirms/rejects
+> a reflected candidate — sections 1b–1c), and records the result. The verdict
+> itself (Confirmed/Rejected/Inconclusive) is a deterministic function of a real
+> browser signal — **never an LLM**, and verification never performs
+> exploitation beyond replaying the exact candidate already sent. Detection
+> attaches through `scan.Options.Handlers`.
 
 ---
 
@@ -72,10 +77,56 @@ baseline:
   pure) locates the token, counts reflection sites, records surrounding context,
   and classifies how the canary came back (none/html/url/js/stripped/mixed). The
   canary is a detection probe, **not** an exploit payload.
-- The `detection.ReflectionReport` is stored in `TestCase.Detail`; evidence
+- Each reflection site is then **context-classified** (`detection.ClassifyContexts`,
+  pure — see [`reflection-context.md`](reflection-context.md)): where the marker
+  sits in the real response markup, with confidence and reason.
+- A **candidate plan** is then derived (`detection.PlanCandidates`, pure — see
+  [`reflection-candidates.md`](reflection-candidates.md)): per site, an ordered,
+  deduplicated set of benign-marker breakout candidates chosen from the context
+  and the observed transformation.
+- The reflection job then **enqueues one child `JobTest` per planned candidate**
+  (before it completes, so completion waits for them). Each child's job priority
+  is the candidate's priority, so the queue drains them in the plan's
+  deterministic order; the plan's dedup means one request per unique candidate. A
+  **candidate job** (`internal/scan/candidate.go`) sends its single breakout into
+  the injection point — all other parameters unchanged, GET query / POST form /
+  POST JSON — through the scope-enforcing engine, then **re-runs reflection +
+  context analysis** on the response. It records reflected/not_reflected and
+  evidence, but **does not re-plan** (no recursion). The state-changing opt-in is
+  re-checked, so a breakout never reaches a state-changing endpoint unless the
+  operator allowed it.
+- A candidate that **reflects via GET/HEAD** creates a `Finding` at
+  `VerdictPending` and enqueues a **browser-verify job** (section 1c) — see
+  [`browser-verification.md`](browser-verification.md). A POST/body-carrying
+  reflection has no browser-navigable form in this phase and stays `pending`.
+- The `detection.ReflectionReport` (reflection + context + plan; for a candidate
+  job, reflection + context + the executed `candidate`) is stored in `TestCase.Detail`; evidence
   references the shared baseline (request+response) and the mutated
-  (request+response). **No verdict is made** — reflection is recorded, not judged.
-  `Status.Tests` adds `reflected` / `not_reflected` tallies.
+  (request+response), and the report records the response body's offset inside
+  the response evidence blob so every site offset resolves to an exact byte.
+  **No verdict is made by the executor** — reflection and context are recorded,
+  not judged; only browser verification (1c) decides confirmed/rejected/
+  inconclusive. `Status.Tests` adds `reflected` / `not_reflected` tallies.
+
+## 1c. Browser verification
+
+Each `JobVerify` job runs on the worker pool's **`browser`** group (its own
+concurrency, `BrowserConcurrency`), via `verifyExecutor`
+(`internal/scan/verify.go`) calling the real `verification.Verifier`
+(`internal/verification/browser.go`) — see
+[`browser-verification.md`](browser-verification.md) for the deterministic
+signal and the confirmed/rejected/inconclusive decision rule in full.
+
+In orchestration terms: it resolves the job's target exactly like a test job,
+re-applies the state-changing safeguard, and — only for a GET/HEAD candidate —
+calls the Verifier with the scan's scope (for the browser's `AllowRequest`
+gate) and the scan's saved session (`domain.Session.StatePath`, for an
+authenticated context). On success it persists the verification report into
+`TestCase.Detail`, stores the screenshot/rendered-DOM/browser-log as evidence,
+and updates the Finding's Verdict/Confidence/EvidenceIDs/VerifiedAt — the
+**only** place a Finding leaves `pending`. A timeout or cancellation leaves the
+Finding untouched. No browser configured for the scan → the job is `skipped`,
+not failed.
 
 | Outcome | Meaning | Job result |
 |---------|---------|------------|

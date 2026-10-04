@@ -12,7 +12,7 @@ platform**. It helps an authorized operator discover and *verify* web
 vulnerabilities against targets **they are explicitly permitted to test**.
 
 - **Phase 1 scope (product):** Reflected XSS detection and verification.
-- **Current phase (code):** Reflected XSS — baseline & **reflection detection** (no verdict yet).
+- **Current phase (code):** Reflected XSS — baseline, **reflection detection**, **context analysis**, **candidate planning**, **candidate execution**, and **browser verification** (a reflected candidate is confirmed/rejected/inconclusive only by a real, deterministic browser signal — never by an LLM).
 - **Future (designed for, not built):** Stored XSS, DOM XSS, additional engines.
 
 The architecture is deliberately generic (not XSS-specific) so new engines plug
@@ -51,11 +51,22 @@ If a change would weaken any of the above, stop and raise it instead.
 The platform is built incrementally. The following are explicitly **out of scope
 right now** and must remain stubs/interfaces (job handlers are no-ops):
 
-- ❌ XSS verdict / declaring a vulnerability (reflection is recorded, not judged)
-- ❌ Exploit payload generation / payload libraries (the reflection step injects a
-  fixed, non-executable detection canary — never scripts, handlers, or schemes)
-- ❌ Context-aware candidate testing, automated exploitation
-- ❌ Verification of findings
+- ❌ Any verdict made by an LLM. Verification's Confirmed/Rejected/Inconclusive
+  decision is a pure function of a deterministic browser signal
+  (`internal/verification/browser.go:decide`) — AI remains advisory-only
+  everywhere, per §2.5.
+- ❌ DOM XSS. Verification replays the SAME marker/candidate the candidate step
+  already sent; it does not crawl the rendered DOM for new sinks or
+  client-side-only inputs.
+- ❌ Automated exploitation / weaponized payloads. Candidate execution AND
+  verification only ever send the small, canonical, benign-marker breakouts the
+  planner chose — no payload obfuscation, no evasion variants, no exploit
+  payload libraries, no simulated user activation (e.g. clicking a
+  `javascript:` link) to force execution. State-changing methods still require
+  the explicit opt-in, for both candidate execution and verification.
+- ❌ POST/body-carrying candidates are not browser-verified (navigation carries
+  no request body); those findings stay Pending. Stored XSS/additional engines
+  remain designed-for, not built.
 
 Implemented so far (infrastructure and **discovery**):
 
@@ -73,15 +84,66 @@ Implemented so far (infrastructure and **discovery**):
   Endpoint-level jobs send a baseline; injection-point jobs run the **Reflected
   XSS reflection step** — baseline + a mutated request carrying a unique,
   deterministic marker in the selected parameter only — and record reflection,
-  locations, surrounding context, and the marker's encoding/transformation into
-  `TestCase.Detail`. No verdict. State-changing methods need the explicit opt-in.
-- ✅ Web UI + CLI (status and scan control)
+  locations, surrounding context, the marker's encoding/transformation, and the
+  derived candidate plan into `TestCase.Detail`. The reflection job then enqueues
+  one child `JobTest` per planned candidate; each child sends that single
+  benign-marker breakout into the same injection point (other parameters
+  unchanged), re-runs reflection analysis, and records reflected/not_reflected +
+  context + evidence. No verdict. State-changing methods need the explicit opt-in.
+- ✅ Context analyzer (`internal/detection/context*.go`): a **pure** classifier that
+  labels each reflection site (HTML text/attribute/tag/comment, JS string/code/
+  comment/regex, URL, CSS, unknown/mixed) by driving a real HTML tokenizer to the
+  site's byte offset, with confidence + reason. No network/browser/LLM/payloads;
+  a test enforces its imports stay pure. See `docs/reflection-context.md`.
+- ✅ Candidate planner (`internal/detection/candidate.go`): a **pure** layer that
+  turns each context-classified site into an ordered, deduplicated set of
+  benign-marker breakout *candidates* (per category: HTML text/attribute, JS
+  string/code, URL, CSS, unknown/mixed), transformation-aware (deprioritizing —
+  never dropping — characters the site encodes/strips), each with provenance,
+  rationale, and a dedup key. Data only: nothing is sent and no verdict is made.
+  Serializable into `TestCase.Detail` and extensible to future advisory (e.g.
+  LLM) sources without touching the domain model. A test enforces its imports
+  stay pure. See `docs/reflection-candidates.md`.
+- ✅ Candidate executor (`internal/scan/candidate.go`): the reflection job
+  enqueues one child `JobTest` per planned candidate (priority = candidate
+  priority, so the queue drains them in the plan's deterministic order; dedup is
+  inherited from the plan, so one request per unique candidate). Each child sends
+  its single benign-marker breakout into the injection point through the
+  scope-enforcing engine, keeping all other parameters at their observed values
+  (GET query, POST form, POST JSON), re-runs reflection analysis on the response,
+  and persists the result (reflected/not_reflected/error/timeout/cancelled) with
+  provenance, source (builtin/llm), and baseline+candidate evidence. Candidate
+  jobs do not re-plan, so execution never recurses. A candidate that reflects
+  via GET/HEAD creates a **Pending `Finding`** and enqueues a `JobVerify` job
+  (POST/body-carrying reflections stay Pending — browser navigation has no
+  body).
+- ✅ Browser verification (`internal/verification/browser.go` +
+  `internal/scan/verify.go`): the real `Verifier`. It replays the EXACT
+  candidate into its injection point in a real, scope-gated, optionally
+  authenticated (`domain.Session.StatePath`) browser context (reusing
+  `internal/browser`'s Manager — the same one discovery uses), waits for the
+  page's own `load` event (no arbitrary sleeps), and observes whether the
+  marker reaches an executable position. The signal is deterministic, not a
+  payload: every built-in candidate is, at its target position, nothing but
+  the bare marker token used as a JS expression, so a browser that evaluates it
+  throws `ReferenceError: <token> is not defined` — observed via the browser's
+  own uncaught-exception/console-error channels, never anything the candidate
+  or verifier causes to happen (no alert/cookie/network call is ever part of a
+  candidate). `Confirmed` only when that signal names the exact marker;
+  `Rejected` when the candidate reflected but no signal appeared; `Inconclusive`
+  when the marker could not even be re-observed. Updates the `Finding`
+  (Verdict/Confidence/EvidenceIDs/VerifiedAt) and persists screenshot/rendered-
+  DOM/browser-log evidence. No LLM, no DOM XSS, no simulated clicks/activation.
+  See `docs/browser-verification.md`.
 - ✅ Evidence filesystem store, config, JSON reporting
-- ⏳ Stubs: detection engines, verification, non-anonymous auth, AI providers
+- ⏳ Stubs: detection engines (non-XSS classes), non-anonymous auth, AI providers
 
-**The dividing line:** transport, browser, discovery, and orchestration are
-implemented; anything that *tests a target for a vulnerability* is an interface
-with a stub returning `ErrNotImplemented`.
+**The dividing line:** transport, browser, discovery, orchestration, and the
+full Reflected XSS pipeline (reflect → context → plan → execute candidates →
+verify) are implemented end to end, with a real verdict (Confirmed/Rejected/
+Inconclusive) for Reflected XSS specifically. Every OTHER vulnerability class
+(Stored XSS, DOM XSS) is still an interface with a stub returning
+`ErrNotImplemented` — Reflected XSS is the one class built all the way through.
 
 **Scope is enforced outside the transport modules.** `httpengine` and `browser`
 perform no scope checks; the scan controller wraps the HTTP engine in a
@@ -103,11 +165,13 @@ internal/
     sqlite/            SQLite store + migrations (modernc.org/sqlite, pure Go)
   queue/               Persistent job queue interface + in-memory impl
   worker/              Concurrent worker pool
-  httpengine/          HTTP engine abstraction (STUB in Phase 0)
-  browser/             Browser service abstraction (STUB in Phase 0)
-  discovery/           Discovery source abstraction + registry (STUBS)
-  detection/           Detection engine interface + registry (no logic)
-  verification/        Verification interface (STUB)
+  httpengine/          HTTP engine (implemented)
+  browser/             Browser manager — Chromium/Playwright (implemented)
+  discovery/           Discovery source abstraction + registry (implemented)
+  detection/           Reflected XSS: reflection/context/candidate planner
+                       (implemented, pure); other vuln classes are stubs
+  verification/        Verification interface + real browser Verifier
+                       (implemented for Reflected XSS)
   auth/                Authentication abstraction (anonymous works; rest STUB)
   scan/                Scan controller, profiles, lifecycle wiring
   config/              Configuration load/save
