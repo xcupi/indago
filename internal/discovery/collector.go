@@ -50,6 +50,52 @@ func NewCollector(st store.Store, q queue.Queue, scanID domain.ID, scope domain.
 	}
 }
 
+// Hydrate rebuilds the collector's deduplication state from what is already
+// persisted for the scan. It must be called before sources run when a scan is
+// resumed after a restart: without it, re-running discovery would re-register
+// every known endpoint/parameter and re-enqueue duplicate test jobs.
+//
+// Endpoints are keyed by their persisted Fingerprint (the EndpointKey computed
+// at insert time); parameters are re-keyed from their endpoint's fingerprint.
+// Hydrate is idempotent.
+func (c *Collector) Hydrate(ctx context.Context) error {
+	endpoints, err := c.store.Endpoints().ListByScan(ctx, c.scanID)
+	if err != nil {
+		return err
+	}
+	params, err := c.store.Parameters().ListByScan(ctx, c.scanID)
+	if err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	fingerprintByID := make(map[domain.ID]string, len(endpoints))
+	for _, e := range endpoints {
+		if e.Fingerprint == "" {
+			continue // legacy row without a key; cannot be deduplicated
+		}
+		fingerprintByID[e.ID] = e.Fingerprint
+		if _, ok := c.seenEndpoints[e.Fingerprint]; !ok {
+			c.seenEndpoints[e.Fingerprint] = e.ID
+			c.endpointCount++
+		}
+	}
+	for _, p := range params {
+		fp, ok := fingerprintByID[p.EndpointID]
+		if !ok {
+			continue
+		}
+		key := fp + "#" + string(p.Location) + ":" + p.Name
+		if _, dup := c.seenParams[key]; !dup {
+			c.seenParams[key] = struct{}{}
+			c.paramCount++
+		}
+	}
+	return nil
+}
+
 // Counts returns discovery progress counters (for UI/tests).
 func (c *Collector) Counts() (endpoints, params, jobs int) {
 	c.mu.Lock()

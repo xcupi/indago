@@ -30,6 +30,22 @@ func jsonDecode(s string, v any) error {
 	return json.Unmarshal([]byte(s), v)
 }
 
+// nonNilStrings returns a non-nil slice so it encodes as [] rather than null.
+func nonNilStrings(in []string) []string {
+	if in == nil {
+		return []string{}
+	}
+	return in
+}
+
+// discoveryOrPending defaults an unset discovery state to pending.
+func discoveryOrPending(d domain.DiscoveryState) domain.DiscoveryState {
+	if d == "" {
+		return domain.DiscoveryPending
+	}
+	return d
+}
+
 // mapGetErr translates sql.ErrNoRows into store.ErrNotFound.
 func mapGetErr(err error) error {
 	if errors.Is(err, sql.ErrNoRows) {
@@ -236,27 +252,30 @@ func (r *scopeRepo) Delete(ctx context.Context, id domain.ID) error {
 
 type scanRepo struct{ db *sql.DB }
 
-const scanCols = `id, project_id, target_id, name, state, profile, config, stop_policy, session_id, stats, error, created_at, started_at, updated_at, ended_at`
+const scanCols = `id, project_id, target_id, name, state, profile, config, stop_policy, session_id, stats, error, created_at, started_at, updated_at, ended_at, seed_urls, discovery_state`
 
 func (r *scanRepo) Create(ctx context.Context, s *domain.Scan) error {
 	cfg, _ := jsonEncode(s.Config)
 	stop, _ := jsonEncode(s.Stop)
 	stats, _ := jsonEncode(s.Stats)
+	seeds, _ := jsonEncode(nonNilStrings(s.SeedURLs))
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO scans (`+scanCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO scans (`+scanCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		s.ID, s.ProjectID, s.TargetID, s.Name, s.State, s.Profile, cfg, stop, s.SessionID, stats, s.Error,
-		ts(s.CreatedAt), tsPtr(s.StartedAt), ts(s.UpdatedAt), tsPtr(s.EndedAt))
+		ts(s.CreatedAt), tsPtr(s.StartedAt), ts(s.UpdatedAt), tsPtr(s.EndedAt), seeds, discoveryOrPending(s.Discovery))
 	return err
 }
 
 func scanScan(sc scanner) (*domain.Scan, error) {
 	var s domain.Scan
-	var cfg, stop, stats, created, updated string
+	var cfg, stop, stats, created, updated, seeds string
 	var started, ended sql.NullString
 	if err := sc.Scan(&s.ID, &s.ProjectID, &s.TargetID, &s.Name, &s.State, &s.Profile,
-		&cfg, &stop, &s.SessionID, &stats, &s.Error, &created, &started, &updated, &ended); err != nil {
+		&cfg, &stop, &s.SessionID, &stats, &s.Error, &created, &started, &updated, &ended,
+		&seeds, &s.Discovery); err != nil {
 		return nil, err
 	}
+	_ = jsonDecode(seeds, &s.SeedURLs)
 	_ = jsonDecode(cfg, &s.Config)
 	_ = jsonDecode(stop, &s.Stop)
 	_ = jsonDecode(stats, &s.Stats)
@@ -307,10 +326,11 @@ func (r *scanRepo) Update(ctx context.Context, s *domain.Scan) error {
 	cfg, _ := jsonEncode(s.Config)
 	stop, _ := jsonEncode(s.Stop)
 	stats, _ := jsonEncode(s.Stats)
+	seeds, _ := jsonEncode(nonNilStrings(s.SeedURLs))
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE scans SET project_id=?, target_id=?, name=?, state=?, profile=?, config=?, stop_policy=?, session_id=?, stats=?, error=?, started_at=?, updated_at=?, ended_at=? WHERE id=?`,
+		`UPDATE scans SET project_id=?, target_id=?, name=?, state=?, profile=?, config=?, stop_policy=?, session_id=?, stats=?, error=?, started_at=?, updated_at=?, ended_at=?, seed_urls=?, discovery_state=? WHERE id=?`,
 		s.ProjectID, s.TargetID, s.Name, s.State, s.Profile, cfg, stop, s.SessionID, stats, s.Error,
-		tsPtr(s.StartedAt), ts(s.UpdatedAt), tsPtr(s.EndedAt), s.ID)
+		tsPtr(s.StartedAt), ts(s.UpdatedAt), tsPtr(s.EndedAt), seeds, discoveryOrPending(s.Discovery), s.ID)
 	return affected(res, err)
 }
 
@@ -560,21 +580,32 @@ func (r *jobRepo) Delete(ctx context.Context, id domain.ID) error {
 
 type testCaseRepo struct{ db *sql.DB }
 
-const testCaseCols = `id, scan_id, job_id, injection_point_id, vuln_class, status, note, created_at, updated_at`
+const testCaseCols = `id, scan_id, job_id, injection_point_id, vuln_class, status, note, created_at, updated_at,
+	attempt, outcome, method, url, http_status, duration_ms, error, evidence_ids, started_at, finished_at, detail`
 
 func (r *testCaseRepo) Create(ctx context.Context, tc *domain.TestCase) error {
+	ev, _ := jsonEncode(nonNilIDs(tc.EvidenceIDs))
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO test_cases (`+testCaseCols+`) VALUES (?,?,?,?,?,?,?,?,?)`,
-		tc.ID, tc.ScanID, tc.JobID, tc.InjectionPointID, tc.VulnClass, tc.Status, tc.Note, ts(tc.CreatedAt), ts(tc.UpdatedAt))
+		`INSERT INTO test_cases (`+testCaseCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		tc.ID, tc.ScanID, tc.JobID, tc.InjectionPointID, tc.VulnClass, tc.Status, tc.Note, ts(tc.CreatedAt), ts(tc.UpdatedAt),
+		tc.Attempt, tc.Outcome, tc.Method, tc.URL, tc.HTTPStatus, tc.DurationMS, tc.Error, ev, tsPtr(tc.StartedAt), tsPtr(tc.FinishedAt), string(tc.Detail))
 	return err
 }
 
 func scanTestCase(sc scanner) (*domain.TestCase, error) {
 	var tc domain.TestCase
-	var created, updated string
-	if err := sc.Scan(&tc.ID, &tc.ScanID, &tc.JobID, &tc.InjectionPointID, &tc.VulnClass, &tc.Status, &tc.Note, &created, &updated); err != nil {
+	var created, updated, ev, detail string
+	var started, finished sql.NullString
+	if err := sc.Scan(&tc.ID, &tc.ScanID, &tc.JobID, &tc.InjectionPointID, &tc.VulnClass, &tc.Status, &tc.Note, &created, &updated,
+		&tc.Attempt, &tc.Outcome, &tc.Method, &tc.URL, &tc.HTTPStatus, &tc.DurationMS, &tc.Error, &ev, &started, &finished, &detail); err != nil {
 		return nil, err
 	}
+	_ = jsonDecode(ev, &tc.EvidenceIDs)
+	if detail != "" {
+		tc.Detail = []byte(detail)
+	}
+	tc.StartedAt, _ = parseTSPtr(started)
+	tc.FinishedAt, _ = parseTSPtr(finished)
 	tc.CreatedAt, _ = parseTS(created)
 	tc.UpdatedAt, _ = parseTS(updated)
 	return &tc, nil
@@ -604,10 +635,20 @@ func (r *testCaseRepo) ListByScan(ctx context.Context, scanID domain.ID) ([]*dom
 }
 
 func (r *testCaseRepo) Update(ctx context.Context, tc *domain.TestCase) error {
+	ev, _ := jsonEncode(nonNilIDs(tc.EvidenceIDs))
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE test_cases SET status=?, note=?, updated_at=? WHERE id=?`,
-		tc.Status, tc.Note, ts(tc.UpdatedAt), tc.ID)
+		`UPDATE test_cases SET status=?, note=?, updated_at=?, vuln_class=?, outcome=?, method=?, url=?, http_status=?, duration_ms=?, error=?, evidence_ids=?, started_at=?, finished_at=?, detail=? WHERE id=?`,
+		tc.Status, tc.Note, ts(tc.UpdatedAt), tc.VulnClass, tc.Outcome, tc.Method, tc.URL, tc.HTTPStatus, tc.DurationMS, tc.Error, ev,
+		tsPtr(tc.StartedAt), tsPtr(tc.FinishedAt), string(tc.Detail), tc.ID)
 	return affected(res, err)
+}
+
+// nonNilIDs returns a non-nil slice so it encodes as [] rather than null.
+func nonNilIDs(in []domain.ID) []domain.ID {
+	if in == nil {
+		return []domain.ID{}
+	}
+	return in
 }
 
 // --- Finding ---

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/store/memory"
+	"github.com/indago/indago/internal/worker"
 )
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -26,11 +28,24 @@ type fixture struct {
 }
 
 func setup(t *testing.T, withScope bool, hosts []string) fixture {
+	return setupWith(t, withScope, hosts, scan.Options{})
+}
+
+// setupWith builds a fixture with explicit controller options. Fast poll/idle
+// intervals are applied unless the caller set them.
+func setupWith(t *testing.T, withScope bool, hosts []string, opts scan.Options) fixture {
 	t.Helper()
 	ctx := context.Background()
 	st := memory.New()
 	q := queue.NewMemory()
-	ctrl := scan.NewController(st, q, quiet(), "test", scan.Options{IdlePoll: 10 * time.Millisecond})
+	if opts.IdlePoll == 0 {
+		opts.IdlePoll = 10 * time.Millisecond
+	}
+	if opts.PollInterval == 0 {
+		opts.PollInterval = 20 * time.Millisecond
+	}
+	ctrl := scan.NewController(st, q, quiet(), "test", opts)
+	t.Cleanup(ctrl.Shutdown)
 
 	proj := &domain.Project{ID: domain.NewID(), Name: "p"}
 	if err := st.Projects().Create(ctx, proj); err != nil {
@@ -79,9 +94,30 @@ func TestCreateScanOutOfScope(t *testing.T) {
 	}
 }
 
+// holdJobs returns handlers whose test-job handler blocks until release is
+// called (or the job's context is canceled). It keeps a scan from completing so
+// the pause/resume/cancel paths can be exercised on a running scan.
+func holdJobs() (handlers map[domain.JobType]worker.Handler, release func()) {
+	gate := make(chan struct{})
+	var once sync.Once
+	handlers = map[domain.JobType]worker.Handler{
+		domain.JobTest: worker.HandlerFunc(func(ctx context.Context, _ *domain.TestJob) error {
+			select {
+			case <-gate:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}),
+	}
+	return handlers, func() { once.Do(func() { close(gate) }) }
+}
+
 func TestScanLifecycle(t *testing.T) {
 	ctx := context.Background()
-	f := setup(t, true, []string{"example.com"})
+	handlers, release := holdJobs()
+	defer release()
+	f := setupWith(t, true, []string{"example.com"}, scan.Options{Handlers: handlers})
 
 	sc, err := f.ctrl.CreateScan(ctx, scan.CreateScanParams{
 		ProjectID: f.proj, TargetID: f.tgt, Name: "run1",
@@ -108,13 +144,11 @@ func TestScanLifecycle(t *testing.T) {
 		t.Fatalf("session state = %s", sess.State)
 	}
 
-	// Seed a job; the no-op handler should complete it.
-	if err := f.queue.Enqueue(ctx, &domain.TestJob{ScanID: sc.ID, Type: domain.JobTest, MaxAttempts: 1}); err != nil {
-		t.Fatal(err)
-	}
+	// Discovery registers the seed immediately and enqueues its test job; the
+	// held handler keeps the scan from completing.
 	waitFor(t, 2*time.Second, func() bool {
 		st, _ := f.ctrl.Stats(ctx, sc.ID)
-		return st.Succeeded == 1
+		return st.Running+st.Queued >= 1
 	})
 
 	// Pause / resume.

@@ -35,16 +35,22 @@
     .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
     footer { padding: 16px 24px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
     a { color: var(--accent); }
+    .muted { color: var(--muted); font-size: 11px; text-transform: none; letter-spacing: 0; margin-left: 8px; }
+    button { background: transparent; color: var(--fg); border: 1px solid var(--border); border-radius: 6px;
+             padding: 2px 10px; font-size: 12px; cursor: pointer; margin-right: 4px; }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    .err { color: #ff7b7b; font-size: 12px; padding: 6px 0; }
   </style>
 </head>
 <body>
   <header>
     <h1>INDAGO</h1>
     <span class="ver" id="version">…</span>
-    <span class="phase">Phase 0 · scaffold</span>
+    <span class="phase">Phase 0 · scaffold + discovery</span>
   </header>
 
   <main>
+    <div id="error" class="err"></div>
     <section class="card">
       <h2>Projects</h2>
       <table>
@@ -54,22 +60,32 @@
     </section>
 
     <section class="card">
-      <h2>Scans</h2>
+      <h2>Scans <span id="refreshed" class="muted"></span></h2>
       <table>
-        <thead><tr><th>Name</th><th>State</th><th>Profile</th><th>ID</th></tr></thead>
-        <tbody id="scans"><tr><td colspan="4" class="empty">loading…</td></tr></tbody>
+        <thead><tr>
+          <th>Name</th><th>State</th><th>Discovery</th><th>Endpoints</th><th>Params</th>
+          <th>Jobs (queued / running / done)</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="scans"><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
       </table>
     </section>
   </main>
 
   <footer>
     Local-first web application security hunting platform. Authorized use only.
-    This Phase 0 build performs no vulnerability testing.
+    This build performs discovery only — no vulnerability testing.
   </footer>
 
   <script>
-    const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => (
-      { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    // All dynamic text goes through textContent (never innerHTML): scan and
+    // project names are operator-supplied.
+    function el(tag, text, cls) {
+      const e = document.createElement(tag);
+      if (text !== undefined) e.textContent = text;
+      if (cls) e.className = cls;
+      return e;
+    }
+    function cell(text, cls) { return el("td", text, cls); }
 
     async function j(url) {
       const r = await fetch(url);
@@ -77,36 +93,103 @@
       return r.json();
     }
 
-    async function load() {
+    // State-changing requests must carry X-Indago-Client (CSRF protection).
+    async function act(scanId, action) {
+      const r = await fetch("/api/scans/" + encodeURIComponent(scanId) + "/" + action, {
+        method: "POST", headers: { "X-Indago-Client": "ui" },
+      });
+      if (!r.ok) {
+        let msg = r.status;
+        try { msg = (await r.json()).error || msg; } catch (e) {}
+        showError(action + " failed: " + msg);
+      }
+      loadScans();
+    }
+
+    function showError(msg) {
+      const box = document.getElementById("error");
+      box.textContent = msg;
+      setTimeout(() => { if (box.textContent === msg) box.textContent = ""; }, 6000);
+    }
+
+    function actionsFor(st) {
+      const id = st.scan.id;
+      const mk = (label, action) => {
+        const b = el("button", label);
+        b.addEventListener("click", () => act(id, action));
+        return b;
+      };
+      switch (st.scan.state) {
+        case "created": return [mk("Start", "start"), mk("Cancel", "cancel")];
+        case "running": return [mk("Pause", "pause"), mk("Cancel", "cancel")];
+        case "paused":
+        case "awaiting_auth": return [mk("Resume", "resume"), mk("Cancel", "cancel")];
+        default: return [];
+      }
+    }
+
+    function scanRow(st) {
+      const tr = el("tr");
+      tr.appendChild(cell(st.scan.name || "(unnamed)"));
+      const state = el("td"); state.appendChild(el("span", st.scan.state, "pill"));
+      tr.appendChild(state);
+      tr.appendChild(cell(st.discovery.state));
+      tr.appendChild(cell(st.discovery.endpoints));
+      tr.appendChild(cell(st.discovery.parameters));
+      const jobs = st.jobs;
+      tr.appendChild(cell(jobs.Queued + " / " + (jobs.Running + jobs.Leased) + " / " + jobs.Succeeded, "mono"));
+      const actions = el("td");
+      actionsFor(st).forEach(b => actions.appendChild(b));
+      tr.appendChild(actions);
+      return tr;
+    }
+
+    function setBody(id, rows, emptyText, cols) {
+      const body = document.getElementById(id);
+      body.replaceChildren();
+      if (!rows.length) {
+        const tr = el("tr"); const td = cell(emptyText, "empty"); td.colSpan = cols;
+        tr.appendChild(td); body.appendChild(tr); return;
+      }
+      rows.forEach(r => body.appendChild(r));
+    }
+
+    async function loadScans() {
+      try {
+        const scans = (await j("/api/scans")) || [];
+        const statuses = await Promise.all(scans.map(s => j("/api/scans/" + encodeURIComponent(s.id) + "/status")));
+        setBody("scans", statuses.map(scanRow), "No scans yet.", 7);
+        document.getElementById("refreshed").textContent = "updated " + new Date().toLocaleTimeString();
+      } catch (e) {
+        setBody("scans", [], "error loading scans", 7);
+      }
+    }
+
+    async function loadProjects() {
+      try {
+        const projects = (await j("/api/projects")) || [];
+        setBody("projects", projects.map(p => {
+          const tr = el("tr");
+          tr.appendChild(cell(p.name));
+          tr.appendChild(cell(p.id, "mono"));
+          tr.appendChild(cell((p.created_at || "").slice(0, 19).replace("T", " ")));
+          return tr;
+        }), "No projects yet.", 3);
+      } catch (e) {
+        setBody("projects", [], "error loading projects", 3);
+      }
+    }
+
+    async function init() {
       try {
         const v = await j("/api/version");
         document.getElementById("version").textContent = "v" + (v.version || "dev");
       } catch (e) { /* ignore */ }
-
-      const projectsEl = document.getElementById("projects");
-      try {
-        const projects = (await j("/api/projects")) || [];
-        projectsEl.innerHTML = projects.length ? projects.map(p => `
-          <tr><td>${esc(p.name)}</td><td class="mono">${esc(p.id)}</td>
-          <td>${esc((p.created_at || "").slice(0, 19).replace("T", " "))}</td></tr>`).join("")
-          : `<tr><td colspan="3" class="empty">No projects yet.</td></tr>`;
-      } catch (e) {
-        projectsEl.innerHTML = `<tr><td colspan="3" class="empty">error loading projects</td></tr>`;
-      }
-
-      const scansEl = document.getElementById("scans");
-      try {
-        const scans = (await j("/api/scans")) || [];
-        scansEl.innerHTML = scans.length ? scans.map(s => `
-          <tr><td>${esc(s.name)}</td><td><span class="pill">${esc(s.state)}</span></td>
-          <td>${esc(s.profile)}</td><td class="mono">${esc(s.id)}</td></tr>`).join("")
-          : `<tr><td colspan="4" class="empty">No scans yet.</td></tr>`;
-      } catch (e) {
-        scansEl.innerHTML = `<tr><td colspan="4" class="empty">error loading scans</td></tr>`;
-      }
+      loadProjects();
+      loadScans();
+      setInterval(loadScans, 2000);
     }
-
-    load();
+    init();
   </script>
 </body>
 </html>

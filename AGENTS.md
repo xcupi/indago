@@ -12,7 +12,7 @@ platform**. It helps an authorized operator discover and *verify* web
 vulnerabilities against targets **they are explicitly permitted to test**.
 
 - **Phase 1 scope (product):** Reflected XSS detection and verification.
-- **Current phase (code):** **Phase 0 — architecture + scaffold only.**
+- **Current phase (code):** Reflected XSS — baseline & **reflection detection** (no verdict yet).
 - **Future (designed for, not built):** Stored XSS, DOM XSS, additional engines.
 
 The architecture is deliberately generic (not XSS-specific) so new engines plug
@@ -46,32 +46,49 @@ If a change would weaken any of the above, stop and raise it instead.
 
 ---
 
-## 3. Phase 0 boundary — DO NOT IMPLEMENT YET
+## 3. Current boundary — DO NOT IMPLEMENT YET
 
-Phase 0 is **scaffold and architecture only.** The following are explicitly
-**out of scope right now** and must remain stubs/interfaces:
+The platform is built incrementally. The following are explicitly **out of scope
+right now** and must remain stubs/interfaces (job handlers are no-ops):
 
-- ❌ Vulnerability detection logic
-- ❌ Payload generation / payload libraries
-- ❌ Automated exploitation
-- ❌ Active target testing (no real HTTP/browser traffic *to targets*)
-- ❌ Real crawling/spidering of live targets
+- ❌ XSS verdict / declaring a vulnerability (reflection is recorded, not judged)
+- ❌ Exploit payload generation / payload libraries (the reflection step injects a
+  fixed, non-executable detection canary — never scripts, handlers, or schemes)
+- ❌ Context-aware candidate testing, automated exploitation
+- ❌ Verification of findings
 
-What Phase 0 **does** build (infrastructure — safe to implement fully):
+Implemented so far (infrastructure and **discovery**):
 
 - ✅ Domain models (generic, not XSS-specific)
 - ✅ Persistence layer (SQLite + in-memory), migrations
 - ✅ Persistent job queue + concurrent worker pool
-- ✅ Service **interfaces/abstractions** for: HTTP engine, browser, discovery,
-  detection, verification, auth, AI gateway
-- ✅ Scan orchestration/lifecycle wiring (handlers are no-ops in Phase 0)
+- ✅ HTTP engine (neutral transport; no scope checks inside it)
+- ✅ Browser manager (Chromium/Playwright; neutral automation)
+- ✅ Discovery (seeds, crawl, forms, sitemap, robots, wordlists, params,
+  network observation) — real requests to **in-scope** targets only
+- ✅ Scan controller: wires discovery + queue + workers, pause/resume/cancel,
+  completion policy, restart recovery (see `docs/scan-orchestration.md`)
+- ✅ Test job executor: runs each `JobTest` through the scope-enforcing engine and
+  persists outcome (success/error/timeout/cancelled) + request/response evidence.
+  Endpoint-level jobs send a baseline; injection-point jobs run the **Reflected
+  XSS reflection step** — baseline + a mutated request carrying a unique,
+  deterministic marker in the selected parameter only — and record reflection,
+  locations, surrounding context, and the marker's encoding/transformation into
+  `TestCase.Detail`. No verdict. State-changing methods need the explicit opt-in.
+- ✅ Web UI + CLI (status and scan control)
 - ✅ Evidence filesystem store, config, JSON reporting
-- ✅ Web UI + CLI skeletons
-- ✅ Tests, docs
+- ⏳ Stubs: detection engines, verification, non-anonymous auth, AI providers
 
-**The dividing line:** infrastructure is implemented; anything that *performs
-security testing against a target* is an interface with a stub returning
-`ErrNotImplemented`.
+**The dividing line:** transport, browser, discovery, and orchestration are
+implemented; anything that *tests a target for a vulnerability* is an interface
+with a stub returning `ErrNotImplemented`.
+
+**Scope is enforced outside the transport modules.** `httpengine` and `browser`
+perform no scope checks; the scan controller wraps the HTTP engine in a
+scope-enforcing engine (every request and redirect hop) and the discovery
+collector re-checks every result. The browser aborts out-of-scope requests
+itself (`AllowRequest`). Never hand an unwrapped engine to code that
+follows attacker-influenced URLs.
 
 ---
 

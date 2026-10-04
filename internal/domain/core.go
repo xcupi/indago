@@ -211,8 +211,14 @@ type Scan struct {
 	Config    ScanConfig  `json:"config"`
 	Stop      StopPolicy  `json:"stop"`
 	SessionID ID          `json:"session_id,omitempty"`
-	Stats     ScanStats   `json:"stats"`
-	Error     string      `json:"error,omitempty"`
+	// SeedURLs are the operator-provided discovery seeds. When empty, the
+	// target's base URL is the seed.
+	SeedURLs []string `json:"seed_urls,omitempty"`
+	// Discovery is the persisted state of the scan's discovery run. It lets a
+	// restarted scan know whether discovery still has to run.
+	Discovery DiscoveryState `json:"discovery"`
+	Stats     ScanStats      `json:"stats"`
+	Error     string         `json:"error,omitempty"`
 
 	CreatedAt time.Time  `json:"created_at"`
 	StartedAt *time.Time `json:"started_at,omitempty"`

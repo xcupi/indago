@@ -170,6 +170,27 @@ Phase 0 implements only the **anonymous** authenticator (goes straight to
 
 ---
 
+## 3b. Discovery state (per scan)
+
+Persisted on the scan (`Scan.Discovery`); it lets a restarted scan know whether
+discovery still has to run. A scan cannot complete until discovery is `complete`.
+
+```
+  pending ──► running ──► complete        (every source finished)
+                 └──────► canceled        (scan canceled mid-discovery)
+```
+
+A graceful shutdown or crash leaves it `running`, so the resumed scan re-runs
+discovery (deduplicated against what is already persisted). A `complete`
+discovery is never re-run.
+
+**Scan completion policy:** `running → completed` happens when discovery is
+`complete` **and** the queue has no queued/leased/running job for the scan — see
+[`scan-orchestration.md`](scan-orchestration.md). After a restart, `running`
+scans are restored as `paused`.
+
+---
+
 ## 4. Finding verdict
 
 Not a transition table (it is a value enum), but the intended lifecycle:

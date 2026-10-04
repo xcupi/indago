@@ -5,22 +5,22 @@ import (
 	"log/slog"
 
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/worker"
 )
 
-// phase0Handlers returns no-op handlers for every job type.
+func (c *Controller) defaultHandlers(eng httpengine.Engine) map[domain.JobType]worker.Handler {
+	h := phase0Handlers(c.log)
+	h[domain.JobTest] = newExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log)
+	return h
+}
+
+// phase0Handlers returns no-op handlers for every job type; defaultHandlers
+// replaces JobTest with the executor.
 //
-// IMPORTANT (Phase 0 boundary): these handlers intentionally do NOTHING against
-// any target. They do not call the HTTP engine, browser, discovery sources,
-// detection engines, or verification. They exist so the end-to-end pipeline
-// (enqueue → lease → execute → complete) is wired and observable without any
-// active target testing.
-//
-// Phase 1 replaces these with real handlers:
-//
-//	JobDiscovery → run discovery sources, emit endpoints/parameters, enqueue tests
-//	JobTest      → baseline → marker → reflection → context → candidate (per engine)
-//	JobVerify    → browser verification → confirmed / rejected / inconclusive
+//	JobDiscovery → (discovery is run by the controller, not by queue jobs)
+//	JobTest      → executor: baseline request (detection attaches here later)
+//	JobVerify    → browser verification (later)
 func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 	noop := func(kind domain.JobType) worker.Handler {
 		return worker.HandlerFunc(func(ctx context.Context, job *domain.TestJob) error {

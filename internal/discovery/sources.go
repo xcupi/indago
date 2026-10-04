@@ -521,7 +521,13 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 		if err := in.wait(ctx); err != nil {
 			return err
 		}
-		res, err := n.browser.Render(ctx, info.Canonical, browser.RenderOptions{WaitUntil: browser.WaitLoad})
+		// Two layers: the browser aborts out-of-scope requests before they are sent
+		// (so no third-party traffic is generated), and every observation is
+		// re-checked below before it reaches the sink.
+		res, err := n.browser.Render(ctx, info.Canonical, browser.RenderOptions{
+			WaitUntil:    browser.WaitLoad,
+			AllowRequest: func(u string) bool { return in.Scope.Permits(u).Allowed },
+		})
 		if err != nil {
 			if errors.Is(err, browser.ErrNotImplemented) {
 				return nil // stub browser: nothing to do
@@ -532,6 +538,9 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			continue
 		}
 		for _, ev := range res.Network {
+			if !in.Scope.Permits(ev.URL).Allowed {
+				continue // never persist or enqueue an out-of-scope observation
+			}
 			method := domain.HTTPMethod(strings.ToUpper(ev.Method))
 			if !method.IsValid() {
 				method = domain.MethodGET

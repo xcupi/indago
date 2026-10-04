@@ -49,6 +49,11 @@ type Config struct {
 	PoolSize int
 	// NavigationTimeout is the default per-navigation timeout (default 30s).
 	NavigationTimeout time.Duration
+	// ExecutablePath launches this Chromium binary instead of the one the
+	// Playwright driver expects. It lets a driver and an installed browser of
+	// different revisions be used together. Empty falls back to
+	// $INDAGO_CHROMIUM_PATH, then to the driver's own browser.
+	ExecutablePath string
 }
 
 // DefaultConfig returns conservative defaults.
@@ -93,6 +98,14 @@ type ConsoleMessage struct {
 
 // ContextOptions configure an isolated browser context.
 type ContextOptions struct {
+	// AllowRequest, when non-nil, is the scope gate for every http(s) request the
+	// browser would make (page loads, subresources, XHR/fetch, redirect hops).
+	// Disallowed requests are ABORTED before they leave the browser — no traffic
+	// reaches the host — and are recorded as blocked rather than as network
+	// observations. nil allows everything (the caller then owns scope).
+	//
+	// Limitation: WebSocket and service-worker traffic is not intercepted.
+	AllowRequest func(url string) bool
 	// StorageStatePath, when set, seeds the context with previously saved session
 	// material (cookies + localStorage), yielding a persistent authenticated
 	// context.
@@ -138,6 +151,8 @@ type PoolStats struct {
 
 // RenderOptions controls how a page is loaded by the convenience Render method.
 type RenderOptions struct {
+	// AllowRequest is the scope gate; see ContextOptions.AllowRequest.
+	AllowRequest func(url string) bool
 	// SessionStatePath points at stored session material to reuse the scan's
 	// authenticated session.
 	SessionStatePath string
@@ -159,7 +174,8 @@ type RenderResult struct {
 	ConsoleLogs    []string
 	ConsoleErrors  []string
 	DialogMessages []string       // alert/confirm/prompt messages observed
-	Network        []NetworkEvent // observed requests
+	Network        []NetworkEvent // observed (allowed) requests
+	Blocked        []string       // requests aborted by AllowRequest (never sent)
 	// ExecutedMarkers is reserved for the verification phase (marker execution
 	// detection). The browser layer leaves it empty — it makes no verdicts.
 	ExecutedMarkers []string

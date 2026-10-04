@@ -19,7 +19,9 @@ type driver interface {
 type browserHandle interface {
 	// NewContext creates an isolated context. storageStatePath, when non-empty,
 	// seeds it with saved session material (persistent authenticated context).
-	NewContext(storageStatePath string) (contextHandle, error)
+	// allow, when non-nil, gates every http(s) request: disallowed requests must
+	// be aborted before they are sent.
+	NewContext(storageStatePath string, allow func(url string) bool) (contextHandle, error)
 	// Close closes the browser and all its contexts.
 	Close() error
 }

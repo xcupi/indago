@@ -73,6 +73,11 @@ type RunResult struct {
 // progresses, so testing never waits for discovery to finish.
 func (m *Manager) Run(ctx context.Context, p RunParams) (*RunResult, error) {
 	collector := NewCollector(m.store, m.queue, p.ScanID, p.Scope, m.cfg, m.log)
+	// Rebuild dedup state from persisted discovery so a resumed scan does not
+	// duplicate endpoints, parameters, or test jobs. A no-op for a fresh scan.
+	if err := collector.Hydrate(ctx); err != nil {
+		return &RunResult{}, fmt.Errorf("discovery: hydrate: %w", err)
+	}
 	in := Input{
 		ScanID:    p.ScanID,
 		Scope:     p.Scope,

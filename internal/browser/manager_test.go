@@ -80,13 +80,13 @@ type fakeBrowser struct {
 	contexts []*fakeContext
 }
 
-func (b *fakeBrowser) NewContext(storageStatePath string) (contextHandle, error) {
+func (b *fakeBrowser) NewContext(storageStatePath string, allow func(string) bool) (contextHandle, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
 		return nil, errors.New("browser closed")
 	}
-	c := &fakeContext{br: b, storagePath: storageStatePath, cookies: map[string]Cookie{}, gotoDelay: b.drv.gotoDelay}
+	c := &fakeContext{br: b, gated: allow != nil, storagePath: storageStatePath, cookies: map[string]Cookie{}, gotoDelay: b.drv.gotoDelay}
 	b.contexts = append(b.contexts, c)
 	return c, nil
 }
@@ -124,6 +124,7 @@ func (b *fakeBrowser) openContexts() int {
 }
 
 type fakeContext struct {
+	gated       bool
 	br          *fakeBrowser
 	storagePath string
 	savedPath   string
@@ -532,5 +533,53 @@ func TestStubUnchanged(t *testing.T) {
 	_, err := Stub{}.Render(context.Background(), "https://x/", RenderOptions{})
 	if !errors.Is(err, ErrNotImplemented) {
 		t.Fatalf("stub: expected ErrNotImplemented, got %v", err)
+	}
+}
+
+// An observation that fails the scope gate is recorded as blocked and never as a
+// network observation, regardless of what the driver reports.
+func TestScopeGateFiltersObservations(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+
+	allow := func(u string) bool { return strings.HasPrefix(u, "https://in.example/") }
+	res, err := m.Render(context.Background(), "https://out.example/page", RenderOptions{AllowRequest: allow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fake emits one request event for the navigation URL (out of scope here).
+	if len(res.Network) != 0 {
+		t.Fatalf("out-of-scope request leaked into observations: %v", res.Network)
+	}
+	if len(res.Blocked) != 1 || res.Blocked[0] != "https://out.example/page" {
+		t.Fatalf("blocked = %v", res.Blocked)
+	}
+
+	res, err = m.Render(context.Background(), "https://in.example/page", RenderOptions{AllowRequest: allow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Network) != 1 || len(res.Blocked) != 0 {
+		t.Fatalf("in-scope request should be observed: net=%v blocked=%v", res.Network, res.Blocked)
+	}
+
+	// No gate: everything is observed (the caller owns scope).
+	res, _ = m.Render(context.Background(), "https://out.example/page", RenderOptions{})
+	if len(res.Network) != 1 {
+		t.Fatalf("without a gate the observation should be kept: %v", res.Network)
+	}
+}
+
+// The gate is handed to the driver so a real browser can abort the request.
+func TestScopeGatePassedToDriver(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+	if _, err := m.NewContext(context.Background(), ContextOptions{AllowRequest: func(string) bool { return false }}); err != nil {
+		t.Fatal(err)
+	}
+	if !d.browsers[0].contexts[0].gated {
+		t.Fatal("the scope gate was not passed to the driver")
 	}
 }

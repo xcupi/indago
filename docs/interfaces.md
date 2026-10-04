@@ -2,7 +2,7 @@
 
 The system is organized around small interfaces so behavior can be swapped,
 stubbed, and tested in isolation. This document catalogs the key contracts and
-their **Phase 0 status**.
+their implementation status.
 
 Legend: ✅ implemented · 🔌 interface + stub (returns `ErrNotImplemented`) ·
 🧩 interface + working default.
@@ -90,7 +90,8 @@ func (p *Pool) Stop()
   pause/resume, lease heartbeating, optional rate limiting.
 - `ErrPermanent` marks a non-retryable handler failure; any other error is
   retried subject to the job's `MaxAttempts`.
-- **Handlers are supplied by the caller.** Phase 0 wires no-op handlers.
+- **Handlers are supplied by the caller** (`scan.Options.Handlers`). The default
+  is the no-op set, so no detection runs yet.
 
 ---
 
@@ -126,8 +127,12 @@ type Source interface {
 type Registry struct { /* register/get/names by source */ }
 ```
 
-- 🔌 All sources are stubs (`DefaultRegistry` registers one per planned method:
-  user-provided, crawler, form, browser-network, sitemap, robots, content, param).
+- ✅ Real sources via `NewRealRegistry(engine, browser, cfg)`: seed, crawler (links,
+  forms, query/form parameters, param wordlist), sitemap, robots, content
+  wordlist, and browser network (when a browser is supplied). A `Collector` (the
+  `Sink`) normalizes, **scope-checks**, deduplicates, persists, and enqueues a test
+  job per new endpoint/injection point; `Hydrate` rebuilds its dedup state after a
+  restart. A `Manager` runs sources concurrently behind a pause `Gate`.
 - The `Sink` streaming contract is what lets **discovery and testing run in
   parallel** — a source emits endpoints/parameters as it finds them.
 
@@ -139,7 +144,9 @@ type Registry struct { /* register/get/names by source */ }
 type Engine interface { Do(ctx, *Request) (*Response, error) }
 ```
 
-- 🔌 `Stub` returns `ErrNotImplemented` — **no target traffic in Phase 0**.
+- ✅ `Client`: GET / POST form / POST JSON, headers, cookies, redirects, timeout,
+  proxy, capture, cancellation. **No scope checks inside it** — wrap it (the scan
+  controller does) before it can follow untrusted URLs. `Stub` remains for tests.
 - The real engine (connection reuse, timeouts, session cookies, rate
   integration) is Phase 1.
 
@@ -154,9 +161,13 @@ type Browser interface {
 }
 ```
 
-- 🔌 `Stub`. `RenderResult` exposes generic runtime signals (executed markers,
-  dialogs, console logs/errors, screenshot) that verification consumes.
-- Real implementation: Chromium via Playwright (Phase 1).
+- ✅ `Manager` (Chromium via Playwright): reusable browser pool, isolated and
+  persistent-authenticated contexts, navigation, cookies/localStorage/
+  sessionStorage, network observation, screenshots, cancellation, graceful
+  shutdown, interactive login/MFA. `RenderResult` exposes generic runtime signals
+  that verification will consume. **No scope enforcement** — page subresources can
+  reach third-party hosts, so discovery's browser source is opt-in.
+- 🔌 `Stub` remains for tests.
 
 ---
 
@@ -238,13 +249,23 @@ type Controller struct { /* ... */ }
 func (c *Controller) CreateScan(ctx, CreateScanParams) (*domain.Scan, error)
 func (c *Controller) Start/Pause/Resume/Cancel(ctx, scanID) error
 func (c *Controller) Reconfigure(ctx, scanID, domain.ScanConfig) error
-func (c *Controller) Recover(ctx) (int, error)
-func (c *Controller) Stats(ctx, scanID) (queue.Stats, error)
+func (c *Controller) Status(ctx, scanID) (*scan.Status, error)
+func (c *Controller) Recover(ctx) (int, error)       // requeue jobs left active by a crash
+func (c *Controller) RecoverScans(ctx) (int, error)  // running → paused after a restart
+func (c *Controller) Shutdown()                      // join goroutines; state untouched
 ```
 
-- ✅ implemented. Enforces scope (fail closed), establishes the reused session,
-  builds the per-scan worker pool with no-op handlers, and exposes the full set
-  of scan controls. `scan.EvaluateStop` implements the stop policy.
+- ✅ implemented. Enforces scope (fail closed; see below), establishes the reused
+  session, and for each started scan runs **discovery and a worker pool in
+  parallel**: every new endpoint/injection point becomes a queued `TestJob`
+  immediately. Pause/resume/cancel route to both. A monitor applies the stop
+  policy and completes the scan once discovery is done and no job is pending.
+  After a restart, interrupted scans are restored paused. Full description:
+  [`scan-orchestration.md`](scan-orchestration.md).
+- `scan.Options` is the wiring seam: `HTTP` (engine; **must** be built with
+  `FollowRedirects=false` — the controller wraps it in a scope-enforcing engine
+  that follows redirects hop-by-hop), `Browser` (optional), `Discovery` (limits),
+  `Handlers` (job handlers; default no-ops — where detection attaches), and timing.
 
 ---
 

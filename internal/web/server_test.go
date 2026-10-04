@@ -44,6 +44,7 @@ func TestProjectCreateListGet(t *testing.T) {
 	// Create.
 	body, _ := json.Marshal(map[string]string{"name": "Acme"})
 	req := httptest.NewRequest(http.MethodPost, "/api/projects", bytes.NewReader(body))
+	req.Header.Set(web.ClientHeader, "test")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -87,6 +88,7 @@ func TestCreateProjectValidation(t *testing.T) {
 	h := newServer(t)
 	// Missing name.
 	req := httptest.NewRequest(http.MethodPost, "/api/projects", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set(web.ClientHeader, "test")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {

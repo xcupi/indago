@@ -17,14 +17,17 @@ and conservative, operator-controlled behavior.
 
 | Phase | Scope | State |
 |-------|-------|-------|
-| **Phase 0** | Architecture + repository scaffold | **current** |
-| Phase 1 | Reflected XSS detection & verification | planned |
+| Scaffold | Domain, persistence, queue, workers, interfaces | done |
+| Transport | HTTP engine, browser manager | done |
+| Discovery | Crawl, forms, sitemap/robots, wordlists, params; scan controller integration | **current** |
+| Phase 1 | Reflected XSS detection & verification | next |
 | Later | Stored XSS, DOM XSS, more engines | designed-for |
 
-**Phase 0 contains no vulnerability detection, payload generation, exploitation,
-or active target testing.** It is the skeleton: domain models, persistence,
-job queue, worker pool, service interfaces, and UI/CLI shells. See
-[`AGENTS.md`](AGENTS.md) for the exact scope boundary.
+**There is no vulnerability detection, payload generation, or exploitation yet.**
+A scan currently performs scope-enforced *discovery* (real requests to in-scope
+targets only) and drains its test jobs through no-op handlers. See
+[`AGENTS.md`](AGENTS.md) for the exact boundary and
+[`docs/scan-orchestration.md`](docs/scan-orchestration.md) for how a scan runs.
 
 ---
 
@@ -81,6 +84,32 @@ make build
 # Show version
 ./bin/indago version
 ```
+
+Drive a scan from another terminal (the CLI talks to the running server; the web
+UI at http://127.0.0.1:8750 shows the same state):
+
+```bash
+./bin/indago project create "my project"                       # → project ID
+./bin/indago scope set  -project <PID> -include app.example.com   # scope is mandatory
+./bin/indago target add -project <PID> -name app -url https://app.example.com/
+./bin/indago scan create -project <PID> -target <TID> -profile conservative
+./bin/indago scan start  <scan-id>        # IDs may be a unique prefix
+./bin/indago scan status <scan-id>        # discovery progress, jobs, provenance
+./bin/indago scan pause|resume|cancel <scan-id>
+```
+
+Only scan systems you own or have written permission to test. Nothing is
+requested outside the scope you set — including redirect targets.
+
+After a crash or restart, interrupted scans come back **paused**; nothing is sent
+until you run `indago scan resume`.
+
+Each discovered endpoint is then requested once as a **baseline** (observed
+values, no payloads) and the result plus request/response evidence is stored
+under `data/evidence/`. POST/PUT/PATCH/DELETE endpoints are skipped unless you
+start the server with `-allow-state-changing`. `indago serve -browser` adds
+browser network discovery (needs Chromium; out-of-scope requests are blocked in
+the browser).
 
 Run the quality gate:
 

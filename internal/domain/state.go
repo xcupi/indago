@@ -83,6 +83,32 @@ func (s ScanState) CanTransitionTo(next ScanState) bool {
 }
 
 // ---------------------------------------------------------------------------
+// Discovery state (per scan)
+// ---------------------------------------------------------------------------
+
+// DiscoveryState is the persisted state of a scan's discovery run. Discovery
+// runs concurrently with testing; a scan cannot complete until discovery has
+// finished (see docs/scan-orchestration.md).
+type DiscoveryState string
+
+const (
+	DiscoveryPending  DiscoveryState = "pending"  // not started yet
+	DiscoveryRunning  DiscoveryState = "running"  // sources are active (or were, at last persist)
+	DiscoveryComplete DiscoveryState = "complete" // every source finished
+	DiscoveryCanceled DiscoveryState = "canceled" // scan canceled mid-discovery
+)
+
+// IsValid reports whether the discovery state is a known value.
+func (s DiscoveryState) IsValid() bool {
+	switch s {
+	case DiscoveryPending, DiscoveryRunning, DiscoveryComplete, DiscoveryCanceled:
+		return true
+	default:
+		return false
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Job (TestJob) lifecycle
 // ---------------------------------------------------------------------------
 
@@ -236,12 +262,13 @@ const (
 	TestCaseCompleted TestCaseStatus = "completed"
 	TestCaseFailed    TestCaseStatus = "failed"
 	TestCaseSkipped   TestCaseStatus = "skipped"
+	TestCaseCancelled TestCaseStatus = "cancelled"
 )
 
 // IsValid reports whether the test-case status is a known value.
 func (s TestCaseStatus) IsValid() bool {
 	switch s {
-	case TestCasePending, TestCaseRunning, TestCaseCompleted, TestCaseFailed, TestCaseSkipped:
+	case TestCasePending, TestCaseRunning, TestCaseCompleted, TestCaseFailed, TestCaseSkipped, TestCaseCancelled:
 		return true
 	default:
 		return false

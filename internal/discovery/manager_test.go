@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -324,4 +325,59 @@ func hasSuffixKey(m map[string]domain.DiscoverySource, suffix string) bool {
 		}
 	}
 	return false
+}
+
+// spyBrowser records the scope gate it was given and returns a mix of in- and
+// out-of-scope observations.
+type spyBrowser struct {
+	allow func(string) bool
+	net   []browser.NetworkEvent
+}
+
+func (s *spyBrowser) Render(_ context.Context, url string, o browser.RenderOptions) (*browser.RenderResult, error) {
+	s.allow = o.AllowRequest
+	return &browser.RenderResult{FinalURL: url, Status: 200, Network: s.net}, nil
+}
+func (*spyBrowser) Close() error { return nil }
+
+// spySink records every candidate offered to it.
+type spySink struct {
+	mu   sync.Mutex
+	urls []string
+}
+
+func (s *spySink) AddEndpoint(_ context.Context, ep discovery.EndpointCandidate) (domain.ID, error) {
+	s.mu.Lock()
+	s.urls = append(s.urls, ep.URL)
+	s.mu.Unlock()
+	return domain.NewID(), nil
+}
+func (s *spySink) AddParameter(context.Context, discovery.ParamCandidate) error { return nil }
+
+// Out-of-scope browser observations must be dropped by the source itself, before
+// the sink (and so before anything is persisted or enqueued), and the browser
+// must be given a scope gate so those requests are never sent at all.
+func TestNetworkSourceScopesObservationsBeforeSink(t *testing.T) {
+	sb := &spyBrowser{net: []browser.NetworkEvent{
+		{URL: "http://in.example/api/data", Method: "GET"},
+		{URL: "https://tracker.evil.example/pixel", Method: "GET"},
+		{URL: "http://in.example/blocked-by-path", Method: "POST"},
+	}}
+	scope := domain.Scope{IncludeHosts: []string{"in.example"}, ExcludePathPrefixes: []string{"/blocked"}}
+	sink := &spySink{}
+
+	src := discovery.NewNetworkSource(sb, discovery.DefaultConfig())
+	if err := src.Run(context.Background(), discovery.Input{Scope: scope, SeedURLs: []string{"http://in.example/"}}, sink); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sink.urls) != 1 || sink.urls[0] != "http://in.example/api/data" {
+		t.Fatalf("sink saw %v; only the in-scope observation may reach it", sink.urls)
+	}
+	if sb.allow == nil {
+		t.Fatal("the browser must be handed a scope gate")
+	}
+	if !sb.allow("http://in.example/x") || sb.allow("https://tracker.evil.example/pixel") || sb.allow("http://in.example/blocked/x") {
+		t.Fatal("the scope gate does not match the scan scope")
+	}
 }

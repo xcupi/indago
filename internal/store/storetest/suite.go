@@ -27,6 +27,126 @@ func Run(t *testing.T, f Factory) {
 	t.Run("FindingEvidence", func(t *testing.T) { testFindingEvidence(t, f) })
 	t.Run("SessionByScan", func(t *testing.T) { testSessionByScan(t, f) })
 	t.Run("Isolation", func(t *testing.T) { testIsolation(t, f) })
+	t.Run("ScanDiscoveryFields", func(t *testing.T) { testScanDiscoveryFields(t, f) })
+	t.Run("TestCaseResults", func(t *testing.T) { testTestCaseResults(t, f) })
+}
+
+// testTestCaseResults verifies a TestCase's execution result round-trips through
+// create and update, with evidence references isolated from caller mutation.
+func testTestCaseResults(t *testing.T, f Factory) {
+	s, done := f(t)
+	defer done()
+	ctx := context.Background()
+	scanID, jobID := domain.NewID(), domain.NewID()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	tc := &domain.TestCase{
+		ID: domain.NewID(), ScanID: scanID, JobID: jobID, Attempt: 2,
+		Status: domain.TestCaseRunning, Method: "POST", URL: "https://x.example/f",
+		StartedAt: &now, CreatedAt: now, UpdatedAt: now,
+	}
+	must(t, s.TestCases().Create(ctx, tc))
+
+	ev1, ev2 := domain.NewID(), domain.NewID()
+	fin := now.Add(150 * time.Millisecond)
+	tc.Status, tc.Outcome = domain.TestCaseCompleted, domain.OutcomeSuccess
+	tc.HTTPStatus, tc.DurationMS = 200, 150
+	tc.EvidenceIDs = []domain.ID{ev1, ev2}
+	tc.Detail = []byte(`{"reflected":true,"count":2}`)
+	tc.FinishedAt, tc.UpdatedAt = &fin, fin
+	must(t, s.TestCases().Update(ctx, tc))
+
+	got, err := s.TestCases().Get(ctx, tc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Outcome != domain.OutcomeSuccess || got.HTTPStatus != 200 || got.DurationMS != 150 || got.Attempt != 2 ||
+		got.Method != "POST" || got.URL != "https://x.example/f" || got.Status != domain.TestCaseCompleted {
+		t.Fatalf("result not persisted: %+v", got)
+	}
+	if len(got.EvidenceIDs) != 2 || got.EvidenceIDs[0] != ev1 || got.EvidenceIDs[1] != ev2 {
+		t.Fatalf("evidence refs: %v", got.EvidenceIDs)
+	}
+	if got.StartedAt == nil || got.FinishedAt == nil || !got.FinishedAt.Equal(fin) {
+		t.Fatalf("timestamps: started=%v finished=%v", got.StartedAt, got.FinishedAt)
+	}
+	if string(got.Detail) != `{"reflected":true,"count":2}` {
+		t.Fatalf("detail not persisted: %q", got.Detail)
+	}
+
+	got.Detail[0] = 'X' // must not alias stored state
+	got.EvidenceIDs[0] = domain.NewID()
+	again, _ := s.TestCases().Get(ctx, tc.ID)
+	if again.EvidenceIDs[0] != ev1 {
+		t.Fatal("evidence IDs aliased through the returned pointer")
+	}
+	if string(again.Detail) != `{"reflected":true,"count":2}` {
+		t.Fatal("detail aliased through the returned pointer")
+	}
+
+	// A failed attempt keeps its error text and has no evidence.
+	bad := &domain.TestCase{ID: domain.NewID(), ScanID: scanID, JobID: jobID, Attempt: 1, Status: domain.TestCaseFailed,
+		Outcome: domain.OutcomeTimeout, Error: "deadline exceeded", CreatedAt: now, UpdatedAt: now}
+	must(t, s.TestCases().Create(ctx, bad))
+	list, _ := s.TestCases().ListByScan(ctx, scanID)
+	if len(list) != 2 {
+		t.Fatalf("expected 2 test cases (one per attempt), got %d", len(list))
+	}
+	gb, _ := s.TestCases().Get(ctx, bad.ID)
+	if gb.Outcome != domain.OutcomeTimeout || gb.Error != "deadline exceeded" || len(gb.EvidenceIDs) != 0 {
+		t.Fatalf("failed attempt: %+v", gb)
+	}
+}
+
+// testScanDiscoveryFields verifies the seed URLs and discovery state round-trip,
+// default correctly, and are isolated from caller mutation.
+func testScanDiscoveryFields(t *testing.T, f Factory) {
+	s, done := f(t)
+	defer done()
+	ctx := context.Background()
+
+	sc := &domain.Scan{
+		ID: domain.NewID(), ProjectID: domain.NewID(), State: domain.ScanCreated,
+		SeedURLs:  []string{"https://a.example/", "https://a.example/x"},
+		Discovery: domain.DiscoveryRunning,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	must(t, s.Scans().Create(ctx, sc))
+
+	got, err := s.Scans().Get(ctx, sc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.SeedURLs) != 2 || got.SeedURLs[1] != "https://a.example/x" || got.Discovery != domain.DiscoveryRunning {
+		t.Fatalf("round-trip lost fields: seeds=%v discovery=%q", got.SeedURLs, got.Discovery)
+	}
+
+	// Mutating the returned slice must not corrupt stored state.
+	got.SeedURLs[0] = "https://evil.example/"
+	again, _ := s.Scans().Get(ctx, sc.ID)
+	if again.SeedURLs[0] != "https://a.example/" {
+		t.Fatalf("seed URLs aliased through returned pointer: %v", again.SeedURLs)
+	}
+
+	// Update persists the discovery state.
+	again.Discovery = domain.DiscoveryComplete
+	must(t, s.Scans().Update(ctx, again))
+	final, _ := s.Scans().Get(ctx, sc.ID)
+	if final.Discovery != domain.DiscoveryComplete {
+		t.Fatalf("discovery state not persisted: %q", final.Discovery)
+	}
+
+	// An unset discovery state defaults to pending in durable stores; the memory
+	// store may keep it empty, so accept either.
+	bare := &domain.Scan{ID: domain.NewID(), ProjectID: domain.NewID(), State: domain.ScanCreated, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	must(t, s.Scans().Create(ctx, bare))
+	gb, _ := s.Scans().Get(ctx, bare.ID)
+	if gb.Discovery != domain.DiscoveryPending && gb.Discovery != "" {
+		t.Fatalf("unexpected default discovery state: %q", gb.Discovery)
+	}
+	if len(gb.SeedURLs) != 0 {
+		t.Fatalf("expected no seeds, got %v", gb.SeedURLs)
+	}
 }
 
 func testProjectCRUD(t *testing.T, f Factory) {

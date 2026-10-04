@@ -157,3 +157,51 @@ func TestCollectorPreservesProvenance(t *testing.T) {
 		t.Fatalf("provenance not preserved: %+v", eps)
 	}
 }
+
+// TestCollectorHydrateAvoidsDuplicatesAfterRestart simulates a restart: a second
+// collector over the same store must recognize everything the first persisted,
+// creating no duplicate endpoints, parameters, or jobs.
+func TestCollectorHydrateAvoidsDuplicatesAfterRestart(t *testing.T) {
+	st := memory.New()
+	q := queue.NewMemory()
+	scanID := domain.NewID()
+	scope := domain.Scope{IncludeHosts: []string{"example.com"}}
+	ctx := context.Background()
+
+	first := discovery.NewCollector(st, q, scanID, scope, discovery.DefaultConfig(), quiet())
+	if _, err := first.AddEndpoint(ctx, discovery.EndpointCandidate{URL: "http://example.com/s?q=1", Method: domain.MethodGET, Source: domain.SourceCrawler}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.AddParameter(ctx, discovery.ParamCandidate{EndpointURL: "http://example.com/post", EndpointMethod: domain.MethodPOST, Name: "body", Location: domain.LocationForm, Source: domain.SourceForm}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := q.Stats(ctx, scanID)
+	e1, p1, _ := first.Counts()
+
+	// "Restart": brand-new collector, same store and queue.
+	second := discovery.NewCollector(st, q, scanID, scope, discovery.DefaultConfig(), quiet())
+	if err := second.Hydrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Hydrate(ctx); err != nil { // idempotent
+		t.Fatal(err)
+	}
+	e2, p2, _ := second.Counts()
+	if e2 != e1 || p2 != p1 {
+		t.Fatalf("hydrated counts differ: endpoints %d vs %d, params %d vs %d", e2, e1, p2, p1)
+	}
+
+	// Re-discovering the same items must now be a no-op.
+	_, _ = second.AddEndpoint(ctx, discovery.EndpointCandidate{URL: "http://example.com/s?q=2", Method: domain.MethodGET, Source: domain.SourceCrawler})
+	_ = second.AddParameter(ctx, discovery.ParamCandidate{EndpointURL: "http://example.com/post", EndpointMethod: domain.MethodPOST, Name: "body", Location: domain.LocationForm, Source: domain.SourceForm})
+
+	eps, _ := st.Endpoints().ListByScan(ctx, scanID)
+	params, _ := st.Parameters().ListByScan(ctx, scanID)
+	after, _ := q.Stats(ctx, scanID)
+	if len(eps) != e1 || len(params) != p1 {
+		t.Fatalf("duplicates persisted after hydrate: endpoints=%d (want %d) params=%d (want %d)", len(eps), e1, len(params), p1)
+	}
+	if after.Total() != before.Total() {
+		t.Fatalf("duplicate jobs enqueued after hydrate: %d -> %d", before.Total(), after.Total())
+	}
+}

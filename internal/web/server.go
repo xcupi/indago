@@ -30,6 +30,10 @@ type Server struct {
 	ctrl    *scan.Controller
 	log     *slog.Logger
 	version string
+
+	// allowedHosts, when non-nil, is the set of acceptable Host header values
+	// (DNS-rebinding protection). ListenAndServe sets it from the bind address.
+	allowedHosts map[string]bool
 }
 
 // NewServer builds a Server. A nil logger uses slog.Default.
@@ -50,16 +54,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/projects", s.handleListProjects)
 	mux.HandleFunc("POST /api/projects", s.handleCreateProject)
 	mux.HandleFunc("GET /api/projects/{id}", s.handleGetProject)
+	mux.HandleFunc("GET /api/projects/{id}/targets", s.handleListTargets)
+	mux.HandleFunc("POST /api/projects/{id}/targets", s.handleCreateTarget)
+	mux.HandleFunc("GET /api/projects/{id}/scope", s.handleGetScope)
+	mux.HandleFunc("PUT /api/projects/{id}/scope", s.handlePutScope)
 
 	mux.HandleFunc("GET /api/scans", s.handleListScans)
+	mux.HandleFunc("POST /api/scans", s.handleCreateScan)
 	mux.HandleFunc("GET /api/scans/{id}", s.handleGetScan)
 	mux.HandleFunc("GET /api/scans/{id}/stats", s.handleScanStats)
+	mux.HandleFunc("GET /api/scans/{id}/status", s.handleScanStatus)
+	mux.HandleFunc("POST /api/scans/{id}/{action}", s.handleScanAction)
 
 	// Static UI.
 	sub, _ := fs.Sub(assetsFS, "assets")
 	mux.Handle("GET /", http.FileServer(http.FS(sub)))
 
-	return s.withLogging(mux)
+	return s.withLogging(s.guard(mux))
 }
 
 // --- handlers ---
@@ -188,6 +199,7 @@ func readJSON(r *http.Request, v any) error {
 // ListenAndServe starts the HTTP server and blocks until ctx is canceled, then
 // shuts down gracefully.
 func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
+	s.allowedHosts = hostsForListenAddr(addr)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           s.Handler(),

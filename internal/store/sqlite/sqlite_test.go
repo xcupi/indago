@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -53,13 +54,14 @@ func TestMigrateIsIdempotent(t *testing.T) {
 		}
 	}
 
-	// schema_migrations should contain exactly the embedded migrations once each.
+	// schema_migrations should contain exactly the embedded migrations once each
+	// (0001_init … 0004_test_case_detail).
 	var count int
 	if err := db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("expected 1 applied migration, got %d", count)
+	if count != 4 {
+		t.Fatalf("expected 4 applied migrations, got %d", count)
 	}
 }
 
@@ -85,5 +87,53 @@ func TestReopenPersists(t *testing.T) {
 	defer db2.Close()
 	if _, err := db2.Projects().Get(ctx, pid); err != nil {
 		t.Fatalf("project did not persist across reopen: %v", err)
+	}
+}
+
+// TestMigrationUpgradesExistingScans proves migration 0002 upgrades a database
+// that already holds scan rows created under schema 1: existing rows get the
+// column defaults and remain readable.
+func TestMigrationUpgradesExistingScans(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upgrade.db")
+	ctx := context.Background()
+
+	db, err := sqlite.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Apply only migration 0001 by hand, then insert a legacy scan row.
+	raw := db.SQL()
+	if _, err := raw.ExecContext(ctx, `CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))`); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile("migrations/0001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, string(body)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO schema_migrations (name) VALUES ('0001_init.sql')`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO scans (id, project_id, target_id, name, state, profile, created_at, updated_at) VALUES ('legacy','p','t','old','completed','balanced',?,?)`,
+		now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now run the real migrator: only 0002 should apply.
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("upgrade migrate: %v", err)
+	}
+	got, err := db.Scans().Get(ctx, "legacy")
+	if err != nil {
+		t.Fatalf("legacy scan unreadable after upgrade: %v", err)
+	}
+	if got.Discovery != domain.DiscoveryPending || len(got.SeedURLs) != 0 {
+		t.Fatalf("legacy defaults wrong: discovery=%q seeds=%v", got.Discovery, got.SeedURLs)
 	}
 }

@@ -67,6 +67,7 @@ func cloneScan(s *domain.Scan) *domain.Scan {
 	c := *s
 	c.StartedAt = cloneTimePtr(s.StartedAt)
 	c.EndedAt = cloneTimePtr(s.EndedAt)
+	c.SeedURLs = cloneStrings(s.SeedURLs)
 	return &c
 }
 
@@ -94,6 +95,10 @@ func cloneJob(j *domain.TestJob) *domain.TestJob {
 
 func cloneTestCase(t *domain.TestCase) *domain.TestCase {
 	c := *t
+	c.EvidenceIDs = cloneIDs(t.EvidenceIDs)
+	c.Detail = cloneBytes(t.Detail)
+	c.StartedAt = cloneTimePtr(t.StartedAt)
+	c.FinishedAt = cloneTimePtr(t.FinishedAt)
 	return &c
 }
 

@@ -1,0 +1,267 @@
+# Indago — Scan Orchestration
+
+How a scan runs: the `internal/scan` controller wires **discovery**, the
+**persistent queue**, and the **worker pool** together, and owns pause / resume /
+cancel, completion, and restart recovery.
+
+> Boundary: a scan performs scope-enforced **discovery** and **executes each test
+> job as a baseline request** (section 1b), but does **no XSS detection, payload
+> generation, or exploitation**. Detection attaches through
+> `scan.Options.Handlers`.
+
+---
+
+## 1. What starts when a scan enters RUNNING
+
+`Controller.Start` (or `Resume`, for a restored scan) launches one **execution**
+per scan:
+
+```
+                         ┌──────────────────────── execution ────────────────────────┐
+ Scan → RUNNING ───────► │  discovery run ──► Collector ──► store + queue.Enqueue      │
+                         │   (sources, concurrent)   │                                 │
+                         │                           ▼  every new endpoint/parameter   │
+                         │                     TestJob(queued) immediately             │
+                         │                           │                                 │
+                         │  worker pool (http/browser/discovery groups) ◄── Lease ─────┤
+                         │                                                             │
+                         │  monitor: stats refresh · stop policy · completion          │
+                         └─────────────────────────────────────────────────────────────┘
+```
+
+- **Discovery and testing run in parallel.** The collector enqueues a test job
+  for each endpoint and each injection point *as it is discovered*; workers lease
+  them while discovery is still running. Exactly one job is created per endpoint
+  and one per injection point (deduplicated).
+- **Seeds**: the scan's `SeedURLs`, or the target base URL when none were given.
+  Every seed must be in scope at creation (an out-of-scope seed is rejected, not
+  silently dropped).
+- **Provenance** (`user_provided`, `crawler`, `form`, `sitemap`, `robots`, …) is
+  stored on every endpoint/parameter and surfaced in status.
+
+## 1b. Test job execution
+
+Each `JobTest` is run by the **executor** (`internal/scan/executor.go`) on the
+worker pool's `http` group, so HTTP concurrency, the request rate, pause/resume,
+and cancel are exactly the pool's.
+
+1. **Resolve** the job's endpoint, the endpoint's parameters, and (for an
+   injection-point job) the focused parameter; all must belong to the job's scan.
+2. **Build the baseline request**: the endpoint's method and URL with every known
+   parameter at its **observed value** — query parameters in the URL, form/JSON
+   parameters in the body — in a deterministic order. No mutation, no payloads;
+   a later phase attaches by choosing which parameter value to substitute.
+3. **Execute** through the scan's scope-enforcing engine with a per-request
+   timeout (`ExecutorConfig.RequestTimeout`, default 20s).
+4. **Persist** a `TestCase` (one per job attempt) with the result and
+   **evidence**: the request and the response (when received) as HTTP/1.1 message
+   blobs in the evidence store, with `Evidence` rows (kind, size, SHA-256)
+   referenced from `TestCase.EvidenceIDs`.
+
+**Injection-point jobs run the Reflected XSS reflection step** instead of a plain
+baseline:
+
+- A **baseline** (all parameters at observed values) is fetched once per endpoint
+  and **reused** across that endpoint's injection points (cached by request
+  signature); a failed baseline is not cached.
+- A **mutated** request carries a unique, deterministic marker
+  (`detection.NewProbe`) in the **selected parameter only**; all others keep their
+  observed values. Supported for GET query, POST form, and POST JSON.
+- The marker is an alphanumeric token bracketed around a fixed canary
+  (`<>"'`) by a second sentinel. The analyzer (`detection.AnalyzeReflection`,
+  pure) locates the token, counts reflection sites, records surrounding context,
+  and classifies how the canary came back (none/html/url/js/stripped/mixed). The
+  canary is a detection probe, **not** an exploit payload.
+- The `detection.ReflectionReport` is stored in `TestCase.Detail`; evidence
+  references the shared baseline (request+response) and the mutated
+  (request+response). **No verdict is made** — reflection is recorded, not judged.
+  `Status.Tests` adds `reflected` / `not_reflected` tallies.
+
+| Outcome | Meaning | Job result |
+|---------|---------|------------|
+| `success` | a response was received (**any** HTTP status — a 404/500 is still a successful execution) | succeeds |
+| `error` | could not complete: connection failure, out of scope, invalid request, unresolvable job | transport errors **retry** (queue backoff, up to `MaxAttempts`); out-of-scope/invalid/unresolvable are **permanent** (dead, not retried) |
+| `timeout` | exceeded the request timeout | retries |
+| `cancelled` | scan cancelled / shutdown interrupted it | context error (jobs are then cancelled or recovered) |
+| *(skipped)* | state-changing method and the opt-in is off | succeeds; recorded as status `skipped` |
+
+- **State-changing methods are skipped by default.** POST/PUT/PATCH/DELETE
+  endpoints are only executed with `ExecutorConfig.AllowStateChanging`
+  (`indago serve -allow-state-changing`), because replaying discovered forms can
+  change a live target's state. (A form's `action` is also registered as a GET
+  endpoint by discovery; that GET is safe and runs.)
+- The `cancelled` result is persisted with a **detached context**, since the job's
+  own context is already canceled; `Cancel` therefore returns only after in-flight
+  attempts have been recorded.
+- If evidence cannot be written the outcome is kept (the request already
+  happened; a retry would resend it) and the test case's note says
+  `evidence incomplete`.
+- On restart, `Recover` marks test cases left `running` by the dead process as
+  `cancelled` ("interrupted by restart"); their requeued jobs record fresh attempts.
+- Completed-scan status reports `tests` counts (success/error/timeout/cancelled/
+  skipped/running), also shown by `indago scan status`.
+
+## 2. Scope is enforced at five points (fail closed)
+
+1. `CreateScan` — project scope must exist, be non-empty, and permit the target
+   base URL **and every seed**.
+2. `Start` / `Resume` — re-checked (scope may have changed).
+3. The discovery **collector** — drops any out-of-scope endpoint/parameter before
+   it is persisted or enqueued.
+4. Every outbound HTTP request goes through `scopedEngine` — checked *before* it
+   is sent. `/robots.txt` outside a path-limited scope is never fetched.
+5. **Redirects are followed by the controller, one hop at a time**, re-checking
+   scope on each hop, so an in-scope page cannot bounce the crawler out of scope.
+
+The HTTP client passed to the controller **must** be built with
+`FollowRedirects=false` (otherwise it would follow redirects itself, bypassing
+check 5). `cmd/indago` does this.
+
+The **executor** and discovery share one scope-enforcing engine per scan.
+
+**Browser-network discovery** (`Options.Browser`, `indago serve -browser`) is
+scope-gated in two layers: the browser **aborts every out-of-scope request before
+it is sent** (page loads, subresources, XHR/fetch, redirect hops — so no
+third-party traffic is generated), and the discovery source re-checks each
+observation before it reaches the collector, so nothing out of scope is persisted
+or enqueued. Aborted requests are reported as `Blocked`, never as observations.
+Limitation: WebSocket and service-worker traffic is not intercepted. It is off by
+default (it needs Chromium).
+
+## 3. Pause, resume, cancel
+
+All three route to **both** the worker pool and discovery.
+
+| Operation | Worker pool | Discovery | Persisted |
+|-----------|-------------|-----------|-----------|
+| **Pause** | stops leasing (in-flight jobs finish) | gate closes: no new fetch starts (in-flight fetch finishes and its results are still persisted) | scan `paused` |
+| **Resume** | leases again | gate opens | scan `running` |
+| **Cancel** | stopped | context canceled — **in-flight requests are interrupted** | queued/active jobs `canceled`; scan `canceled`, discovery `canceled` |
+
+Pause is idempotent. Cancel is idempotent for terminal scans and works on a scan
+with no live execution (e.g. one restored after a restart).
+
+## 4. Completion policy
+
+A monitor evaluates each running scan every `PollInterval`:
+
+1. **Refresh** persisted stats (endpoints, parameters, queued/succeeded jobs,
+   findings by verdict).
+2. **Stop policy** (`continue_all` · `first_confirmed` · `after_n_confirmed` ·
+   `pause_and_ask`) is applied to the confirmed-finding count. `pause_and_ask`
+   re-asks only when the count *increases*, so resuming does not immediately
+   re-pause. Stopping early cancels the scan's remaining jobs.
+3. **Complete** when discovery has finished **and** no job is queued, leased, or
+   running (`Pending() == 0`). Handlers must enqueue any child jobs *before* the
+   parent job completes — that is what makes `Pending() == 0` a reliable
+   quiescence test.
+
+A paused or awaiting-auth scan never completes. `COMPLETED` is recorded only
+*after* the workers and discovery have fully stopped and (for an early stop) the
+remaining jobs are canceled, so a status reader never sees a completed scan with
+pending work.
+
+## 5. Persisted scan and discovery state
+
+`Scan.Discovery` is persisted (migration `0002_scan_discovery`):
+
+```
+pending ──► running ──► complete          (every source finished)
+               └──────► canceled          (scan canceled mid-discovery)
+```
+
+`Scan.Stats` is refreshed by the monitor and finalized on completion/cancel.
+`Status` (below) reads live from the store, so it is correct at any moment —
+including immediately after a restart, before anything is resumed.
+
+## 6. Restart and crash recovery
+
+A restart **never sends traffic on its own.** `indago serve` runs, in order:
+
+1. `Controller.Recover` — jobs left `leased`/`running` by the dead process are
+   requeued (no worker can legitimately hold a lease at startup).
+2. `Controller.RecoverScans`:
+   - `running` scans → **`paused`** ("interrupted by restart"),
+   - `canceling` scans → the cancel is completed,
+   - `created`, `paused`, `awaiting_auth`, and terminal scans are left alone.
+3. The operator resumes with `indago scan resume <id>` (or the UI).
+
+`Resume` on a restored scan rebuilds its execution. If discovery had **not**
+finished it runs again, but the collector first **hydrates** its dedup state from
+the store, so nothing is re-registered and no duplicate jobs are enqueued; it
+simply continues discovering. If discovery had already completed it is **not**
+re-run — only the remaining jobs are processed.
+
+`Controller.Shutdown` (graceful stop) cancels and joins every goroutine but
+leaves persisted state untouched, so a graceful stop is recovered exactly like a
+crash.
+
+## 7. Status
+
+`Controller.Status` backs the web UI, the CLI, and `GET /api/scans/{id}/status`,
+so all three always agree:
+
+```jsonc
+{
+  "scan":      { "state": "running", "discovery": "running", ... },
+  "running":   true,                       // a live execution exists in this process
+  "discovery": { "state": "running", "endpoints": 13, "parameters": 4,
+                 "injection_points": 4,
+                 "endpoints_by_source": { "crawler": 8, "form": 3, "robots": 1, "user_provided": 1 } },
+  "jobs":      { "Queued": 6, "Running": 4, "Succeeded": 3, ... },
+  "findings":  { "confirmed": 0, "rejected": 0, "inconclusive": 0, "pending": 0 }
+}
+```
+
+## 8. Web API and CLI
+
+| Action | HTTP | CLI |
+|--------|------|-----|
+| create project | `POST /api/projects` | `indago project create NAME` |
+| add target | `POST /api/projects/{id}/targets` | `indago target add -project ID -name N -url URL` |
+| set scope | `PUT /api/projects/{id}/scope` | `indago scope set -project ID -include a,b …` |
+| create scan | `POST /api/scans` | `indago scan create -project ID -target ID …` |
+| start / pause / resume / cancel | `POST /api/scans/{id}/{action}` | `indago scan start\|pause\|resume\|cancel ID` |
+| status | `GET /api/scans/{id}/status` | `indago scan status ID [-json]` |
+
+The CLI is a thin client over the running server's API (so only the server opens
+the SQLite file); scan IDs may be given as a unique prefix.
+
+### Protecting the control plane
+
+The API can start scans, so it is guarded against a malicious web page the
+operator visits:
+
+- **CSRF**: every state-changing request needs the `X-Indago-Client` header
+  (browsers cannot send a custom header cross-origin without a CORS preflight,
+  which the server never approves), and an `Origin` header, if present, must match
+  the `Host`. The bundled UI and the CLI send it.
+- **DNS rebinding**: when bound to a specific address, the `Host` header must be
+  loopback or the bound host.
+- The API has **no authentication** (single local user). `indago serve` warns when
+  bound to a non-loopback address; restrict network access in that case.
+
+## 9. Locking rules (for maintainers)
+
+- `Controller.mu` guards the running-execution map and the closed flag. It is
+  **never held while waiting for a goroutine** — `Cancel`/`Shutdown` take the
+  execution out of the map, release the lock, then wait. This is what stops the
+  completion monitor (which also takes `mu`) from deadlocking against them.
+- `Controller.scanMu` serializes read-modify-write of scan rows (`mutate`), so the
+  monitor's stats refresh can never overwrite a concurrent state change with stale
+  data. Lock order: `mu` → `scanMu`.
+- Completion takes ownership (state check + map removal in one critical section)
+  before tearing the execution down.
+
+## 10. Known limitations
+
+- **Discovery concurrency is read when discovery starts.** `Reconfigure` resizes
+  the worker pool and rate live, but a running crawl keeps its concurrency until
+  discovery next starts.
+- The executor sends only the observed (baseline) request; there is no
+  per-parameter variation yet, so an endpoint job and each of its injection-point
+  jobs send near-identical requests.
+- A scan that was `paused` by `pause_and_ask` and then restarted will ask again
+  once after resume (the "already asked" marker is in memory).
+- Per-job progress inside long-running handlers is not persisted; a crashed job is
+  simply re-run (jobs must be idempotent).

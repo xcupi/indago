@@ -64,6 +64,22 @@ disabled gateway) behaves, registries enumerate correctly, and every stub return
 summary math, config round-trip/defaults/derived paths, evidence content-
 addressing + idempotency + path-traversal rejection.
 
+### Real Chromium
+`internal/browser/playwright_integration_test.go` drives a real Chromium (render,
+context isolation, cancellation, and that the scope gate stops out-of-scope
+requests from leaving the browser). It runs by default and skips when no Chromium
+is found (`$INDAGO_CHROMIUM_PATH` or `~/.cache/ms-playwright/chromium-*`; skipped
+in `-short`). Chromium is launched by explicit path, so the Playwright driver and
+the installed revision need not match.
+
+### Test job executor
+`internal/scan/executor_test.go` (request construction, resolution, each outcome
+and its retry/permanent mapping, evidence content, scope, evidence-write failure,
+and — through the worker pool — job states, concurrency limit, pause/resume) and
+`executor_integration_test.go` (a full scan's persisted results, the
+state-changing opt-in, cancel recording `cancelled`, crash recovery of running
+test cases).
+
 ### End-to-end — binary smoke
 The built binary is exercised manually/CI: `db init` creates the schema; `serve`
 brings up the stack; the API persists a project that **survives a restart**.

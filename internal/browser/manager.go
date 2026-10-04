@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,7 +30,11 @@ var _ Browser = (*Manager)(nil)
 
 // NewManager starts the Playwright engine and launches the browser pool.
 func NewManager(cfg Config, log *slog.Logger) (*Manager, error) {
-	return newManager(cfg, log, newPlaywrightDriver)
+	exe := cfg.ExecutablePath
+	if exe == "" {
+		exe = os.Getenv("INDAGO_CHROMIUM_PATH")
+	}
+	return newManager(cfg, log, func() (driver, error) { return newPlaywrightDriver(exe) })
 }
 
 // newManager is the injectable constructor used by tests.
@@ -85,13 +91,13 @@ func (m *Manager) NewContext(ctx context.Context, opts ContextOptions) (*Context
 	}
 
 	ch, err := callCtx(ctx, func() (contextHandle, error) {
-		return b.NewContext(opts.StorageStatePath)
+		return b.NewContext(opts.StorageStatePath, opts.AllowRequest)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("browser: new context: %w", err)
 	}
 
-	c := &Context{mgr: m, handle: ch, pages: make(map[*Page]struct{})}
+	c := &Context{mgr: m, handle: ch, allow: opts.AllowRequest, pages: make(map[*Page]struct{})}
 
 	m.mu.Lock()
 	if m.closed {
@@ -157,7 +163,7 @@ func (m *Manager) forget(c *Context) {
 // Render implements the Browser facade: it opens a throwaway isolated context,
 // loads the URL, gathers observations, and tears the context down.
 func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*RenderResult, error) {
-	c, err := m.NewContext(ctx, ContextOptions{StorageStatePath: opts.SessionStatePath})
+	c, err := m.NewContext(ctx, ContextOptions{StorageStatePath: opts.SessionStatePath, AllowRequest: opts.AllowRequest})
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +190,7 @@ func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*
 		HTML:           html,
 		DialogMessages: page.DialogMessages(),
 		Network:        page.NetworkEvents(),
+		Blocked:        page.BlockedRequests(),
 	}
 	for _, cm := range page.ConsoleMessages() {
 		if cm.Type == "error" {
@@ -232,7 +239,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext(opts.StorageStatePath)
+	ch, err := b.NewContext(opts.StorageStatePath, nil) // operator-driven login: no scope gate
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}
@@ -271,6 +278,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 type Context struct {
 	mgr    *Manager
 	handle contextHandle
+	allow  func(url string) bool // scope gate (nil = allow all)
 
 	mu     sync.Mutex
 	pages  map[*Page]struct{}
@@ -357,6 +365,7 @@ type Page struct {
 	console []ConsoleMessage
 	dialogs []string
 	network []NetworkEvent
+	blocked []string
 	closed  bool
 }
 
@@ -374,8 +383,15 @@ func newPage(c *Context, ph pageHandle) *Page {
 	})
 	ph.OnRequest(func(ev NetworkEvent) {
 		p.mu.Lock()
+		defer p.mu.Unlock()
+		// Scope the observation itself, independent of the driver: a disallowed
+		// request is recorded as blocked and never as a network observation, so
+		// nothing out of scope can flow on to be persisted or enqueued.
+		if c.allow != nil && isNetworkURL(ev.URL) && !c.allow(ev.URL) {
+			p.blocked = append(p.blocked, ev.URL)
+			return
+		}
 		p.network = append(p.network, ev)
-		p.mu.Unlock()
 	})
 	return p
 }
@@ -452,6 +468,19 @@ func (p *Page) writeStorage(ctx context.Context, store, key, value string) error
 		_, err := p.handle.Evaluate(script, map[string]string{"k": key, "v": value})
 		return err
 	})
+}
+
+// BlockedRequests returns a copy of the requests the scope gate refused.
+func (p *Page) BlockedRequests() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.blocked...)
+}
+
+// isNetworkURL reports whether u is an http(s) URL (data:, blob:, about: never
+// leave the browser and are not subject to the scope gate).
+func isNetworkURL(u string) bool {
+	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
 }
 
 // ConsoleMessages returns a copy of observed console messages.

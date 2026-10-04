@@ -12,20 +12,26 @@ import (
 // a browser are gated behind the `browser_integration` build tag.
 
 // newPlaywrightDriver starts a Playwright engine.
-func newPlaywrightDriver() (driver, error) {
+// exe, when non-empty, is the Chromium binary to launch.
+func newPlaywrightDriver(exe string) (driver, error) {
 	p, err := pw.Run()
 	if err != nil {
 		return nil, fmt.Errorf("run playwright (is it installed? try `playwright install`): %w", err)
 	}
-	return &pwDriver{pw: p}, nil
+	return &pwDriver{pw: p, exe: exe}, nil
 }
 
-type pwDriver struct{ pw *pw.Playwright }
+type pwDriver struct {
+	pw  *pw.Playwright
+	exe string
+}
 
 func (d *pwDriver) Launch(headless bool) (browserHandle, error) {
-	b, err := d.pw.Chromium.Launch(pw.BrowserTypeLaunchOptions{
-		Headless: pw.Bool(headless),
-	})
+	opts := pw.BrowserTypeLaunchOptions{Headless: pw.Bool(headless)}
+	if d.exe != "" {
+		opts.ExecutablePath = pw.String(d.exe)
+	}
+	b, err := d.pw.Chromium.Launch(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -36,7 +42,7 @@ func (d *pwDriver) Stop() error { return d.pw.Stop() }
 
 type pwBrowser struct{ b pw.Browser }
 
-func (b *pwBrowser) NewContext(storageStatePath string) (contextHandle, error) {
+func (b *pwBrowser) NewContext(storageStatePath string, allow func(string) bool) (contextHandle, error) {
 	opts := pw.BrowserNewContextOptions{}
 	if storageStatePath != "" {
 		opts.StorageStatePath = pw.String(storageStatePath)
@@ -44,6 +50,22 @@ func (b *pwBrowser) NewContext(storageStatePath string) (contextHandle, error) {
 	c, err := b.b.NewContext(opts)
 	if err != nil {
 		return nil, err
+	}
+	if allow != nil {
+		// Abort disallowed requests before they leave the browser. Redirect hops
+		// are routed as requests of their own, so each is checked too.
+		err := c.Route("**/*", func(route pw.Route) {
+			u := route.Request().URL()
+			if isNetworkURL(u) && !allow(u) {
+				_ = route.Abort("blockedbyclient")
+				return
+			}
+			_ = route.Continue()
+		})
+		if err != nil {
+			_ = c.Close()
+			return nil, fmt.Errorf("install scope gate: %w", err)
+		}
 	}
 	return &pwContext{c: c}, nil
 }
