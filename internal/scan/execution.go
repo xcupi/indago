@@ -26,11 +26,6 @@ type execution struct {
 	// discFinished is set once discovery completed normally (or was skipped
 	// because it had already completed before a restart).
 	discFinished atomic.Bool
-
-	// askedAt is the confirmed-finding count at which a pause-and-ask stop policy
-	// last paused the scan, so resuming doesn't immediately re-pause. Only the
-	// monitor goroutine touches it.
-	askedAt int
 }
 
 // pause routes a scan pause to both the worker pool and discovery.
@@ -52,12 +47,19 @@ func (e *execution) resume() {
 // launch builds and starts an execution for a RUNNING scan: the worker pool and
 // (unless it already completed) discovery, plus the monitor. The caller holds
 // c.mu and records the returned execution in c.running.
-func (c *Controller) launch(_ context.Context, sc *domain.Scan, scope domain.Scope, target *domain.Target) (*execution, error) {
+func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.Scope, target *domain.Target) (*execution, error) {
 	runCtx, cancel := context.WithCancel(c.baseCtx)
 
 	// ONE scope-enforcing engine per scan, shared by discovery and the executor:
 	// every request either of them makes is scope-checked, redirect hops included.
+	// If the scan's session saved a browser storage state (the same one browser
+	// verification uses), its cookies are carried here too — otherwise a
+	// cookie-gated endpoint would never reflect for the HTTP-level executor, and
+	// nothing downstream would ever reach verification.
 	eng := newScopedEngine(c.opts.HTTP, scope)
+	if cookies := c.sessionCookiesFor(ctx, sc, target); len(cookies) > 0 {
+		eng = eng.WithSessionCookies(cookies)
+	}
 
 	handlers := c.opts.Handlers
 	if handlers == nil {
@@ -156,6 +158,10 @@ func (c *Controller) runDiscovery(ctx context.Context, ex *execution, sc *domain
 	stats := c.snapshotStats(ctx, sc.ID)
 	if _, err := c.mutate(ctx, sc.ID, func(s *domain.Scan) error {
 		s.Discovery = domain.DiscoveryComplete
+		// AskedAtConfirmed is bookkeeping, not a live-computed snapshot value
+		// (see its doc comment and refreshStats); carry it over rather than
+		// resetting it to zero.
+		stats.AskedAtConfirmed = s.Stats.AskedAtConfirmed
 		s.Stats = stats
 		return nil
 	}); err != nil {
@@ -221,6 +227,22 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		return false
 	}
 
+	// Session expiration: the scanner never silently re-authenticates (see
+	// domain.Session's doc comment). An expired session pauses the scan into
+	// AwaitingAuth so no further target-facing work runs against it; Resume
+	// re-establishes the session before work continues.
+	if expired, err := c.sessionExpired(ctx, sc); err != nil {
+		if ctx.Err() == nil {
+			c.log.Warn("monitor: check session expiry", "scan", ex.scanID, "err", err)
+		}
+	} else if expired {
+		c.log.Info("session expired", "scan", ex.scanID)
+		if err := c.pauseForExpiredSession(ctx, ex.scanID); err != nil {
+			c.log.Warn("pause for expired session", "scan", ex.scanID, "err", err)
+		}
+		return false
+	}
+
 	// Stop policy (confirmed findings). Phase 0 produces none, but the wiring is
 	// real so detection can drive it later.
 	confirmed := c.countConfirmed(ctx, ex.scanID)
@@ -228,9 +250,17 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 	case d.Stop:
 		c.log.Info("stop policy reached", "scan", ex.scanID, "reason", d.Reason)
 		return c.finish(ctx, ex, true)
-	case d.Pause && confirmed > ex.askedAt:
-		ex.askedAt = confirmed
+	case d.Pause && confirmed > sc.Stats.AskedAtConfirmed:
 		c.log.Info("stop policy: pausing for operator", "scan", ex.scanID, "reason", d.Reason)
+		// Persisted, not just kept on the execution object: a restart must not
+		// forget this and immediately re-pause for findings the operator
+		// already saw before the crash.
+		if _, err := c.mutate(ctx, ex.scanID, func(s *domain.Scan) error {
+			s.Stats.AskedAtConfirmed = confirmed
+			return nil
+		}); err != nil {
+			c.log.Warn("persist asked-at-confirmed", "scan", ex.scanID, "err", err)
+		}
 		if err := c.Pause(ctx, ex.scanID); err != nil {
 			c.log.Warn("stop policy pause", "scan", ex.scanID, "err", err)
 		}
@@ -356,10 +386,13 @@ func (c *Controller) snapshotStats(ctx context.Context, scanID domain.ID) domain
 	return st
 }
 
-// refreshStats persists the stats rollup when it changed.
+// refreshStats persists the stats rollup when it changed. AskedAtConfirmed is
+// bookkeeping (see its doc comment), not a live-computed snapshot value, so it
+// is carried over rather than reset to zero on every refresh.
 func (c *Controller) refreshStats(ctx context.Context, scanID domain.ID) {
 	stats := c.snapshotStats(ctx, scanID)
 	_, err := c.mutate(ctx, scanID, func(s *domain.Scan) error {
+		stats.AskedAtConfirmed = s.Stats.AskedAtConfirmed
 		if s.Stats == stats {
 			return errSkipWrite
 		}

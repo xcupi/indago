@@ -1,20 +1,16 @@
-// Package report renders scan results. JSON and Markdown reporters are
-// implemented (pure serialization — no security logic, no LLM). An HTML
-// reporter is planned; For returns ErrNotImplemented for it until then.
+// Package report renders scan results. JSON, Markdown, and HTML reporters are
+// all pure serialization — no security logic, no LLM.
 package report
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
 	"github.com/indago/indago/internal/domain"
 )
-
-// ErrNotImplemented is returned for report formats not yet available.
-var ErrNotImplemented = errors.New("report: format not implemented")
 
 // Data is the input to a report generator.
 type Data struct {
@@ -29,6 +25,21 @@ type Data struct {
 type Generator interface {
 	Format() domain.ReportFormat
 	Generate(w io.Writer, data Data) error
+}
+
+// sortedFindings returns a copy of findings sorted by (CreatedAt, ID) so every
+// generator's output is deterministic regardless of the order the caller
+// supplies findings in (store list order is not guaranteed stable across
+// calls: it is "ORDER BY created_at" with no tiebreaker).
+func sortedFindings(findings []*domain.Finding) []*domain.Finding {
+	out := append([]*domain.Finding(nil), findings...)
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
 }
 
 // Summarize computes an aggregate summary over a set of findings.
@@ -67,9 +78,9 @@ type jsonReport struct {
 	Findings    []*domain.Finding    `json:"findings"`
 }
 
-// Generate implements Generator.
+// Generate implements Generator. Output is deterministic: see sortedFindings.
 func (JSONGenerator) Generate(w io.Writer, data Data) error {
-	findings := data.Findings
+	findings := sortedFindings(data.Findings)
 	if findings == nil {
 		findings = []*domain.Finding{}
 	}
@@ -92,7 +103,7 @@ func (JSONGenerator) Generate(w io.Writer, data Data) error {
 
 var _ Generator = JSONGenerator{}
 
-// For returns a generator for the given format. HTML is not yet implemented.
+// For returns a generator for the given format.
 func For(format domain.ReportFormat) (Generator, error) {
 	switch format {
 	case domain.ReportJSON:
@@ -100,7 +111,7 @@ func For(format domain.ReportFormat) (Generator, error) {
 	case domain.ReportMarkdown:
 		return MarkdownGenerator{}, nil
 	case domain.ReportHTML:
-		return nil, fmt.Errorf("%w: %s", ErrNotImplemented, format)
+		return HTMLGenerator{}, nil
 	default:
 		return nil, fmt.Errorf("report: unknown format %q", format)
 	}

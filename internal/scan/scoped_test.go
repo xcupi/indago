@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -155,5 +157,78 @@ func TestScopedEngineRedirectLoopBounded(t *testing.T) {
 	_, err := eng.Do(context.Background(), httpengine.GET(srv.URL+"/app/loop"))
 	if !errors.Is(err, httpengine.ErrTooManyRedirects) {
 		t.Fatalf("expected ErrTooManyRedirects, got %v", err)
+	}
+}
+
+// --- session cookies: HTTP-level testing carries the same authenticated
+// session browser verification uses ---
+
+func writeStorageState(t *testing.T, cookies string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"cookies":[`+cookies+`],"origins":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Playwright's storage-state format does not preserve the host-only vs.
+// explicit-Domain distinction (no such flag is written), so matching treats
+// every stored cookie as domain-scoped: it applies to the exact host and its
+// subdomains, regardless of a leading dot. A cookie for a clearly different
+// domain is never sent.
+func TestSessionCookiesMatchesHostAndSubdomain(t *testing.T) {
+	path := writeStorageState(t, `
+		{"name":"sid","value":"abc","domain":"example.com"},
+		{"name":"sub","value":"xyz","domain":".example.com"},
+		{"name":"other","value":"no","domain":"other.test"}`)
+
+	got := sessionCookies(path, "example.com")
+	if len(got) != 2 {
+		t.Fatalf("cookies = %v, want 2 matching example.com", got)
+	}
+	gotSub := sessionCookies(path, "app.example.com")
+	if len(gotSub) != 2 {
+		t.Fatalf("subdomain match = %v, want both example.com cookies", gotSub)
+	}
+	for _, c := range append(got, gotSub...) {
+		if c.Name == "other" {
+			t.Fatal("a cookie for a different domain must never be sent")
+		}
+	}
+}
+
+func TestSessionCookiesEmptyOrUnreadableYieldsNil(t *testing.T) {
+	if got := sessionCookies("", "example.com"); got != nil {
+		t.Fatalf("empty path should yield nil, got %v", got)
+	}
+	if got := sessionCookies("/nonexistent/path/state.json", "example.com"); got != nil {
+		t.Fatalf("unreadable path should yield nil, got %v", got)
+	}
+	bad := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(bad, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionCookies(bad, "example.com"); got != nil {
+		t.Fatalf("malformed JSON should yield nil, got %v", got)
+	}
+}
+
+func TestScopedEngineWithSessionCookiesSendsThem(t *testing.T) {
+	var sawCookie string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if c, err := r.Cookie("sid"); err == nil {
+			sawCookie = c.Value
+		}
+	}))
+	defer srv.Close()
+
+	eng := newScopedEngine(noFollowClient(t), domain.Scope{IncludeHosts: []string{"127.0.0.1"}}).
+		WithSessionCookies([]*http.Cookie{{Name: "sid", Value: "authed-123"}})
+	if _, err := eng.Do(context.Background(), httpengine.GET(srv.URL+"/")); err != nil {
+		t.Fatal(err)
+	}
+	if sawCookie != "authed-123" {
+		t.Fatalf("session cookie not sent: %q", sawCookie)
 	}
 }

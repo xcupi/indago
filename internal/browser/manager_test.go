@@ -10,6 +10,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -21,12 +23,14 @@ func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)
 // --- fake driver ---
 
 type fakeDriver struct {
-	mu        sync.Mutex
-	launched  int
-	stopped   bool
-	browsers  []*fakeBrowser
-	failAfter int           // if >0, Launch fails once this many have launched
-	gotoDelay time.Duration // navigation delay, for cancellation tests
+	mu          sync.Mutex
+	launched    int
+	stopped     bool
+	browsers    []*fakeBrowser
+	failAfter   int           // if >0, Launch fails once this many have launched
+	gotoDelay   time.Duration // navigation delay, for cancellation tests
+	createDelay time.Duration // NewContext/NewPage delay, for cancellation-race tests
+	hangStop    chan struct{} // if non-nil, Stop blocks on this channel (never closed = wedged driver)
 }
 
 func fakeFactory(d *fakeDriver) newDriverFunc {
@@ -49,6 +53,9 @@ func (d *fakeDriver) Launch(headless bool) (browserHandle, error) {
 }
 
 func (d *fakeDriver) Stop() error {
+	if d.hangStop != nil {
+		<-d.hangStop
+	}
 	d.mu.Lock()
 	d.stopped = true
 	d.mu.Unlock()
@@ -81,6 +88,9 @@ type fakeBrowser struct {
 }
 
 func (b *fakeBrowser) NewContext(storageStatePath string, allow func(string) bool) (contextHandle, error) {
+	if b.drv.createDelay > 0 {
+		time.Sleep(b.drv.createDelay)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
@@ -132,15 +142,21 @@ type fakeContext struct {
 	mu          sync.Mutex
 	closed      bool
 	cookies     map[string]Cookie
+	pages       []*fakePage
 }
 
 func (c *fakeContext) NewPage() (pageHandle, error) {
+	if c.br.drv.createDelay > 0 {
+		time.Sleep(c.br.drv.createDelay)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return nil, errors.New("context closed")
 	}
-	return &fakePage{ctx: c, gotoDelay: c.gotoDelay, localStorage: map[string]string{}}, nil
+	p := &fakePage{ctx: c, gotoDelay: c.gotoDelay, localStorage: map[string]string{}}
+	c.pages = append(c.pages, p)
+	return p, nil
 }
 
 func (c *fakeContext) AddCookies(cookies []Cookie) error {
@@ -166,7 +182,9 @@ func (c *fakeContext) SaveStorageState(path string) error {
 	c.mu.Lock()
 	c.savedPath = path
 	c.mu.Unlock()
-	return nil
+	// Real Playwright writes an actual file here; match that so callers that
+	// touch the file afterward (e.g. restricting its permissions) see one.
+	return os.WriteFile(path, []byte(`{"cookies":[]}`), 0o644)
 }
 
 func (c *fakeContext) Close() error {
@@ -246,6 +264,12 @@ func (p *fakePage) Close() error {
 	p.closed = true
 	p.mu.Unlock()
 	return nil
+}
+
+func (p *fakePage) isClosed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed
 }
 
 // --- tests ---
@@ -510,17 +534,28 @@ func TestInteractiveLogin(t *testing.T) {
 	m := newFakeManager(t, Config{PoolSize: 1, Headless: true}, d)
 	defer m.Close()
 
+	statePath := filepath.Join(t.TempDir(), "auth.json")
 	res, err := m.InteractiveLogin(context.Background(), LoginOptions{
 		LoginURL:         "https://app/login",
 		SuccessURLGlob:   "**/dashboard",
-		StorageStatePath: "/tmp/auth.json",
+		StorageStatePath: statePath,
 		Timeout:          time.Second,
 	})
 	if err != nil {
 		t.Fatalf("interactive login: %v", err)
 	}
-	if res.StorageStatePath != "/tmp/auth.json" {
+	if res.StorageStatePath != statePath {
 		t.Fatalf("result path = %q", res.StorageStatePath)
+	}
+	// The saved state is the target's own auth cookies — must not be left
+	// group/world-readable regardless of the process umask or whatever mode
+	// Playwright's own writer used.
+	info, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatalf("stat saved session: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("session file mode = %o, want 0600", perm)
 	}
 	// A visible (headful) browser must have been launched for the operator.
 	if !d.sawHeadful() {
@@ -589,5 +624,107 @@ func TestScopeGatePassedToDriver(t *testing.T) {
 	}
 	if !d.browsers[0].contexts[0].gated {
 		t.Fatal("the scope gate was not passed to the driver")
+	}
+}
+
+// waitForTrue polls cond until it is true or d elapses.
+func waitForTrue(t *testing.T, d time.Duration, desc string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("condition %q not met within %s", desc, d)
+}
+
+// TestNewContextClosesResourceCreatedAfterCancellation covers the race where
+// the caller's context is canceled (a per-call timeout, a scan cancellation)
+// at almost the same moment the underlying browser actually finishes creating
+// the context. NewContext correctly reports the cancellation error either
+// way, but the real browser-side context that was in fact created must still
+// be closed — not silently orphaned open for the rest of the Manager's life.
+func TestNewContextClosesResourceCreatedAfterCancellation(t *testing.T) {
+	d := &fakeDriver{createDelay: 80 * time.Millisecond}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := m.NewContext(ctx, ContextOptions{}); err == nil {
+		t.Fatal("expected the call to report the context's cancellation")
+	}
+
+	waitForTrue(t, time.Second, "orphaned context closed", func() bool {
+		d.mu.Lock()
+		nbrowsers := len(d.browsers)
+		var b *fakeBrowser
+		if nbrowsers > 0 {
+			b = d.browsers[0]
+		}
+		d.mu.Unlock()
+		if b == nil {
+			return false
+		}
+		b.mu.Lock()
+		var fc *fakeContext
+		if len(b.contexts) > 0 {
+			fc = b.contexts[0]
+		}
+		b.mu.Unlock()
+		return fc != nil && fc.isClosed()
+	})
+	if st := m.Stats(); st.OpenContexts != 0 {
+		t.Fatalf("OpenContexts = %d, want 0 (the canceled-but-created context must not be tracked as open)", st.OpenContexts)
+	}
+}
+
+// Same race, one level down: Context.NewPage against a canceled ctx.
+func TestContextNewPageClosesResourceCreatedAfterCancellation(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+
+	c, err := m.NewContext(context.Background(), ContextOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.createDelay = 80 * time.Millisecond // delay only the page creation below
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := c.NewPage(ctx); err == nil {
+		t.Fatal("expected the call to report the context's cancellation")
+	}
+
+	waitForTrue(t, time.Second, "orphaned page closed", func() bool {
+		fc := d.browsers[0].contexts[0]
+		fc.mu.Lock()
+		defer fc.mu.Unlock()
+		return len(fc.pages) == 1 && fc.pages[0].isClosed()
+	})
+}
+
+// TestCloseReturnsPromptlyDespiteAWedgedDriver proves Close no longer blocks
+// forever when the underlying driver.Stop call never returns (ShutdownTimeout
+// bounds the wait) — before the fix, Close had no timeout at all, so one
+// unresponsive Playwright/Chromium process could prevent the whole program
+// from ever shutting down gracefully.
+func TestCloseReturnsPromptlyDespiteAWedgedDriver(t *testing.T) {
+	d := &fakeDriver{hangStop: make(chan struct{})} // never closed: Stop blocks forever
+	m := newFakeManager(t, Config{PoolSize: 1, ShutdownTimeout: 100 * time.Millisecond}, d)
+
+	done := make(chan error, 1)
+	go func() { done <- m.Close() }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a timeout error from Close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return within ShutdownTimeout + slack; it is waiting on the wedged driver forever")
 	}
 }

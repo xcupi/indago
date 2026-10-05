@@ -95,7 +95,7 @@ func newScanEnv(t *testing.T) *scanEnv {
 }
 
 func (e *scanEnv) verifyExec(v verification.Verifier, scope domain.Scope, cfg ExecutorConfig) *verifyExecutor {
-	return newVerifyExecutor(e.st, v, e.ev, scope, cfg, execLog())
+	return newVerifyExecutor(e.st, v, e.ev, scope, cfg, execLog(), nil)
 }
 
 func (e *scanEnv) verifyJobFor(target domain.JobTarget, cand detection.Candidate, findingID domain.ID) *domain.TestJob {
@@ -175,6 +175,12 @@ func TestEnqueueVerificationOnReflectedCandidate(t *testing.T) {
 
 // A candidate reflecting on a state-changing (POST) endpoint never gets browser
 // verification in this phase: navigation carries no body.
+// A candidate reflecting on a POST endpoint still gets a Pending finding (it
+// is just as real a candidate as a GET one), but — unlike a GET/HEAD one — no
+// browser-verify job is ever enqueued for it: browser navigation has no
+// request body, so it can never confirm/reject a POST candidate regardless of
+// AllowStateChanging. The finding simply stays Pending forever (see
+// docs/scan-orchestration.md).
 func TestEnqueueVerificationSkippedForStateChangingEndpoint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -197,8 +203,9 @@ func TestEnqueueVerificationSkippedForStateChangingEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if findings, _ := env.st.Findings().ListByScan(context.Background(), env.scanID); len(findings) != 0 {
-		t.Fatalf("no finding should be created for a POST candidate, got %v", findings)
+	findings, _ := env.st.Findings().ListByScan(context.Background(), env.scanID)
+	if len(findings) != 1 || findings[0].Verdict != domain.VerdictPending {
+		t.Fatalf("expected exactly one Pending finding for the POST candidate, got %+v", findings)
 	}
 	if st, _ := q.Stats(context.Background(), env.scanID); st.Total() != 0 {
 		t.Fatalf("no verify job should be enqueued for a POST candidate, queue total = %d", st.Total())

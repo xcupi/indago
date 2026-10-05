@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -379,5 +380,69 @@ func TestNetworkSourceScopesObservationsBeforeSink(t *testing.T) {
 	}
 	if !sb.allow("http://in.example/x") || sb.allow("https://tracker.evil.example/pixel") || sb.allow("http://in.example/blocked/x") {
 		t.Fatal("the scope gate does not match the scan scope")
+	}
+}
+
+// Discovery concurrency is adjustable WHILE a scan is running, not just at
+// creation: Manager.SetConcurrency reaches the live crawl source, and the
+// change applies starting at the crawler's next depth level.
+func TestManagerSetConcurrencyAppliesMidRun(t *testing.T) {
+	const fanout = 12
+	var rootHold = make(chan struct{})
+	var inFlight, peak atomic.Int64
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		<-rootHold // held until the test has set the new concurrency
+		var b strings.Builder
+		for i := 0; i < fanout; i++ {
+			fmt.Fprintf(&b, `<a href="/p%d">p</a> `, i)
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, b.String())
+	})
+	for i := 0; i < fanout; i++ {
+		mux.HandleFunc(fmt.Sprintf("/p%d", i), func(w http.ResponseWriter, r *http.Request) {
+			n := inFlight.Add(1)
+			for {
+				p := peak.Load()
+				if n <= p || peak.CompareAndSwap(p, n) {
+					break
+				}
+			}
+			time.Sleep(40 * time.Millisecond)
+			inFlight.Add(-1)
+		})
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cfg := discovery.DefaultConfig()
+	cfg.MaxDepth = 1
+	cfg.Concurrency = 1 // deliberately serial at construction
+	m, _, _ := newManagerFor(t, cfg, nil)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = m.Run(context.Background(), discovery.RunParams{
+			ScanID: domain.NewID(), Scope: scopeFor(srv), SeedURLs: []string{srv.URL},
+		})
+	}()
+
+	// The root fetch is held, so depth 0 cannot have finished yet: raise
+	// concurrency now, strictly before crawlLevel(depth=1) — where the fanout
+	// pages actually run — builds its semaphore.
+	m.SetConcurrency(8)
+	close(rootHold)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("discovery did not finish")
+	}
+
+	if got := peak.Load(); got <= 1 {
+		t.Fatalf("peak concurrent fetches = %d, want > 1 (SetConcurrency should have raised it)", got)
 	}
 }

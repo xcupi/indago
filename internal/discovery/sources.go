@@ -63,15 +63,26 @@ func (seedSource) Run(ctx context.Context, in Input, sink Sink) error {
 type crawlSource struct {
 	engine httpengine.Engine
 	cfg    Config
+	conc   *liveConcurrency // crawl fetch concurrency; adjustable while running
 }
 
 // NewCrawlSource crawls from the seeds, extracting links, forms, and parameters
 // up to the configured depth and limits.
 func NewCrawlSource(engine httpengine.Engine, cfg Config) Source {
-	return &crawlSource{engine: engine, cfg: cfg.withDefaults()}
+	cfg = cfg.withDefaults()
+	return &crawlSource{engine: engine, cfg: cfg, conc: newLiveConcurrency(cfg.Concurrency)}
 }
 
 func (c *crawlSource) Name() domain.DiscoverySource { return domain.SourceCrawler }
+
+// SetConcurrency implements ConcurrencyAdjustable. crawlLevel reads c.conc
+// fresh for each depth level's semaphore, so this takes effect starting at
+// the next level — it does not resize an already-running level's semaphore
+// (that channel is already sized and in flight), which is an acceptable,
+// bounded delay for a value that changes rarely.
+func (c *crawlSource) SetConcurrency(n int) { c.conc.Set(n) }
+
+var _ ConcurrencyAdjustable = (*crawlSource)(nil)
 
 func (c *crawlSource) Run(ctx context.Context, in Input, sink Sink) error {
 	var visited sync.Map
@@ -117,7 +128,7 @@ func (c *crawlSource) crawlLevel(ctx context.Context, in Input, sink Sink, urls 
 		mu.Unlock()
 	}
 
-	sem := make(chan struct{}, c.cfg.Concurrency)
+	sem := make(chan struct{}, c.conc.Get())
 	var wg sync.WaitGroup
 
 	for _, u := range urls {

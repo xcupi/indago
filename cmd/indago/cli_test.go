@@ -12,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/scan"
+	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/store/memory"
 	"github.com/indago/indago/internal/web"
 )
@@ -22,6 +24,16 @@ import (
 // newTestServer runs the real web handler + controller and returns a CLI aimed
 // at it, plus the captured output.
 func newTestServer(t *testing.T) (*cli, *bytes.Buffer) {
+	t.Helper()
+	c, out, _, _ := newTestServerAndStore(t)
+	return c, out
+}
+
+// newTestServerAndStore is newTestServer plus direct access to the store and
+// evidence backing it, for tests that seed findings/evidence directly instead
+// of driving a full scan (detection/verification are out of scope here; this
+// phase only exposes already-correlated data over HTTP).
+func newTestServerAndStore(t *testing.T) (*cli, *bytes.Buffer, store.Store, evidence.Store) {
 	t.Helper()
 	cfg := httpengine.DefaultConfig()
 	cfg.FollowRedirects = false
@@ -37,11 +49,15 @@ func newTestServer(t *testing.T) (*cli, *bytes.Buffer) {
 		HTTP: eng, IdlePoll: 10 * time.Millisecond, PollInterval: 20 * time.Millisecond,
 	})
 	t.Cleanup(ctrl.Shutdown)
-	srv := httptest.NewServer(web.NewServer(st, ctrl, "test", log).Handler())
+	evStore, err := evidence.NewFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(web.NewServer(st, ctrl, "test", log, evStore, t.TempDir()).Handler())
 	t.Cleanup(srv.Close)
 
 	out := &bytes.Buffer{}
-	return newCLI(srv.URL, out), out
+	return newCLI(srv.URL, out), out, st, evStore
 }
 
 var uuidRe = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
@@ -286,6 +302,30 @@ func TestIsLoopbackAddr(t *testing.T) {
 	} {
 		if got := isLoopbackAddr(addr); got != want {
 			t.Errorf("isLoopbackAddr(%q) = %v, want %v", addr, got, want)
+		}
+	}
+}
+
+func TestCheckRemoteBindAllowed(t *testing.T) {
+	cases := []struct {
+		addr        string
+		allowRemote bool
+		wantErr     bool
+	}{
+		{"127.0.0.1:8750", false, false},
+		{"localhost:8750", false, false},
+		{"0.0.0.0:8750", false, true},  // non-loopback, not opted in: refused
+		{"10.0.0.5:8750", false, true}, // non-loopback, not opted in: refused
+		{"0.0.0.0:8750", true, false},  // non-loopback, explicit opt-in: allowed
+		{"10.0.0.5:8750", true, false}, // non-loopback, explicit opt-in: allowed
+	}
+	for _, c := range cases {
+		err := checkRemoteBindAllowed(c.addr, c.allowRemote)
+		if (err != nil) != c.wantErr {
+			t.Errorf("checkRemoteBindAllowed(%q, %v) = %v, wantErr %v", c.addr, c.allowRemote, err, c.wantErr)
+		}
+		if err != nil && !strings.Contains(err.Error(), "-allow-remote") {
+			t.Errorf("error should mention -allow-remote: %v", err)
 		}
 	}
 }

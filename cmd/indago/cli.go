@@ -101,6 +101,32 @@ func (c *cli) call(method, path string, in, out any) error {
 	return nil
 }
 
+// getRaw performs a GET and returns the raw response body — for endpoints
+// that serve rendered content (report/evidence bytes) rather than JSON.
+func (c *cli) getRaw(path string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, c.server+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("cannot reach the indago server at %s (is `indago serve` running?): %w", c.server, err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		var e struct {
+			Error string `json:"error"`
+		}
+		msg := strings.TrimSpace(string(data))
+		if json.Unmarshal(data, &e) == nil && e.Error != "" {
+			msg = e.Error
+		}
+		return nil, &apiError{Status: resp.StatusCode, Message: msg}
+	}
+	return data, nil
+}
+
 // --- flag helpers ---
 
 // stringList is a repeatable string flag (-seed a -seed b).
@@ -163,6 +189,10 @@ func (c *cli) runClient(group string, args []string) error {
 		return c.scope(sub, rest)
 	case "scan":
 		return c.scan(sub, rest)
+	case "finding":
+		return c.finding(sub, rest)
+	case "report":
+		return c.report(sub, rest)
 	}
 	return fmt.Errorf("unknown command group %q", group)
 }
@@ -409,22 +439,46 @@ func (c *cli) resolveScanID(ref string) (string, error) {
 	if err := c.call("GET", "/api/scans", nil, &scans); err != nil {
 		return "", err
 	}
+	ids := make([]domain.ID, len(scans))
+	for i, s := range scans {
+		ids[i] = s.ID
+	}
+	return resolveIDPrefix("scan", ids, ref)
+}
+
+// resolveFindingID accepts a full finding ID or a unique prefix of one, scoped
+// to a single scan's findings.
+func (c *cli) resolveFindingID(scanID, ref string) (string, error) {
+	var findings []domain.Finding
+	if err := c.call("GET", "/api/scans/"+url.PathEscape(scanID)+"/findings", nil, &findings); err != nil {
+		return "", err
+	}
+	ids := make([]domain.ID, len(findings))
+	for i, f := range findings {
+		ids[i] = f.ID
+	}
+	return resolveIDPrefix("finding", ids, ref)
+}
+
+// resolveIDPrefix finds the one id in ids that equals ref or has it as a
+// unique prefix.
+func resolveIDPrefix(kind string, ids []domain.ID, ref string) (string, error) {
 	var matches []string
-	for _, s := range scans {
-		if string(s.ID) == ref {
+	for _, id := range ids {
+		if string(id) == ref {
 			return ref, nil
 		}
-		if strings.HasPrefix(string(s.ID), ref) {
-			matches = append(matches, string(s.ID))
+		if strings.HasPrefix(string(id), ref) {
+			matches = append(matches, string(id))
 		}
 	}
 	switch len(matches) {
 	case 0:
-		return "", fmt.Errorf("no scan matches %q", ref)
+		return "", fmt.Errorf("no %s matches %q", kind, ref)
 	case 1:
 		return matches[0], nil
 	default:
-		return "", fmt.Errorf("%q is ambiguous (%d scans match); use more characters", ref, len(matches))
+		return "", fmt.Errorf("%q is ambiguous (%d %ss match); use more characters", ref, len(matches), kind)
 	}
 }
 
@@ -468,6 +522,254 @@ func printStatus(w io.Writer, st *scan.Status) {
 	if s.Error != "" {
 		fmt.Fprintf(w, "Error      %s\n", s.Error)
 	}
+}
+
+// --- findings ---
+
+func (c *cli) finding(sub string, args []string) error {
+	switch sub {
+	case "list":
+		return c.findingList(args)
+	case "show":
+		return c.findingShow(args)
+	}
+	return fmt.Errorf("unknown finding subcommand %q (list, show)", sub)
+}
+
+func (c *cli) findingList(args []string) error {
+	fs := c.newFlags("finding list")
+	scanRef := fs.String("scan", "", "scan ID or prefix")
+	asJSON := fs.Bool("json", false, "print JSON")
+	if _, err := parseInterspersed(fs, args); err != nil {
+		return err
+	}
+	if *scanRef == "" {
+		return errors.New("usage: indago finding list -scan <scan-id|prefix> [-json]")
+	}
+	scanID, err := c.resolveScanID(*scanRef)
+	if err != nil {
+		return err
+	}
+	var findings []domain.Finding
+	if err := c.call("GET", "/api/scans/"+url.PathEscape(scanID)+"/findings", nil, &findings); err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(c.out, findings)
+	}
+	if len(findings) == 0 {
+		fmt.Fprintln(c.out, "no findings")
+		return nil
+	}
+	for _, f := range findings {
+		fmt.Fprintf(c.out, "%s  %-12s %-8s %-14s %s\n", f.ID, f.Verdict, f.Severity, f.VulnClass, f.Title)
+	}
+	return nil
+}
+
+// findingCandidate and findingDetail mirror the web API's JSON shape for a
+// finding's parsed Detail (see web.findingCandidate/web.findingDetail) —
+// decoded here only through this small, local, read-only shape, the same way
+// internal/report decodes it, never by importing internal/scan or
+// internal/detection.
+type findingCandidate struct {
+	Category       string `json:"category"`
+	Context        string `json:"context"`
+	Value          string `json:"value"`
+	Transformation string `json:"transformation"`
+	Rationale      string `json:"rationale"`
+	Priority       int    `json:"priority"`
+}
+
+type findingDetailOut struct {
+	domain.Finding
+	ParsedDetail struct {
+		Method        string             `json:"method"`
+		ParameterName string             `json:"parameter_name"`
+		Occurrences   int                `json:"occurrences"`
+		Candidates    []findingCandidate `json:"candidates"`
+	} `json:"parsed_detail"`
+	Endpoint  *domain.Endpoint   `json:"endpoint"`
+	Parameter *domain.Parameter  `json:"parameter"`
+	Evidence  []*domain.Evidence `json:"evidence"`
+}
+
+func (c *cli) findingShow(args []string) error {
+	fs := c.newFlags("finding show")
+	scanRef := fs.String("scan", "", "scan ID or prefix")
+	asJSON := fs.Bool("json", false, "print JSON")
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if *scanRef == "" || len(pos) != 1 {
+		return errors.New("usage: indago finding show -scan <scan-id|prefix> <finding-id|prefix> [-json]")
+	}
+	scanID, err := c.resolveScanID(*scanRef)
+	if err != nil {
+		return err
+	}
+	findingID, err := c.resolveFindingID(scanID, pos[0])
+	if err != nil {
+		return err
+	}
+	var fd findingDetailOut
+	if err := c.call("GET", "/api/scans/"+url.PathEscape(scanID)+"/findings/"+url.PathEscape(findingID), nil, &fd); err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(c.out, fd)
+	}
+	printFindingDetail(c.out, c.server, &fd)
+	return nil
+}
+
+func printFindingDetail(w io.Writer, server string, fd *findingDetailOut) {
+	fmt.Fprintf(w, "Finding    %s\n", fd.ID)
+	fmt.Fprintf(w, "Title      %s\n", fd.Title)
+	fmt.Fprintf(w, "Verdict    %s   Severity %s   Confidence %s   Class %s\n", fd.Verdict, fd.Severity, fd.Confidence, fd.VulnClass)
+	if fd.Endpoint != nil {
+		fmt.Fprintf(w, "Endpoint   %s %s\n", fd.Endpoint.Method, fd.Endpoint.URL)
+	}
+	if fd.Parameter != nil {
+		fmt.Fprintf(w, "Parameter  %s (%s)\n", fd.Parameter.Name, fd.Parameter.Location)
+	} else if fd.ParsedDetail.ParameterName != "" {
+		fmt.Fprintf(w, "Parameter  %s\n", fd.ParsedDetail.ParameterName)
+	}
+	if len(fd.ParsedDetail.Candidates) > 0 {
+		fmt.Fprintf(w, "Candidates (%d, %d occurrence(s)):\n", len(fd.ParsedDetail.Candidates), fd.ParsedDetail.Occurrences)
+		for _, cand := range fd.ParsedDetail.Candidates {
+			fmt.Fprintf(w, "  - [%s/%s] %s — %s\n", cand.Category, cand.Context, cand.Value, cand.Rationale)
+		}
+	}
+	fmt.Fprintf(w, "Provenance %s, discovered via %s", fd.Provenance.Engine, fd.Provenance.DiscoverySource)
+	if fd.Provenance.AIAssisted {
+		fmt.Fprint(w, " (AI-assisted; advisory only)")
+	}
+	fmt.Fprintln(w)
+	if len(fd.Evidence) > 0 {
+		fmt.Fprintf(w, "Evidence (%d):\n", len(fd.Evidence))
+		for _, ev := range fd.Evidence {
+			fmt.Fprintf(w, "  - %s  %-10s %s  %d bytes  sha256:%s\n    open: %s/api/evidence/%s/content\n",
+				ev.ID, ev.Kind, ev.MediaType, ev.Size, ev.SHA256, server, ev.ID)
+		}
+	}
+}
+
+// --- reports ---
+
+func (c *cli) report(sub string, args []string) error {
+	switch sub {
+	case "create":
+		return c.reportCreate(args)
+	case "list":
+		return c.reportList(args)
+	case "show":
+		return c.reportShow(args)
+	}
+	return fmt.Errorf("unknown report subcommand %q (create, list, show)", sub)
+}
+
+func (c *cli) reportCreate(args []string) error {
+	fs := c.newFlags("report create")
+	scanRef := fs.String("scan", "", "scan ID or prefix")
+	format := fs.String("format", "json", "json | markdown | html")
+	out := fs.String("out", "", "also write the rendered report to this file")
+	var findingIDs stringList
+	fs.Var(&findingIDs, "finding", "finding ID to include (repeatable; default: every finding in the scan)")
+	if _, err := parseInterspersed(fs, args); err != nil {
+		return err
+	}
+	if *scanRef == "" {
+		return errors.New("usage: indago report create -scan <scan-id|prefix> -format json|markdown|html [-finding ID]... [-out FILE]")
+	}
+	scanID, err := c.resolveScanID(*scanRef)
+	if err != nil {
+		return err
+	}
+	var rpt domain.Report
+	if err := c.call("POST", "/api/scans/"+url.PathEscape(scanID)+"/reports",
+		map[string]any{"format": *format, "finding_ids": []string(findingIDs)}, &rpt); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "created report %s (%s, %d finding(s))\n", rpt.ID, rpt.Format, rpt.Summary.TotalFindings)
+	if *out != "" {
+		return c.downloadReport(string(rpt.ID), *out)
+	}
+	return nil
+}
+
+func (c *cli) reportList(args []string) error {
+	fs := c.newFlags("report list")
+	scanRef := fs.String("scan", "", "scan ID or prefix")
+	asJSON := fs.Bool("json", false, "print JSON")
+	if _, err := parseInterspersed(fs, args); err != nil {
+		return err
+	}
+	if *scanRef == "" {
+		return errors.New("usage: indago report list -scan <scan-id|prefix> [-json]")
+	}
+	scanID, err := c.resolveScanID(*scanRef)
+	if err != nil {
+		return err
+	}
+	var reports []domain.Report
+	if err := c.call("GET", "/api/scans/"+url.PathEscape(scanID)+"/reports", nil, &reports); err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(c.out, reports)
+	}
+	if len(reports) == 0 {
+		fmt.Fprintln(c.out, "no reports")
+		return nil
+	}
+	for _, r := range reports {
+		fmt.Fprintf(c.out, "%s  %-9s findings=%-3d %s\n", r.ID, r.Format, r.Summary.TotalFindings, r.CreatedAt.Format(time.RFC3339))
+	}
+	return nil
+}
+
+func (c *cli) reportShow(args []string) error {
+	fs := c.newFlags("report show")
+	out := fs.String("out", "", "write content to this file instead of stdout")
+	download := fs.Bool("download", false, "ask the server for a download Content-Disposition")
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return errors.New("usage: indago report show <report-id> [-out FILE] [-download]")
+	}
+	path := "/api/reports/" + url.PathEscape(pos[0]) + "/content"
+	if *download {
+		path += "?download"
+	}
+	data, err := c.getRaw(path)
+	if err != nil {
+		return err
+	}
+	if *out != "" {
+		return writeReportFile(c.out, *out, data)
+	}
+	_, err = c.out.Write(data)
+	return err
+}
+
+func (c *cli) downloadReport(id, out string) error {
+	data, err := c.getRaw("/api/reports/" + url.PathEscape(id) + "/content")
+	if err != nil {
+		return err
+	}
+	return writeReportFile(c.out, out, data)
+}
+
+func writeReportFile(w io.Writer, path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "wrote report to %s\n", path)
+	return nil
 }
 
 func writeJSON(w io.Writer, v any) error {

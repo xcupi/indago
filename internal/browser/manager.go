@@ -24,6 +24,17 @@ type Manager struct {
 	next     int
 	contexts map[*Context]struct{}
 	closed   bool
+
+	// createMu serializes calls that create a new Playwright object (a context
+	// or a page) against the underlying driver. Object creation registers new
+	// event-handler state on the single shared connection/dispatch goroutine
+	// Playwright uses per driver; concurrent creation calls from independent
+	// goroutines (e.g. discovery's browser-network source and candidate
+	// verification both use this same Manager at once) have been observed to
+	// race inside that registration — not in Indago's own bookkeeping, which
+	// is already guarded by mu. Operations on an already-created context/page
+	// are not serialized here, only the moment of creation.
+	createMu sync.Mutex
 }
 
 var _ Browser = (*Manager)(nil)
@@ -90,7 +101,9 @@ func (m *Manager) NewContext(ctx context.Context, opts ContextOptions) (*Context
 		return nil, err
 	}
 
-	ch, err := callCtx(ctx, func() (contextHandle, error) {
+	ch, err := callCtxCreate(ctx, func() (contextHandle, error) {
+		m.createMu.Lock()
+		defer m.createMu.Unlock()
 		return b.NewContext(opts.StorageStatePath, opts.AllowRequest)
 	})
 	if err != nil {
@@ -118,7 +131,11 @@ func (m *Manager) Stats() PoolStats {
 }
 
 // Close performs a graceful shutdown: it closes every open context, every pooled
-// browser, then stops the engine. It is idempotent.
+// browser, then stops the engine. It is idempotent. The underlying calls are
+// synchronous round-trips into the Playwright process with no cancellation of
+// their own, so the whole sequence is bounded by cfg.ShutdownTimeout — a
+// wedged driver/Chromium process would otherwise block Close (and so the
+// whole program's graceful shutdown) forever.
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	if m.closed {
@@ -142,14 +159,26 @@ func (m *Manager) Close() error {
 		}
 	}
 
-	for _, c := range contexts {
-		note(c.closeHandle())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, c := range contexts {
+			note(c.closeHandle())
+		}
+		for _, b := range browsers {
+			note(b.Close())
+		}
+		note(m.drv.Stop())
+	}()
+
+	select {
+	case <-done:
+		m.log.Info("browser manager closed")
+	case <-time.After(m.cfg.ShutdownTimeout):
+		m.log.Warn("browser manager close timed out; abandoning an unresponsive driver/browser process",
+			"timeout", m.cfg.ShutdownTimeout)
+		firstErr = fmt.Errorf("browser: close timed out after %s", m.cfg.ShutdownTimeout)
 	}
-	for _, b := range browsers {
-		note(b.Close())
-	}
-	note(m.drv.Stop())
-	m.log.Info("browser manager closed")
 	return firstErr
 }
 
@@ -266,6 +295,12 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	if err := ch.SaveStorageState(opts.StorageStatePath); err != nil {
 		return nil, fmt.Errorf("browser: save session: %w", err)
 	}
+	// The saved state is the target's own auth cookies/tokens — sensitive
+	// regardless of the process umask or Playwright's own default file mode,
+	// so restrict it explicitly rather than trust either.
+	if err := os.Chmod(opts.StorageStatePath, 0o600); err != nil {
+		return nil, fmt.Errorf("browser: restrict session file permissions: %w", err)
+	}
 	_, finalURL, _ := ph.Goto(opts.LoginURL, WaitCommit, m.cfg.NavigationTimeout) // best-effort current URL
 	return &LoginResult{StorageStatePath: opts.StorageStatePath, FinalURL: finalURL}, nil
 }
@@ -295,7 +330,11 @@ func (c *Context) NewPage(ctx context.Context) (*Page, error) {
 	}
 	c.mu.Unlock()
 
-	ph, err := callCtx(ctx, func() (pageHandle, error) { return c.handle.NewPage() })
+	ph, err := callCtxCreate(ctx, func() (pageHandle, error) {
+		c.mgr.createMu.Lock()
+		defer c.mgr.createMu.Unlock()
+		return c.handle.NewPage()
+	})
 	if err != nil {
 		return nil, fmt.Errorf("browser: new page: %w", err)
 	}
@@ -562,6 +601,40 @@ func callCtx[T any](ctx context.Context, fn func() (T, error)) (T, error) {
 func callCtxErr(ctx context.Context, fn func() error) error {
 	_, err := callCtx(ctx, func() (struct{}, error) { return struct{}{}, fn() })
 	return err
+}
+
+// callCtxCreate is callCtx specialized for calls that create a closeable
+// browser resource (a context or a page). Plain callCtx would, on the
+// ctx-wins-the-race path, simply discard whatever fn() goes on to produce —
+// if fn() was in fact about to succeed, that resource was already created in
+// the real browser process and nothing would ever close it, leaking it for
+// the Manager's lifetime. Here, losing the race still waits for fn() in the
+// background and closes anything it produced.
+func callCtxCreate[T interface{ Close() error }](ctx context.Context, fn func() (T, error)) (T, error) {
+	var zero T
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
+	type result struct {
+		v   T
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		v, err := fn()
+		ch <- result{v, err}
+	}()
+	select {
+	case <-ctx.Done():
+		go func() {
+			if r := <-ch; r.err == nil {
+				_ = r.v.Close()
+			}
+		}()
+		return zero, ctx.Err()
+	case r := <-ch:
+		return r.v, r.err
+	}
 }
 
 func gotoWithCtx(ctx context.Context, ph pageHandle, url, wait string, timeout time.Duration) (int, string, error) {

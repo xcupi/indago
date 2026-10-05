@@ -57,7 +57,10 @@ Notes:
   leasing and resume on `running`.
 - **Session expiry**: `running → awaiting_auth`. The scanner does **not**
   silently re-authenticate; after the operator re-auths, `awaiting_auth →
-  running`.
+  running`. Implemented in `Controller.evaluate` (checks `Session.ExpiresAt`
+  each monitor tick → `pauseForExpiredSession`) and `Resume` →
+  `reauthenticateIfAwaitingAuth` (re-runs `Authenticator.Establish`); see
+  `docs/e2e-validation.md`.
 - **Cancel** moves through `canceling` (stop workers, cancel jobs) to `canceled`.
 
 ---

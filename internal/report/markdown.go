@@ -35,16 +35,11 @@ type markdownDetail struct {
 }
 
 // Generate implements Generator. Output is deterministic: findings are sorted
-// by (CreatedAt, ID) and every map-keyed breakdown is rendered in sorted key
-// order, so the same Data always produces byte-identical Markdown.
+// by (CreatedAt, ID) (see sortedFindings) and every map-keyed breakdown is
+// rendered in sorted key order, so the same Data always produces byte-
+// identical Markdown.
 func (MarkdownGenerator) Generate(w io.Writer, data Data) error {
-	findings := append([]*domain.Finding(nil), data.Findings...)
-	sort.Slice(findings, func(i, j int) bool {
-		if !findings[i].CreatedAt.Equal(findings[j].CreatedAt) {
-			return findings[i].CreatedAt.Before(findings[j].CreatedAt)
-		}
-		return findings[i].ID < findings[j].ID
-	})
+	findings := sortedFindings(data.Findings)
 	summary := Summarize(data.Scan.ID, findings)
 
 	var b strings.Builder

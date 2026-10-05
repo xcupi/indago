@@ -2,9 +2,12 @@ package scan
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/httpengine"
@@ -30,6 +33,10 @@ const maxScopedRedirects = 10
 type scopedEngine struct {
 	inner httpengine.Engine
 	scope domain.Scope
+	// cookies are added to every request this engine sends, on top of whatever
+	// the caller set — see WithSessionCookies. nil for most scans (anonymous
+	// auth, or no browser storage state).
+	cookies []*http.Cookie
 }
 
 var _ httpengine.Engine = (*scopedEngine)(nil)
@@ -38,12 +45,28 @@ func newScopedEngine(inner httpengine.Engine, scope domain.Scope) *scopedEngine 
 	return &scopedEngine{inner: inner, scope: scope}
 }
 
+// WithSessionCookies attaches cookies to every request this engine sends, so
+// the scan's authenticated session (established for browser verification) is
+// ALSO carried by the plain HTTP-level reflection/candidate testing — without
+// it, a cookie-gated endpoint would never even show its reflection to the HTTP
+// executor, and nothing downstream would ever reach verification. Returns the
+// same engine for chaining. Each scopedEngine instance is scan-scoped (built
+// fresh per launch), so this never leaks one scan's cookies into another's
+// requests even though the underlying transport (c.opts.HTTP) is shared.
+func (s *scopedEngine) WithSessionCookies(cookies []*http.Cookie) *scopedEngine {
+	s.cookies = cookies
+	return s
+}
+
 // Do implements httpengine.Engine.
 func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpengine.Response, error) {
 	if req == nil {
 		return nil, fmt.Errorf("%w: nil request", httpengine.ErrInvalidRequest)
 	}
 	cur := *req // never mutate the caller's request
+	if len(s.cookies) > 0 {
+		cur.Cookies = append(append([]*http.Cookie(nil), req.Cookies...), s.cookies...)
+	}
 	var chain []string
 
 	for hop := 0; ; hop++ {
@@ -94,6 +117,45 @@ func isRedirectStatus(code int) bool {
 	default:
 		return false
 	}
+}
+
+// sessionCookies reads a browser storage-state file (the JSON format
+// browser.Context.SaveStorageState writes: {"cookies":[...], "origins":[...]})
+// and returns the cookies whose domain matches host, for WithSessionCookies.
+// It never errors — a missing/unreadable/malformed file, or no browser
+// session having been saved at all, simply yields no cookies; HTTP-level
+// testing then proceeds unauthenticated, exactly as it always has.
+func sessionCookies(statePath, host string) []*http.Cookie {
+	if statePath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return nil
+	}
+	var state struct {
+		Cookies []struct {
+			Name   string `json:"name"`
+			Value  string `json:"value"`
+			Domain string `json:"domain"`
+		} `json:"cookies"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil
+	}
+	host = strings.ToLower(host)
+	var out []*http.Cookie
+	for _, c := range state.Cookies {
+		// Playwright's storage state does not record whether a cookie was
+		// host-only or had an explicit Domain (no such flag is written), so
+		// every stored cookie is treated as domain-scoped: it applies to its
+		// domain and that domain's subdomains, with or without a leading dot.
+		d := strings.ToLower(strings.TrimPrefix(c.Domain, "."))
+		if d == "" || d == host || strings.HasSuffix(host, "."+d) {
+			out = append(out, &http.Cookie{Name: c.Name, Value: c.Value})
+		}
+	}
+	return out
 }
 
 func resolveRedirect(base, loc string) (string, error) {

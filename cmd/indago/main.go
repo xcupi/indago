@@ -55,7 +55,7 @@ func main() {
 		err = cmdDB(args)
 	case "serve":
 		err = cmdServe(args)
-	case "project", "target", "scope", "scan":
+	case "project", "target", "scope", "scan", "finding", "report":
 		err = newCLI(defaultServer(), os.Stdout).runClient(cmd, args)
 	case "help", "-h", "--help":
 		usage()
@@ -90,6 +90,11 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER, default http://
   scan list [-json]
   scan status <scan-id|prefix> [-json]
   scan start|pause|resume|cancel <scan-id|prefix>
+  finding list -scan <scan-id|prefix> [-json]
+  finding show -scan <scan-id|prefix> <finding-id|prefix> [-json]
+  report create -scan <scan-id|prefix> -format json|markdown|html [-finding ID]... [-out FILE]
+  report list -scan <scan-id|prefix> [-json]
+  report show <report-id|prefix> [-out FILE] [-download]
 
 Scope is mandatory: nothing is requested outside it. Authorized use only.
 `)
@@ -134,6 +139,7 @@ func cmdDB(args []string) error {
 	}
 	fmt.Printf("initialized database at %s\n", cfg.DBPath())
 	fmt.Printf("evidence directory at %s\n", cfg.EvidenceDir())
+	fmt.Printf("reports directory at %s\n", cfg.ReportsDir())
 	return nil
 }
 
@@ -146,6 +152,8 @@ func cmdServe(args []string) error {
 		"also execute POST/PUT/PATCH/DELETE endpoints (default: only GET/HEAD/OPTIONS; others are skipped)")
 	useBrowser := fs.Bool("browser", false, "enable browser network-observation discovery AND browser verification of reflected XSS candidates (needs Chromium; requests are scope-gated)")
 	chromium := fs.String("chromium", "", "Chromium executable for -browser (default: $INDAGO_CHROMIUM_PATH or the Playwright cache)")
+	allowRemote := fs.Bool("allow-remote", false,
+		"allow binding a non-loopback address; required because the API has no authentication (see docs/deployment.md)")
 	_ = fs.Parse(args)
 
 	log := newLogger(*debug)
@@ -157,6 +165,9 @@ func cmdServe(args []string) error {
 	cfg.DataDir = *dataDir
 	if *addr != "" {
 		cfg.Server.Addr = *addr
+	}
+	if err := checkRemoteBindAllowed(cfg.Server.Addr, *allowRemote); err != nil {
+		return err
 	}
 	if err := cfg.EnsureDirs(); err != nil {
 		return err
@@ -227,17 +238,32 @@ func cmdServe(args []string) error {
 		log.Info("restored interrupted scans as paused; resume them with `indago scan resume <id>`", "count", n)
 	}
 	if !isLoopbackAddr(cfg.Server.Addr) {
-		log.Warn("listening on a non-loopback address: the API has no authentication and can start scans; restrict access at the network level", "addr", cfg.Server.Addr)
+		log.Warn("listening on a non-loopback address (-allow-remote): the API has no authentication and can start scans, read evidence, and generate reports; restrict access at the network level (firewall/VPN)", "addr", cfg.Server.Addr)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	srv := web.NewServer(db, ctrl, version, log)
+	srv := web.NewServer(db, ctrl, version, log, evStore, cfg.ReportsDir())
 	log.Info("indago starting", "version", version, "data", cfg.DataDir)
 	err = srv.ListenAndServe(ctx, cfg.Server.Addr)
 	ctrl.Shutdown()
 	return err
+}
+
+// checkRemoteBindAllowed refuses a non-loopback bind unless the operator
+// explicitly opted in. The API has no authentication (it's a local control
+// plane — see internal/web/guard.go): anyone who can reach it can start
+// scans, read findings/evidence (which may include captured session
+// cookies), and generate reports. A log warning alone is easy to miss running
+// as a daemon, so this is an outright refusal, not just advice.
+func checkRemoteBindAllowed(addr string, allowRemote bool) error {
+	if isLoopbackAddr(addr) || allowRemote {
+		return nil
+	}
+	return fmt.Errorf("refusing to bind non-loopback address %q without -allow-remote: "+
+		"the API has no authentication and can start scans, read evidence, and generate reports; "+
+		"see docs/deployment.md before exposing it beyond localhost", addr)
 }
 
 // isLoopbackAddr reports whether addr binds only the loopback interface.

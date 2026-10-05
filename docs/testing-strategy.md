@@ -57,6 +57,18 @@ table.
 `internal/web` via `httptest`: health, version, project create/list/get (+404,
 +validation), static UI served, and graceful serve/shutdown.
 
+### Fuzz — context classifier
+`internal/detection/fuzz_test.go` (`FuzzClassifyAt`): the hand-written HTML/
+JS/CSS/URL tokenizers in `context_*.go` parse bytes straight from a scanned
+target's HTTP response — untrusted input, since the whole point of the tool is
+testing applications that may themselves be buggy or hostile. Unlike
+`golang.org/x/net/html` (not used, per the project's minimal-dependency
+policy), these tokenizers are project-local, so they get their own fuzz target
+rather than relying on an upstream library's hardening. The only requirement
+is "never panics or hangs" — any `ContextAnalysis` is an acceptable answer for
+garbage input. `go test ./internal/detection/... -fuzz FuzzClassifyAt` for a
+real fuzzing run (regular `go test` only replays the seed corpus).
+
 ### Contract — abstractions
 `auth`, `discovery`, `detection`, `ai`: the working default (anonymous auth,
 disabled gateway) behaves, registries enumerate correctly, and every stub returns
@@ -113,6 +125,24 @@ deterministic byte-identical output across repeated `Generate` calls.
 `storetest/suite.go`'s finding/evidence conformance test round-trips the new
 `ParameterID`/`Detail` fields through both the memory and SQLite backends.
 
+### End-to-end — full pipeline against a local corpus
+`internal/scan/e2e_corpus_test.go` drives a real `Controller` + real Chromium
+over a one-server corpus covering every scenario the pipeline needs to get
+right (reflected-but-safe, encoded, HTML-attribute, JavaScript, multiple
+reflection sites, confirmed, a page with an unrelated/pre-existing browser
+error, an authenticated endpoint, an out-of-scope resource, and GET/POST-
+form/POST-JSON) — asserting the correct verdict lands on each, evidence
+resolves, and JSON/Markdown reports are reproducible.
+`e2e_recovery_test.go` crashes a scan mid-`JobVerify` navigation and restarts
+with a fresh `browser.Manager`, asserting recovery (no duplicate findings, no
+orphaned work). `e2e_hardening_test.go` covers concurrent scans sharing one
+browser pool, a goroutine-leak check across a scan's lifecycle, malformed/
+oversized responses, a larger crawl, and throughput/memory measurements
+(logged for inspection, not gated on exact numbers). See
+[`e2e-validation.md`](e2e-validation.md) for what this found and fixed. All of
+these skip (quickly) when no Chromium is found, like the other real-browser
+suites.
+
 ### End-to-end — binary smoke
 The built binary is exercised manually/CI: `db init` creates the schema; `serve`
 brings up the stack; the API persists a project that **survives a restart**.
@@ -136,6 +166,21 @@ go test ./...     # add -race for concurrency work: make test
 ```
 
 `make cover` produces a coverage summary.
+
+**`make test` runs `go test -race -p 1 ./...`, deliberately serialized.**
+Several packages (`internal/browser`, `internal/scan`, `internal/verification`)
+launch real Chromium instances under test. `go test`'s default parallelism runs
+different packages' test binaries concurrently, which lets their Chromium
+processes compete for CPU at the same time — under `-race`'s overhead, that can
+push a real-browser test's own internal timeout past its deadline on a loaded
+machine (observed in `TestE2E_RestartRecoversInterruptedVerification`: fails
+intermittently with full default parallelism, passes reliably both in
+isolation and under `-p 1`, confirming the cause is scheduling contention
+rather than a product race). `-p 1` costs wall-clock time but removes that
+contention entirely; prefer it over chasing a flake that `-race` would
+otherwise make look like a real bug. A single package's tests still run their
+own subtests/goroutines concurrently as normal — only cross-package
+parallelism is removed.
 
 ---
 

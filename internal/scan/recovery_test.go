@@ -276,6 +276,62 @@ func TestRestartSkipsCompletedDiscovery(t *testing.T) {
 }
 
 // A scan that crashed mid-cancel has its cancel completed on restart.
+// pause_and_ask's "don't immediately re-pause for a finding already shown"
+// bookkeeping must survive a restart — a fresh Controller/execution after a
+// crash must not forget it and re-ask the operator about findings they
+// already saw before the crash.
+func TestPauseAndAskStatePersistsAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	s := standardSite(t)
+	dbPath := filepath.Join(t.TempDir(), "indago.db")
+
+	db, q := openSQLite(t, dbPath)
+	proj, tgt := seedProject(t, db, s.URL, hostScope())
+	handlers, release := holdJobs()
+	defer release()
+	ctrl1 := newCtrl(t, db, q, scan.Options{Handlers: handlers})
+
+	sc := createScan(t, ctrl1, proj, tgt, workersCfg(2), domain.StopPolicy{Mode: domain.StopPauseAndAsk})
+	if err := ctrl1.Start(ctx, sc.ID); err != nil {
+		t.Fatal(err)
+	}
+	addFinding(t, db, sc, domain.VerdictConfirmed)
+	waitStatus(t, ctrl1, sc.ID, 5*time.Second, func(s *scan.Status) bool { return s.Scan.State == domain.ScanPaused })
+
+	persisted, err := db.Scans().Get(ctx, sc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Stats.AskedAtConfirmed != 1 {
+		t.Fatalf("asked_at_confirmed = %d, want 1 (persisted before any restart)", persisted.Stats.AskedAtConfirmed)
+	}
+
+	// "Restart": shut the first controller down and close the database, then
+	// reopen a fresh one exactly like a real crash/restart would.
+	ctrl1.Shutdown()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db2, q2 := openSQLite(t, dbPath)
+	defer db2.Close()
+	handlers2, release2 := holdJobs()
+	defer release2()
+	ctrl2 := newCtrl(t, db2, q2, scan.Options{Handlers: handlers2})
+
+	if err := ctrl2.Resume(ctx, sc.ID); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if cur, _ := ctrl2.Status(ctx, sc.ID); cur.Scan.State != domain.ScanRunning {
+		t.Fatalf("scan re-paused after restart for a finding the operator already saw: %s", cur.Scan.State)
+	}
+
+	// A genuinely NEW confirmed finding must still ask again.
+	addFinding(t, db2, sc, domain.VerdictConfirmed)
+	waitStatus(t, ctrl2, sc.ID, 5*time.Second, func(s *scan.Status) bool { return s.Scan.State == domain.ScanPaused })
+}
+
 func TestRecoverScansFinishesInterruptedCancel(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "indago.db")

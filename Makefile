@@ -23,7 +23,13 @@ run: build ## Build and run `indago serve`
 	$(BIN_DIR)/$(BINARY) serve
 
 test: ## Run all tests with the race detector
-	go test -race $(PKG)
+	# -p 1: several packages launch real Chromium instances under test
+	# (internal/browser, internal/scan, internal/verification). Running
+	# packages in parallel (go test's default) lets those compete for CPU at
+	# the same time, which can push a real-browser test's own timeout past
+	# its deadline — an environmental flake, not a product bug, but one this
+	# avoids rather than tolerates: see docs/testing-strategy.md.
+	go test -race -p 1 $(PKG)
 
 vet: ## Run go vet
 	go vet $(PKG)

@@ -50,6 +50,18 @@ func (m *Manager) Resume() { m.gate.Resume() }
 // Paused reports whether discovery is paused.
 func (m *Manager) Paused() bool { return m.gate.Paused() }
 
+// SetConcurrency adjusts fetch concurrency on every currently-registered
+// source that supports it (see ConcurrencyAdjustable — today, crawlSource).
+// Safe to call while discovery is running: it takes effect starting at the
+// crawler's next depth level, without restarting the run.
+func (m *Manager) SetConcurrency(n int) {
+	for _, src := range m.registry.Sources() {
+		if adj, ok := src.(ConcurrencyAdjustable); ok {
+			adj.SetConcurrency(n)
+		}
+	}
+}
+
 // RunParams are the inputs to a discovery run.
 type RunParams struct {
 	ScanID    domain.ID

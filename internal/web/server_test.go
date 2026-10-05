@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/store/memory"
@@ -17,12 +18,7 @@ import (
 )
 
 func newServer(t *testing.T) http.Handler {
-	t.Helper()
-	st := memory.New()
-	q := queue.NewMemory()
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	ctrl := scan.NewController(st, q, log, "test", scan.Options{})
-	return web.NewServer(st, ctrl, "test", log).Handler()
+	return newServerStruct(t).Handler()
 }
 
 func TestHealthAndVersion(t *testing.T) {
@@ -126,5 +122,9 @@ func newServerStruct(t *testing.T) *web.Server {
 	q := queue.NewMemory()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctrl := scan.NewController(st, q, log, "test", scan.Options{})
-	return web.NewServer(st, ctrl, "test", log)
+	evStore, err := evidence.NewFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return web.NewServer(st, ctrl, "test", log, evStore, t.TempDir())
 }

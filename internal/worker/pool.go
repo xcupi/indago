@@ -57,6 +57,13 @@ type Config struct {
 	Heartbeat         time.Duration // lease-extension interval while running
 	IdlePoll          time.Duration // sleep between empty lease attempts
 	RequestsPerSecond float64       // 0 = unlimited; applies to the "http" group
+	// ShutdownTimeout bounds how long Stop waits for in-flight handlers to
+	// return. A handler that ignores context cancellation (a hung network or
+	// browser call, say) would otherwise block Stop — and so the whole
+	// process's graceful shutdown — forever; past this timeout Stop logs a
+	// warning and returns anyway, abandoning that handler's goroutine rather
+	// than waiting on it indefinitely.
+	ShutdownTimeout time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -68,6 +75,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.IdlePoll <= 0 {
 		c.IdlePoll = 200 * time.Millisecond
+	}
+	if c.ShutdownTimeout <= 0 {
+		c.ShutdownTimeout = 30 * time.Second
 	}
 	return c
 }
@@ -197,8 +207,18 @@ func (p *Pool) Stop() {
 	p.started = false
 	p.mu.Unlock()
 
-	p.wg.Wait()
-	p.log.Info("worker pool stopped")
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		p.log.Info("worker pool stopped")
+	case <-time.After(p.cfg.ShutdownTimeout):
+		p.log.Warn("worker pool stop timed out; abandoning still-running handler(s) that did not honor context cancellation",
+			"timeout", p.cfg.ShutdownTimeout)
+	}
 }
 
 // scaleLocked grows or shrinks a group to n workers. Caller holds p.mu.
@@ -292,7 +312,12 @@ func (p *Pool) process(ctx context.Context, spec GroupSpec, job *domain.TestJob)
 	}
 }
 
-// heartbeat periodically extends the job's lease until ctx is canceled.
+// heartbeat periodically extends the job's lease until ctx is canceled. A
+// failed extension is logged and retried on the next tick rather than ending
+// the loop — a transient store error (a momentary SQLITE_BUSY, for example)
+// must not permanently stop heartbeating while the handler keeps running:
+// that would let the lease expire out from under a job that is still
+// healthy, with nothing left to extend it for the rest of the job's run.
 func (p *Pool) heartbeat(ctx context.Context, jobID domain.ID) {
 	t := time.NewTicker(p.cfg.Heartbeat)
 	defer t.Stop()
@@ -302,7 +327,9 @@ func (p *Pool) heartbeat(ctx context.Context, jobID domain.ID) {
 			return
 		case <-t.C:
 			if err := p.q.Heartbeat(ctx, jobID, p.cfg.LeaseDuration); err != nil {
-				return
+				if ctx.Err() == nil {
+					p.log.Warn("heartbeat failed; will retry next tick", "job", jobID, "err", err)
+				}
 			}
 		}
 	}

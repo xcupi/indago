@@ -6,9 +6,11 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"syscall"
 	"time"
 )
 
@@ -76,6 +78,23 @@ var _ Engine = (*Client)(nil)
 func New(cfg Config) (*Client, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 
+	// Scope is enforced on the request's hostname (internal/scan/scoped.go), not
+	// the resolved IP — intentionally, since an operator may legitimately scope
+	// an internal/private target. But a hostname's DNS can change between that
+	// check and this dial (or simply resolve somewhere the operator never
+	// intended), and link-local addresses are never a legitimate scan target —
+	// that range is where every major cloud provider's instance-metadata
+	// service lives (169.254.169.254) and SSRF-into-metadata is a standing risk
+	// for any tool that fetches operator-specified URLs. Block it at the one
+	// point that sees the address actually being connected to, regardless of
+	// which hostname or redirect hop produced it.
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   rejectLinkLocal,
+	}
+	tr.DialContext = dialer.DialContext
+
 	if cfg.ProxyURL != "" {
 		pu, err := url.Parse(cfg.ProxyURL)
 		if err != nil {
@@ -120,6 +139,22 @@ func New(cfg Config) (*Client, error) {
 		userAgent:       cfg.UserAgent,
 		defaultHeaders:  cloneStringMap(cfg.DefaultHeaders),
 	}, nil
+}
+
+// rejectLinkLocal is a net.Dialer.Control hook: it runs after DNS resolution
+// but before the socket connects, so it sees the actual IP about to be dialed
+// (not just the hostname) — refusing it here closes the window between a
+// hostname-based scope check and the real connection. See the comment in New.
+func rejectLinkLocal(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil // not host:port; let the dial itself fail naturally
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && (ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
+		return fmt.Errorf("httpengine: refusing to connect to link-local address %s (cloud metadata/APIPA range)", ip)
+	}
+	return nil
 }
 
 // NewDefault returns a Client with DefaultConfig.

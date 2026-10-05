@@ -198,6 +198,12 @@ type ScanStats struct {
 	FindingsConfirmed    int `json:"findings_confirmed"`
 	FindingsRejected     int `json:"findings_rejected"`
 	FindingsInconclusive int `json:"findings_inconclusive"`
+	// AskedAtConfirmed is the confirmed-finding count at which a
+	// StopPauseAndAsk policy last paused the scan for operator review.
+	// Persisted (not just kept in memory) so a restart does not forget it and
+	// immediately re-pause for findings the operator already saw before the
+	// crash — see docs/e2e-validation.md.
+	AskedAtConfirmed int `json:"asked_at_confirmed,omitempty"`
 }
 
 // Scan is a single hunting run against a target, using one reused auth session.

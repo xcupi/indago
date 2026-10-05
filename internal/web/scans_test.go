@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/scan"
+	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/store/memory"
 	"github.com/indago/indago/internal/web"
 	"github.com/indago/indago/internal/worker"
@@ -23,8 +25,10 @@ import (
 // api drives the real handler over httptest, adding the client header that
 // state-changing requests require.
 type api struct {
-	t *testing.T
-	h http.Handler
+	t  *testing.T
+	h  http.Handler
+	st store.Store
+	ev evidence.Store
 }
 
 func (a api) do(method, path string, body any) *httptest.ResponseRecorder {
@@ -75,7 +79,11 @@ func newAPI(t *testing.T, handlers map[domain.JobType]worker.Handler) api {
 		IdlePoll: 10 * time.Millisecond, PollInterval: 20 * time.Millisecond,
 	})
 	t.Cleanup(ctrl.Shutdown)
-	return api{t: t, h: web.NewServer(st, ctrl, "test", log).Handler()}
+	evStore, err := evidence.NewFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api{t: t, h: web.NewServer(st, ctrl, "test", log, evStore, t.TempDir()).Handler(), st: st, ev: evStore}
 }
 
 func testSite(t *testing.T) *httptest.Server {

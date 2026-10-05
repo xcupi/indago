@@ -3,16 +3,17 @@
 // re-authenticates. On expiry the owning scan moves to AwaitingAuth and the
 // operator is asked to re-authenticate.
 //
-// Phase 0 implements only the Anonymous mode (which needs no credentials). The
-// password, interactive-browser, MFA, and existing-session modes are stubs that
-// return ErrNotImplemented; credential handling and interactive login arrive in
-// Phase 1.
+// Anonymous (no credentials) and Existing (importing session material saved
+// by a prior interactive login) are implemented. Password, interactive-
+// browser, and MFA — modes that themselves need to drive a real login flow —
+// remain stubs that return ErrNotImplemented.
 package auth
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/indago/indago/internal/domain"
@@ -64,7 +65,52 @@ func (Anonymous) Validate(context.Context, *domain.Session) (bool, error) { retu
 
 var _ Authenticator = Anonymous{}
 
-// stubAuth is a Phase 0 placeholder for a not-yet-implemented mode.
+// Existing imports session material (cookies/storage state) saved by a prior
+// interactive login — e.g. the operator ran an interactive-login flow once,
+// out of band, and points the scan at the saved file. It performs no network
+// or browser activity itself: it only validates that the material is present,
+// which is why it needs none of Interactive/MFA's unimplemented machinery.
+type Existing struct{}
+
+// Mode implements Authenticator.
+func (Existing) Mode() domain.AuthMode { return domain.AuthExisting }
+
+// Establish validates that in.StatePath names a readable file and returns an
+// active session pointing at it.
+func (Existing) Establish(_ context.Context, in Input) (*domain.Session, error) {
+	if in.StatePath == "" {
+		return nil, fmt.Errorf("auth: existing-session mode requires a state path")
+	}
+	if _, err := os.Stat(in.StatePath); err != nil {
+		return nil, fmt.Errorf("auth: existing session material: %w", err)
+	}
+	now := time.Now()
+	return &domain.Session{
+		ID:        domain.NewID(),
+		ScanID:    in.ScanID,
+		Mode:      domain.AuthExisting,
+		State:     domain.SessionActive,
+		StatePath: in.StatePath,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, nil
+}
+
+// Validate reports the session active as long as its state file is still
+// present; it does not assert the material is still ACCEPTED by the target
+// (that would require the network activity this mode deliberately avoids).
+func (Existing) Validate(_ context.Context, s *domain.Session) (bool, error) {
+	if s.StatePath == "" {
+		return false, nil
+	}
+	_, err := os.Stat(s.StatePath)
+	return err == nil, nil
+}
+
+var _ Authenticator = Existing{}
+
+// stubAuth is a placeholder for a mode that itself needs an unimplemented
+// interactive/credentialed login flow.
 type stubAuth struct{ mode domain.AuthMode }
 
 func (s stubAuth) Mode() domain.AuthMode { return s.mode }
@@ -75,13 +121,16 @@ func (s stubAuth) Validate(context.Context, *domain.Session) (bool, error) {
 	return false, fmt.Errorf("%w: auth mode %q", ErrNotImplemented, s.mode)
 }
 
-// For returns the authenticator for a given mode. Only Anonymous is implemented
-// in Phase 0; other modes return a stub whose operations report ErrNotImplemented.
+// For returns the authenticator for a given mode. Anonymous and Existing are
+// implemented; Password/Interactive/MFA return a stub whose operations report
+// ErrNotImplemented.
 func For(mode domain.AuthMode) (Authenticator, error) {
 	switch mode {
 	case domain.AuthAnonymous:
 		return Anonymous{}, nil
-	case domain.AuthPassword, domain.AuthInteractive, domain.AuthMFA, domain.AuthExisting:
+	case domain.AuthExisting:
+		return Existing{}, nil
+	case domain.AuthPassword, domain.AuthInteractive, domain.AuthMFA:
 		return stubAuth{mode: mode}, nil
 	default:
 		return nil, fmt.Errorf("auth: unknown mode %q", mode)

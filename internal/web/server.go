@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/store"
 )
@@ -31,17 +32,26 @@ type Server struct {
 	log     *slog.Logger
 	version string
 
+	// evidence opens evidence blob content for handleGetEvidenceContent. Nil
+	// disables that one endpoint (evidence metadata still works via the store).
+	evidence evidence.Store
+	// reportsDir is where generated reports are written. Empty disables report
+	// generation (listing/reading already-generated reports still works).
+	reportsDir string
+
 	// allowedHosts, when non-nil, is the set of acceptable Host header values
 	// (DNS-rebinding protection). ListenAndServe sets it from the bind address.
 	allowedHosts map[string]bool
 }
 
-// NewServer builds a Server. A nil logger uses slog.Default.
-func NewServer(st store.Store, ctrl *scan.Controller, version string, log *slog.Logger) *Server {
+// NewServer builds a Server. A nil logger uses slog.Default. evStore and
+// reportsDir are optional (nil/"" disables evidence content serving and
+// report generation respectively, e.g. in tests that don't need them).
+func NewServer(st store.Store, ctrl *scan.Controller, version string, log *slog.Logger, evStore evidence.Store, reportsDir string) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{store: st, ctrl: ctrl, log: log, version: version}
+	return &Server{store: st, ctrl: ctrl, log: log, version: version, evidence: evStore, reportsDir: reportsDir}
 }
 
 // Handler returns the configured HTTP handler (routes + static UI).
@@ -64,7 +74,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/scans/{id}", s.handleGetScan)
 	mux.HandleFunc("GET /api/scans/{id}/stats", s.handleScanStats)
 	mux.HandleFunc("GET /api/scans/{id}/status", s.handleScanStatus)
+	mux.HandleFunc("GET /api/scans/{id}/findings", s.handleListFindings)
+	mux.HandleFunc("GET /api/scans/{id}/findings/{fid}", s.handleGetFinding)
+	mux.HandleFunc("GET /api/scans/{id}/reports", s.handleListReports)
+	mux.HandleFunc("POST /api/scans/{id}/reports", s.handleCreateReport)
 	mux.HandleFunc("POST /api/scans/{id}/{action}", s.handleScanAction)
+
+	mux.HandleFunc("GET /api/evidence/{id}", s.handleGetEvidence)
+	mux.HandleFunc("GET /api/evidence/{id}/content", s.handleGetEvidenceContent)
+	mux.HandleFunc("GET /api/reports/{id}", s.handleGetReport)
+	mux.HandleFunc("GET /api/reports/{id}/content", s.handleGetReportContent)
 
 	// Static UI.
 	sub, _ := fs.Sub(assetsFS, "assets")
@@ -90,7 +109,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	projects, err := s.store.Projects().List(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeInternalError(w, "list projects", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, projects)
@@ -114,7 +133,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	p := &domain.Project{ID: domain.NewID(), Name: req.Name, Notes: req.Notes, CreatedAt: now, UpdatedAt: now}
 	if err := s.store.Projects().Create(r.Context(), p); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeInternalError(w, "create project", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, p)
@@ -132,7 +151,7 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListScans(w http.ResponseWriter, r *http.Request) {
 	scans, err := s.store.Scans().List(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeInternalError(w, "list scans", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, scans)
@@ -155,7 +174,7 @@ func (s *Server) handleScanStats(w http.ResponseWriter, r *http.Request) {
 	}
 	stats, err := s.ctrl.Stats(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeInternalError(w, "scan stats", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
@@ -168,7 +187,15 @@ func (s *Server) writeLookupError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	writeError(w, http.StatusInternalServerError, err.Error())
+	s.writeInternalError(w, "lookup", err)
+}
+
+// writeInternalError logs the real error server-side — which may include
+// internal detail (a file path, a raw DB error) not meant for an API
+// caller — and returns a generic message instead of err.Error() itself.
+func (s *Server) writeInternalError(w http.ResponseWriter, context string, err error) {
+	s.log.Error(context, "err", err)
+	writeError(w, http.StatusInternalServerError, context+" failed")
 }
 
 func (s *Server) withLogging(next http.Handler) http.Handler {

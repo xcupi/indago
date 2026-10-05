@@ -8,8 +8,11 @@ package scan
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -494,5 +497,55 @@ func TestUpsertPendingFindingPreservesCandidateSource(t *testing.T) {
 	}
 	if !sawBuiltin || !sawLLM {
 		t.Fatalf("candidate sources not preserved: %+v", d.Candidates)
+	}
+}
+
+// Concurrent candidates correlating to the SAME site (same injection point,
+// category, and context) must never race into duplicate Finding rows: the
+// correlation lookup (list + match by dedup key) is not atomic at the store
+// layer, so without findingsMu serializing it, two goroutines can both see
+// "no existing finding" and each create one. Run with -race.
+func TestEnqueueVerificationConcurrentCandidatesDoNotDuplicateFinding(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<p>"+r.URL.Query().Get("q")+"</p>")
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/s", domain.MethodGET)
+	focus := env.param(ep, "q", domain.LocationQuery, "hi")
+	ip := env.injection(ep, focus)
+	job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobTest,
+		Target: domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, MaxAttempts: 3}
+
+	ex := env.executor(scopedClient(t, openScope()), ExecutorConfig{})
+
+	const n = 20
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cand := candAt(detection.CatHTMLText, detection.CtxHTMLText, fmt.Sprintf("<svg data-i=%d onload=m>", i))
+			ex.enqueueVerification(context.Background(), job, ep, cand, focus, domain.NewID())
+		}()
+	}
+	wg.Wait()
+
+	findings, err := env.st.Findings().ListByScan(context.Background(), env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding from %d concurrent candidates at the same site, got %d", n, len(findings))
+	}
+	d := decodeFindingDetail(findings[0].Detail)
+	if d.Occurrences != n {
+		t.Fatalf("occurrences = %d, want %d (no lost updates)", d.Occurrences, n)
+	}
+	if len(d.Candidates) != n {
+		t.Fatalf("candidates recorded = %d, want %d (no lost updates)", len(d.Candidates), n)
 	}
 }

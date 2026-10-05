@@ -16,6 +16,7 @@ package discovery
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 
 	"github.com/indago/indago/internal/domain"
 )
@@ -92,6 +93,40 @@ func (in Input) wait(ctx context.Context) error {
 type Source interface {
 	Name() domain.DiscoverySource
 	Run(ctx context.Context, in Input, sink Sink) error
+}
+
+// ConcurrencyAdjustable is an optional capability a Source may implement to
+// have its fetch concurrency changed while discovery is already running (see
+// Manager.SetConcurrency). Sources that don't need live adjustment (seed,
+// robots/sitemap — single-fetch sources) simply don't implement it; Manager
+// only calls it on sources that do.
+type ConcurrencyAdjustable interface {
+	SetConcurrency(n int)
+}
+
+// liveConcurrency is a small, thread-safe, runtime-adjustable fetch-
+// concurrency value. crawlSource (the dominant discovery concurrency knob —
+// "crawl fetch concurrency" per Config.Concurrency's own doc) reads it fresh
+// for every crawl level's semaphore, so a change made mid-scan takes effect
+// starting at the next level without needing to restart discovery.
+type liveConcurrency struct{ n atomic.Int64 }
+
+func newLiveConcurrency(initial int) *liveConcurrency {
+	c := &liveConcurrency{}
+	c.Set(initial)
+	return c
+}
+
+func (c *liveConcurrency) Get() int { return int(c.n.Load()) }
+
+// Set clamps to at least 1 — a concurrency of 0 would wedge the crawl (a
+// zero-capacity semaphore admits nothing), the same class of bug as an
+// unstaffed worker-pool group (see docs/e2e-validation.md).
+func (c *liveConcurrency) Set(n int) {
+	if n < 1 {
+		n = 1
+	}
+	c.n.Store(int64(n))
 }
 
 // Config tunes discovery behavior. Zero values get sensible defaults via

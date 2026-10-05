@@ -27,6 +27,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +69,13 @@ type Options struct {
 	// PollInterval is how often the completion monitor evaluates a running scan
 	// (default 200ms).
 	PollInterval time.Duration
+
+	// ReapInterval is how often expired job leases are reclaimed for a worker
+	// that stopped heartbeating without the job ever reaching a terminal state
+	// (a hung or crashed handler goroutine, for example) — see
+	// queue.Queue.ReapExpired. Reaping more often than a lease's own duration
+	// cannot find anything new, so the default is LeaseDuration.
+	ReapInterval time.Duration
 
 	// HTTP is the engine discovery uses. It is wrapped in a scope-enforcing
 	// engine per scan, which follows redirects itself — so HTTP MUST be built with
@@ -119,6 +128,9 @@ func (o Options) withDefaults() Options {
 	if o.PollInterval <= 0 {
 		o.PollInterval = 200 * time.Millisecond
 	}
+	if o.ReapInterval <= 0 {
+		o.ReapInterval = o.LeaseDuration
+	}
 	if o.HTTP == nil {
 		o.HTTP = httpengine.Stub{}
 	}
@@ -155,7 +167,7 @@ func NewController(st store.Store, q queue.Queue, log *slog.Logger, version stri
 		log = slog.Default()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Controller{
+	c := &Controller{
 		store:      st,
 		queue:      q,
 		log:        log,
@@ -164,6 +176,36 @@ func NewController(st store.Store, q queue.Queue, log *slog.Logger, version stri
 		baseCtx:    ctx,
 		baseCancel: cancel,
 		running:    make(map[domain.ID]*execution),
+	}
+	go c.reapExpiredLeases(ctx)
+	return c
+}
+
+// reapExpiredLeases periodically reclaims jobs whose lease expired without
+// ever reaching a terminal state — the queue-level safety net for a worker
+// that stops heartbeating but never fails or completes the job (a hung
+// handler, a goroutine that panicked past its recover, ...). Without this,
+// such a job stays stuck until the whole process restarts (Recover only runs
+// once, at startup). Runs for the Controller's lifetime; stops at Shutdown.
+func (c *Controller) reapExpiredLeases(ctx context.Context) {
+	t := time.NewTicker(c.opts.ReapInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			n, err := c.queue.ReapExpired(ctx, time.Now())
+			if err != nil {
+				if ctx.Err() == nil {
+					c.log.Warn("reap expired leases", "err", err)
+				}
+				continue
+			}
+			if n > 0 {
+				c.log.Warn("reclaimed jobs with expired leases (worker stopped heartbeating without failing/completing them)", "count", n)
+			}
+		}
 	}
 }
 
@@ -176,6 +218,10 @@ type CreateScanParams struct {
 	Config    *domain.ScanConfig // override, used when Profile == Custom
 	Stop      domain.StopPolicy
 	AuthMode  domain.AuthMode
+	// AuthStatePath is the saved session material (cookies/storage state) to
+	// import when AuthMode is AuthExisting — e.g. the file an interactive login
+	// run earlier saved. Ignored for every other mode.
+	AuthStatePath string
 	// SeedURLs are discovery seeds. Empty means the target's base URL. Every seed
 	// must be in scope; an out-of-scope seed is rejected rather than silently
 	// dropped.
@@ -244,7 +290,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	now := time.Now()
 	sess := &domain.Session{
 		ID: domain.NewID(), ScanID: domain.NewID(), // ScanID set below once scan ID is known
-		Mode: mode, State: domain.SessionNone, CreatedAt: now, UpdatedAt: now,
+		Mode: mode, State: domain.SessionNone, StatePath: p.AuthStatePath, CreatedAt: now, UpdatedAt: now,
 	}
 	sc := &domain.Scan{
 		ID:        domain.NewID(),
@@ -364,6 +410,13 @@ func (c *Controller) Resume(ctx context.Context, scanID domain.ID) error {
 	}
 
 	if ex, ok := c.running[scanID]; ok {
+		sc, err := c.store.Scans().Get(ctx, scanID)
+		if err != nil {
+			return err
+		}
+		if err := c.reauthenticateIfAwaitingAuth(ctx, sc); err != nil {
+			return err
+		}
 		if _, err := c.mutate(ctx, scanID, func(s *domain.Scan) error {
 			return transition(s, domain.ScanRunning)
 		}); err != nil {
@@ -393,6 +446,9 @@ func (c *Controller) Resume(ctx context.Context, scanID domain.ID) error {
 	}
 	if d := scope.Permits(target.BaseURL); !d.Allowed {
 		return fmt.Errorf("%w: %s", ErrOutOfScope, d.Reason)
+	}
+	if err := c.reauthenticateIfAwaitingAuth(ctx, sc); err != nil {
+		return err
 	}
 
 	sc, err = c.mutate(ctx, scanID, func(s *domain.Scan) error {
@@ -491,8 +547,16 @@ func (c *Controller) Reconfigure(ctx context.Context, scanID domain.ID, cfg doma
 	if ex, ok := c.running[scanID]; ok {
 		_ = ex.pool.Resize(GroupDiscovery, cfg.DiscoveryConcurrency)
 		_ = ex.pool.Resize(GroupHTTP, cfg.HTTPConcurrency)
-		_ = ex.pool.Resize(GroupBrowser, cfg.BrowserConcurrency)
+		_ = ex.pool.Resize(GroupBrowser, minBrowserWorkers(cfg.BrowserConcurrency))
 		ex.pool.SetRate(cfg.RequestsPerSecond)
+		// GroupDiscovery above is queue-pool bookkeeping only: discovery itself
+		// never runs as a queued job (see handlers.go), so resizing it changes
+		// nothing on its own. Discovery has its own concurrency fan-out
+		// (discovery.Manager), reached here so DiscoveryConcurrency is actually
+		// adjustable at runtime, not just accepted and ignored.
+		if ex.disc != nil {
+			ex.disc.SetConcurrency(cfg.DiscoveryConcurrency)
+		}
 	}
 	c.log.Info("scan reconfigured", "scan", scanID, "config", cfg)
 	return nil
@@ -526,9 +590,20 @@ func (c *Controller) Shutdown() {
 	}
 	c.mu.Unlock() // release BEFORE waiting (see mu)
 
+	// In parallel, not sequentially: each stopExecution can take up to its
+	// pool's ShutdownTimeout if a handler is wedged (see worker.Pool.Stop), and
+	// with several scans running at once a sequential wait would multiply that
+	// by the scan count instead of bounding total shutdown time by the worst
+	// single one.
+	var wg sync.WaitGroup
 	for _, ex := range exs {
-		c.stopExecution(ex, true)
+		wg.Add(1)
+		go func(ex *execution) {
+			defer wg.Done()
+			c.stopExecution(ex, true)
+		}(ex)
 	}
+	wg.Wait()
 	c.baseCancel()
 }
 
@@ -560,7 +635,7 @@ func (c *Controller) establishSession(ctx context.Context, sc *domain.Scan) erro
 	if err != nil {
 		return err
 	}
-	established, err := a.Establish(ctx, auth.Input{ScanID: sc.ID})
+	established, err := a.Establish(ctx, auth.Input{ScanID: sc.ID, StatePath: sess.StatePath})
 	if err != nil {
 		return fmt.Errorf("scan: establish session: %w", err)
 	}
@@ -575,19 +650,117 @@ func (c *Controller) establishSession(ctx context.Context, sc *domain.Scan) erro
 	return nil
 }
 
+// sessionCookiesFor returns the scan's saved browser-session cookies (if any)
+// for target's host, so the HTTP-level executor can reach the same
+// authenticated pages browser verification does. Best-effort: a missing
+// session, no saved state, or a read/parse failure all just yield nil — HTTP
+// testing then proceeds unauthenticated, exactly as it always has.
+func (c *Controller) sessionCookiesFor(ctx context.Context, sc *domain.Scan, target *domain.Target) []*http.Cookie {
+	if sc.SessionID.Empty() {
+		return nil
+	}
+	sess, err := c.store.Sessions().Get(ctx, sc.SessionID)
+	if err != nil || sess.StatePath == "" {
+		return nil
+	}
+	u, err := url.Parse(target.BaseURL)
+	if err != nil || u.Hostname() == "" {
+		return nil
+	}
+	return sessionCookies(sess.StatePath, u.Hostname())
+}
+
+// reauthenticateIfAwaitingAuth re-establishes the scan's session before it
+// resumes from AwaitingAuth. The scanner never silently re-authenticates
+// outside of this path (see domain.Session's doc comment) — a plain Paused
+// resume does nothing here.
+func (c *Controller) reauthenticateIfAwaitingAuth(ctx context.Context, sc *domain.Scan) error {
+	if sc.State != domain.ScanAwaitingAuth {
+		return nil
+	}
+	if err := c.establishSession(ctx, sc); err != nil {
+		return fmt.Errorf("scan: re-authenticate: %w", err)
+	}
+	return nil
+}
+
+// sessionExpired reports whether the scan's established session has an
+// ExpiresAt in the past. A session with no expiry (e.g. the anonymous mode)
+// never expires.
+func (c *Controller) sessionExpired(ctx context.Context, sc *domain.Scan) (bool, error) {
+	if sc.SessionID.Empty() {
+		return false, nil
+	}
+	sess, err := c.store.Sessions().Get(ctx, sc.SessionID)
+	if err != nil {
+		return false, err
+	}
+	return sess.State == domain.SessionActive && sess.ExpiresAt != nil && sess.ExpiresAt.Before(time.Now()), nil
+}
+
+// pauseForExpiredSession marks the session Expired and moves the scan to
+// AwaitingAuth, pausing its execution exactly like an operator Pause (no
+// further target-facing work proceeds) until Resume re-establishes the
+// session. Mirrors Pause's own lock discipline (c.mu held for the whole
+// operation; mutate's scanMu nests inside it).
+func (c *Controller) pauseForExpiredSession(ctx context.Context, scanID domain.ID) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	ex, ok := c.running[scanID]
+	if !ok {
+		return nil // execution already gone; nothing to pause
+	}
+	sc, err := c.mutate(ctx, scanID, func(s *domain.Scan) error {
+		return transition(s, domain.ScanAwaitingAuth)
+	})
+	if err != nil {
+		return err
+	}
+	if !sc.SessionID.Empty() {
+		if sess, err := c.store.Sessions().Get(ctx, sc.SessionID); err == nil && sess.State != domain.SessionExpired {
+			sess.State = domain.SessionExpired
+			sess.UpdatedAt = time.Now()
+			if err := c.store.Sessions().Update(ctx, sess); err != nil {
+				c.log.Warn("mark session expired", "scan", scanID, "err", err)
+			}
+		}
+	}
+	ex.pause()
+	c.log.Info("scan paused: session expired, awaiting re-authentication", "scan", scanID)
+	return nil
+}
+
 func (c *Controller) poolConfig(sc *domain.Scan) worker.Config {
 	return worker.Config{
 		ScanID: sc.ID,
 		Groups: []worker.GroupSpec{
 			{Name: GroupDiscovery, Types: []domain.JobType{domain.JobDiscovery}, Size: sc.Config.DiscoveryConcurrency},
 			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest}, Size: sc.Config.HTTPConcurrency},
-			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify}, Size: sc.Config.BrowserConcurrency},
+			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
 		},
 		LeaseDuration:     c.opts.LeaseDuration,
 		Heartbeat:         c.opts.Heartbeat,
 		IdlePoll:          c.opts.IdlePoll,
 		RequestsPerSecond: sc.Config.RequestsPerSecond,
 	}
+}
+
+// minBrowserWorkers clamps the browser group to at least one worker. Unlike
+// HTTP/discovery concurrency, 0 here is a legitimate, deliberately-supported
+// configuration — "no browser available for this scan" (Options.Browser nil,
+// or the operator just set it to 0) — and verifyExecutor already handles that
+// by skipping JobVerify jobs gracefully (verification.Stub → skipped, not
+// failed; see verify_test.go's TestVerifyHandleNoBrowserConfiguredSkips). That
+// guarantee requires at least one worker to actually LEASE those jobs so the
+// handler gets a chance to skip them — a zero-sized group never leases
+// anything, so a reflected GET candidate's JobVerify would sit queued forever
+// and the scan would never complete.
+func minBrowserWorkers(configured int) int {
+	if configured < 1 {
+		return 1
+	}
+	return configured
 }
 
 // mutate is the single path for read-modify-write of a scan row. It serializes

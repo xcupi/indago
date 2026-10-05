@@ -18,6 +18,7 @@ const (
 	DefaultServerAddr = "127.0.0.1:8750"
 	dbFileName        = "indago.db"
 	evidenceDirName   = "evidence"
+	reportsDirName    = "reports"
 	configFileName    = "config.json"
 )
 
@@ -62,12 +63,15 @@ func (c Config) DBPath() string { return filepath.Join(c.DataDir, dbFileName) }
 // EvidenceDir returns the evidence root under the data dir.
 func (c Config) EvidenceDir() string { return filepath.Join(c.DataDir, evidenceDirName) }
 
+// ReportsDir returns the generated-report root under the data dir.
+func (c Config) ReportsDir() string { return filepath.Join(c.DataDir, reportsDirName) }
+
 // ConfigPath returns the config file path under the data dir.
 func (c Config) ConfigPath() string { return filepath.Join(c.DataDir, configFileName) }
 
 // EnsureDirs creates the data and evidence directories if missing.
 func (c Config) EnsureDirs() error {
-	for _, d := range []string{c.DataDir, c.EvidenceDir()} {
+	for _, d := range []string{c.DataDir, c.EvidenceDir(), c.ReportsDir()} {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			return fmt.Errorf("config: create dir %s: %w", d, err)
 		}

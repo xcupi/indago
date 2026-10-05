@@ -54,11 +54,19 @@ type Config struct {
 	// different revisions be used together. Empty falls back to
 	// $INDAGO_CHROMIUM_PATH, then to the driver's own browser.
 	ExecutablePath string
+	// ShutdownTimeout bounds how long Close waits for contexts/browsers/the
+	// driver to close. These are synchronous calls into the Playwright
+	// process with no cancellation of their own; if that process is wedged,
+	// Close would otherwise block forever — and so would the whole program's
+	// graceful shutdown. Past this timeout Close logs a warning and returns
+	// anyway, leaving the underlying Chromium process orphaned rather than
+	// hanging.
+	ShutdownTimeout time.Duration
 }
 
 // DefaultConfig returns conservative defaults.
 func DefaultConfig() Config {
-	return Config{Headless: true, PoolSize: 1, NavigationTimeout: 30 * time.Second}
+	return Config{Headless: true, PoolSize: 1, NavigationTimeout: 30 * time.Second, ShutdownTimeout: 30 * time.Second}
 }
 
 func (c Config) withDefaults() Config {
@@ -67,6 +75,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.NavigationTimeout <= 0 {
 		c.NavigationTimeout = 30 * time.Second
+	}
+	if c.ShutdownTimeout <= 0 {
+		c.ShutdownTimeout = 30 * time.Second
 	}
 	return c
 }

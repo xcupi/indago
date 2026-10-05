@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/indago/indago/internal/detection"
@@ -59,10 +60,27 @@ type executor struct {
 	cfg       ExecutorConfig
 	log       *slog.Logger
 	baselines *baselineCache // reuses a baseline across an endpoint's injection points
+	// findingsMu serializes Finding correlation (upsertPendingFinding) against
+	// both other candidates in this executor AND verifyExecutor's
+	// correlateVerification for the same scan — see newExecutor's doc. Never
+	// nil (the constructor defaults it).
+	findingsMu *sync.Mutex
 }
 
-func newExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, q queue.Queue, cfg ExecutorConfig, log *slog.Logger) *executor {
-	return &executor{store: st, engine: eng, evidence: ev, queue: q, cfg: cfg.withDefaults(), log: log, baselines: newBaselineCache()}
+// newExecutor builds a test-job executor. findingsMu, when non-nil, MUST be
+// the SAME mutex given to this scan's verifyExecutor (see defaultHandlers):
+// both enqueueVerification (here) and correlateVerification read-then-write
+// Finding rows keyed by a correlation lookup, not a store-level unique
+// constraint, so without a shared lock, two candidates (or a candidate and a
+// verification) racing on the same site can create a duplicate Finding or
+// lose an update. nil defaults to a fresh mutex, which is correct whenever a
+// caller (e.g. a test exercising only this executor) never shares a scan with
+// a separately-constructed verifyExecutor.
+func newExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, q queue.Queue, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex) *executor {
+	if findingsMu == nil {
+		findingsMu = &sync.Mutex{}
+	}
+	return &executor{store: st, engine: eng, evidence: ev, queue: q, cfg: cfg.withDefaults(), log: log, baselines: newBaselineCache(), findingsMu: findingsMu}
 }
 
 var _ worker.Handler = (*executor)(nil)
@@ -172,12 +190,13 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 			return result{outcome: domain.OutcomeError, permanent: true, err: errors.New("candidate job has no injection point"), vulnClass: domain.VulnReflectedXSS}
 		}
 		res := e.runCandidate(ctx, tc, ep, params, focus, cand)
-		// A candidate that reflected is a PENDING finding, confirmed or rejected
-		// only by real browser verification — never by this HTTP-only result.
-		// Browser navigation carries no request body, so only a GET-navigable
-		// candidate can be verified; isSafeMethod also covers HEAD/OPTIONS, which
-		// are equally bodiless and equally navigable.
-		if res.reflection != nil && res.reflection.Reflected && isSafeMethod(ep.Method) {
+		// A candidate that reflected is always correlated into a PENDING finding
+		// — confirmed or rejected only by real browser verification, never by
+		// this HTTP-only result. enqueueVerification itself decides whether a
+		// browser-verify job can even be enqueued (browser navigation carries no
+		// request body, so a POST/body-carrying candidate's finding stays
+		// Pending — see docs/scan-orchestration.md).
+		if res.reflection != nil && res.reflection.Reflected {
 			e.enqueueVerification(ctx, job, ep, cand, focus, tc.ID)
 		}
 		return res

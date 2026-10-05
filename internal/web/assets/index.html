@@ -33,13 +33,21 @@
     td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
     .empty { color: var(--muted); font-style: italic; padding: 8px 6px; }
     .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+    .pill.confirmed { color: #ff7b7b; border-color: #ff7b7b; }
+    .pill.pending { color: #e0b24c; border-color: #e0b24c; }
     footer { padding: 16px 24px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
     a { color: var(--accent); }
     .muted { color: var(--muted); font-size: 11px; text-transform: none; letter-spacing: 0; margin-left: 8px; }
-    button { background: transparent; color: var(--fg); border: 1px solid var(--border); border-radius: 6px;
+    button, select { background: transparent; color: var(--fg); border: 1px solid var(--border); border-radius: 6px;
              padding: 2px 10px; font-size: 12px; cursor: pointer; margin-right: 4px; }
     button:hover { border-color: var(--accent); color: var(--accent); }
     .err { color: #ff7b7b; font-size: 12px; padding: 6px 0; }
+    .detail { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin: 4px 0 12px; }
+    .detail dt { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-top: 8px; }
+    .detail dd { margin: 2px 0 0; }
+    .detail ul { margin: 4px 0; padding-left: 18px; }
+    .clickable { cursor: pointer; }
+    .clickable:hover { color: var(--accent); }
   </style>
 </head>
 <body>
@@ -64,9 +72,38 @@
       <table>
         <thead><tr>
           <th>Name</th><th>State</th><th>Discovery</th><th>Endpoints</th><th>Params</th>
-          <th>Jobs (queued / running / done)</th><th>Actions</th>
+          <th>Jobs (queued / running / done)</th><th>Findings (confirmed / pending / rejected / inconclusive)</th><th>Actions</th>
         </tr></thead>
-        <tbody id="scans"><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
+        <tbody id="scans"><tr><td colspan="8" class="empty">loading…</td></tr></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Findings <span id="findingsScanLabel" class="muted"></span></h2>
+      <table>
+        <thead><tr>
+          <th></th><th>Title</th><th>Verdict</th><th>Severity</th><th>Parameter</th><th>Context</th>
+        </tr></thead>
+        <tbody id="findings"><tr><td colspan="6" class="empty">Click "Findings" on a scan above.</td></tr></tbody>
+      </table>
+    </section>
+
+    <section class="card" id="reportsCard" style="display:none">
+      <h2>Reports <span id="reportsScanLabel" class="muted"></span></h2>
+      <p class="muted" style="margin:0 0 10px">
+        Generate from checked findings above, or leave all unchecked to include every finding in the scan.
+      </p>
+      <p>
+        <select id="reportFormat">
+          <option value="json">JSON</option>
+          <option value="markdown">Markdown</option>
+          <option value="html">HTML</option>
+        </select>
+        <button id="generateReport">Generate report</button>
+      </p>
+      <table>
+        <thead><tr><th>Created</th><th>Format</th><th>Findings</th><th>Confirmed</th><th>Open</th></tr></thead>
+        <tbody id="reports"><tr><td colspan="5" class="empty">No reports yet.</td></tr></tbody>
       </table>
     </section>
   </main>
@@ -137,9 +174,14 @@
       tr.appendChild(cell(st.discovery.endpoints));
       tr.appendChild(cell(st.discovery.parameters));
       const jobs = st.jobs;
-      tr.appendChild(cell(jobs.Queued + " / " + (jobs.Running + jobs.Leased) + " / " + jobs.Succeeded, "mono"));
+      tr.appendChild(cell(jobs.queued + " / " + (jobs.running + jobs.leased) + " / " + jobs.succeeded, "mono"));
+      const f = st.findings;
+      tr.appendChild(cell(f.confirmed + " / " + f.pending + " / " + f.rejected + " / " + f.inconclusive, "mono"));
       const actions = el("td");
       actionsFor(st).forEach(b => actions.appendChild(b));
+      const findingsBtn = el("button", "Findings");
+      findingsBtn.addEventListener("click", () => selectScan(st.scan.id, st.scan.name || st.scan.id));
+      actions.appendChild(findingsBtn);
       tr.appendChild(actions);
       return tr;
     }
@@ -158,7 +200,7 @@
       try {
         const scans = (await j("/api/scans")) || [];
         const statuses = await Promise.all(scans.map(s => j("/api/scans/" + encodeURIComponent(s.id) + "/status")));
-        setBody("scans", statuses.map(scanRow), "No scans yet.", 7);
+        setBody("scans", statuses.map(scanRow), "No scans yet.", 8);
         document.getElementById("refreshed").textContent = "updated " + new Date().toLocaleTimeString();
       } catch (e) {
         setBody("scans", [], "error loading scans", 7);
@@ -180,11 +222,190 @@
       }
     }
 
+    // --- findings & reports ---
+
+    let selectedScanId = null;
+    let selectedFindingIds = new Set();
+
+    function selectScan(id, label) {
+      selectedScanId = id;
+      selectedFindingIds = new Set();
+      document.getElementById("findingsScanLabel").textContent = "— " + label;
+      document.getElementById("reportsScanLabel").textContent = "— " + label;
+      document.getElementById("reportsCard").style.display = "";
+      loadFindings();
+      loadReports();
+    }
+
+    // Finding.Detail comes over the wire as base64 (Go []byte -> JSON string);
+    // decoding it here mirrors the read-only shape internal/report and the web
+    // API's own detail endpoint use, just for the list's Parameter/Context
+    // columns — the full detail view below still comes from the server, which
+    // also resolves endpoint/parameter/evidence.
+    function decodeDetail(raw) {
+      try { return JSON.parse(atob(raw)); } catch (e) { return {}; }
+    }
+
+    function findingDetailEl(f) {
+      const box = el("div", undefined, "detail");
+      const dl = document.createElement("dl");
+      function row(label, value) {
+        if (!value) return;
+        dl.appendChild(el("dt", label));
+        dl.appendChild(el("dd", value));
+      }
+      row("Verdict", f.verdict + "   (confidence: " + f.confidence + ")");
+      if (f.endpoint) row("Endpoint", f.endpoint.method + " " + f.endpoint.url);
+      if (f.parameter) row("Parameter", f.parameter.name + " (" + f.parameter.location + ")");
+      else if (f.parsed_detail && f.parsed_detail.parameter_name) row("Parameter", f.parsed_detail.parameter_name);
+
+      const cands = (f.parsed_detail && f.parsed_detail.candidates) || [];
+      if (cands.length) {
+        dl.appendChild(el("dt", "Candidates (" + cands.length + ", " + (f.parsed_detail.occurrences || 0) + " occurrence(s))"));
+        const dd = document.createElement("dd");
+        const ul = document.createElement("ul");
+        cands.forEach(c => {
+          ul.appendChild(el("li", "[" + c.category + "/" + c.context + "] " + c.value + " — " + c.rationale));
+        });
+        dd.appendChild(ul);
+        dl.appendChild(dd);
+      }
+
+      if (f.provenance) {
+        let p = f.provenance.engine + ", discovered via " + f.provenance.discovery_source;
+        if (f.provenance.ai_assisted) p += " (AI-assisted; advisory only, not the verdict authority)";
+        row("Provenance", p);
+      }
+
+      if (f.evidence && f.evidence.length) {
+        dl.appendChild(el("dt", "Evidence (" + f.evidence.length + ") — metadata only; opening fetches the actual content"));
+        const dd = document.createElement("dd");
+        const ul = document.createElement("ul");
+        f.evidence.forEach(ev => {
+          const li = document.createElement("li");
+          li.appendChild(document.createTextNode(ev.kind + " · " + (ev.media_type || "") + " · " + ev.size + " bytes · "));
+          const a = document.createElement("a");
+          a.href = "/api/evidence/" + encodeURIComponent(ev.id) + "/content";
+          a.target = "_blank"; a.rel = "noopener";
+          a.textContent = "open";
+          li.appendChild(a);
+          ul.appendChild(li);
+        });
+        dd.appendChild(ul);
+        dl.appendChild(dd);
+      }
+      box.appendChild(dl);
+      return box;
+    }
+
+    function findingRow(f) {
+      const tr = el("tr");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.title = "include in next generated report";
+      cb.addEventListener("change", () => {
+        if (cb.checked) selectedFindingIds.add(f.id); else selectedFindingIds.delete(f.id);
+      });
+      const cbTd = el("td"); cbTd.appendChild(cb); tr.appendChild(cbTd);
+
+      const titleTd = cell(f.title || "(untitled)", "clickable");
+      tr.appendChild(titleTd);
+
+      const vTd = el("td");
+      vTd.appendChild(el("span", f.verdict, "pill " + (f.verdict === "confirmed" ? "confirmed" : f.verdict === "pending" ? "pending" : "")));
+      tr.appendChild(vTd);
+      tr.appendChild(cell(f.severity));
+
+      const detail = decodeDetail(f.detail || "");
+      tr.appendChild(cell(detail.parameter_name || ""));
+      const firstCand = (detail.candidates || [])[0];
+      tr.appendChild(cell(firstCand ? firstCand.context : ""));
+
+      let detailRow = null;
+      titleTd.addEventListener("click", async () => {
+        if (detailRow) { detailRow.remove(); detailRow = null; return; }
+        detailRow = el("tr");
+        const td = el("td"); td.colSpan = 6;
+        td.appendChild(el("div", "loading…", "muted"));
+        detailRow.appendChild(td);
+        tr.after(detailRow);
+        try {
+          const full = await j("/api/scans/" + encodeURIComponent(selectedScanId) + "/findings/" + encodeURIComponent(f.id));
+          td.replaceChildren(findingDetailEl(full));
+        } catch (e) {
+          td.replaceChildren(el("div", "failed to load detail", "err"));
+        }
+      });
+      return tr;
+    }
+
+    async function loadFindings() {
+      if (!selectedScanId) return;
+      try {
+        const findings = (await j("/api/scans/" + encodeURIComponent(selectedScanId) + "/findings")) || [];
+        setBody("findings", findings.map(findingRow), "No findings for this scan.", 6);
+      } catch (e) {
+        setBody("findings", [], "error loading findings", 6);
+      }
+    }
+
+    function reportRow(r) {
+      const tr = el("tr");
+      tr.appendChild(cell((r.created_at || "").slice(0, 19).replace("T", " ")));
+      tr.appendChild(cell(r.format));
+      tr.appendChild(cell(String((r.summary && r.summary.total_findings) || 0)));
+      tr.appendChild(cell(String((r.summary && r.summary.confirmed_count) || 0)));
+      const openTd = el("td");
+      const view = document.createElement("a");
+      view.href = "/api/reports/" + encodeURIComponent(r.id) + "/content";
+      view.target = "_blank"; view.rel = "noopener";
+      view.textContent = "view";
+      const dl = document.createElement("a");
+      dl.href = "/api/reports/" + encodeURIComponent(r.id) + "/content?download";
+      dl.textContent = "download";
+      dl.style.marginLeft = "10px";
+      openTd.appendChild(view); openTd.appendChild(dl);
+      tr.appendChild(openTd);
+      return tr;
+    }
+
+    async function loadReports() {
+      if (!selectedScanId) return;
+      try {
+        const reports = (await j("/api/scans/" + encodeURIComponent(selectedScanId) + "/reports")) || [];
+        setBody("reports", reports.map(reportRow), "No reports yet.", 5);
+      } catch (e) {
+        setBody("reports", [], "error loading reports", 5);
+      }
+    }
+
+    async function generateReport() {
+      if (!selectedScanId) return;
+      const format = document.getElementById("reportFormat").value;
+      try {
+        const r = await fetch("/api/scans/" + encodeURIComponent(selectedScanId) + "/reports", {
+          method: "POST",
+          headers: { "X-Indago-Client": "ui", "Content-Type": "application/json" },
+          body: JSON.stringify({ format: format, finding_ids: Array.from(selectedFindingIds) }),
+        });
+        if (!r.ok) {
+          let msg = r.status;
+          try { msg = (await r.json()).error || msg; } catch (e) {}
+          showError("generate report failed: " + msg);
+          return;
+        }
+        loadReports();
+      } catch (e) {
+        showError("generate report failed: " + e);
+      }
+    }
+
     async function init() {
       try {
         const v = await j("/api/version");
         document.getElementById("version").textContent = "v" + (v.version || "dev");
       } catch (e) { /* ignore */ }
+      document.getElementById("generateReport").addEventListener("click", generateReport);
       loadProjects();
       loadScans();
       setInterval(loadScans, 2000);

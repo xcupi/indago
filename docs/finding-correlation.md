@@ -41,6 +41,20 @@ match absorbs the new candidate (bumping an occurrence count and recording the
 candidate + its TestCase ID, deduplicated by candidate value so a retried
 attempt doesn't bloat the list) instead of creating a new row.
 
+A Finding is created **regardless of HTTP method**: a POST/JSON candidate
+reflecting is just as real as a GET one, even though it can never be browser-
+verified (navigation has no request body) and so stays `pending` forever —
+see `docs/scan-orchestration.md`. Only the browser-verify job's enqueue is
+gated on the method, not the correlation itself.
+
+This lookup-then-write is not atomic at the store layer, so `executor` and
+`verifyExecutor` share one `*sync.Mutex` (constructed once per scan in
+`defaultHandlers`) around it and around `correlateVerification`'s own
+Get-mutate-Update — without it, two candidates reflecting into the same site
+on different workers could each see "no match" and create a duplicate
+Finding, and two concurrent verify completions for the same Finding could
+lose one's evidence to the other's `Update`. See `docs/e2e-validation.md`.
+
 ## Verdict: monotonic, never an LLM's call
 
 A `Finding`'s `Verdict` only ever moves up one lattice:

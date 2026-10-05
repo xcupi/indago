@@ -169,6 +169,14 @@ func verdictRank(v domain.Verdict) int {
 // TestCase IDs are unioned in every time, so correlating never discards raw
 // evidence. It is the only place a Finding's Verdict leaves Pending.
 func (e *verifyExecutor) correlateVerification(ctx context.Context, findingID domain.ID, candTestCaseID domain.ID, vres *verification.Result, verifyTestCaseID domain.ID, newEvidenceIDs []domain.ID) {
+	// Serialized: two verify jobs for the same correlated finding (two
+	// candidates at the same site) can complete at the same time on different
+	// browser workers, and this is a plain Get-mutate-Update — without the
+	// lock, the second Update to commit would silently overwrite the first's
+	// evidence/verdict rather than merge with it.
+	e.findingsMu.Lock()
+	defer e.findingsMu.Unlock()
+
 	f, err := e.store.Findings().Get(ctx, findingID)
 	if err != nil {
 		e.log.Warn("load finding for verification update", "finding", findingID, "err", err)

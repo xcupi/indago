@@ -12,7 +12,7 @@ platform**. It helps an authorized operator discover and *verify* web
 vulnerabilities against targets **they are explicitly permitted to test**.
 
 - **Phase 1 scope (product):** Reflected XSS detection and verification.
-- **Current phase (code):** Reflected XSS — baseline, **reflection detection**, **context analysis**, **candidate planning**, **candidate execution**, **browser verification** (a reflected candidate is confirmed/rejected/inconclusive only by a real, deterministic browser signal — never by an LLM), and **finding correlation & reporting** (repeated results at the same site collapse into one `Finding` without discarding evidence; JSON + Markdown output).
+- **Current phase (code):** Reflected XSS — baseline, **reflection detection**, **context analysis**, **candidate planning**, **candidate execution**, **browser verification** (a reflected candidate is confirmed/rejected/inconclusive only by a real, deterministic browser signal — never by an LLM), **finding correlation & reporting** (repeated results at the same site collapse into one `Finding` without discarding evidence; JSON + Markdown output), and **end-to-end validation/hardening** of that whole pipeline against a local test corpus (see `docs/e2e-validation.md`) — no new detection features, only fixes the corpus's real-browser tests actually caught.
 - **Future (designed for, not built):** Stored XSS, DOM XSS, additional engines.
 
 The architecture is deliberately generic (not XSS-specific) so new engines plug
@@ -154,7 +154,26 @@ Implemented so far (infrastructure and **discovery**):
 - ✅ Reporting (`internal/report`): `JSONGenerator` and `MarkdownGenerator`,
   pure serialization of findings — no detection/verification dependency, no
   LLM, deterministic output (sorted findings, sorted map-keyed breakdowns).
-- ⏳ Stubs: detection engines (non-XSS classes), non-anonymous auth, AI providers
+- ✅ End-to-end validation/hardening (see `docs/e2e-validation.md`): a local
+  test corpus and real-Chromium tests exercising the full pipeline (discovery
+  → … → report), which found and fixed real gaps rather than adding features:
+  **session expiration** was fully designed (states, `Authenticator.Validate`,
+  `ScanAwaitingAuth`) but never wired into the monitor — it now is, and
+  **`auth.Existing`** (importing session material saved by a prior login) is
+  implemented so an authenticated scan can be tested at all; the **HTTP-level**
+  executor never carried the scan's session cookies (only browser verification
+  did) — `scopedEngine` now does too; a candidate reflecting on a **POST/JSON**
+  endpoint created no `Finding` at all, contradicting the documented "stays
+  pending" behavior — fixed to always correlate one, just never enqueuing a
+  (body-less) browser-verify job for it; the browser worker group could be
+  sized to **zero**, silently orphaning every `JobVerify` job forever even
+  though "no browser configured" is a supported, tested configuration — now
+  floored at 1; and **Finding correlation** (`upsertPendingFinding`/
+  `correlateVerification`) read-then-wrote without a lock, so concurrent
+  candidates at the same site could race into a duplicate `Finding` or a lost
+  evidence update — now serialized per scan.
+- ⏳ Stubs: detection engines (non-XSS classes), Password/Interactive/MFA auth
+  modes, AI providers
 
 **The dividing line:** transport, browser, discovery, orchestration, and the
 full Reflected XSS pipeline (reflect → context → plan → execute candidates →

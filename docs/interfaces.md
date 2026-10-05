@@ -107,9 +107,14 @@ func For(mode domain.AuthMode) (Authenticator, error)
 ```
 
 - ✅ `Anonymous` (no credentials; immediately active; never expires).
-- 🔌 `password`, `interactive`, `mfa`, `existing` (stubs).
-- Secrets are never logged; interactive/MFA login and credential handling arrive
-  in Phase 1.
+- ✅ `Existing`: imports session material (cookies/storage state) saved by a
+  prior interactive login, via `CreateScanParams.AuthStatePath`. No network or
+  browser activity of its own — it only validates the file is present —
+  which is what makes an authenticated scan testable without Interactive/MFA.
+- 🔌 `password`, `interactive`, `mfa` (stubs: these themselves need an
+  unimplemented credentialed/interactive login flow).
+- Secrets are never logged; interactive/MFA login and credential handling
+  remain future work.
 
 ---
 

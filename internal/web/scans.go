@@ -35,7 +35,7 @@ func (s *Server) handleListTargets(w http.ResponseWriter, r *http.Request) {
 	}
 	targets, err := s.store.Targets().ListByProject(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeInternalError(w, "list targets", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, nonNil(targets))
@@ -65,7 +65,7 @@ func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	t := &domain.Target{ID: domain.NewID(), ProjectID: projectID, Name: req.Name, BaseURL: u.String(), CreatedAt: now, UpdatedAt: now}
 	if err := s.store.Targets().Create(r.Context(), t); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeInternalError(w, "create target", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, t)
@@ -120,7 +120,7 @@ func (s *Server) handlePutScope(w http.ResponseWriter, r *http.Request) {
 		existing.AllowSubdomains = req.AllowSubdomains
 		existing.UpdatedAt = now
 		if err := s.store.Scopes().Update(r.Context(), existing); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			s.writeInternalError(w, "update scope", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, existing)
@@ -134,12 +134,12 @@ func (s *Server) handlePutScope(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:           now, UpdatedAt: now,
 		}
 		if err := s.store.Scopes().Create(r.Context(), sc); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			s.writeInternalError(w, "create scope", err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, sc)
 	default:
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeInternalError(w, "load scope", err)
 	}
 }
 
@@ -277,7 +277,7 @@ func (s *Server) writeScanError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 	default:
 		s.log.Error("scan operation failed", "err", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "scan operation failed")
 	}
 }
 

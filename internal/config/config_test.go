@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -55,5 +56,19 @@ func TestDerivedPaths(t *testing.T) {
 	}
 	if c.EvidenceDir() != "/var/indago/evidence" {
 		t.Fatalf("evidence dir = %s", c.EvidenceDir())
+	}
+	if c.ReportsDir() != "/var/indago/reports" {
+		t.Fatalf("reports dir = %s", c.ReportsDir())
+	}
+}
+
+func TestEnsureDirsCreatesReportsDir(t *testing.T) {
+	c := config.Default()
+	c.DataDir = t.TempDir()
+	if err := c.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(c.ReportsDir()); err != nil || !info.IsDir() {
+		t.Fatalf("reports dir not created: %v", err)
 	}
 }

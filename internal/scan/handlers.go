@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	"github.com/indago/indago/internal/browser"
 	"github.com/indago/indago/internal/domain"
@@ -13,8 +14,12 @@ import (
 
 func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope) map[domain.JobType]worker.Handler {
 	h := phase0Handlers(c.log)
-	h[domain.JobTest] = newExecutor(c.store, eng, c.opts.Evidence, c.queue, c.opts.Executor, c.log)
-	h[domain.JobVerify] = newVerifyExecutor(c.store, c.verifier(), c.opts.Evidence, scope, c.opts.Executor, c.log)
+	// Shared by both executors so Finding correlation (candidate-side upsert
+	// and verification-side update) is race-free across the whole scan — see
+	// newExecutor's doc comment.
+	findingsMu := &sync.Mutex{}
+	h[domain.JobTest] = newExecutor(c.store, eng, c.opts.Evidence, c.queue, c.opts.Executor, c.log, findingsMu)
+	h[domain.JobVerify] = newVerifyExecutor(c.store, c.verifier(), c.opts.Evidence, scope, c.opts.Executor, c.log, findingsMu)
 	return h
 }
 

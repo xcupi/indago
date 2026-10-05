@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/indago/indago/internal/detection"
@@ -61,17 +62,33 @@ func parseVerifyJob(job *domain.TestJob) (verifyJob, error) {
 
 // enqueueVerification correlates a candidate that reflected into a Finding
 // (creating one at VerdictPending, or absorbing this candidate into an
-// existing finding at the same site — see upsertPendingFinding) and enqueues
-// the JobVerify job that will confirm or reject it. Best-effort: failures are
-// logged, not fatal — the candidate's own TestCase result (already persisted)
-// is unaffected either way.
+// existing finding at the same site — see upsertPendingFinding) and, only when
+// the endpoint's method is browser-navigable, enqueues the JobVerify job that
+// will confirm or reject it.
+//
+// The Finding is created UNCONDITIONALLY: a POST/body-carrying reflection is
+// just as real a candidate as a GET one, and the operator should see it even
+// though browser navigation has no request body and so cannot verify it —
+// that finding simply stays Pending (see docs/scan-orchestration.md). Only the
+// verify-job enqueue is gated on the method.
+//
+// Best-effort throughout: failures are logged, not fatal — the candidate's own
+// TestCase result (already persisted) is unaffected either way.
 func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, cand detection.Candidate, focus *domain.Parameter, candTestCaseID domain.ID) {
-	if e.queue == nil || e.store == nil {
+	if e.store == nil {
 		return
 	}
+	// Serialized: two candidates correlating to the same site can run on
+	// different HTTP workers at the same time, and the correlation lookup
+	// (ListByScan + match by dedup key) is not atomic at the store layer.
+	e.findingsMu.Lock()
 	f, err := upsertPendingFinding(ctx, e.store, job.ScanID, ep, job.Target.InjectionPointID, focus, cand, candTestCaseID)
+	e.findingsMu.Unlock()
 	if err != nil {
 		e.log.Warn("enqueue verification: upsert finding", "job", job.ID, "err", err)
+		return
+	}
+	if e.queue == nil || !isSafeMethod(ep.Method) {
 		return
 	}
 
@@ -108,13 +125,19 @@ type verifyExecutor struct {
 	scope    domain.Scope
 	cfg      ExecutorConfig // reuses AllowStateChanging + RequestTimeout semantics
 	log      *slog.Logger
+	// findingsMu — see newExecutor's doc comment. MUST be the same mutex given
+	// to this scan's executor for correlation to be race-free.
+	findingsMu *sync.Mutex
 }
 
-func newVerifyExecutor(st store.Store, v verification.Verifier, ev evidence.Store, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger) *verifyExecutor {
+func newVerifyExecutor(st store.Store, v verification.Verifier, ev evidence.Store, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex) *verifyExecutor {
 	if v == nil {
 		v = verification.Stub{}
 	}
-	return &verifyExecutor{store: st, verifier: v, evidence: ev, scope: scope, cfg: cfg.withDefaults(), log: log}
+	if findingsMu == nil {
+		findingsMu = &sync.Mutex{}
+	}
+	return &verifyExecutor{store: st, verifier: v, evidence: ev, scope: scope, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu}
 }
 
 var _ worker.Handler = (*verifyExecutor)(nil)
