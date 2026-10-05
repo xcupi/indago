@@ -34,6 +34,15 @@ type Manager struct {
 	// race inside that registration — not in Indago's own bookkeeping, which
 	// is already guarded by mu. Operations on an already-created context/page
 	// are not serialized here, only the moment of creation.
+	//
+	// Closing a context, or the pooled browsers, also takes createMu: a
+	// creation abandoned by its caller's cancellation keeps running in the
+	// background (callCtxCreate), and Playwright finishes initializing the new
+	// object (e.g. setting its browser back-reference) on the caller's
+	// goroutine AFTER the server has created it — if that object is closed
+	// server-side meanwhile (Manager.Close right after a scan shutdown), the
+	// library's close-event handler races that initialization. Waiting for the
+	// in-flight creation first means a close never overlaps one.
 	createMu sync.Mutex
 }
 
@@ -165,9 +174,11 @@ func (m *Manager) Close() error {
 		for _, c := range contexts {
 			note(c.closeHandle())
 		}
+		m.createMu.Lock() // see createMu: never close a browser mid-creation
 		for _, b := range browsers {
 			note(b.Close())
 		}
+		m.createMu.Unlock()
 		note(m.drv.Stop())
 	}()
 
@@ -382,6 +393,8 @@ func (c *Context) closeHandle() error {
 	c.closed = true
 	c.pages = make(map[*Page]struct{})
 	c.mu.Unlock()
+	c.mgr.createMu.Lock() // see Manager.createMu: never close mid-creation
+	defer c.mgr.createMu.Unlock()
 	return c.handle.Close()
 }
 

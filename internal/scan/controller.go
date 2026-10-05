@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,12 @@ var (
 	ErrBadState      = errors.New("scan: illegal state transition")
 	ErrShutdown      = errors.New("scan: controller is shut down")
 	ErrInvalidSeed   = errors.New("scan: invalid seed URL")
+	// ErrAuth reports an unusable authentication configuration: an
+	// unimplemented mode, a state path given for a mode that takes none, or
+	// session material AuthExisting cannot use (at creation, or when Start/
+	// Resume re-establishes the session and finds it gone or changed). It is
+	// operator-fixable input, never an internal failure.
+	ErrAuth = errors.New("scan: authentication")
 )
 
 // errSkipWrite lets a mutate callback signal "nothing changed; do not persist".
@@ -282,6 +289,10 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	if !mode.IsValid() {
 		mode = domain.AuthAnonymous
 	}
+	statePath, err := validateAuth(mode, p.AuthStatePath)
+	if err != nil {
+		return nil, err
+	}
 	stop := p.Stop
 	if !stop.Mode.IsValid() {
 		stop.Mode = domain.StopContinueAll
@@ -290,7 +301,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	now := time.Now()
 	sess := &domain.Session{
 		ID: domain.NewID(), ScanID: domain.NewID(), // ScanID set below once scan ID is known
-		Mode: mode, State: domain.SessionNone, StatePath: p.AuthStatePath, CreatedAt: now, UpdatedAt: now,
+		Mode: mode, State: domain.SessionNone, StatePath: statePath, CreatedAt: now, UpdatedAt: now,
 	}
 	sc := &domain.Scan{
 		ID:        domain.NewID(),
@@ -611,6 +622,29 @@ func (c *Controller) Shutdown() {
 // helpers
 // ---------------------------------------------------------------------------
 
+// validateAuth checks a scan's authentication configuration at creation, so an
+// unusable one is rejected up front (ErrAuth) instead of failing at Start. It
+// returns the cleaned state path to persist.
+func validateAuth(mode domain.AuthMode, statePath string) (string, error) {
+	if !auth.Implemented(mode) {
+		return "", fmt.Errorf("%w: auth mode %q is not implemented (use %q or %q)", ErrAuth, mode, domain.AuthAnonymous, domain.AuthExisting)
+	}
+	statePath = strings.TrimSpace(statePath)
+	if mode != domain.AuthExisting {
+		if statePath != "" {
+			return "", fmt.Errorf("%w: a session state path is only valid with auth mode %q", ErrAuth, domain.AuthExisting)
+		}
+		return "", nil
+	}
+	if statePath != "" && filepath.IsAbs(statePath) {
+		statePath = filepath.Clean(statePath)
+	}
+	if err := auth.ValidateStateFile(statePath); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrAuth, err)
+	}
+	return statePath, nil
+}
+
 // loadScope loads the project's scope, failing closed when absent or empty.
 func (c *Controller) loadScope(ctx context.Context, projectID domain.ID) (domain.Scope, error) {
 	scope, err := c.store.Scopes().GetByProject(ctx, projectID)
@@ -637,7 +671,7 @@ func (c *Controller) establishSession(ctx context.Context, sc *domain.Scan) erro
 	}
 	established, err := a.Establish(ctx, auth.Input{ScanID: sc.ID, StatePath: sess.StatePath})
 	if err != nil {
-		return fmt.Errorf("scan: establish session: %w", err)
+		return fmt.Errorf("%w: establish session: %w", ErrAuth, err)
 	}
 	// Preserve the existing session row ID; copy over established fields.
 	sess.State = established.State
@@ -684,9 +718,11 @@ func (c *Controller) reauthenticateIfAwaitingAuth(ctx context.Context, sc *domai
 	return nil
 }
 
-// sessionExpired reports whether the scan's established session has an
-// ExpiresAt in the past. A session with no expiry (e.g. the anonymous mode)
-// never expires.
+// sessionExpired reports whether the scan's established session is no longer
+// usable: its ExpiresAt is in the past, or its mode's Authenticator.Validate
+// reports it inactive (e.g. AuthExisting's session material was removed —
+// continuing would silently test the target unauthenticated). A session with
+// no expiry that still validates (e.g. the anonymous mode) never expires.
 func (c *Controller) sessionExpired(ctx context.Context, sc *domain.Scan) (bool, error) {
 	if sc.SessionID.Empty() {
 		return false, nil
@@ -695,7 +731,21 @@ func (c *Controller) sessionExpired(ctx context.Context, sc *domain.Scan) (bool,
 	if err != nil {
 		return false, err
 	}
-	return sess.State == domain.SessionActive && sess.ExpiresAt != nil && sess.ExpiresAt.Before(time.Now()), nil
+	if sess.State != domain.SessionActive {
+		return false, nil
+	}
+	if sess.ExpiresAt != nil && sess.ExpiresAt.Before(time.Now()) {
+		return true, nil
+	}
+	a, err := auth.For(sess.Mode)
+	if err != nil {
+		return false, err
+	}
+	ok, err := a.Validate(ctx, sess)
+	if err != nil {
+		return false, err
+	}
+	return !ok, nil
 }
 
 // pauseForExpiredSession marks the session Expired and moves the scan to

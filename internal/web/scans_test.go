@@ -8,6 +8,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -355,5 +358,53 @@ func TestMutationGuard(t *testing.T) {
 	// Reads never need the header.
 	if rec := a.do("GET", "/api/scans", nil); rec.Code != 200 {
 		t.Fatalf("GET: %d", rec.Code)
+	}
+}
+
+func TestCreateScanExistingSession(t *testing.T) {
+	a := newAPI(t, nil)
+	site := testSite(t)
+	projectID, targetID := setupScan(a, site.URL)
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(state, []byte(`{"cookies":[{"name":"sid","value":"1","domain":"127.0.0.1"}],"origins":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, body := range map[string]map[string]any{
+		"existing without path":   {"auth_mode": "existing"},
+		"existing relative path":  {"auth_mode": "existing", "auth_state_path": "state.json"},
+		"existing missing file":   {"auth_mode": "existing", "auth_state_path": filepath.Join(dir, "missing.json")},
+		"path with anonymous":     {"auth_mode": "anonymous", "auth_state_path": state},
+		"path with default mode":  {"auth_state_path": state},
+		"unimplemented auth mode": {"auth_mode": "password"},
+	} {
+		body["project_id"], body["target_id"] = projectID, targetID
+		rec := a.do("POST", "/api/scans", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400: %s", name, rec.Code, rec.Body.String())
+			continue
+		}
+		if !strings.Contains(rec.Body.String(), "authentication") {
+			t.Errorf("%s: error does not explain the auth problem: %s", name, rec.Body.String())
+		}
+	}
+
+	var sc domain.Scan
+	a.mustJSON(a.do("POST", "/api/scans", map[string]any{
+		"project_id": projectID, "target_id": targetID, "auth_mode": "existing", "auth_state_path": state,
+	}), 201, &sc)
+	sess, err := a.st.Sessions().GetByScan(context.Background(), sc.ID)
+	if err != nil || sess.Mode != domain.AuthExisting || sess.StatePath != state {
+		t.Fatalf("session not created as requested: %+v (%v)", sess, err)
+	}
+
+	// Material removed before start: a clear 400, not an opaque 500.
+	if err := os.Remove(state); err != nil {
+		t.Fatal(err)
+	}
+	rec := a.do("POST", "/api/scans/"+string(sc.ID)+"/start", nil)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "authentication") {
+		t.Fatalf("start with missing session material: %d %s", rec.Code, rec.Body.String())
 	}
 }

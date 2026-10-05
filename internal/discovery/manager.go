@@ -68,7 +68,11 @@ type RunParams struct {
 	Scope     domain.Scope
 	SeedURLs  []string
 	SessionID domain.ID
-	Wordlist  string
+	// SessionStatePath is the scan's saved browser session material (empty
+	// for an anonymous scan); browser-based sources load pages with it so an
+	// authenticated scan does not discover the logged-out site.
+	SessionStatePath string
+	Wordlist         string
 }
 
 // RunResult summarizes a completed discovery run.
@@ -91,12 +95,13 @@ func (m *Manager) Run(ctx context.Context, p RunParams) (*RunResult, error) {
 		return &RunResult{}, fmt.Errorf("discovery: hydrate: %w", err)
 	}
 	in := Input{
-		ScanID:    p.ScanID,
-		Scope:     p.Scope,
-		SeedURLs:  p.SeedURLs,
-		SessionID: p.SessionID,
-		Wordlist:  p.Wordlist,
-		Gate:      m.gate,
+		ScanID:           p.ScanID,
+		Scope:            p.Scope,
+		SeedURLs:         p.SeedURLs,
+		SessionID:        p.SessionID,
+		SessionStatePath: p.SessionStatePath,
+		Wordlist:         p.Wordlist,
+		Gate:             m.gate,
 	}
 
 	var (

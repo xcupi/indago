@@ -172,6 +172,20 @@ Implemented so far (infrastructure and **discovery**):
   `correlateVerification`) read-then-wrote without a lock, so concurrent
   candidates at the same site could race into a duplicate `Finding` or a lost
   evidence update — now serialized per scan.
+- ✅ Reliability & release gate (see `docs/e2e-validation.md`): no new
+  detection features. Discovery's restart hydration now **reconciles**
+  half-finished registrations (endpoint/parameter/injection point persisted
+  but its job not enqueued), which was the root cause of the
+  `TestE2E_RestartRecoversInterruptedVerification` flake, via the new
+  `Queue.Jobs`. Two Playwright races are fixed: the library is upgraded to
+  `playwright-go v0.6000.0` (driver 1.60.0), and closing a context/browser
+  waits for any in-flight creation. `auth.Existing` is wired end to end: CLI
+  `-auth-state`, API `auth_state_path`, create-time validation (`ErrAuth` →
+  400), session reuse by HTTP + browser discovery + verification, and the
+  monitor pausing to `awaiting_auth` when the material disappears. Stress
+  tests live in `internal/scan/stress_test.go`. When changing restart, queue,
+  or browser lifecycle code, keep `assertScanIntegrity`'s invariants
+  passing under `-race -count=20`.
 - ⏳ Stubs: detection engines (non-XSS classes), Password/Interactive/MFA auth
   modes, AI providers
 

@@ -331,12 +331,14 @@ func hasSuffixKey(m map[string]domain.DiscoverySource, suffix string) bool {
 // spyBrowser records the scope gate it was given and returns a mix of in- and
 // out-of-scope observations.
 type spyBrowser struct {
-	allow func(string) bool
-	net   []browser.NetworkEvent
+	allow     func(string) bool
+	statePath string
+	net       []browser.NetworkEvent
 }
 
 func (s *spyBrowser) Render(_ context.Context, url string, o browser.RenderOptions) (*browser.RenderResult, error) {
 	s.allow = o.AllowRequest
+	s.statePath = o.SessionStatePath
 	return &browser.RenderResult{FinalURL: url, Status: 200, Network: s.net}, nil
 }
 func (*spyBrowser) Close() error { return nil }
@@ -380,6 +382,24 @@ func TestNetworkSourceScopesObservationsBeforeSink(t *testing.T) {
 	}
 	if !sb.allow("http://in.example/x") || sb.allow("https://tracker.evil.example/pixel") || sb.allow("http://in.example/blocked/x") {
 		t.Fatal("the scope gate does not match the scan scope")
+	}
+}
+
+// An authenticated scan's browser discovery loads pages with the scan's saved
+// session — otherwise it observes the logged-out site (found by the release-
+// gate deployment smoke test: one cookie-less request per discovery run).
+func TestNetworkSourceUsesScanSession(t *testing.T) {
+	sb := &spyBrowser{}
+	src := discovery.NewNetworkSource(sb, discovery.DefaultConfig())
+	in := discovery.Input{
+		Scope: domain.Scope{IncludeHosts: []string{"in.example"}}, SeedURLs: []string{"http://in.example/"},
+		SessionStatePath: "/data/sessions/state.json",
+	}
+	if err := src.Run(context.Background(), in, &spySink{}); err != nil {
+		t.Fatal(err)
+	}
+	if sb.statePath != in.SessionStatePath {
+		t.Fatalf("browser rendered with session %q, want %q", sb.statePath, in.SessionStatePath)
 	}
 }
 

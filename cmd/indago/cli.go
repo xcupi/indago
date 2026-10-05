@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -340,17 +341,34 @@ func (c *cli) scanCreate(args []string) error {
 	profile := fs.String("profile", "balanced", "conservative | balanced | fast")
 	stop := fs.String("stop", "", "stop policy: continue_all | first_confirmed | after_n_confirmed | pause_and_ask")
 	stopN := fs.Int("stop-n", 0, "confirmed-finding limit for -stop after_n_confirmed")
+	authMode := fs.String("auth", "", "auth mode: anonymous (default) | existing")
+	authState := fs.String("auth-state", "", "saved session material (Playwright storage-state JSON) for -auth existing")
 	var seeds stringList
 	fs.Var(&seeds, "seed", "discovery seed URL (repeatable; default: the target base URL)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-seed URL]... [-stop MODE [-stop-n N]]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
 		"profile": *profile, "seed_urls": []string(seeds),
+	}
+	if *authState != "" && *authMode == "" {
+		*authMode = string(domain.AuthExisting) // the only mode that takes a state file
+	}
+	if *authMode != "" {
+		req["auth_mode"] = *authMode
+	}
+	if *authState != "" {
+		// The server opens the file, so send an absolute path: a relative one
+		// would be resolved against the server's working directory, not ours.
+		abs, err := filepath.Abs(*authState)
+		if err != nil {
+			return fmt.Errorf("-auth-state: %w", err)
+		}
+		req["auth_state_path"] = abs
 	}
 	if *stop != "" {
 		req["stop"] = map[string]any{"mode": *stop, "confirmed_limit": *stopN}

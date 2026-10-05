@@ -205,3 +205,147 @@ func TestCollectorHydrateAvoidsDuplicatesAfterRestart(t *testing.T) {
 		t.Fatalf("duplicate jobs enqueued after hydrate: %d -> %d", before.Total(), after.Total())
 	}
 }
+
+// failingEnqueue simulates a shutdown landing between a collector's persist
+// and enqueue steps: every Enqueue fails as if the run context were canceled.
+type failingEnqueue struct{ queue.Queue }
+
+func (failingEnqueue) Enqueue(context.Context, *domain.TestJob) error { return context.Canceled }
+
+// jobTargets returns, per injection point (or "endpoint:<id>" for an
+// endpoint-level job), how many JobTest jobs target it.
+func jobTargets(t *testing.T, q queue.Queue, scanID domain.ID) map[string]int {
+	t.Helper()
+	jobs, err := q.Jobs(context.Background(), scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]int{}
+	for _, j := range jobs {
+		if j.Target.InjectionPointID.Empty() {
+			out["endpoint:"+string(j.Target.EndpointID)]++
+		} else {
+			out[string(j.Target.InjectionPointID)]++
+		}
+	}
+	return out
+}
+
+// Regression for the restart-recovery completion bug: an endpoint + parameter
+// + injection point persisted by a run that was interrupted before their test
+// jobs were enqueued must get those jobs on the next run's Hydrate. Before the
+// fix, Hydrate only marked them "seen", so they were never tested and the scan
+// completed anyway (TestE2E_RestartRecoversInterruptedVerification: "expected
+// exactly one finding ... got 0").
+func TestCollectorHydrateEnqueuesJobsLostToInterruption(t *testing.T) {
+	st := memory.New()
+	q := queue.NewMemory()
+	scanID := domain.NewID()
+	scope := domain.Scope{IncludeHosts: []string{"example.com"}}
+	ctx := context.Background()
+
+	first := discovery.NewCollector(st, failingEnqueue{q}, scanID, scope, discovery.DefaultConfig(), quiet())
+	if _, err := first.AddEndpoint(ctx, discovery.EndpointCandidate{URL: "http://example.com/s?q=1", Method: domain.MethodGET, Source: domain.SourceCrawler}); err != nil {
+		t.Fatal(err)
+	}
+	ips, _ := st.InjectionPoints().ListByScan(ctx, scanID)
+	if len(ips) != 1 {
+		t.Fatalf("setup: want 1 persisted injection point, got %d", len(ips))
+	}
+	if st, _ := q.Stats(ctx, scanID); st.Total() != 0 {
+		t.Fatalf("setup: interrupted run must have enqueued nothing, got %+v", st)
+	}
+
+	second := discovery.NewCollector(st, q, scanID, scope, discovery.DefaultConfig(), quiet())
+	for i := 0; i < 2; i++ { // second pass proves idempotence
+		if err := second.Hydrate(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eps, _ := st.Endpoints().ListByScan(ctx, scanID)
+	got := jobTargets(t, q, scanID)
+	want := map[string]int{"endpoint:" + string(eps[0].ID): 1, string(ips[0].ID): 1}
+	if len(got) != len(want) || got["endpoint:"+string(eps[0].ID)] != 1 || got[string(ips[0].ID)] != 1 {
+		t.Fatalf("reconciled jobs = %v, want exactly %v", got, want)
+	}
+}
+
+// An endpoint persisted without its own query parameters (interrupted right
+// after the endpoint row was written) gets them — parameter, injection point,
+// and job — on Hydrate. Re-adding the endpoint alone cannot do this: the dedup
+// check returns early for a known endpoint.
+func TestCollectorHydrateRegistersMissingQueryParams(t *testing.T) {
+	st := memory.New()
+	q := queue.NewMemory()
+	scanID := domain.NewID()
+	scope := domain.Scope{IncludeHosts: []string{"example.com"}}
+	ctx := context.Background()
+
+	info, err := discovery.Normalize("http://example.com/s?q=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := &domain.Endpoint{ID: domain.NewID(), ScanID: scanID, URL: info.Canonical, Method: domain.MethodGET,
+		Source: domain.SourceCrawler, Fingerprint: discovery.EndpointKey(domain.MethodGET, info)}
+	if err := st.Endpoints().Create(ctx, ep); err != nil {
+		t.Fatal(err)
+	}
+
+	c := discovery.NewCollector(st, q, scanID, scope, discovery.DefaultConfig(), quiet())
+	if err := c.Hydrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Hydrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	params, _ := st.Parameters().ListByScan(ctx, scanID)
+	ips, _ := st.InjectionPoints().ListByScan(ctx, scanID)
+	if len(params) != 1 || params[0].Name != "q" || params[0].Example != "1" || params[0].Source != domain.SourceCrawler {
+		t.Fatalf("missing query parameter not registered: %+v", params)
+	}
+	if len(ips) != 1 || ips[0].ParameterID != params[0].ID {
+		t.Fatalf("missing injection point not registered: %+v", ips)
+	}
+	got := jobTargets(t, q, scanID)
+	if got[string(ips[0].ID)] != 1 || got["endpoint:"+string(ep.ID)] != 1 || len(got) != 2 {
+		t.Fatalf("jobs = %v, want one endpoint job and one injection-point job", got)
+	}
+}
+
+// A parameter persisted without its injection point gets one (and its job).
+func TestCollectorHydrateCreatesMissingInjectionPoint(t *testing.T) {
+	st := memory.New()
+	q := queue.NewMemory()
+	scanID := domain.NewID()
+	scope := domain.Scope{IncludeHosts: []string{"example.com"}}
+	ctx := context.Background()
+
+	first := discovery.NewCollector(st, q, scanID, scope, discovery.DefaultConfig(), quiet())
+	if err := first.AddParameter(ctx, discovery.ParamCandidate{EndpointURL: "http://example.com/post", EndpointMethod: domain.MethodPOST, Name: "body", Location: domain.LocationForm, Source: domain.SourceForm}); err != nil {
+		t.Fatal(err)
+	}
+	params, _ := st.Parameters().ListByScan(ctx, scanID)
+	// Simulate the interruption: a second parameter row with no injection point.
+	orphan := &domain.Parameter{ID: domain.NewID(), ScanID: scanID, EndpointID: params[0].EndpointID, Name: "extra", Location: domain.LocationForm, Source: domain.SourceForm}
+	if err := st.Parameters().Create(ctx, orphan); err != nil {
+		t.Fatal(err)
+	}
+
+	second := discovery.NewCollector(st, q, scanID, scope, discovery.DefaultConfig(), quiet())
+	if err := second.Hydrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Hydrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ips, _ := st.InjectionPoints().ListByScan(ctx, scanID)
+	if len(ips) != 2 {
+		t.Fatalf("want 2 injection points (1 original + 1 reconciled), got %d", len(ips))
+	}
+	got := jobTargets(t, q, scanID)
+	for _, ip := range ips {
+		if got[string(ip.ID)] != 1 {
+			t.Fatalf("injection point %s has %d jobs, want 1 (jobs=%v)", ip.ID, got[string(ip.ID)], got)
+		}
+	}
+}

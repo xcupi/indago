@@ -340,3 +340,46 @@ func TestLeaseScanFilterIsolatesScans(t *testing.T) {
 		}
 	})
 }
+
+func TestJobsListsOneScanInAnyState(t *testing.T) {
+	runEach(t, func(t *testing.T, q clockQueue) {
+		ctx := context.Background()
+		scanA, scanB := domain.NewID(), domain.NewID()
+		a1, a2 := job(scanA, 0), job(scanA, 5)
+		a2.Payload = []byte(`{"k":1}`)
+		_ = q.Enqueue(ctx, a1)
+		_ = q.Enqueue(ctx, a2)
+		_ = q.Enqueue(ctx, job(scanB, 0))
+		leased, err := q.Lease(ctx, "w", scanA, nil, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Complete(ctx, leased.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := q.Jobs(ctx, scanA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("Jobs(scanA) = %d jobs, want 2 (both states, no scanB job)", len(got))
+		}
+		states := map[domain.ID]domain.JobState{}
+		for _, j := range got {
+			if j.ScanID != scanA {
+				t.Fatalf("job from wrong scan: %s", j.ScanID)
+			}
+			states[j.ID] = j.State
+			if j.ID == a2.ID && string(j.Payload) != `{"k":1}` {
+				t.Fatalf("payload not round-tripped: %q", j.Payload)
+			}
+		}
+		if states[leased.ID] != domain.JobSucceeded {
+			t.Fatalf("completed job state = %s", states[leased.ID])
+		}
+		if empty, _ := q.Jobs(ctx, domain.NewID()); len(empty) != 0 {
+			t.Fatalf("unknown scan returned %d jobs", len(empty))
+		}
+	})
+}

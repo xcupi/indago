@@ -136,11 +136,16 @@ func (c *Controller) runDiscovery(ctx context.Context, ex *execution, sc *domain
 		return
 	}
 
+	var statePath string
+	if sess, err := c.store.Sessions().Get(ctx, sc.SessionID); err == nil {
+		statePath = sess.StatePath
+	}
 	res, err := ex.disc.Run(ctx, discovery.RunParams{
-		ScanID:    sc.ID,
-		Scope:     scope,
-		SeedURLs:  seeds,
-		SessionID: sc.SessionID,
+		ScanID:           sc.ID,
+		Scope:            scope,
+		SeedURLs:         seeds,
+		SessionID:        sc.SessionID,
+		SessionStatePath: statePath,
 	})
 	if err != nil {
 		if ctx.Err() != nil {

@@ -133,7 +133,7 @@ func (c *pwContext) Cookies() ([]Cookie, error) {
 }
 
 func (c *pwContext) SaveStorageState(path string) error {
-	_, err := c.c.StorageState(path)
+	_, err := c.c.StorageState(pw.BrowserContextStorageStateOptions{Path: pw.String(path)})
 	return err
 }
 

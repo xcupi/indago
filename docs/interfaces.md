@@ -61,6 +61,7 @@ type Queue interface {
     Recover(ctx) (int, error)                 // startup: requeue all active
     ReapExpired(ctx, now time.Time) (int, error) // runtime: requeue expired leases
     Stats(ctx, scanID domain.ID) (Stats, error)
+    Jobs(ctx, scanID domain.ID) ([]*domain.TestJob, error) // all of a scan's jobs, any state (restart reconciliation)
 }
 ```
 

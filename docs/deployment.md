@@ -141,10 +141,15 @@ ways to provide one:
 1. **Let Playwright manage it** (simplest): install the matching driver and
    browser once —
    ```bash
-   go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps chromium
+   go run github.com/playwright-community/playwright-go/cmd/playwright@v0.6000.0 install --with-deps chromium
    ```
-   This downloads a Chromium build pinned to the `playwright-go` version in
-   `go.mod` into Playwright's cache (`~/.cache/ms-playwright/chromium-*` on
+   (Use the `playwright-go` version in `go.mod`, currently `v0.6000.0`, which
+   drives Playwright **1.60.0**. It was upgraded from `v0.5001.0`/1.50.1 at the
+   Reliability & Release Gate because that version has a data race in its
+   context/page close path; see `docs/e2e-validation.md`. A host
+   provisioned for the old version needs this step re-run.) This downloads a
+   Chromium build pinned to the `playwright-go` version in `go.mod` into
+   Playwright's cache (`~/.cache/ms-playwright/chromium-*` on
    Linux) and installs the OS packages Chromium needs to actually launch
    (`--with-deps`; omit it if those are already present, e.g. in a minimal
    container you're building yourself). Re-run this after bumping the
@@ -279,17 +284,22 @@ report for what was verified here.
   (disabled by default) takes an **environment variable name**
   (`ai.api_key_env`), not a key — the actual key is read from that env var at
   call time and never persisted.
-- A target's authenticated-session material (cookies/storage state) lives in
-  its own file, wherever `browser.Manager.InteractiveLogin`'s caller pointed
-  `StorageStatePath` — outside `-data` unless you put it there. **As of this
-  writing, `InteractiveLogin` and `auth_existing`'s state-path
-  (`auth.Input.StatePath` / `CreateScanParams.AuthStatePath`) are implemented
-  and tested at the Go level but not yet wired to any CLI command or web API
-  field** — `auth_mode: existing` can be requested through the API, but the
-  server has no way to learn the state file's path, so it fails closed with
-  `"auth: existing-session mode requires a state path"` rather than silently
-  scanning unauthenticated. Treat the state file like a password once this
-  gap is closed and you do have a path to it.
+- A target's authenticated-session material (a Playwright storage-state
+  JSON file: cookies + origins) lives in its own file, outside `-data` unless
+  you put it there. Point a scan at it with `auth_mode: "existing"` plus
+  `auth_state_path` (API), or `indago scan create … -auth-state FILE` (CLI).
+  The **server** opens the path, so it must be absolute (the CLI makes a
+  relative one absolute for you) and readable by the `indago serve` user.
+  The file is validated when the scan is created, and again whenever the
+  session is (re-)established on Start or on Resume from `awaiting_auth`. It
+  must be a regular file of at most 10 MB holding a storage-state object. An
+  unusable configuration is a `400` with an `authentication` message, never
+  a silent fallback to an unauthenticated scan. The session is reused by
+  every layer of the scan: HTTP-level requests (its cookies), browser
+  discovery, and browser verification. If the file disappears mid-scan, the
+  monitor moves the scan to `awaiting_auth`; restore it and resume.
+  `password`/`interactive`/`mfa` modes are rejected at creation (not
+  implemented). Treat the state file like a password: it *is* the session.
 - Evidence request blobs can contain the target's session cookie verbatim
   (that's the point — full request capture for evidence integrity,
   `AGENTS.md` §2.6). Restricting who can read `-data` (§4) is what protects

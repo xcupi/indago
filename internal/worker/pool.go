@@ -303,13 +303,25 @@ func (p *Pool) process(ctx context.Context, spec GroupSpec, job *domain.TestJob)
 	if err != nil {
 		retry := !errors.Is(err, ErrPermanent)
 		if ferr := p.q.Fail(ctx, job.ID, err.Error(), retry); ferr != nil {
-			p.log.Warn("mark job failed", "job", job.ID, "err", ferr)
+			p.logRecordErr(ctx, "mark job failed", job.ID, ferr)
 		}
 		return
 	}
 	if cerr := p.q.Complete(ctx, job.ID); cerr != nil {
-		p.log.Warn("mark job complete", "job", job.ID, "err", cerr)
+		p.logRecordErr(ctx, "mark job complete", job.ID, cerr)
 	}
+}
+
+// logRecordErr logs a failure to record a job's outcome. When the worker's
+// own context has ended (shutdown or scan cancel), that failure is the
+// expected path — the job stays active and is requeued by restart recovery
+// (Queue.Recover) or lease reaping — so it is not a warning.
+func (p *Pool) logRecordErr(ctx context.Context, msg string, jobID domain.ID, err error) {
+	if ctx.Err() != nil {
+		p.log.Info(msg+": worker stopping; job left for recovery", "job", jobID, "err", err)
+		return
+	}
+	p.log.Warn(msg, "job", jobID, "err", err)
 }
 
 // heartbeat periodically extends the job's lease until ctx is canceled. A

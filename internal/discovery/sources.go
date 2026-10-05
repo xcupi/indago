@@ -536,8 +536,9 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 		// (so no third-party traffic is generated), and every observation is
 		// re-checked below before it reaches the sink.
 		res, err := n.browser.Render(ctx, info.Canonical, browser.RenderOptions{
-			WaitUntil:    browser.WaitLoad,
-			AllowRequest: func(u string) bool { return in.Scope.Permits(u).Allowed },
+			WaitUntil:        browser.WaitLoad,
+			AllowRequest:     func(u string) bool { return in.Scope.Permits(u).Allowed },
+			SessionStatePath: in.SessionStatePath,
 		})
 		if err != nil {
 			if errors.Is(err, browser.ErrNotImplemented) {

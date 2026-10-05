@@ -2,16 +2,20 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/queue"
@@ -326,6 +330,58 @@ func TestCheckRemoteBindAllowed(t *testing.T) {
 		}
 		if err != nil && !strings.Contains(err.Error(), "-allow-remote") {
 			t.Errorf("error should mention -allow-remote: %v", err)
+		}
+	}
+}
+
+func TestCLIScanCreateExistingSession(t *testing.T) {
+	c, out, st, _ := newTestServerAndStore(t)
+	site := targetSite(t)
+	run := func(group string, args ...string) error { t.Helper(); return c.runClient(group, args) }
+
+	if err := run("project", "create", "p"); err != nil {
+		t.Fatal(err)
+	}
+	project := idFrom(t, out)
+	if err := run("scope", "set", "-project", project, "-include", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run("target", "add", "-project", project, "-name", "s", "-url", site.URL); err != nil {
+		t.Fatal(err)
+	}
+	target := idFrom(t, out)
+
+	// A relative -auth-state is resolved against the CLI's working directory,
+	// not the server's; -auth defaults to "existing" when a state is given.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"cookies":[],"origins":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if err := run("scan", "create", "-project", project, "-target", target, "-auth-state", "state.json"); err != nil {
+		t.Fatalf("create with existing session: %v", err)
+	}
+	scanID := idFrom(t, out)
+	sess, err := st.Sessions().GetByScan(context.Background(), domain.ID(scanID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "state.json"); sess.Mode != domain.AuthExisting || sess.StatePath != want {
+		t.Fatalf("session = mode %s path %q, want existing %q", sess.Mode, sess.StatePath, want)
+	}
+
+	// Unusable configurations come back as the server's clear 400.
+	for _, args := range [][]string{
+		{"-auth", "existing"},
+		{"-auth-state", "missing.json"},
+		{"-auth", "password"},
+		{"-auth", "anonymous", "-auth-state", "state.json"},
+	} {
+		err := run("scan", append([]string{"create", "-project", project, "-target", target}, args...)...)
+		var ae *apiError
+		if !asAPIError(err, &ae) || ae.Status != 400 || !strings.Contains(err.Error(), "authentication") {
+			t.Errorf("%v: want a 400 authentication error, got %v", args, err)
 		}
 	}
 }
