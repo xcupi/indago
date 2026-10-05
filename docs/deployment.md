@@ -135,40 +135,61 @@ default): HTTP-level crawling, reflection, context analysis, and candidate
 planning need nothing beyond the Go binary itself.
 
 **Browser verification and browser-based discovery (`-browser`) need a real
-Chromium**, driven via `github.com/playwright-community/playwright-go`. Two
-ways to provide one:
+Chromium-family browser**, driven via `github.com/mxschmitt/playwright-go`
+**v0.6201.1**, which uses the Playwright **1.62.1** driver.
 
-1. **Let Playwright manage it** (simplest): install the matching driver and
-   browser once —
-   ```bash
-   go run github.com/playwright-community/playwright-go/cmd/playwright@v0.6000.0 install --with-deps chromium
-   ```
-   (Use the `playwright-go` version in `go.mod`, currently `v0.6000.0`, which
-   drives Playwright **1.60.0**. It was upgraded from `v0.5001.0`/1.50.1 at the
-   Reliability & Release Gate because that version has a data race in its
-   context/page close path; see `docs/e2e-validation.md`. A host
-   provisioned for the old version needs this step re-run.) This downloads a
-   Chromium build pinned to the `playwright-go` version in `go.mod` into
-   Playwright's cache (`~/.cache/ms-playwright/chromium-*` on
-   Linux) and installs the OS packages Chromium needs to actually launch
-   (`--with-deps`; omit it if those are already present, e.g. in a minimal
-   container you're building yourself). Re-run this after bumping the
-   `playwright-go` dependency — the driver and the installed browser must be
-   version-matched.
-2. **Point at an existing Chromium** via `-chromium PATH` or
-   `$INDAGO_CHROMIUM_PATH`: the Playwright *driver* (Node-side protocol
-   handler) is still required from step 1, but it launches the browser you
-   name instead of its own cached one. Useful when a specific Chromium
-   build/revision is already provisioned (a container base image, a shared
-   CI runner).
+**The driver (always required).** Install it once per host:
+```bash
+go run github.com/mxschmitt/playwright-go/cmd/playwright@v0.6201.1 --version   # installs the driver only, then prints "Version 1.62.1"
+```
+This assembles the driver in `~/.cache/ms-playwright-go/1.62.1/` from two
+downloads: the `playwright-core` 1.62.1 package from `registry.npmjs.org`,
+and Node.js v24.19.0 from `nodejs.org/dist`. It no longer uses Playwright's
+retired `/builds/driver` CDN. Mirrors and offline options are set by
+environment variable:
+- `PLAYWRIGHT_GO_NPM_REGISTRY` and `NODE_MIRROR` point the two downloads at
+  mirrors;
+- `PLAYWRIGHT_NODEJS_PATH` uses an existing Node.js instead of downloading
+  one;
+- `PLAYWRIGHT_DRIVER_PATH` or `PLAYWRIGHT_CLI_PATH` use a pre-provisioned
+  driver.
+
+Re-run the install after changing the `playwright-go` version in `go.mod`.
+
+**The browser (choose one).**
+
+1. **A system browser (recommended; no bundled Chromium needed at
+   runtime).** Pass `-chromium PATH` or set `$INDAGO_CHROMIUM_PATH`, e.g.
+   `-chromium /usr/bin/google-chrome`. The driver launches that executable
+   instead of a Playwright-managed one, so the browser's version doesn't have
+   to match the driver's. Useful when Chrome/Chromium is already provisioned
+   (a container base image, a shared CI runner, a workstation).
+2. **A Playwright-managed Chromium.** Run
+   `go run github.com/mxschmitt/playwright-go/cmd/playwright@v0.6201.1 install --with-deps chromium`.
+   This downloads the Chromium build matched to driver 1.62.1 into
+   `~/.cache/ms-playwright/` and installs the OS packages it needs
+   (`--with-deps`). With no `-chromium`/`$INDAGO_CHROMIUM_PATH` set, Indago
+   uses that browser.
+
+History:
+- `playwright-community/playwright-go` v0.5001.0 (driver 1.50.1) was
+  replaced at the Reliability & Release Gate because of a data race in its
+  close path.
+- That module's v0.6000.0 (driver 1.60.0) was then superseded by this
+  migration to the maintained `mxschmitt` module path. See
+  `docs/e2e-validation.md`.
+
+A host provisioned for an older driver needs the install step re-run.
 
 Headless Chromium needs the usual sandboxing/shared-library support most
 minimal container base images lack — the `--with-deps` install step above
 handles that on Debian/Ubuntu-family images; for other bases install
 Chromium's runtime dependencies manually (fonts, `libnss3`, `libatk`, etc.).
 
-Without a usable Chromium, `-browser` fails fast at startup (`run playwright
-(is it installed? try \`playwright install\`)`) — it's a hard dependency for
+Without a usable driver or browser, `-browser` fails fast at startup. A
+missing driver reports `run playwright (is it installed? …)`; a bad browser
+path reports `Failed to launch chromium because executable doesn't exist at
+…`. It's a hard dependency for
 that flag, not a silent degrade. Everything else continues to work with
 `-browser` simply left off.
 

@@ -231,16 +231,14 @@ lock (pages have the same pattern). This happens whenever a context closes
 while a request is being routed through the scope gate.
 
 Unrouting before close would avoid it, but would disable interception and
-open a scope hole. Upstream fixed it (`atomic.Bool`) in `v0.6000.0`, which is
-now the pinned version (driver **1.60.0**, see `docs/deployment.md` §3).
+open a scope hole. Upstream fixed it (`atomic.Bool`) in `v0.6000.0`, which
+was pinned at this gate (driver 1.60.0). The only API change was
+`StorageState`'s options struct (`internal/browser/playwright.go`).
 
-The newer `v0.6100.0`+ releases were **rejected**: their `go.mod` declares a
-different module path (`github.com/mxschmitt/playwright-go`) from the one
-they are published under, so Go refuses them. A mismatched module identity
-is not something to adopt in a release gate.
-
-The only API change was `StorageState`'s options struct
-(`internal/browser/playwright.go`).
+At the time, `v0.6100.0`+ were rejected. Under the `playwright-community`
+path they declare a different module path (`github.com/mxschmitt/playwright-go`),
+so Go refuses them. That is resolved by the **Playwright driver migration**
+below, which imports them under their declared path.
 
 **Race B (Indago bug, exposed by the library).** With A fixed, a second
 race remained: `browser.NewContext` initializing a new context while the
@@ -312,4 +310,50 @@ See `docs/scan-orchestration.md` §10.
 - **Unchanged by design (AGENTS.md §3):** Password, Interactive, and MFA
   auth, DOM XSS, and Stored XSS remain stubs. They are now rejected at scan
   creation instead of failing at Start.
+
+## Playwright driver migration
+
+Indago now imports **`github.com/mxschmitt/playwright-go` v0.6201.1**,
+which drives Playwright **1.62.1**. It previously imported
+`github.com/playwright-community/playwright-go` v0.6000.0 (driver 1.60.0).
+
+**Module checks before adopting it:**
+- Its `go.mod` declares `module github.com/mxschmitt/playwright-go`,
+  matching the import path.
+- It was fetched through `proxy.golang.org` and verified against
+  `sum.golang.org` (`h1:KBBDopE+IIdjAp2FIk6zhLcKCCSSx/T6rGjKZmfo/Bs=`).
+- Its source tree is byte-identical to the `playwright-community` v0.6201.1
+  tag. So this is the same code published under its own path, not a fork
+  with different contents.
+
+**Code change:** only the import path in `internal/browser/playwright.go`.
+No API changes were needed. The Browser Manager API, scope gate,
+`-chromium`/`$INDAGO_CHROMIUM_PATH`, storage-state authentication, and
+verification semantics are untouched. `go.mod` also drops one indirect
+dependency, `go-jose`.
+
+**Driver provenance:** installed via the module's own installer.
+- An HTTP-traced install into an empty directory fetched exactly two URLs:
+  - `https://registry.npmjs.org/playwright-core/-/playwright-core-1.62.1.tgz`
+  - `https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.gz`
+- Nothing touched the retired `/builds/driver` CDN, which returns 403 from
+  the validation host anyway.
+- The installer patches the downloaded `coreBundle.js` for null-safe
+  `pageError.location` access. That is the library's own documented step.
+
+**Validation:**
+- `go test ./...`, `go test -race ./...`, `go vet ./...`, and `make check`
+  all pass.
+- The restart/crash/stress set passes 10× under `-race`.
+- The real-browser tests (browser, verification and scan e2e packages) ran
+  with 0 skips against a separately provisioned Chromium 141.0.7390.37,
+  passed by path via `$INDAGO_CHROMIUM_PATH`.
+- `/usr/bin/google-chrome` could not be installed on the validation host
+  (`dl.google.com` is blocked there). The same code path, an
+  externally-provided executable instead of a bundled one, was exercised
+  with that Chromium instead.
+- The rebuilt `./bin/indago serve -browser` was run with both `-chromium
+  PATH` and `$INDAGO_CHROMIUM_PATH`. Each authenticated scan produced 1
+  confirmed finding with 0/17 cookieless requests. Each `serve` exited 0
+  on SIGTERM, with no orphaned browser processes.
 

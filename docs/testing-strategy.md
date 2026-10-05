@@ -90,7 +90,7 @@ when no Chromium is found (`$INDAGO_CHROMIUM_PATH` or
 `~/.cache/ms-playwright/chromium-*`; skipped in `-short`). Chromium is launched
 by explicit path, so the Playwright driver and the installed revision need not
 match. The Playwright *driver* must match `go.mod`'s `playwright-go` version
-(currently 1.60.0, see `docs/deployment.md` §3); without it these tests
+(currently `github.com/mxschmitt/playwright-go` v0.6201.1 → driver 1.62.1, see `docs/deployment.md` §3); without it these tests
 **skip** rather than fail, so check for `SKIP` in `-v` output before reading a
 green run as browser coverage.
 
