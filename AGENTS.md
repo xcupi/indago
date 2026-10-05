@@ -178,7 +178,8 @@ Implemented so far (infrastructure and **discovery**):
   but its job not enqueued), which was the root cause of the
   `TestE2E_RestartRecoversInterruptedVerification` flake, via the new
   `Queue.Jobs`. Two Playwright races are fixed: the library is upgraded to
-  `playwright-go v0.6000.0` (driver 1.60.0), and closing a context/browser
+  `playwright-go v0.6000.0` (driver 1.60.0; since migrated to
+  `github.com/mxschmitt/playwright-go` v0.6201.1 / driver 1.62.1), and closing a context/browser
   waits for any in-flight creation. `auth.Existing` is wired end to end: CLI
   `-auth-state`, API `auth_state_path`, create-time validation (`ErrAuth` →
   400), session reuse by HTTP + browser discovery + verification, and the
@@ -262,9 +263,12 @@ other heavy infrastructure without a concrete, documented requirement.
 
 ## 6. Dependencies
 
-Minimal by policy. Current external dependency:
+Minimal by policy. Current external dependencies:
 
 - `modernc.org/sqlite` — pure-Go SQLite driver (no cgo; clean local builds).
+- `github.com/mxschmitt/playwright-go` v0.6201.1 (Playwright driver 1.62.1) —
+  browser automation, used only by `internal/browser`. See
+  `docs/deployment.md` §3 for driver install and system-browser use.
 
 Everything else is the standard library (routing via `net/http.ServeMux`, CLI
 via `flag`, IDs via `crypto/rand`). Add a dependency only with a clear reason.

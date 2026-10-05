@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	pw "github.com/playwright-community/playwright-go"
+	pw "github.com/mxschmitt/playwright-go"
 )
 
 // IsTimeout reports whether err represents a navigation/action timeout — either
@@ -29,7 +29,7 @@ func IsTimeout(err error) bool {
 func newPlaywrightDriver(exe string) (driver, error) {
 	p, err := pw.Run()
 	if err != nil {
-		return nil, fmt.Errorf("run playwright (is it installed? try `playwright install`): %w", err)
+		return nil, fmt.Errorf("run playwright (install the driver: go run github.com/mxschmitt/playwright-go/cmd/playwright@v0.6201.1 --version): %w", err)
 	}
 	return &pwDriver{pw: p, exe: exe}, nil
 }

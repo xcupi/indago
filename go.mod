@@ -5,7 +5,7 @@ module github.com/indago/indago
 go 1.26.0
 
 require (
-	github.com/playwright-community/playwright-go v0.6000.0
+	github.com/mxschmitt/playwright-go v0.6201.1
 	golang.org/x/net v0.59.0
 	modernc.org/sqlite v1.60.1
 )
@@ -13,7 +13,6 @@ require (
 require (
 	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
 	github.com/go-stack/stack v1.8.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
