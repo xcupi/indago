@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -51,13 +52,25 @@ func NewCollector(st store.Store, q queue.Queue, scanID domain.ID, scope domain.
 }
 
 // Hydrate rebuilds the collector's deduplication state from what is already
-// persisted for the scan. It must be called before sources run when a scan is
-// resumed after a restart: without it, re-running discovery would re-register
-// every known endpoint/parameter and re-enqueue duplicate test jobs.
+// persisted for the scan, then reconciles anything a previous run persisted
+// only partially. It must be called before sources run when a scan is resumed
+// after a restart: without it, re-running discovery would re-register every
+// known endpoint/parameter and re-enqueue duplicate test jobs.
 //
 // Endpoints are keyed by their persisted Fingerprint (the EndpointKey computed
 // at insert time); parameters are re-keyed from their endpoint's fingerprint.
-// Hydrate is idempotent.
+//
+// Reconciliation: registering a target is several separate writes (endpoint →
+// its job → its query parameters → parameter → injection point → its job), and
+// a shutdown or crash can land between any two of them. Marking such a target
+// "seen" would make the rest of that sequence unreachable forever — the next
+// run's sources rediscover the endpoint, hit the dedup check, and never
+// register its parameters or enqueue its jobs, so it is silently never tested
+// and the scan still completes. Hydrate therefore finishes every incomplete
+// sequence it finds: an endpoint with no endpoint-level job gets one, an
+// endpoint missing any of its own URL's query parameters gets them, a
+// parameter with no injection point gets one, and an injection point with no
+// test job gets one. Hydrate is idempotent.
 func (c *Collector) Hydrate(ctx context.Context) error {
 	endpoints, err := c.store.Endpoints().ListByScan(ctx, c.scanID)
 	if err != nil {
@@ -67,10 +80,16 @@ func (c *Collector) Hydrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	ips, err := c.store.InjectionPoints().ListByScan(ctx, c.scanID)
+	if err != nil {
+		return err
+	}
+	jobs, err := c.queue.Jobs(ctx, c.scanID)
+	if err != nil {
+		return err
+	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	fingerprintByID := make(map[domain.ID]string, len(endpoints))
 	for _, e := range endpoints {
 		if e.Fingerprint == "" {
@@ -91,6 +110,83 @@ func (c *Collector) Hydrate(ctx context.Context) error {
 		if _, dup := c.seenParams[key]; !dup {
 			c.seenParams[key] = struct{}{}
 			c.paramCount++
+		}
+	}
+	c.mu.Unlock()
+
+	return c.reconcile(ctx, endpoints, params, ips, jobs)
+}
+
+// reconcile completes registration sequences a previous run left unfinished
+// (see Hydrate). Every step is idempotent against the already-hydrated dedup
+// state and against the jobs that exist, so running it on a scan with nothing
+// missing changes nothing.
+func (c *Collector) reconcile(ctx context.Context, endpoints []*domain.Endpoint, params []*domain.Parameter, ips []*domain.InjectionPoint, jobs []*domain.TestJob) error {
+	// Discovery-enqueued test jobs: a reflection/candidate child of an
+	// injection-point job also targets that injection point, which is fine —
+	// its existence proves the injection point's own job existed.
+	endpointJob := map[domain.ID]bool{}
+	ipJob := map[domain.ID]bool{}
+	for _, j := range jobs {
+		if j.Type != domain.JobTest {
+			continue
+		}
+		if ipID := j.Target.InjectionPointID; !ipID.Empty() {
+			ipJob[ipID] = true
+		} else if !j.Target.EndpointID.Empty() {
+			endpointJob[j.Target.EndpointID] = true
+		}
+	}
+	ipByParam := make(map[domain.ID]*domain.InjectionPoint, len(ips))
+	for _, ip := range ips {
+		ipByParam[ip.ParameterID] = ip
+	}
+	endpointByID := make(map[domain.ID]*domain.Endpoint, len(endpoints))
+	for _, e := range endpoints {
+		endpointByID[e.ID] = e
+	}
+
+	for _, e := range endpoints {
+		if e.Fingerprint == "" {
+			continue
+		}
+		if c.cfg.EnqueueEndpointJobs && !endpointJob[e.ID] {
+			if err := c.enqueueJob(ctx, domain.JobTarget{EndpointID: e.ID, URL: e.URL}); err != nil {
+				return fmt.Errorf("reconcile endpoint job %s: %w", e.ID, err)
+			}
+		}
+		// The endpoint's own query parameters are registered right after it;
+		// registerParam skips any already hydrated, so only the missing ones
+		// are created (each with its injection point and job).
+		info, err := Normalize(e.URL)
+		if err != nil {
+			continue
+		}
+		for _, name := range info.ParamNames {
+			c.registerParam(ctx, e.ID, e.Method, info, name, domain.LocationQuery, info.Query.Get(name), e.Source)
+		}
+	}
+
+	for _, p := range params {
+		ep, ok := endpointByID[p.EndpointID]
+		if !ok {
+			continue
+		}
+		ip, ok := ipByParam[p.ID]
+		if !ok {
+			ip = &domain.InjectionPoint{
+				ID: domain.NewID(), ScanID: c.scanID, EndpointID: p.EndpointID,
+				ParameterID: p.ID, Location: p.Location, CreatedAt: time.Now(),
+			}
+			if err := c.store.InjectionPoints().Create(ctx, ip); err != nil {
+				return fmt.Errorf("reconcile injection point for parameter %s: %w", p.ID, err)
+			}
+		}
+		if !ipJob[ip.ID] {
+			if err := c.enqueueJob(ctx, domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID, URL: ep.URL}); err != nil {
+				return fmt.Errorf("reconcile injection point job %s: %w", ip.ID, err)
+			}
+			ipJob[ip.ID] = true
 		}
 	}
 	return nil
@@ -153,7 +249,7 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 	}
 
 	if c.cfg.EnqueueEndpointJobs {
-		c.enqueueJob(ctx, domain.JobTarget{EndpointID: id, URL: info.Canonical})
+		_ = c.enqueueJob(ctx, domain.JobTarget{EndpointID: id, URL: info.Canonical})
 	}
 
 	// Query-string parameters are injection points — register them immediately.
@@ -251,7 +347,7 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 		return
 	}
 
-	c.enqueueJob(ctx, domain.JobTarget{
+	_ = c.enqueueJob(ctx, domain.JobTarget{
 		EndpointID:       endpointID,
 		InjectionPointID: ip.ID,
 		URL:              info.Canonical,
@@ -259,8 +355,9 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 }
 
 // enqueueJob enqueues a test job for a discovered target. Enqueue failures are
-// logged, not fatal: the endpoint/param is already persisted and recoverable.
-func (c *Collector) enqueueJob(ctx context.Context, target domain.JobTarget) {
+// logged (and returned for callers that care), not fatal to discovery: the
+// endpoint/param is already persisted, and the next Hydrate re-enqueues it.
+func (c *Collector) enqueueJob(ctx context.Context, target domain.JobTarget) error {
 	now := time.Now()
 	job := &domain.TestJob{
 		ID:          domain.NewID(),
@@ -275,9 +372,10 @@ func (c *Collector) enqueueJob(ctx context.Context, target domain.JobTarget) {
 	}
 	if err := c.queue.Enqueue(ctx, job); err != nil {
 		c.log.Warn("discovery: enqueue test job", "err", err)
-		return
+		return err
 	}
 	c.mu.Lock()
 	c.jobCount++
 	c.mu.Unlock()
+	return nil
 }

@@ -11,9 +11,12 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/indago/indago/internal/domain"
@@ -21,6 +24,69 @@ import (
 
 // ErrNotImplemented indicates a Phase 0 stub with no behavior yet.
 var ErrNotImplemented = errors.New("auth: not implemented in Phase 0")
+
+// ErrInvalidState reports unusable session material for AuthExisting: a
+// missing, relative, unreadable, oversized, or malformed state path.
+var ErrInvalidState = errors.New("auth: invalid session state")
+
+// maxStateFileSize bounds a session state file. Playwright storage states are
+// a few KB; anything far larger is not one, and is not read into memory.
+const maxStateFileSize = 10 << 20
+
+// Implemented reports whether mode has a working authenticator (as opposed to
+// a stub whose operations return ErrNotImplemented), so callers can reject an
+// unusable mode when a scan is created rather than when it starts.
+func Implemented(mode domain.AuthMode) bool {
+	return mode == domain.AuthAnonymous || mode == domain.AuthExisting
+}
+
+// ValidateStateFile checks that path names session material AuthExisting can
+// use: an absolute path (the server, not the caller's shell, resolves it) to a
+// readable regular file of bounded size holding a JSON object in Playwright's
+// storage-state shape ({"cookies":[...], "origins":[...]}, either key may be
+// absent but the file must contain at least one of them). It reads only the
+// file; it never contacts the target.
+func ValidateStateFile(path string) error {
+	if path == "" {
+		return fmt.Errorf("%w: existing-session mode requires a state path", ErrInvalidState)
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("%w: state path %q must be absolute", ErrInvalidState, path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidState, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidState, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%w: %s is not a regular file", ErrInvalidState, path)
+	}
+	if fi.Size() > maxStateFileSize {
+		return fmt.Errorf("%w: %s is larger than %d bytes", ErrInvalidState, path, maxStateFileSize)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxStateFileSize+1))
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidState, err)
+	}
+	var state struct {
+		Cookies *[]struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		} `json:"cookies"`
+		Origins *[]json.RawMessage `json:"origins"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return fmt.Errorf("%w: %s is not a storage-state JSON file: %v", ErrInvalidState, path, err)
+	}
+	if state.Cookies == nil && state.Origins == nil {
+		return fmt.Errorf("%w: %s has neither \"cookies\" nor \"origins\" (not a storage-state file)", ErrInvalidState, path)
+	}
+	return nil
+}
 
 // Input carries what an authenticator needs to establish a session. Secret
 // material is referenced by path or supplied interactively — never logged.
@@ -75,14 +141,11 @@ type Existing struct{}
 // Mode implements Authenticator.
 func (Existing) Mode() domain.AuthMode { return domain.AuthExisting }
 
-// Establish validates that in.StatePath names a readable file and returns an
+// Establish validates in.StatePath (see ValidateStateFile) and returns an
 // active session pointing at it.
 func (Existing) Establish(_ context.Context, in Input) (*domain.Session, error) {
-	if in.StatePath == "" {
-		return nil, fmt.Errorf("auth: existing-session mode requires a state path")
-	}
-	if _, err := os.Stat(in.StatePath); err != nil {
-		return nil, fmt.Errorf("auth: existing session material: %w", err)
+	if err := ValidateStateFile(in.StatePath); err != nil {
+		return nil, err
 	}
 	now := time.Now()
 	return &domain.Session{

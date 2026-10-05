@@ -96,6 +96,11 @@ type Queue interface {
 
 	// Stats returns job counts by state for a scan.
 	Stats(ctx context.Context, scanID domain.ID) (Stats, error)
+
+	// Jobs returns every job of a scan, in any state, ordered by creation time.
+	// It is a read-only snapshot used for restart reconciliation (e.g.
+	// discovery checking that each persisted target still has its job).
+	Jobs(ctx context.Context, scanID domain.ID) ([]*domain.TestJob, error)
 }
 
 // Tuning constants for retry backoff.

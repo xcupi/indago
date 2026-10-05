@@ -264,6 +264,23 @@ func (q *SQLite) ReapExpired(ctx context.Context, now time.Time) (int, error) {
 	return int(n), nil
 }
 
+func (q *SQLite) Jobs(ctx context.Context, scanID domain.ID) ([]*domain.TestJob, error) {
+	rows, err := q.db.QueryContext(ctx, `SELECT `+sqJobCols+` FROM jobs WHERE scan_id=? ORDER BY created_at ASC, id ASC`, scanID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*domain.TestJob
+	for rows.Next() {
+		j, err := scanSQJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
 func (q *SQLite) Stats(ctx context.Context, scanID domain.ID) (Stats, error) {
 	rows, err := q.db.QueryContext(ctx, `SELECT state, COUNT(*) FROM jobs WHERE scan_id=? GROUP BY state`, scanID)
 	if err != nil {

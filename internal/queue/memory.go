@@ -242,6 +242,24 @@ func (q *Memory) requeue(j *domain.TestJob, now time.Time) {
 	j.UpdatedAt = now
 }
 
+func (q *Memory) Jobs(_ context.Context, scanID domain.ID) ([]*domain.TestJob, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	var out []*domain.TestJob
+	for _, j := range q.jobs {
+		if j.ScanID == scanID {
+			out = append(out, q.clone(j))
+		}
+	}
+	sort.Slice(out, func(i, k int) bool {
+		if !out[i].CreatedAt.Equal(out[k].CreatedAt) {
+			return out[i].CreatedAt.Before(out[k].CreatedAt)
+		}
+		return out[i].ID < out[k].ID
+	})
+	return out, nil
+}
+
 func (q *Memory) Stats(_ context.Context, scanID domain.ID) (Stats, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()

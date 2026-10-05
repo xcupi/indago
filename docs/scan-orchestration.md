@@ -253,6 +253,27 @@ the store, so nothing is re-registered and no duplicate jobs are enqueued; it
 simply continues discovering. If discovery had already completed it is **not**
 re-run — only the remaining jobs are processed.
 
+Hydration also **reconciles** registrations the interrupted run left half-done.
+Registering a target is several separate writes (endpoint → its job → its query
+parameters → parameter → injection point → its job), and a shutdown or crash
+can land between any two. Hydrate completes each one it finds incomplete: an
+endpoint without its endpoint-level job, an endpoint missing any of its own
+URL's query parameters, a parameter without an injection point, or an injection
+point without a test job (checked against `Queue.Jobs`). Without this, the
+resumed crawl would rediscover such an endpoint, hit the dedup check, and never
+register or test what was missing, and the scan would still **complete**.
+That was the root cause of the intermittent
+`TestE2E_RestartRecoversInterruptedVerification` failure. See
+`TestRestartTestsInjectionPointWhoseJobWasLostToShutdown` and the
+`TestCollectorHydrate*` tests.
+
+Job execution is **at-least-once**: a job interrupted mid-handler is re-run
+from the start after `Recover`, so its side effects can repeat. For a
+reflection job, that means re-enqueueing its candidate children. Finding
+correlation absorbs the repeats into the same `Finding` (no duplicate rows),
+but `Finding.Detail.occurrences` counts every correlated attempt, and a crash-
+interrupted attempt still counts against the job's `MaxAttempts`.
+
 `Controller.Shutdown` (graceful stop) cancels and joins every goroutine but
 leaves persisted state untouched, so a graceful stop is recovered exactly like a
 crash.
@@ -282,6 +303,7 @@ so all three always agree:
 | add target | `POST /api/projects/{id}/targets` | `indago target add -project ID -name N -url URL` |
 | set scope | `PUT /api/projects/{id}/scope` | `indago scope set -project ID -include a,b …` |
 | create scan | `POST /api/scans` | `indago scan create -project ID -target ID …` |
+| … with an existing session | `POST /api/scans` + `"auth_mode":"existing","auth_state_path":"/abs/state.json"` | `indago scan create … -auth-state FILE` (`-auth existing` implied; a relative path is made absolute by the CLI) |
 | start / pause / resume / cancel | `POST /api/scans/{id}/{action}` | `indago scan start\|pause\|resume\|cancel ID` |
 | status | `GET /api/scans/{id}/status` | `indago scan status ID [-json]` |
 
@@ -316,13 +338,22 @@ operator visits:
 
 ## 10. Known limitations
 
-- **Discovery concurrency is read when discovery starts.** `Reconfigure` resizes
-  the worker pool and rate live, but a running crawl keeps its concurrency until
-  discovery next starts.
-- The executor sends only the observed (baseline) request; there is no
-  per-parameter variation yet, so an endpoint job and each of its injection-point
-  jobs send near-identical requests.
-- A scan that was `paused` by `pause_and_ask` and then restarted will ask again
-  once after resume (the "already asked" marker is in memory).
-- Per-job progress inside long-running handlers is not persisted; a crashed job is
-  simply re-run (jobs must be idempotent).
+Reviewed at the Reliability & Release Gate. Three earlier entries were
+already fixed in code and have been removed: live discovery concurrency
+(`Reconfigure` → `discovery.Manager.SetConcurrency`), per-parameter mutation
+(the reflection step), and the in-memory `pause_and_ask` marker (now
+`ScanStats.AskedAtConfirmed`, persisted).
+
+- **At-least-once job execution (accepted).** Per-job progress inside a handler
+  is not persisted; a crashed job is re-run from the start (§6). Outcomes
+  stay correct: findings correlate, evidence is unioned, and verdicts only move
+  up. The costs are a few repeated benign requests after a crash, and an
+  `occurrences` count that includes repeats.
+- **Crash-interrupted attempts count toward `MaxAttempts` (accepted).** A job
+  interrupted N times and then failing transiently can go `dead` sooner than
+  one that was never interrupted. Its TestCases record the interruptions
+  (`cancelled`, "interrupted by restart").
+- **WebSocket and service-worker traffic is not intercepted** by browser
+  discovery's scope gate (§2). This is deferred, and not a production blocker:
+  `-browser` is opt-in, and every observation is still re-checked against scope
+  before anything is persisted.

@@ -161,21 +161,155 @@ absolute, confirmation; it is exactly the kind of low-probability
 interleaving that warrants a follow-up stress run (`go test -race
 ./internal/scan/... -run TestE2E -count=30`) before relying on it fully.
 
-**A residual, lower-rate completion-timing flake, same test, unresolved.**
-Independent of the race above: repeated `-race` runs of the full
-`TestE2E_*` suite (`-count=10`) showed `TestE2E_RestartRecoversInterruptedVerification`
-occasionally (~1 in 10–15 runs under that specific heavy back-to-back
-repetition, not observed in isolated or lightly-repeated runs) finishing in
-under 2 seconds with "expected exactly one finding ... got 0" — i.e. the
-scan reached `ScanCompleted` without the post-restart verification having
-actually produced a Finding yet. This was true before this phase's
-`createMu` fix and is still true after it, so it is not the same bug. Not
-root-caused: plausibly a completion-policy race specific to restart recovery
-under heavy `-race` scheduling overhead (the monitor may see "no job queued/
-leased/running" become true a tick before a just-requeued verify job's
-result is persisted), but this is a hypothesis, not a diagnosis. Classified
-as an accepted limitation for now — rare, needs artificially heavy repeated
-iteration to observe, and the restart-recovery behavior itself (the thing
-e2e_recovery_test.go exists to prove) passes reliably in normal use — but it
-should be root-caused before relying on restart recovery under real
-concurrent production load.
+**A residual, lower-rate completion-timing flake, same test.** Root-caused
+and fixed in the Reliability & Release Gate phase below. It was not a
+completion-policy race and not scheduling noise: it was a restart-recovery
+bug in discovery.
+
+## Reliability & Release Gate phase
+
+No new detection features. The goal was to root-cause the flake above, then
+stress the whole lifecycle hard enough to trust it.
+
+### Bug 1 (root cause of the flake): discovery lost work across a restart
+
+**Symptom.** After a restart the scan reached `completed` with zero findings.
+Under parallel load this happened in 13 of 60 runs.
+
+**Diagnosis.** I captured the failing state, not just the assertion. Every
+failing run had crashed while discovery was still running, not during
+verification. Two signatures showed up:
+
+- **`ips=0`:** the `/confirmed` endpoint was persisted, but its `q`
+  parameter was not.
+- **`ips=1`:** the injection point was persisted, but its job was never
+  enqueued.
+
+Registration is several separate writes (endpoint → its job → its query
+parameters → parameter → injection point → its job). A shutdown that cancels
+the run context can land between any two of them. On resume, the collector's
+`Hydrate` marked whatever existed as "seen". The crawl then rediscovered
+`/confirmed`, and `AddEndpoint` returned early for a known endpoint, so the
+missing parameter, injection point, or job was never created. With nothing
+left pending, the completion monitor correctly saw a quiescent scan, and the
+scan completed. A hard kill (`SIGKILL`) can land in the same windows.
+
+**Fix.** `Hydrate` now reconciles (`internal/discovery/collector.go`):
+
+- an endpoint with no endpoint-level job gets one;
+- an endpoint missing any of its own URL's query parameters gets them;
+- a parameter with no injection point gets one;
+- an injection point with no test job gets one.
+
+This needs the new read-only `Queue.Jobs(scanID)`, implemented by both the
+memory and SQLite queues.
+
+**Second, separate problem: the test.** Its precondition (`Jobs.Running >= 1`)
+was too weak. In every failing run it had "crashed" during discovery, so it
+was not testing what its name says. It now waits until verification's own
+browser navigation is parked at the gate, and asserts a Pending finding
+exists at crash time.
+
+**Evidence.**
+
+- `TestRestartTestsInjectionPointWhoseJobWasLostToShutdown` parks discovery's
+  injection-point enqueue until shutdown. It needs no browser. It fails 3/3
+  on the old code with the flake's exact signature (`Succeeded:2,
+  Reflected:0`) and passes on the fix.
+- `TestCollectorHydrate{EnqueuesJobsLostToInterruption,RegistersMissingQueryParams,CreatesMissingInjectionPoint}`
+  pin each interruption point individually.
+- The **original, unmodified** test file, run against the fixed code under
+  the same parallel load, no longer showed the "got 0" failure.
+
+### Bug 2: two data races in Playwright context/page lifecycle
+
+**Race A (library bug).** The flake hunt hit roughly 1 `DATA RACE` per 60
+runs. With `GORACE=halt_on_error=1` the stack showed a bug in
+`playwright-go v0.5001.0` itself: `browserContextImpl.Close()` writes a plain
+`closeWasCalled` bool that the dispatch goroutine's `onRoute` reads without a
+lock (pages have the same pattern). This happens whenever a context closes
+while a request is being routed through the scope gate.
+
+Unrouting before close would avoid it, but would disable interception and
+open a scope hole. Upstream fixed it (`atomic.Bool`) in `v0.6000.0`, which is
+now the pinned version (driver **1.60.0**, see `docs/deployment.md` §3).
+
+The newer `v0.6100.0`+ releases were **rejected**: their `go.mod` declares a
+different module path (`github.com/mxschmitt/playwright-go`) from the one
+they are published under, so Go refuses them. A mismatched module identity
+is not something to adopt in a release gate.
+
+The only API change was `StorageState`'s options struct
+(`internal/browser/playwright.go`).
+
+**Race B (Indago bug, exposed by the library).** With A fixed, a second
+race remained: `browser.NewContext` initializing a new context while the
+same context's server-side `onClose` ran. `callCtxCreate` returns to a
+cancelled caller but finishes the creation in the background. So after a
+scan shutdown, `Manager.Close` could close browsers mid-creation.
+
+Fix: closing a context, or the pooled browsers, now takes the same
+`createMu` that creation holds (`internal/browser/manager.go`). A close
+never overlaps a creation.
+
+**Results.** Before the fixes, the original test binary hit a race in about
+1 of 60 runs under 6× parallel load. After them, the same binary (rebuilt) ran **600 times under the same load with 0 races and 0 failures**.
+
+### Gaps closed for production
+
+- **`auth_existing` wired end to end.**
+  - CLI: `scan create -auth-state FILE` (`-auth existing` implied; the path
+    is made absolute).
+  - API: `auth_state_path`.
+  - Validated at creation: absolute path, regular file, ≤10 MB,
+    storage-state JSON. Unimplemented modes are rejected there too.
+  - `scan.ErrAuth` maps to **400** with an `authentication` message at
+    create, Start, and re-auth Resume, instead of an opaque 500.
+- **Session reuse.** Browser discovery rendered seeds *without* the scan's
+  session (found by the deployment smoke test: one cookieless request per
+  discovery run), so an authenticated scan's discovery saw the logged-out
+  site. `RunParams.SessionStatePath` now carries the session to
+  `networkSource`.
+- **Session loss.** The monitor now consults `Authenticator.Validate`, not
+  just `ExpiresAt`. If an existing session's material disappears mid-scan,
+  the scan moves to `awaiting_auth` instead of continuing unauthenticated.
+- **Shutdown log noise.** Graceful shutdown logged `WARN mark job failed …
+  context canceled` for every interrupted job, which is the expected
+  restart-recovery path. That is now INFO ("job left for recovery").
+
+### Stress coverage added
+
+`internal/scan/stress_test.go`, plus
+`TestE2E_RepeatedCrashRestartDuringVerification`. See
+`docs/testing-strategy.md`, "Release gate". The crash stress uses a chained
+site so discovery stays in flight. It catches Bug 1 independently: with the
+old collector it fails 4 of 8 runs with `injection points = 11, want 12`.
+
+### Deployment validation (real binary, real Chromium)
+
+- **Bind address.** `serve` refuses `0.0.0.0` without `-allow-remote`
+  (before touching the data directory). With the flag it starts and warns.
+- **Browser startup.** A bad `-chromium` path fails fast with a clear
+  error.
+- **Data directory.** `serve` creates the data directory (0750) with
+  `config.json`, `indago.db`, `evidence/`, and `reports/`.
+- **Authenticated scan, SIGTERM, and restart.** An existing-session scan
+  started with `-browser` was SIGTERMed mid-discovery. `serve` exited 0,
+  with the worker pool and browser manager closed and no orphaned Chromium.
+  On restart: "recovered orphaned jobs", then the scan was restored
+  **paused**. After resume it completed with 1 **confirmed** finding, and
+  0 of 24 target requests lacked the session cookie.
+
+### Remaining limitations (reviewed)
+
+See `docs/scan-orchestration.md` §10.
+
+- **Accepted:** at-least-once job execution, and crash-interrupted
+  attempts counting toward `MaxAttempts`.
+- **Deferred, not a blocker:** WebSocket/service-worker traffic is not
+  intercepted by browser discovery's scope gate (`-browser` is opt-in, and
+  observations are re-checked).
+- **Unchanged by design (AGENTS.md §3):** Password, Interactive, and MFA
+  auth, DOM XSS, and Stored XSS remain stubs. They are now rejected at scan
+  creation instead of failing at Start.
+

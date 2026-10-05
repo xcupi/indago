@@ -151,14 +151,17 @@ type stopReq struct {
 }
 
 type createScanReq struct {
-	ProjectID string             `json:"project_id"`
-	TargetID  string             `json:"target_id"`
-	Name      string             `json:"name"`
-	Profile   string             `json:"profile"`
-	AuthMode  string             `json:"auth_mode"`
-	SeedURLs  []string           `json:"seed_urls"`
-	Stop      *stopReq           `json:"stop"`
-	Config    *domain.ScanConfig `json:"config"`
+	ProjectID string `json:"project_id"`
+	TargetID  string `json:"target_id"`
+	Name      string `json:"name"`
+	Profile   string `json:"profile"`
+	AuthMode  string `json:"auth_mode"`
+	// AuthStatePath is the absolute, server-side path of saved session
+	// material (Playwright storage state) for auth_mode "existing".
+	AuthStatePath string             `json:"auth_state_path"`
+	SeedURLs      []string           `json:"seed_urls"`
+	Stop          *stopReq           `json:"stop"`
+	Config        *domain.ScanConfig `json:"config"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -207,14 +210,15 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sc, err := s.ctrl.CreateScan(r.Context(), scan.CreateScanParams{
-		ProjectID: domain.ID(req.ProjectID),
-		TargetID:  domain.ID(req.TargetID),
-		Name:      strings.TrimSpace(req.Name),
-		Profile:   profile,
-		Config:    req.Config,
-		Stop:      stop,
-		AuthMode:  mode,
-		SeedURLs:  req.SeedURLs,
+		ProjectID:     domain.ID(req.ProjectID),
+		TargetID:      domain.ID(req.TargetID),
+		Name:          strings.TrimSpace(req.Name),
+		Profile:       profile,
+		Config:        req.Config,
+		Stop:          stop,
+		AuthMode:      mode,
+		AuthStatePath: req.AuthStatePath,
+		SeedURLs:      req.SeedURLs,
 	})
 	if err != nil {
 		s.writeScanError(w, err)
@@ -269,7 +273,8 @@ func (s *Server) writeScanError(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, scan.ErrScopeRequired), errors.Is(err, scan.ErrScopeEmpty),
-		errors.Is(err, scan.ErrOutOfScope), errors.Is(err, scan.ErrInvalidSeed):
+		errors.Is(err, scan.ErrOutOfScope), errors.Is(err, scan.ErrInvalidSeed),
+		errors.Is(err, scan.ErrAuth):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, scan.ErrBadState), errors.Is(err, scan.ErrNotRunning):
 		writeError(w, http.StatusConflict, err.Error())

@@ -89,7 +89,34 @@ are blocked, and timeout/cancellation are observed. Both run by default and skip
 when no Chromium is found (`$INDAGO_CHROMIUM_PATH` or
 `~/.cache/ms-playwright/chromium-*`; skipped in `-short`). Chromium is launched
 by explicit path, so the Playwright driver and the installed revision need not
-match.
+match. The Playwright *driver* must match `go.mod`'s `playwright-go` version
+(currently 1.60.0, see `docs/deployment.md` §3); without it these tests
+**skip** rather than fail, so check for `SKIP` in `-v` output before reading a
+green run as browser coverage.
+
+### Release gate (stress + repetition)
+`internal/scan/stress_test.go` (no browser) and
+`TestE2E_RepeatedCrashRestartDuringVerification` (real Chromium) stress what
+single-pass tests can't:
+- repeated crash/restart at six points deepening through a scan whose
+  discovery stays in flight (a chained site);
+- three consecutive crashes mid-verification;
+- concurrent scans under 8-goroutine pause/resume churn, then cancel or
+  complete;
+- repeated session-loss → `awaiting_auth` → re-auth cycles.
+
+Each ends by checking the release invariants (`assertScanIntegrity`):
+- every injection point was tested;
+- no duplicate finding per correlation key;
+- every finding and test-case evidence reference resolves to a readable blob;
+- no job is left pending and no test case is left running.
+
+The gate itself:
+```bash
+make check                                   # gofmt + vet + race, -p 1
+go test -race -p 1 -count=5 ./...            # repetition
+go test -race -count=20 ./internal/scan/ -run 'TestE2E_.*Restart|TestStress_|TestRestart'
+```
 
 ### Test job executor
 `internal/scan/executor_test.go` (request construction, resolution, each outcome
@@ -173,12 +200,16 @@ launch real Chromium instances under test. `go test`'s default parallelism runs
 different packages' test binaries concurrently, which lets their Chromium
 processes compete for CPU at the same time — under `-race`'s overhead, that can
 push a real-browser test's own internal timeout past its deadline on a loaded
-machine (observed in `TestE2E_RestartRecoversInterruptedVerification`: fails
-intermittently with full default parallelism, passes reliably both in
-isolation and under `-p 1`, confirming the cause is scheduling contention
-rather than a product race). `-p 1` costs wall-clock time but removes that
-contention entirely; prefer it over chasing a flake that `-race` would
-otherwise make look like a real bug. A single package's tests still run their
+machine. `-p 1` costs wall-clock time but removes that contention.
+
+**Caveat, learned the hard way:** this paragraph used to cite
+`TestE2E_RestartRecoversInterruptedVerification` as an example of
+"scheduling contention, not a product race". That was wrong. Its
+intermittent failure was a real restart-recovery bug: discovery's partial
+registration was not reconciled on resume (see `docs/e2e-validation.md`,
+Reliability & Release Gate). Load only made the window wider. Treat a flake
+that load makes *more* likely as a product bug until you've proven otherwise,
+and capture the failing state, not just the failing assertion. A single package's tests still run their
 own subtests/goroutines concurrently as normal — only cross-package
 parallelism is removed.
 

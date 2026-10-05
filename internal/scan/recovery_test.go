@@ -360,3 +360,97 @@ func TestRecoverScansFinishesInterruptedCancel(t *testing.T) {
 		t.Fatalf("state=%s jobs=%+v", got.Scan.State, got.Jobs)
 	}
 }
+
+// parkInjectionPointEnqueue wraps a queue so discovery's FIRST enqueue of an
+// injection-point test job blocks until the run is torn down, then fails with
+// the cancellation — exactly where a shutdown/crash was observed to land in
+// TestE2E_RestartRecoversInterruptedVerification's intermittent failure: the
+// injection point already persisted, its test job not yet enqueued.
+type parkInjectionPointEnqueue struct {
+	queue.Queue
+	once   sync.Once
+	parked chan struct{}
+}
+
+func (p *parkInjectionPointEnqueue) Enqueue(ctx context.Context, job *domain.TestJob) error {
+	if job.Type == domain.JobTest && !job.Target.InjectionPointID.Empty() && len(job.Payload) == 0 {
+		park := false
+		p.once.Do(func() { park = true })
+		if park {
+			close(p.parked)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+	}
+	return p.Queue.Enqueue(ctx, job)
+}
+
+// Regression: a restart must test an injection point whose job was lost to the
+// shutdown. Before the fix the resumed scan COMPLETED with zero findings — the
+// rediscovered endpoint hit the collector's dedup check, so its injection point
+// was never enqueued again — the root cause of
+// TestE2E_RestartRecoversInterruptedVerification's "got 0" flake. This version
+// is deterministic and needs no browser.
+func TestRestartTestsInjectionPointWhoseJobWasLostToShutdown(t *testing.T) {
+	ctx := context.Background()
+	s := newSite(t, func(mux *http.ServeMux, _ func() string) {
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/" {
+				http.NotFound(w, r)
+				return
+			}
+			writeHTML(w, `<a href="/reflect?q=hi">r</a>`)
+		})
+		mux.HandleFunc("/reflect", func(w http.ResponseWriter, r *http.Request) {
+			writeHTML(w, "<div>"+r.URL.Query().Get("q")+"</div>")
+		})
+	})
+	dbPath := filepath.Join(t.TempDir(), "indago.db")
+
+	db, q := openSQLite(t, dbPath)
+	proj, tgt := seedProject(t, db, s.URL, hostScope())
+	pq := &parkInjectionPointEnqueue{Queue: q, parked: make(chan struct{})}
+	ctrl1 := newCtrl(t, db, pq, scan.Options{})
+	sc := createScan(t, ctrl1, proj, tgt, workersCfg(2), domain.StopPolicy{})
+	if err := ctrl1.Start(ctx, sc.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-pq.parked:
+	case <-time.After(15 * time.Second):
+		t.Fatal("discovery never reached the injection-point enqueue")
+	}
+	ctrl1.Shutdown() // the "crash": lands between persisting the IP and enqueueing its job
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db2, q2 := openSQLite(t, dbPath)
+	defer db2.Close()
+	ips, err := db2.InjectionPoints().ListByScan(ctx, sc.ID)
+	if err != nil || len(ips) != 1 {
+		t.Fatalf("setup: want the injection point persisted before the crash, got %d (%v)", len(ips), err)
+	}
+	ctrl2 := newCtrl(t, db2, q2, scan.Options{})
+	if _, err := ctrl2.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctrl2.RecoverScans(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctrl2.Resume(ctx, sc.ID); err != nil {
+		t.Fatal(err)
+	}
+	done := waitStatus(t, ctrl2, sc.ID, 20*time.Second, isCompleted)
+
+	if done.Tests.Reflected == 0 {
+		t.Fatalf("injection point never tested after restart: tests=%+v jobs=%+v", done.Tests, done.Jobs)
+	}
+	findings, err := db2.Findings().ListByScan(ctx, sc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("want exactly one finding after restart, got %d", len(findings))
+	}
+}

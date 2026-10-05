@@ -72,6 +72,9 @@ type Input struct {
 	Scope     domain.Scope
 	SeedURLs  []string
 	SessionID domain.ID
+	// SessionStatePath is the scan's saved browser session material, if any
+	// (see RunParams.SessionStatePath).
+	SessionStatePath string
 	// Wordlist is an optional file path for content/parameter discovery (used
 	// when the Config wordlists are empty).
 	Wordlist string

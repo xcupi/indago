@@ -85,3 +85,51 @@ func TestUnknownModeErrors(t *testing.T) {
 		t.Fatal("expected error for unknown mode")
 	}
 }
+
+func TestValidateStateFileRejectsUnusableMaterial(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cases := map[string]string{
+		"empty path":         "",
+		"relative path":      "state.json",
+		"missing file":       filepath.Join(dir, "nope.json"),
+		"directory":          dir,
+		"not JSON":           write("notjson.json", "cookie=abc"),
+		"JSON, wrong shape":  write("other.json", `{"hello":"world"}`),
+		"JSON array":         write("array.json", `[1,2,3]`),
+		"cookies wrong type": write("badcookies.json", `{"cookies":"abc"}`),
+	}
+	for name, path := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := auth.ValidateStateFile(path); !errors.Is(err, auth.ErrInvalidState) {
+				t.Fatalf("ValidateStateFile(%q) = %v, want ErrInvalidState", path, err)
+			}
+		})
+	}
+	for _, ok := range []string{
+		write("full.json", `{"cookies":[{"name":"sid","value":"1","domain":"example.com"}],"origins":[]}`),
+		write("cookies-only.json", `{"cookies":[]}`),
+		write("origins-only.json", `{"origins":[]}`),
+	} {
+		if err := auth.ValidateStateFile(ok); err != nil {
+			t.Fatalf("ValidateStateFile(%s) = %v, want nil", ok, err)
+		}
+	}
+}
+
+func TestImplementedModes(t *testing.T) {
+	for m, want := range map[domain.AuthMode]bool{
+		domain.AuthAnonymous: true, domain.AuthExisting: true,
+		domain.AuthPassword: false, domain.AuthInteractive: false, domain.AuthMFA: false,
+	} {
+		if got := auth.Implemented(m); got != want {
+			t.Errorf("Implemented(%s) = %v, want %v", m, got, want)
+		}
+	}
+}
