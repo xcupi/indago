@@ -4,286 +4,53 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Indago</title>
-  <style>
-    :root {
-      --bg: #0f1115; --panel: #171a21; --fg: #e6e9ef; --muted: #8b93a7;
-      --accent: #5b9dff; --border: #262b36; --ok: #4caf50; --warn: #e0b24c; --bad: #ff7b7b;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      background: var(--bg); color: var(--fg);
-    }
-    header {
-      padding: 16px 24px; border-bottom: 1px solid var(--border);
-      display: flex; align-items: baseline; gap: 12px;
-    }
-    header h1 { margin: 0; font-size: 18px; letter-spacing: 0.5px; }
-    header .ver { color: var(--muted); font-size: 12px; }
-    header .ctx { margin-left: auto; font-size: 12px; color: var(--muted); }
-    header .ctx b { color: var(--fg); font-weight: 600; }
-    main { padding: 24px; max-width: 1100px; margin: 0 auto; display: grid; gap: 20px; }
-    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
-    .card h2 { margin: 0 0 12px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
-    .card h2 .muted { color: var(--muted); font-size: 11px; text-transform: none; letter-spacing: 0; margin-left: 8px; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
-    th { color: var(--muted); font-weight: 600; font-size: 12px; }
-    td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-    .empty { color: var(--muted); font-style: italic; padding: 8px 6px; }
-    .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
-    .pill.confirmed, .pill.running, .pill.active { color: var(--ok); border-color: var(--ok); }
-    .pill.pending, .pill.paused, .pill.awaiting_auth, .pill.expired { color: var(--warn); border-color: var(--warn); }
-    .pill.failed, .pill.canceled, .pill.rejected { color: var(--bad); border-color: var(--bad); }
-    footer { padding: 16px 24px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
-    a { color: var(--accent); }
-    .muted { color: var(--muted); }
-    button, select, input[type=text], input[type=url], input[type=number] {
-      background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px;
-      padding: 5px 10px; font-size: 13px; font-family: inherit;
-    }
-    button { cursor: pointer; margin-right: 4px; }
-    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-    button:disabled { opacity: 0.4; cursor: not-allowed; }
-    button.primary { border-color: var(--accent); color: var(--accent); }
-    button.danger:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
-    label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 2px; }
-    .row { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: flex-end; }
-    .row > div { flex: 1 1 180px; min-width: 150px; }
-    .row.tight > div { flex: 0 0 auto; min-width: 0; }
-    input, select { width: 100%; }
-    .inline { display: inline-flex; align-items: center; gap: 6px; width: auto; }
-    .inline input[type=checkbox] { width: auto; }
-    .err { color: var(--bad); font-size: 12px; padding: 6px 0; min-height: 0; }
-    .ok-msg { color: var(--ok); font-size: 12px; padding: 6px 0; }
-    .detail { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin: 4px 0 12px; }
-    .detail dt { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-top: 8px; }
-    .detail dd { margin: 2px 0 0; }
-    .detail ul { margin: 4px 0; padding-left: 18px; }
-    .clickable { cursor: pointer; }
-    .clickable:hover { color: var(--accent); }
-    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
-    .metric { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
-    .metric .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
-    .metric .v { font-size: 16px; margin-top: 2px; }
-    .hidden { display: none; }
-    fieldset { border: 1px solid var(--border); border-radius: 8px; margin: 10px 0 0; padding: 8px 12px 12px; }
-    fieldset legend { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; padding: 0 6px; }
-    .hint { color: var(--muted); font-size: 11px; margin-top: 2px; }
-  </style>
+  <link rel="stylesheet" href="app.css" />
 </head>
 <body>
-  <header>
-    <h1>INDAGO</h1>
+  <header class="topbar">
+    <a class="brand" href="#/dashboard">INDAGO</a>
     <span class="ver" id="version">…</span>
-    <span class="ctx" id="context">No project selected</span>
+    <div class="project-picker">
+      <label for="projectSelect">Project</label>
+      <select id="projectSelect"><option value="">— select a project —</option></select>
+    </div>
   </header>
 
-  <main>
-    <div id="error" class="err"></div>
+  <div class="shell">
+    <nav class="sidebar" id="sidebar" aria-label="Main">
+      <a href="#/dashboard" id="nav-dashboard" data-nav="dashboard">Dashboard</a>
+      <a href="#/projects" id="nav-projects" data-nav="projects">Projects</a>
+      <a href="#/targets" id="nav-targets" data-nav="targets">Targets</a>
+      <a href="#/scope" id="nav-scope" data-nav="scope">Scope</a>
+      <a href="#/scans" id="nav-scans" data-nav="scans">Scans</a>
+      <a href="#/findings" id="nav-findings" data-nav="findings">Findings</a>
+      <a href="#/reports" id="nav-reports" data-nav="reports">Reports</a>
+      <a href="#/settings" id="nav-settings" data-nav="settings">Settings</a>
+    </nav>
 
-    <!-- ===================== PROJECTS ===================== -->
-    <section class="card">
-      <h2>Projects</h2>
-      <div class="row">
-        <div><label for="projName">New project name</label><input type="text" id="projName" placeholder="Acme pentest" /></div>
-        <div style="flex:0 0 auto"><button id="createProject" class="primary">Create project</button></div>
+    <main class="content">
+      <div id="error" class="err" role="alert"></div>
+      <div id="view"></div>
+    </main>
+  </div>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2 id="modalTitle"></h2>
+        <button id="modalClose" aria-label="Close">×</button>
       </div>
-      <div id="projErr" class="err"></div>
-      <table>
-        <thead><tr><th></th><th>Name</th><th>ID</th><th>Created</th></tr></thead>
-        <tbody id="projects"><tr><td colspan="4" class="empty">loading…</td></tr></tbody>
-      </table>
-    </section>
+      <div id="modalBody"></div>
+    </div>
+  </div>
 
-    <!-- ===================== TARGETS ===================== -->
-    <section class="card" id="targetsCard">
-      <h2>Targets <span class="muted" id="targetsProjLabel"></span></h2>
-      <div id="targetsBody">
-        <div class="row">
-          <div><label for="tgtName">Target name</label><input type="text" id="tgtName" placeholder="web app" /></div>
-          <div><label for="tgtURL">Base URL</label><input type="url" id="tgtURL" placeholder="https://app.example.com" /></div>
-          <div style="flex:0 0 auto"><button id="addTarget" class="primary">Add target</button></div>
-        </div>
-        <div id="tgtErr" class="err"></div>
-        <table>
-          <thead><tr><th>Name</th><th>Base URL</th><th>Details</th></tr></thead>
-          <tbody id="targets"><tr><td colspan="3" class="empty">Select a project first.</td></tr></tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- ===================== SCOPE ===================== -->
-    <section class="card" id="scopeCard">
-      <h2>Scope <span class="muted">— the safety boundary; every request is checked against it</span></h2>
-      <div id="scopeBody">
-        <div class="row">
-          <div><label for="scIncludeHosts">Include hosts (one per line)</label><textarea id="scIncludeHosts" rows="3" style="width:100%" placeholder="app.example.com"></textarea></div>
-          <div><label for="scExcludeHosts">Exclude hosts (one per line)</label><textarea id="scExcludeHosts" rows="3" style="width:100%"></textarea></div>
-        </div>
-        <div class="row">
-          <div><label for="scIncludePaths">Include path prefixes (one per line)</label><textarea id="scIncludePaths" rows="2" style="width:100%"></textarea></div>
-          <div><label for="scExcludePaths">Exclude path prefixes (one per line)</label><textarea id="scExcludePaths" rows="2" style="width:100%" placeholder="/logout"></textarea></div>
-        </div>
-        <label class="inline"><input type="checkbox" id="scSubdomains" /> Allow subdomains of included hosts</label>
-        <div style="margin-top:10px"><button id="saveScope" class="primary">Save scope</button></div>
-        <div id="scopeErr" class="err"></div>
-        <div id="scopeCurrent" class="detail hidden"></div>
-      </div>
-    </section>
-
-    <!-- ===================== NEW SCAN ===================== -->
-    <section class="card" id="newScanCard">
-      <h2>New scan</h2>
-      <div id="newScanBody">
-        <div class="row">
-          <div><label for="scanName">Scan name</label><input type="text" id="scanName" placeholder="initial sweep" /></div>
-          <div><label for="scanTarget">Target</label><select id="scanTarget"></select></div>
-        </div>
-        <fieldset>
-          <legend>Scan type &amp; discovery</legend>
-          <div class="row tight">
-            <div><label class="inline"><input type="radio" name="scanType" value="crawl" checked /> Crawl scan (follow links)</label></div>
-            <div><label class="inline"><input type="radio" name="scanType" value="quick" /> Quick scan (seeds only)</label></div>
-          </div>
-          <label for="scanSeeds">Seed URLs (one per line; default: the target base URL)</label>
-          <textarea id="scanSeeds" rows="2" style="width:100%"></textarea>
-          <div class="row tight" id="crawlLimits">
-            <div><label for="scanDepth">Crawl depth</label><input type="number" id="scanDepth" min="0" max="20" placeholder="default" style="width:110px" /></div>
-            <div><label for="scanMaxPages">Max pages</label><input type="number" id="scanMaxPages" min="0" placeholder="default" style="width:120px" /></div>
-            <div><label for="scanMaxEndpoints">Max endpoints</label><input type="number" id="scanMaxEndpoints" min="0" placeholder="default" style="width:120px" /></div>
-          </div>
-        </fieldset>
-        <fieldset>
-          <legend>Performance profile</legend>
-          <div class="row tight">
-            <div><label for="scanProfile">Profile</label>
-              <select id="scanProfile">
-                <option value="conservative">Conservative</option>
-                <option value="balanced" selected>Balanced</option>
-                <option value="fast">Fast</option>
-                <option value="custom">Custom</option>
-              </select>
-            </div>
-          </div>
-          <div class="row tight hidden" id="customConfig">
-            <div><label for="cfgDiscovery">Discovery concurrency</label><input type="number" id="cfgDiscovery" min="0" max="64" value="4" style="width:150px" /></div>
-            <div><label for="cfgHTTP">HTTP concurrency</label><input type="number" id="cfgHTTP" min="0" max="64" value="10" style="width:140px" /></div>
-            <div><label for="cfgBrowser">Browser concurrency</label><input type="number" id="cfgBrowser" min="0" max="64" value="2" style="width:150px" /></div>
-            <div><label for="cfgRate">Requests / second</label><input type="number" id="cfgRate" min="0" max="1000" step="0.1" value="10" style="width:130px" /></div>
-          </div>
-        </fieldset>
-        <fieldset>
-          <legend>Stop policy</legend>
-          <div class="row tight">
-            <div><label for="scanStop">When to stop</label>
-              <select id="scanStop">
-                <option value="continue_all" selected>Continue (test everything)</option>
-                <option value="first_confirmed">Stop at first confirmed</option>
-                <option value="after_n_confirmed">Stop after N confirmed</option>
-                <option value="pause_and_ask">Pause &amp; ask on confirmed</option>
-              </select>
-            </div>
-            <div id="stopNWrap" class="hidden"><label for="scanStopN">N confirmed</label><input type="number" id="scanStopN" min="1" value="1" style="width:110px" /></div>
-          </div>
-        </fieldset>
-        <fieldset>
-          <legend>Authentication</legend>
-          <div class="row tight">
-            <div><label for="scanAuth">Mode</label>
-              <select id="scanAuth">
-                <option value="anonymous" selected>Anonymous (no login)</option>
-                <option value="existing">Existing session (import saved state)</option>
-              </select>
-            </div>
-          </div>
-          <div id="authExistingWrap" class="hidden">
-            <label for="scanAuthState">Session state file (absolute server-side path)</label>
-            <input type="text" id="scanAuthState" class="mono" placeholder="/data/sessions/login-….json" />
-            <div class="hint">Capture one with interactive login below, or point at a Playwright storage-state file. The file's contents are never shown.</div>
-            <div style="margin-top:8px"><button id="startLogin">Interactive login…</button></div>
-            <div id="loginPanel" class="detail hidden">
-              <div class="row tight">
-                <div style="flex:1 1 260px"><label for="loginURL">Login page URL</label><input type="url" id="loginURL" placeholder="https://app.example.com/login" /></div>
-                <div style="flex:1 1 200px"><label for="loginSuccess">Success URL glob (optional)</label><input type="text" id="loginSuccess" class="mono" placeholder="**/dashboard" /></div>
-                <div style="flex:0 0 auto"><button id="runLogin" class="primary">Open browser &amp; wait</button></div>
-              </div>
-              <div id="loginStatus" class="muted" style="font-size:12px"></div>
-            </div>
-          </div>
-        </fieldset>
-        <div style="margin-top:12px"><button id="createScan" class="primary">Create scan</button></div>
-        <div id="scanErr" class="err"></div>
-      </div>
-    </section>
-
-    <!-- ===================== SCANS ===================== -->
-    <section class="card">
-      <h2>Scans <span class="muted" id="refreshed"></span></h2>
-      <table>
-        <thead><tr>
-          <th>Name</th><th>State</th><th>Discovery</th><th>Endpoints</th><th>Params</th>
-          <th>Jobs (q / run / done)</th><th>Findings (C / P / R / I)</th><th>Actions</th>
-        </tr></thead>
-        <tbody id="scans"><tr><td colspan="8" class="empty">loading…</td></tr></tbody>
-      </table>
-    </section>
-
-    <!-- ===================== MONITOR ===================== -->
-    <section class="card hidden" id="monitorCard">
-      <h2>Live monitor <span class="muted" id="monitorLabel"></span></h2>
-      <div class="metrics" id="monitorMetrics"></div>
-      <fieldset>
-        <legend>Runtime tuning (applies live)</legend>
-        <div class="row tight">
-          <div><label for="rcDiscovery">Discovery</label><input type="number" id="rcDiscovery" min="0" max="64" style="width:110px" /></div>
-          <div><label for="rcHTTP">HTTP</label><input type="number" id="rcHTTP" min="0" max="64" style="width:110px" /></div>
-          <div><label for="rcBrowser">Browser</label><input type="number" id="rcBrowser" min="0" max="64" style="width:110px" /></div>
-          <div><label for="rcRate">Req/s</label><input type="number" id="rcRate" min="0" max="1000" step="0.1" style="width:110px" /></div>
-          <div style="flex:0 0 auto; align-self:flex-end"><button id="applyConfig">Apply</button></div>
-        </div>
-        <div id="rcErr" class="err"></div>
-      </fieldset>
-    </section>
-
-    <!-- ===================== FINDINGS ===================== -->
-    <section class="card">
-      <h2>Findings <span class="muted" id="findingsScanLabel"></span></h2>
-      <table>
-        <thead><tr>
-          <th></th><th>Title</th><th>Verdict</th><th>Severity</th><th>Parameter</th><th>Context</th>
-        </tr></thead>
-        <tbody id="findings"><tr><td colspan="6" class="empty">Select a scan's "Monitor" to view its findings.</td></tr></tbody>
-      </table>
-    </section>
-
-    <!-- ===================== REPORTS ===================== -->
-    <section class="card hidden" id="reportsCard">
-      <h2>Reports <span class="muted" id="reportsScanLabel"></span></h2>
-      <p class="hint" style="margin:0 0 10px">
-        Generate from checked findings above, or leave all unchecked to include every finding in the scan.
-      </p>
-      <p>
-        <select id="reportFormat" style="width:auto">
-          <option value="json">JSON</option>
-          <option value="markdown">Markdown</option>
-          <option value="html">HTML</option>
-        </select>
-        <button id="generateReport" class="primary">Generate report</button>
-      </p>
-      <div id="reportErr" class="err"></div>
-      <table>
-        <thead><tr><th>Created</th><th>Format</th><th>Findings</th><th>Confirmed</th><th>Open</th></tr></thead>
-        <tbody id="reports"><tr><td colspan="5" class="empty">No reports yet.</td></tr></tbody>
-      </table>
-    </section>
-  </main>
-
-  <footer>
+  <footer class="footer">
     Indago — local-first, single-user web application security hunting platform. Authorized use only.
     Reflected XSS is discovered <em>and</em> verified in a real browser; results are backed by stored evidence.
   </footer>
 
   <script src="app.js"></script>
+  <script src="scans.js"></script>
+  <script src="views.js"></script>
 </body>
 </html>
