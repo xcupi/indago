@@ -179,9 +179,15 @@ const prefs = {
     try { if (val === null || val === undefined) localStorage.removeItem("indago." + key); else localStorage.setItem("indago." + key, String(val)); } catch (e) { /* ignore */ }
   },
 };
+// Live-refresh interval in milliseconds, or 0 for "Off". Stored per-browser.
+// Default 10s. Legacy/invalid values fall back to the default; 0 is a valid,
+// explicit "Off".
+const REFRESH_OPTIONS = [["0", "Off"], ["5000", "5 seconds"], ["10000", "10 seconds"], ["30000", "30 seconds"], ["60000", "60 seconds"]];
 function refreshMs() {
-  const v = parseInt(prefs.get("refreshMs", "2000"), 10);
-  return Number.isFinite(v) && v >= 500 ? v : 2000;
+  const raw = prefs.get("refreshMs", "10000");
+  const v = parseInt(raw, 10);
+  if (v === 0) return 0; // Off
+  return REFRESH_OPTIONS.some(([val]) => val === String(v)) ? v : 10000;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +259,12 @@ const routes = []; // { name, pattern: RegExp, render(params, view) }
 let currentView = { name: "", refresh: null, timer: null };
 
 function defineRoute(name, pattern, render) { routes.push({ name, pattern, render }); }
+
+// manualRefreshButton triggers the current view's refresh once. It is how a
+// view stays usable when the live-refresh setting is Off (no timer runs).
+function manualRefreshButton() {
+  return button("Refresh", () => { if (currentView.refresh) currentView.refresh(); }, "");
+}
 function navigate(hash) {
   if (location.hash === hash) route(); else location.hash = hash;
 }
@@ -284,10 +296,14 @@ async function route() {
     const refresh = await match.render(params, view);
     if (token !== currentView) return; // navigated away while rendering
     if (typeof refresh === "function") {
-      currentView.refresh = refresh;
-      currentView.timer = setInterval(() => {
-        if (token === currentView && $("modal").classList.contains("hidden")) refresh();
-      }, refreshMs());
+      currentView.refresh = refresh; // also invoked by any manual "Refresh" control
+      const ms = refreshMs();
+      if (ms > 0) {
+        currentView.timer = setInterval(() => {
+          if (token === currentView && $("modal").classList.contains("hidden")) refresh();
+        }, ms);
+      }
+      // ms === 0 (Off): no timer runs; the view's manual Refresh button still works.
     }
   } catch (e) {
     if (token !== currentView) return;

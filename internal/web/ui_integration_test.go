@@ -363,9 +363,22 @@ func TestUIOperationalWorkflow(t *testing.T) {
 	if err := u.st.Sessions().Update(context.Background(), sess); err != nil {
 		t.Fatal(err)
 	}
-	u.mustClickText("#sidebar a", "Scans")
-	u.waitUI("awaiting_auth shown in scans list",
-		`/awaiting_auth/.test(document.getElementById('view').textContent)`)
+	// Wait for the backend to actually reach awaiting_auth (deterministic),
+	// then drive the UI to the scan — its detail fetches status on render, so
+	// the assertion does not depend on the live-refresh interval.
+	deadlineA := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadlineA) {
+		if cur, _ := u.st.Scans().Get(context.Background(), sc.ID); cur.State == domain.ScanAwaitingAuth {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if cur, _ := u.st.Scans().Get(context.Background(), sc.ID); cur.State != domain.ScanAwaitingAuth {
+		t.Fatalf("scan did not reach awaiting_auth: %s", cur.State)
+	}
+	u.goHash("#/scans/" + string(sc.ID) + "/overview")
+	u.waitUI("awaiting_auth shown in scan detail",
+		`/awaiting_auth/.test(document.getElementById('tabPanel').textContent)`)
 }
 
 func mustScan(t *testing.T, st *memory.Store, id string) *domain.Scan {

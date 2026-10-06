@@ -8,7 +8,7 @@
 // Dashboard — high-level summary + active scans only
 // ---------------------------------------------------------------------------
 async function renderDashboard(_params, view) {
-  view.appendChild(pageHead("Dashboard", [button("New scan", openNewScanModal, "primary")]));
+  view.appendChild(pageHead("Dashboard", [manualRefreshButton(), button("New scan", openNewScanModal, "primary")]));
 
   const summary = card("Summary", el("div", "loading…", "hint"));
   const active = card("Active scans", el("div", "loading…", "hint"));
@@ -205,7 +205,7 @@ async function renderScope(_params, view) {
 // Scans list
 // ---------------------------------------------------------------------------
 async function renderScansList(_params, view) {
-  view.appendChild(pageHead("Scans", [button("New scan", openNewScanModal, "primary")]));
+  view.appendChild(pageHead("Scans", [manualRefreshButton(), button("New scan", openNewScanModal, "primary")]));
   const headers = ["Name", "State", "Discovery", "Endpoints", "Jobs (q/run/done)", "Findings (C/P/R/I)", ""];
   const body = card(null, el("div", "loading…", "hint"));
   view.appendChild(body);
@@ -283,10 +283,10 @@ async function renderReports(_params, view) {
 async function renderSettings(_params, view) {
   view.appendChild(pageHead("Settings"));
 
-  const interval = select("set_refresh", [["1000", "1 second"], ["2000", "2 seconds"], ["5000", "5 seconds"], ["10000", "10 seconds"]], prefs.get("refreshMs", "2000"));
+  const interval = select("set_refresh", REFRESH_OPTIONS, String(refreshMs()));
   interval.style.width = "200px";
   interval.addEventListener("change", () => { prefs.set("refreshMs", interval.value); route(); });
-  view.appendChild(card("Live refresh interval", field("How often live views poll for updates", interval),
+  view.appendChild(card("Live refresh interval", field("How often live views poll for updates (Off = manual refresh only)", interval),
     el("p", "A per-browser preference only; it changes nothing on the server.", "hint")));
 
   let login = "unknown";
