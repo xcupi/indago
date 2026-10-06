@@ -154,13 +154,31 @@ func (p ProfileName) IsValid() bool {
 	}
 }
 
-// ScanConfig holds the runtime-tunable concurrency and rate controls. All of
-// these may be changed while a scan is running.
+// ScanConfig holds a scan's concurrency, rate, and crawl-extent controls.
+//
+// The concurrency and rate controls are runtime-tunable: all four may be
+// changed while a scan is running (see Controller.Reconfigure). The crawl
+// controls (QuickScan, MaxDepth, MaxPages, MaxEndpoints) are read when
+// discovery starts, so changing them only affects a subsequent discovery run —
+// exactly like DiscoveryConcurrency's effect on the crawl fan-out.
 type ScanConfig struct {
 	DiscoveryConcurrency int     `json:"discovery_concurrency"`
 	HTTPConcurrency      int     `json:"http_concurrency"`
 	BrowserConcurrency   int     `json:"browser_concurrency"`
 	RequestsPerSecond    float64 `json:"requests_per_second"` // 0 = unlimited (discouraged)
+
+	// QuickScan limits discovery to the seeds themselves (crawl depth 0): the
+	// seed endpoints and their own parameters are tested, but no links are
+	// followed. It overrides MaxDepth. A full ("crawl") scan leaves it false.
+	QuickScan bool `json:"quick_scan,omitempty"`
+	// MaxDepth is the crawl depth for a full scan (links followed from the
+	// seeds). 0 means "use the server default"; QuickScan forces seeds-only
+	// regardless. Ignored when QuickScan is set.
+	MaxDepth int `json:"max_depth,omitempty"`
+	// MaxPages caps pages fetched by the crawler (0 = server default).
+	MaxPages int `json:"max_pages,omitempty"`
+	// MaxEndpoints caps endpoints discovered (0 = server default).
+	MaxEndpoints int `json:"max_endpoints,omitempty"`
 }
 
 // StopMode controls when a scan stops relative to confirmed findings.

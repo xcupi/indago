@@ -329,8 +329,10 @@ func (c *cli) scan(sub string, args []string) error {
 		return c.scanStatus(args)
 	case "start", "pause", "resume", "cancel":
 		return c.scanAction(sub, args)
+	case "config":
+		return c.scanConfig(args)
 	}
-	return fmt.Errorf("unknown scan subcommand %q (create, list, status, start, pause, resume, cancel)", sub)
+	return fmt.Errorf("unknown scan subcommand %q (create, list, status, start, pause, resume, cancel, config)", sub)
 }
 
 func (c *cli) scanCreate(args []string) error {
@@ -343,17 +345,22 @@ func (c *cli) scanCreate(args []string) error {
 	stopN := fs.Int("stop-n", 0, "confirmed-finding limit for -stop after_n_confirmed")
 	authMode := fs.String("auth", "", "auth mode: anonymous (default) | existing")
 	authState := fs.String("auth-state", "", "saved session material (Playwright storage-state JSON) for -auth existing")
+	quick := fs.Bool("quick", false, "quick scan: test the seeds only, do not follow links (crawl depth 0)")
+	depth := fs.Int("depth", 0, "crawl depth for a full scan (0 = server default; ignored with -quick)")
+	maxPages := fs.Int("max-pages", 0, "cap on pages fetched by the crawler (0 = server default)")
+	maxEndpoints := fs.Int("max-endpoints", 0, "cap on endpoints discovered (0 = server default)")
 	var seeds stringList
 	fs.Var(&seeds, "seed", "discovery seed URL (repeatable; default: the target base URL)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
 		"profile": *profile, "seed_urls": []string(seeds),
+		"quick_scan": *quick, "max_depth": *depth, "max_pages": *maxPages, "max_endpoints": *maxEndpoints,
 	}
 	if *authState != "" && *authMode == "" {
 		*authMode = string(domain.AuthExisting) // the only mode that takes a state file
@@ -451,6 +458,59 @@ func (c *cli) scanAction(action string, args []string) error {
 	return nil
 }
 
+// scanConfig changes a running scan's concurrency/rate at runtime. Crawl extent
+// (quick/depth/limits) is fixed at creation and preserved by the server.
+func (c *cli) scanConfig(args []string) error {
+	fs := c.newFlags("scan config")
+	disc := fs.Int("discovery", -1, "discovery concurrency")
+	httpC := fs.Int("http", -1, "HTTP concurrency")
+	browserC := fs.Int("browser", -1, "browser concurrency")
+	rps := fs.Float64("rate", -1, "requests per second (0 = unlimited)")
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return errors.New("usage: indago scan config <scan-id> [-discovery N] [-http N] [-browser N] [-rate N]")
+	}
+	id, err := c.resolveScanID(pos[0])
+	if err != nil {
+		return err
+	}
+	// Start from the scan's current config so unspecified flags are unchanged.
+	var cur scan.Status
+	if err := c.call("GET", "/api/scans/"+url.PathEscape(id)+"/status", nil, &cur); err != nil {
+		return err
+	}
+	cfg := cur.Scan.Config
+	if *disc >= 0 {
+		cfg.DiscoveryConcurrency = *disc
+	}
+	if *httpC >= 0 {
+		cfg.HTTPConcurrency = *httpC
+	}
+	if *browserC >= 0 {
+		cfg.BrowserConcurrency = *browserC
+	}
+	if *rps >= 0 {
+		cfg.RequestsPerSecond = *rps
+	}
+	req := map[string]any{
+		"discovery_concurrency": cfg.DiscoveryConcurrency,
+		"http_concurrency":      cfg.HTTPConcurrency,
+		"browser_concurrency":   cfg.BrowserConcurrency,
+		"requests_per_second":   cfg.RequestsPerSecond,
+	}
+	var st scan.Status
+	if err := c.call("POST", "/api/scans/"+url.PathEscape(id)+"/config", req, &st); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "reconfigured scan %s: discovery=%d http=%d browser=%d rate=%g\n",
+		st.Scan.ID, st.Scan.Config.DiscoveryConcurrency, st.Scan.Config.HTTPConcurrency,
+		st.Scan.Config.BrowserConcurrency, st.Scan.Config.RequestsPerSecond)
+	return nil
+}
+
 // resolveScanID accepts a full scan ID or a unique prefix of one.
 func (c *cli) resolveScanID(ref string) (string, error) {
 	var scans []domain.Scan
@@ -537,6 +597,33 @@ func printStatus(w io.Writer, st *scan.Status) {
 	f := st.Findings
 	fmt.Fprintf(w, "Findings   confirmed %d   inconclusive %d   rejected %d   pending %d\n",
 		f.Confirmed, f.Inconclusive, f.Rejected, f.Pending)
+	if t.RateLimited > 0 || t.ServerError > 0 {
+		fmt.Fprintf(w, "Responses  429 (rate-limited) %d   5xx (server error) %d\n", t.RateLimited, t.ServerError)
+	}
+	cfg := s.Config
+	rate := "unlimited"
+	if cfg.RequestsPerSecond > 0 {
+		rate = fmt.Sprintf("%g req/s", cfg.RequestsPerSecond)
+	}
+	fmt.Fprintf(w, "Config     discovery %d   http %d   browser %d   rate %s\n",
+		cfg.DiscoveryConcurrency, cfg.HTTPConcurrency, cfg.BrowserConcurrency, rate)
+	if st.Workers != nil {
+		fmt.Fprintf(w, "Workers    discovery %d   http %d   browser %d   (live)\n",
+			st.Workers.Discovery, st.Workers.HTTP, st.Workers.Browser)
+	}
+	if sess := st.Session; sess != nil {
+		line := fmt.Sprintf("Session    mode %s   state %s", sess.Mode, sess.State)
+		if sess.HasState {
+			line += "   (session material on file)"
+		}
+		if sess.ExpiresAt != nil {
+			line += "   expires " + sess.ExpiresAt.Format("2006-01-02 15:04:05")
+		}
+		fmt.Fprintln(w, line)
+		if sess.LastError != "" {
+			fmt.Fprintf(w, "           auth error: %s\n", sess.LastError)
+		}
+	}
 	if s.Error != "" {
 		fmt.Fprintf(w, "Error      %s\n", s.Error)
 	}

@@ -2,6 +2,7 @@ package scan
 
 import (
 	"context"
+	"time"
 
 	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
@@ -18,6 +19,32 @@ type Status struct {
 	Jobs      queue.Stats     `json:"jobs"`
 	Findings  FindingCounts   `json:"findings"`
 	Tests     TestCounts      `json:"tests"`
+	// Session is the scan's authentication session, redacted for display: its
+	// mode and lifecycle state, whether saved session material is on file, and
+	// expiry — never the material itself (no cookies/tokens/paths).
+	Session *SessionStatus `json:"session,omitempty"`
+	// Workers is the live per-group worker count (discovery/http/browser) when
+	// the controller holds a running execution; nil when the scan is not
+	// actively running.
+	Workers *WorkerStatus `json:"workers,omitempty"`
+}
+
+// SessionStatus is the operator-facing, redacted view of a scan's auth session.
+// It deliberately omits StatePath and any session material (AGENTS.md §2.6 /
+// the UI must never expose cookies, tokens, or session-state contents).
+type SessionStatus struct {
+	Mode      domain.AuthMode     `json:"mode"`
+	State     domain.SessionState `json:"state"`
+	HasState  bool                `json:"has_state"` // saved session material exists on disk
+	ExpiresAt *time.Time          `json:"expires_at,omitempty"`
+	LastError string              `json:"last_error,omitempty"`
+}
+
+// WorkerStatus is the live worker-pool size per group, for the monitoring view.
+type WorkerStatus struct {
+	Discovery int `json:"discovery"`
+	HTTP      int `json:"http"`
+	Browser   int `json:"browser"`
 }
 
 // TestCounts tallies executed test cases by outcome. Each job attempt is one
@@ -33,6 +60,11 @@ type TestCounts struct {
 	// NotReflected <= Success.
 	Reflected    int `json:"reflected"`
 	NotReflected int `json:"not_reflected"`
+	// HTTP-status tallies observed by the executor, surfaced for monitoring:
+	// RateLimited counts 429 responses, ServerError counts 5xx. They are
+	// observational only and never change any verdict.
+	RateLimited int `json:"rate_limited"`
+	ServerError int `json:"server_error"`
 }
 
 // DiscoveryStatus summarizes a scan's discovery progress. EndpointsBySource
@@ -121,6 +153,12 @@ func (c *Controller) Status(ctx context.Context, scanID domain.ID) (*Status, err
 		case tc.Outcome == domain.OutcomeError:
 			st.Tests.Error++
 		}
+		switch {
+		case tc.HTTPStatus == 429:
+			st.Tests.RateLimited++
+		case tc.HTTPStatus >= 500 && tc.HTTPStatus <= 599:
+			st.Tests.ServerError++
+		}
 	}
 
 	findings, err := c.store.Findings().ListByScan(ctx, scanID)
@@ -139,5 +177,44 @@ func (c *Controller) Status(ctx context.Context, scanID domain.ID) (*Status, err
 			st.Findings.Pending++
 		}
 	}
+
+	st.Session = c.sessionStatus(ctx, sc)
+	st.Workers = c.workerStatus(scanID)
 	return st, nil
+}
+
+// sessionStatus builds the redacted session view. Errors degrade to nil (the
+// session is simply not shown) rather than failing the whole status read.
+func (c *Controller) sessionStatus(ctx context.Context, sc *domain.Scan) *SessionStatus {
+	if sc.SessionID.Empty() {
+		return nil
+	}
+	sess, err := c.store.Sessions().Get(ctx, sc.SessionID)
+	if err != nil {
+		return nil
+	}
+	return &SessionStatus{
+		Mode:      sess.Mode,
+		State:     sess.State,
+		HasState:  sess.StatePath != "", // presence only; never the path or its contents
+		ExpiresAt: sess.ExpiresAt,
+		LastError: sess.LastError,
+	}
+}
+
+// workerStatus returns the live per-group worker counts when the controller
+// holds a running execution for the scan, else nil (not actively running).
+func (c *Controller) workerStatus(scanID domain.ID) *WorkerStatus {
+	c.mu.Lock()
+	ex, ok := c.running[scanID]
+	c.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	sizes := ex.pool.Sizes()
+	return &WorkerStatus{
+		Discovery: sizes[GroupDiscovery],
+		HTTP:      sizes[GroupHTTP],
+		Browser:   sizes[GroupBrowser],
+	}
 }

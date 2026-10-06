@@ -55,6 +55,9 @@ var (
 	ErrBadState      = errors.New("scan: illegal state transition")
 	ErrShutdown      = errors.New("scan: controller is shut down")
 	ErrInvalidSeed   = errors.New("scan: invalid seed URL")
+	// ErrBadConfig reports an out-of-range scan configuration value (e.g. a
+	// crawl depth/limit beyond its cap). Operator-fixable input.
+	ErrBadConfig = errors.New("scan: invalid configuration")
 	// ErrAuth reports an unusable authentication configuration: an
 	// unimplemented mode, a state path given for a mode that takes none, or
 	// session material AuthExisting cannot use (at creation, or when Start/
@@ -233,7 +236,24 @@ type CreateScanParams struct {
 	// must be in scope; an out-of-scope seed is rejected rather than silently
 	// dropped.
 	SeedURLs []string
+
+	// Crawl-extent controls, applied on top of the resolved profile/config so
+	// they work with any profile. QuickScan limits discovery to the seeds
+	// (depth 0). MaxDepth/MaxPages/MaxEndpoints override the server defaults
+	// when > 0. See domain.ScanConfig.
+	QuickScan    bool
+	MaxDepth     int
+	MaxPages     int
+	MaxEndpoints int
 }
+
+// Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
+// effectively unbounded.
+const (
+	maxCrawlDepth     = 20
+	maxCrawlPages     = 100000
+	maxCrawlEndpoints = 100000
+)
 
 // CreateScan validates scope and inputs, then persists a scan in the Created
 // state together with a pending session. It performs no testing.
@@ -283,6 +303,21 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg := ProfileConfig(profile)
 	if profile == domain.ProfileCustom && p.Config != nil {
 		cfg = *p.Config
+	}
+	// Crawl-extent controls sit alongside the concurrency preset: they apply
+	// whatever the profile. 0 keeps the server/profile default.
+	cfg.QuickScan = p.QuickScan
+	if p.MaxDepth > 0 {
+		cfg.MaxDepth = p.MaxDepth
+	}
+	if p.MaxPages > 0 {
+		cfg.MaxPages = p.MaxPages
+	}
+	if p.MaxEndpoints > 0 {
+		cfg.MaxEndpoints = p.MaxEndpoints
+	}
+	if err := validateCrawlExtent(cfg); err != nil {
+		return nil, err
 	}
 
 	mode := p.AuthMode
@@ -643,6 +678,20 @@ func validateAuth(mode domain.AuthMode, statePath string) (string, error) {
 		return "", fmt.Errorf("%w: %w", ErrAuth, err)
 	}
 	return statePath, nil
+}
+
+// validateCrawlExtent bounds the crawl-extent controls so a typo cannot ask the
+// crawler to run effectively unbounded.
+func validateCrawlExtent(cfg domain.ScanConfig) error {
+	switch {
+	case cfg.MaxDepth < 0 || cfg.MaxDepth > maxCrawlDepth:
+		return fmt.Errorf("%w: max_depth must be between 0 and %d", ErrBadConfig, maxCrawlDepth)
+	case cfg.MaxPages < 0 || cfg.MaxPages > maxCrawlPages:
+		return fmt.Errorf("%w: max_pages must be between 0 and %d", ErrBadConfig, maxCrawlPages)
+	case cfg.MaxEndpoints < 0 || cfg.MaxEndpoints > maxCrawlEndpoints:
+		return fmt.Errorf("%w: max_endpoints must be between 0 and %d", ErrBadConfig, maxCrawlEndpoints)
+	}
+	return nil
 }
 
 // loadScope loads the project's scope, failing closed when absent or empty.

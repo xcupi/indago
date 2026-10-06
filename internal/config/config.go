@@ -19,6 +19,7 @@ const (
 	dbFileName        = "indago.db"
 	evidenceDirName   = "evidence"
 	reportsDirName    = "reports"
+	sessionsDirName   = "sessions"
 	configFileName    = "config.json"
 )
 
@@ -66,12 +67,17 @@ func (c Config) EvidenceDir() string { return filepath.Join(c.DataDir, evidenceD
 // ReportsDir returns the generated-report root under the data dir.
 func (c Config) ReportsDir() string { return filepath.Join(c.DataDir, reportsDirName) }
 
+// SessionsDir returns the root for saved interactive-login session material
+// (cookies/storage state) under the data dir. These files are sensitive; the
+// browser login writes them with 0600.
+func (c Config) SessionsDir() string { return filepath.Join(c.DataDir, sessionsDirName) }
+
 // ConfigPath returns the config file path under the data dir.
 func (c Config) ConfigPath() string { return filepath.Join(c.DataDir, configFileName) }
 
 // EnsureDirs creates the data and evidence directories if missing.
 func (c Config) EnsureDirs() error {
-	for _, d := range []string{c.DataDir, c.EvidenceDir(), c.ReportsDir()} {
+	for _, d := range []string{c.DataDir, c.EvidenceDir(), c.ReportsDir(), c.SessionsDir()} {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			return fmt.Errorf("config: create dir %s: %w", d, err)
 		}

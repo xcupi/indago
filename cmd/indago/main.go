@@ -8,8 +8,10 @@
 //	indago project|target|scope|scan ...   drive a running server (see `indago help`)
 //
 // `serve` brings up the full backend (store, queue, scan controller, discovery,
-// web). Scans perform scope-enforced discovery; job handlers are still the
-// Phase 0 no-ops, so no vulnerability testing happens.
+// web) and the operational dashboard. Scans run the full scope-enforced
+// Reflected XSS pipeline — discovery, reflection, context analysis, candidate
+// execution, and (with -browser) real-browser verification — and the web UI and
+// CLI drive it through the same HTTP API.
 package main
 
 import (
@@ -20,11 +22,13 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/indago/indago/internal/browser"
 	"github.com/indago/indago/internal/config"
+	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/queue"
@@ -87,10 +91,11 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER, default http://
   scope set -project ID -include host[,host] [-exclude ..] [-include-path ..] [-exclude-path ..] [-subdomains]
   scope show -project ID
   scan create -project ID -target ID [-name N] [-profile P] [-seed URL]... [-stop MODE [-stop-n N]]
-              [-auth existing -auth-state FILE]
+              [-quick | -depth N] [-max-pages N] [-max-endpoints N] [-auth existing -auth-state FILE]
   scan list [-json]
   scan status <scan-id|prefix> [-json]
   scan start|pause|resume|cancel <scan-id|prefix>
+  scan config <scan-id|prefix> [-discovery N] [-http N] [-browser N] [-rate N]   (runtime tuning)
   finding list -scan <scan-id|prefix> [-json]
   finding show -scan <scan-id|prefix> <finding-id|prefix> [-json]
   report create -scan <scan-id|prefix> -format json|markdown|html [-finding ID]... [-out FILE]
@@ -215,6 +220,7 @@ func cmdServe(args []string) error {
 	if *allowUnsafe {
 		log.Warn("state-changing methods (POST/PUT/PATCH/DELETE) will be executed against in-scope targets")
 	}
+	var loginFn web.LoginFunc
 	if *useBrowser {
 		bm, err := browser.NewManager(browser.Config{Headless: true, ExecutablePath: *chromium}, log)
 		if err != nil {
@@ -222,6 +228,23 @@ func cmdServe(args []string) error {
 		}
 		defer bm.Close()
 		opts.Browser = bm
+		// Interactive login reuses the same manager; it opens its OWN visible
+		// browser (independent of the pool's headless setting) and saves the
+		// captured session under the data dir. The web layer only ever returns
+		// the saved file's path, never its contents.
+		sessionsDir := cfg.SessionsDir()
+		loginFn = func(ctx context.Context, p web.LoginParams) (string, string, error) {
+			statePath := filepath.Join(sessionsDir, "login-"+string(domain.NewID())+".json")
+			res, err := bm.InteractiveLogin(ctx, browser.LoginOptions{
+				LoginURL:         p.LoginURL,
+				SuccessURLGlob:   p.SuccessURL,
+				StorageStatePath: statePath,
+			})
+			if err != nil {
+				return "", "", err
+			}
+			return res.StorageStatePath, res.FinalURL, nil
+		}
 	}
 	ctrl := scan.NewController(db, q, log, version, opts)
 
@@ -246,6 +269,7 @@ func cmdServe(args []string) error {
 	defer stop()
 
 	srv := web.NewServer(db, ctrl, version, log, evStore, cfg.ReportsDir())
+	srv.SetLoginFunc(loginFn) // nil unless -browser: endpoint then reports unavailable
 	log.Info("indago starting", "version", version, "data", cfg.DataDir)
 	err = srv.ListenAndServe(ctx, cfg.Server.Addr)
 	ctrl.Shutdown()
