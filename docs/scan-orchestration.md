@@ -301,14 +301,23 @@ so all three always agree:
 |--------|------|-----|
 | create project | `POST /api/projects` | `indago project create NAME` |
 | add target | `POST /api/projects/{id}/targets` | `indago target add -project ID -name N -url URL` |
+| target detail | `GET /api/projects/{id}/targets/{tid}` | (shown in the dashboard) |
 | set scope | `PUT /api/projects/{id}/scope` | `indago scope set -project ID -include a,b …` |
 | create scan | `POST /api/scans` | `indago scan create -project ID -target ID …` |
+| … quick / crawl + limits | `POST /api/scans` + `"quick_scan":true` or `"max_depth":N,"max_pages":N,"max_endpoints":N` | `indago scan create … -quick` or `-depth N -max-pages N -max-endpoints N` |
 | … with an existing session | `POST /api/scans` + `"auth_mode":"existing","auth_state_path":"/abs/state.json"` | `indago scan create … -auth-state FILE` (`-auth existing` implied; a relative path is made absolute by the CLI) |
 | start / pause / resume / cancel | `POST /api/scans/{id}/{action}` | `indago scan start\|pause\|resume\|cancel ID` |
-| status | `GET /api/scans/{id}/status` | `indago scan status ID [-json]` |
+| runtime concurrency / rate | `POST /api/scans/{id}/config` (the four runtime fields; crawl extent preserved) | `indago scan config ID [-discovery N] [-http N] [-browser N] [-rate N]` |
+| status (state, discovery, jobs, findings, request rate, live workers, 429/5xx, redacted session) | `GET /api/scans/{id}/status` | `indago scan status ID [-json]` |
+| interactive login (capture a session file for `existing` mode; needs `-browser`) | `POST /api/auth/login` | (dashboard only) |
 
 The CLI is a thin client over the running server's API (so only the server opens
-the SQLite file); scan IDs may be given as a unique prefix.
+the SQLite file); scan IDs may be given as a unique prefix. The bundled web
+dashboard (`/`, served by `indago serve`) is a thin client over the **same**
+API — it holds no scan, scope, or verification logic of its own — so the UI and
+CLI can never diverge in behavior. The status endpoint's session view is
+redacted: it carries the auth mode, lifecycle state, expiry, and whether saved
+material exists, but never a state path or any cookies/tokens.
 
 ### Protecting the control plane
 

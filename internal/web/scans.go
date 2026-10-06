@@ -71,6 +71,24 @@ func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, t)
 }
 
+func (s *Server) handleGetTarget(w http.ResponseWriter, r *http.Request) {
+	projectID := domain.ID(r.PathValue("id"))
+	if _, err := s.store.Projects().Get(r.Context(), projectID); err != nil {
+		s.writeLookupError(w, err)
+		return
+	}
+	t, err := s.store.Targets().Get(r.Context(), domain.ID(r.PathValue("tid")))
+	if err != nil {
+		s.writeLookupError(w, err)
+		return
+	}
+	if t.ProjectID != projectID {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
 // --- scope ---
 
 type scopeReq struct {
@@ -162,6 +180,15 @@ type createScanReq struct {
 	SeedURLs      []string           `json:"seed_urls"`
 	Stop          *stopReq           `json:"stop"`
 	Config        *domain.ScanConfig `json:"config"`
+
+	// Crawl extent, applied on top of the chosen profile (any profile). Quick
+	// limits discovery to the seeds (no link following); a full "crawl" scan
+	// leaves it false. MaxDepth/MaxPages/MaxEndpoints override server defaults
+	// when > 0.
+	QuickScan    bool `json:"quick_scan"`
+	MaxDepth     int  `json:"max_depth"`
+	MaxPages     int  `json:"max_pages"`
+	MaxEndpoints int  `json:"max_endpoints"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -219,6 +246,10 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		AuthMode:      mode,
 		AuthStatePath: req.AuthStatePath,
 		SeedURLs:      req.SeedURLs,
+		QuickScan:     req.QuickScan,
+		MaxDepth:      req.MaxDepth,
+		MaxPages:      req.MaxPages,
+		MaxEndpoints:  req.MaxEndpoints,
 	})
 	if err != nil {
 		s.writeScanError(w, err)
@@ -266,6 +297,91 @@ func (s *Server) handleScanAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
+// reconfigureReq carries the runtime-tunable controls only. Crawl extent
+// (quick/depth/limits) is fixed at creation and is preserved here.
+type reconfigureReq struct {
+	DiscoveryConcurrency int     `json:"discovery_concurrency"`
+	HTTPConcurrency      int     `json:"http_concurrency"`
+	BrowserConcurrency   int     `json:"browser_concurrency"`
+	RequestsPerSecond    float64 `json:"requests_per_second"`
+}
+
+// handleReconfigureScan changes a scan's concurrency/rate at runtime. It reads
+// the scan's current config and overlays only the four runtime fields, so the
+// crawl-extent controls set at creation are never clobbered.
+func (s *Server) handleReconfigureScan(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(r.PathValue("id"))
+	sc, err := s.store.Scans().Get(r.Context(), id)
+	if err != nil {
+		s.writeLookupError(w, err)
+		return
+	}
+	var req reconfigureReq
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	cfg := sc.Config // preserve QuickScan/MaxDepth/MaxPages/MaxEndpoints
+	cfg.DiscoveryConcurrency = req.DiscoveryConcurrency
+	cfg.HTTPConcurrency = req.HTTPConcurrency
+	cfg.BrowserConcurrency = req.BrowserConcurrency
+	cfg.RequestsPerSecond = req.RequestsPerSecond
+	if msg := validateConfig(cfg); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+	if err := s.ctrl.Reconfigure(r.Context(), id, cfg); err != nil {
+		s.writeScanError(w, err)
+		return
+	}
+	st, err := s.ctrl.Status(r.Context(), id)
+	if err != nil {
+		s.writeLookupError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// loginReq is the interactive-login request.
+type loginReq struct {
+	LoginURL   string `json:"login_url"`
+	SuccessURL string `json:"success_url"`
+}
+
+// handleInteractiveLogin drives a visible-browser login and returns the saved
+// session file's PATH only — never its contents (cookies/tokens). The operator
+// then uses that path as auth_state_path with auth_mode "existing". It blocks
+// until the login completes, times out, or the request is canceled, so the UI
+// shows a waiting/MFA state meanwhile.
+func (s *Server) handleInteractiveLogin(w http.ResponseWriter, r *http.Request) {
+	if s.login == nil {
+		writeError(w, http.StatusNotImplemented, "interactive login is not available (start the server with a browser configured: indago serve -browser)")
+		return
+	}
+	var req loginReq
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	u, err := url.Parse(strings.TrimSpace(req.LoginURL))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		writeError(w, http.StatusBadRequest, "login_url must be an absolute http(s) URL")
+		return
+	}
+	statePath, finalURL, err := s.login(r.Context(), LoginParams{LoginURL: u.String(), SuccessURL: strings.TrimSpace(req.SuccessURL)})
+	if err != nil {
+		if r.Context().Err() != nil {
+			// Operator navigated away / canceled: not a server fault.
+			writeError(w, http.StatusRequestTimeout, "login canceled or timed out")
+			return
+		}
+		s.writeInternalError(w, "interactive login", err)
+		return
+	}
+	// Return the path and final URL only. No session material crosses the API.
+	writeJSON(w, http.StatusOK, map[string]string{"state_path": statePath, "final_url": finalURL})
+}
+
 // writeScanError maps controller errors to HTTP statuses: bad input → 400,
 // wrong lifecycle state → 409, missing → 404, shutting down → 503.
 func (s *Server) writeScanError(w http.ResponseWriter, err error) {
@@ -274,7 +390,7 @@ func (s *Server) writeScanError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, scan.ErrScopeRequired), errors.Is(err, scan.ErrScopeEmpty),
 		errors.Is(err, scan.ErrOutOfScope), errors.Is(err, scan.ErrInvalidSeed),
-		errors.Is(err, scan.ErrAuth):
+		errors.Is(err, scan.ErrAuth), errors.Is(err, scan.ErrBadConfig):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, scan.ErrBadState), errors.Is(err, scan.ErrNotRunning):
 		writeError(w, http.StatusConflict, err.Error())

@@ -477,6 +477,17 @@ func (p *Page) Content(ctx context.Context) (string, error) {
 	return callCtx(ctx, func() (string, error) { return p.handle.Content() })
 }
 
+// Evaluate runs a JavaScript expression in the page and returns its result.
+// It is the general escape hatch for driving and inspecting a loaded page —
+// used by UI/integration tests to click, fill, and read DOM state against the
+// real dashboard. Production code uses the typed helpers (Navigate, Content,
+// storage accessors) instead. It stays neutral automation like the rest of
+// this package: it evaluates exactly what the caller passes and performs no
+// scope checks of its own.
+func (p *Page) Evaluate(ctx context.Context, script string) (any, error) {
+	return callCtx(ctx, func() (any, error) { return p.handle.Evaluate(script, nil) })
+}
+
 // Screenshot captures a PNG screenshot.
 func (p *Page) Screenshot(ctx context.Context, opts ScreenshotOptions) ([]byte, error) {
 	return callCtx(ctx, func() ([]byte, error) { return p.handle.Screenshot(opts.FullPage) })

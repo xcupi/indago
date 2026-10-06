@@ -7,7 +7,7 @@
   <style>
     :root {
       --bg: #0f1115; --panel: #171a21; --fg: #e6e9ef; --muted: #8b93a7;
-      --accent: #5b9dff; --border: #262b36; --ok: #4caf50;
+      --accent: #5b9dff; --border: #262b36; --ok: #4caf50; --warn: #e0b24c; --bad: #ff7b7b;
     }
     * { box-sizing: border-box; }
     body {
@@ -20,87 +20,258 @@
     }
     header h1 { margin: 0; font-size: 18px; letter-spacing: 0.5px; }
     header .ver { color: var(--muted); font-size: 12px; }
-    header .phase {
-      margin-left: auto; font-size: 11px; color: var(--muted);
-      border: 1px solid var(--border); padding: 2px 8px; border-radius: 999px;
-    }
-    main { padding: 24px; max-width: 1000px; margin: 0 auto; display: grid; gap: 24px; }
+    header .ctx { margin-left: auto; font-size: 12px; color: var(--muted); }
+    header .ctx b { color: var(--fg); font-weight: 600; }
+    main { padding: 24px; max-width: 1100px; margin: 0 auto; display: grid; gap: 20px; }
     .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
     .card h2 { margin: 0 0 12px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+    .card h2 .muted { color: var(--muted); font-size: 11px; text-transform: none; letter-spacing: 0; margin-left: 8px; }
     table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
     th { color: var(--muted); font-weight: 600; font-size: 12px; }
     td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
     .empty { color: var(--muted); font-style: italic; padding: 8px 6px; }
-    .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
-    .pill.confirmed { color: #ff7b7b; border-color: #ff7b7b; }
-    .pill.pending { color: #e0b24c; border-color: #e0b24c; }
+    .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+    .pill.confirmed, .pill.running, .pill.active { color: var(--ok); border-color: var(--ok); }
+    .pill.pending, .pill.paused, .pill.awaiting_auth, .pill.expired { color: var(--warn); border-color: var(--warn); }
+    .pill.failed, .pill.canceled, .pill.rejected { color: var(--bad); border-color: var(--bad); }
     footer { padding: 16px 24px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
     a { color: var(--accent); }
-    .muted { color: var(--muted); font-size: 11px; text-transform: none; letter-spacing: 0; margin-left: 8px; }
-    button, select { background: transparent; color: var(--fg); border: 1px solid var(--border); border-radius: 6px;
-             padding: 2px 10px; font-size: 12px; cursor: pointer; margin-right: 4px; }
-    button:hover { border-color: var(--accent); color: var(--accent); }
-    .err { color: #ff7b7b; font-size: 12px; padding: 6px 0; }
+    .muted { color: var(--muted); }
+    button, select, input[type=text], input[type=url], input[type=number] {
+      background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px;
+      padding: 5px 10px; font-size: 13px; font-family: inherit;
+    }
+    button { cursor: pointer; margin-right: 4px; }
+    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.primary { border-color: var(--accent); color: var(--accent); }
+    button.danger:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
+    label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 2px; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: flex-end; }
+    .row > div { flex: 1 1 180px; min-width: 150px; }
+    .row.tight > div { flex: 0 0 auto; min-width: 0; }
+    input, select { width: 100%; }
+    .inline { display: inline-flex; align-items: center; gap: 6px; width: auto; }
+    .inline input[type=checkbox] { width: auto; }
+    .err { color: var(--bad); font-size: 12px; padding: 6px 0; min-height: 0; }
+    .ok-msg { color: var(--ok); font-size: 12px; padding: 6px 0; }
     .detail { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin: 4px 0 12px; }
     .detail dt { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-top: 8px; }
     .detail dd { margin: 2px 0 0; }
     .detail ul { margin: 4px 0; padding-left: 18px; }
     .clickable { cursor: pointer; }
     .clickable:hover { color: var(--accent); }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+    .metric { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+    .metric .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .metric .v { font-size: 16px; margin-top: 2px; }
+    .hidden { display: none; }
+    fieldset { border: 1px solid var(--border); border-radius: 8px; margin: 10px 0 0; padding: 8px 12px 12px; }
+    fieldset legend { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; padding: 0 6px; }
+    .hint { color: var(--muted); font-size: 11px; margin-top: 2px; }
   </style>
 </head>
 <body>
   <header>
     <h1>INDAGO</h1>
     <span class="ver" id="version">…</span>
-    <span class="phase">Phase 0 · scaffold + discovery</span>
+    <span class="ctx" id="context">No project selected</span>
   </header>
 
   <main>
     <div id="error" class="err"></div>
+
+    <!-- ===================== PROJECTS ===================== -->
     <section class="card">
       <h2>Projects</h2>
+      <div class="row">
+        <div><label for="projName">New project name</label><input type="text" id="projName" placeholder="Acme pentest" /></div>
+        <div style="flex:0 0 auto"><button id="createProject" class="primary">Create project</button></div>
+      </div>
+      <div id="projErr" class="err"></div>
       <table>
-        <thead><tr><th>Name</th><th>ID</th><th>Created</th></tr></thead>
-        <tbody id="projects"><tr><td colspan="3" class="empty">loading…</td></tr></tbody>
+        <thead><tr><th></th><th>Name</th><th>ID</th><th>Created</th></tr></thead>
+        <tbody id="projects"><tr><td colspan="4" class="empty">loading…</td></tr></tbody>
       </table>
     </section>
 
+    <!-- ===================== TARGETS ===================== -->
+    <section class="card" id="targetsCard">
+      <h2>Targets <span class="muted" id="targetsProjLabel"></span></h2>
+      <div id="targetsBody">
+        <div class="row">
+          <div><label for="tgtName">Target name</label><input type="text" id="tgtName" placeholder="web app" /></div>
+          <div><label for="tgtURL">Base URL</label><input type="url" id="tgtURL" placeholder="https://app.example.com" /></div>
+          <div style="flex:0 0 auto"><button id="addTarget" class="primary">Add target</button></div>
+        </div>
+        <div id="tgtErr" class="err"></div>
+        <table>
+          <thead><tr><th>Name</th><th>Base URL</th><th>Details</th></tr></thead>
+          <tbody id="targets"><tr><td colspan="3" class="empty">Select a project first.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===================== SCOPE ===================== -->
+    <section class="card" id="scopeCard">
+      <h2>Scope <span class="muted">— the safety boundary; every request is checked against it</span></h2>
+      <div id="scopeBody">
+        <div class="row">
+          <div><label for="scIncludeHosts">Include hosts (one per line)</label><textarea id="scIncludeHosts" rows="3" style="width:100%" placeholder="app.example.com"></textarea></div>
+          <div><label for="scExcludeHosts">Exclude hosts (one per line)</label><textarea id="scExcludeHosts" rows="3" style="width:100%"></textarea></div>
+        </div>
+        <div class="row">
+          <div><label for="scIncludePaths">Include path prefixes (one per line)</label><textarea id="scIncludePaths" rows="2" style="width:100%"></textarea></div>
+          <div><label for="scExcludePaths">Exclude path prefixes (one per line)</label><textarea id="scExcludePaths" rows="2" style="width:100%" placeholder="/logout"></textarea></div>
+        </div>
+        <label class="inline"><input type="checkbox" id="scSubdomains" /> Allow subdomains of included hosts</label>
+        <div style="margin-top:10px"><button id="saveScope" class="primary">Save scope</button></div>
+        <div id="scopeErr" class="err"></div>
+        <div id="scopeCurrent" class="detail hidden"></div>
+      </div>
+    </section>
+
+    <!-- ===================== NEW SCAN ===================== -->
+    <section class="card" id="newScanCard">
+      <h2>New scan</h2>
+      <div id="newScanBody">
+        <div class="row">
+          <div><label for="scanName">Scan name</label><input type="text" id="scanName" placeholder="initial sweep" /></div>
+          <div><label for="scanTarget">Target</label><select id="scanTarget"></select></div>
+        </div>
+        <fieldset>
+          <legend>Scan type &amp; discovery</legend>
+          <div class="row tight">
+            <div><label class="inline"><input type="radio" name="scanType" value="crawl" checked /> Crawl scan (follow links)</label></div>
+            <div><label class="inline"><input type="radio" name="scanType" value="quick" /> Quick scan (seeds only)</label></div>
+          </div>
+          <label for="scanSeeds">Seed URLs (one per line; default: the target base URL)</label>
+          <textarea id="scanSeeds" rows="2" style="width:100%"></textarea>
+          <div class="row tight" id="crawlLimits">
+            <div><label for="scanDepth">Crawl depth</label><input type="number" id="scanDepth" min="0" max="20" placeholder="default" style="width:110px" /></div>
+            <div><label for="scanMaxPages">Max pages</label><input type="number" id="scanMaxPages" min="0" placeholder="default" style="width:120px" /></div>
+            <div><label for="scanMaxEndpoints">Max endpoints</label><input type="number" id="scanMaxEndpoints" min="0" placeholder="default" style="width:120px" /></div>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Performance profile</legend>
+          <div class="row tight">
+            <div><label for="scanProfile">Profile</label>
+              <select id="scanProfile">
+                <option value="conservative">Conservative</option>
+                <option value="balanced" selected>Balanced</option>
+                <option value="fast">Fast</option>
+                <option value="custom">Custom</option>
+              </select>
+            </div>
+          </div>
+          <div class="row tight hidden" id="customConfig">
+            <div><label for="cfgDiscovery">Discovery concurrency</label><input type="number" id="cfgDiscovery" min="0" max="64" value="4" style="width:150px" /></div>
+            <div><label for="cfgHTTP">HTTP concurrency</label><input type="number" id="cfgHTTP" min="0" max="64" value="10" style="width:140px" /></div>
+            <div><label for="cfgBrowser">Browser concurrency</label><input type="number" id="cfgBrowser" min="0" max="64" value="2" style="width:150px" /></div>
+            <div><label for="cfgRate">Requests / second</label><input type="number" id="cfgRate" min="0" max="1000" step="0.1" value="10" style="width:130px" /></div>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Stop policy</legend>
+          <div class="row tight">
+            <div><label for="scanStop">When to stop</label>
+              <select id="scanStop">
+                <option value="continue_all" selected>Continue (test everything)</option>
+                <option value="first_confirmed">Stop at first confirmed</option>
+                <option value="after_n_confirmed">Stop after N confirmed</option>
+                <option value="pause_and_ask">Pause &amp; ask on confirmed</option>
+              </select>
+            </div>
+            <div id="stopNWrap" class="hidden"><label for="scanStopN">N confirmed</label><input type="number" id="scanStopN" min="1" value="1" style="width:110px" /></div>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Authentication</legend>
+          <div class="row tight">
+            <div><label for="scanAuth">Mode</label>
+              <select id="scanAuth">
+                <option value="anonymous" selected>Anonymous (no login)</option>
+                <option value="existing">Existing session (import saved state)</option>
+              </select>
+            </div>
+          </div>
+          <div id="authExistingWrap" class="hidden">
+            <label for="scanAuthState">Session state file (absolute server-side path)</label>
+            <input type="text" id="scanAuthState" class="mono" placeholder="/data/sessions/login-….json" />
+            <div class="hint">Capture one with interactive login below, or point at a Playwright storage-state file. The file's contents are never shown.</div>
+            <div style="margin-top:8px"><button id="startLogin">Interactive login…</button></div>
+            <div id="loginPanel" class="detail hidden">
+              <div class="row tight">
+                <div style="flex:1 1 260px"><label for="loginURL">Login page URL</label><input type="url" id="loginURL" placeholder="https://app.example.com/login" /></div>
+                <div style="flex:1 1 200px"><label for="loginSuccess">Success URL glob (optional)</label><input type="text" id="loginSuccess" class="mono" placeholder="**/dashboard" /></div>
+                <div style="flex:0 0 auto"><button id="runLogin" class="primary">Open browser &amp; wait</button></div>
+              </div>
+              <div id="loginStatus" class="muted" style="font-size:12px"></div>
+            </div>
+          </div>
+        </fieldset>
+        <div style="margin-top:12px"><button id="createScan" class="primary">Create scan</button></div>
+        <div id="scanErr" class="err"></div>
+      </div>
+    </section>
+
+    <!-- ===================== SCANS ===================== -->
     <section class="card">
-      <h2>Scans <span id="refreshed" class="muted"></span></h2>
+      <h2>Scans <span class="muted" id="refreshed"></span></h2>
       <table>
         <thead><tr>
           <th>Name</th><th>State</th><th>Discovery</th><th>Endpoints</th><th>Params</th>
-          <th>Jobs (queued / running / done)</th><th>Findings (confirmed / pending / rejected / inconclusive)</th><th>Actions</th>
+          <th>Jobs (q / run / done)</th><th>Findings (C / P / R / I)</th><th>Actions</th>
         </tr></thead>
         <tbody id="scans"><tr><td colspan="8" class="empty">loading…</td></tr></tbody>
       </table>
     </section>
 
+    <!-- ===================== MONITOR ===================== -->
+    <section class="card hidden" id="monitorCard">
+      <h2>Live monitor <span class="muted" id="monitorLabel"></span></h2>
+      <div class="metrics" id="monitorMetrics"></div>
+      <fieldset>
+        <legend>Runtime tuning (applies live)</legend>
+        <div class="row tight">
+          <div><label for="rcDiscovery">Discovery</label><input type="number" id="rcDiscovery" min="0" max="64" style="width:110px" /></div>
+          <div><label for="rcHTTP">HTTP</label><input type="number" id="rcHTTP" min="0" max="64" style="width:110px" /></div>
+          <div><label for="rcBrowser">Browser</label><input type="number" id="rcBrowser" min="0" max="64" style="width:110px" /></div>
+          <div><label for="rcRate">Req/s</label><input type="number" id="rcRate" min="0" max="1000" step="0.1" style="width:110px" /></div>
+          <div style="flex:0 0 auto; align-self:flex-end"><button id="applyConfig">Apply</button></div>
+        </div>
+        <div id="rcErr" class="err"></div>
+      </fieldset>
+    </section>
+
+    <!-- ===================== FINDINGS ===================== -->
     <section class="card">
-      <h2>Findings <span id="findingsScanLabel" class="muted"></span></h2>
+      <h2>Findings <span class="muted" id="findingsScanLabel"></span></h2>
       <table>
         <thead><tr>
           <th></th><th>Title</th><th>Verdict</th><th>Severity</th><th>Parameter</th><th>Context</th>
         </tr></thead>
-        <tbody id="findings"><tr><td colspan="6" class="empty">Click "Findings" on a scan above.</td></tr></tbody>
+        <tbody id="findings"><tr><td colspan="6" class="empty">Select a scan's "Monitor" to view its findings.</td></tr></tbody>
       </table>
     </section>
 
-    <section class="card" id="reportsCard" style="display:none">
-      <h2>Reports <span id="reportsScanLabel" class="muted"></span></h2>
-      <p class="muted" style="margin:0 0 10px">
+    <!-- ===================== REPORTS ===================== -->
+    <section class="card hidden" id="reportsCard">
+      <h2>Reports <span class="muted" id="reportsScanLabel"></span></h2>
+      <p class="hint" style="margin:0 0 10px">
         Generate from checked findings above, or leave all unchecked to include every finding in the scan.
       </p>
       <p>
-        <select id="reportFormat">
+        <select id="reportFormat" style="width:auto">
           <option value="json">JSON</option>
           <option value="markdown">Markdown</option>
           <option value="html">HTML</option>
         </select>
-        <button id="generateReport">Generate report</button>
+        <button id="generateReport" class="primary">Generate report</button>
       </p>
+      <div id="reportErr" class="err"></div>
       <table>
         <thead><tr><th>Created</th><th>Format</th><th>Findings</th><th>Confirmed</th><th>Open</th></tr></thead>
         <tbody id="reports"><tr><td colspan="5" class="empty">No reports yet.</td></tr></tbody>
@@ -109,308 +280,10 @@
   </main>
 
   <footer>
-    Local-first web application security hunting platform. Authorized use only.
-    This build performs discovery only — no vulnerability testing.
+    Indago — local-first, single-user web application security hunting platform. Authorized use only.
+    Reflected XSS is discovered <em>and</em> verified in a real browser; results are backed by stored evidence.
   </footer>
 
-  <script>
-    // All dynamic text goes through textContent (never innerHTML): scan and
-    // project names are operator-supplied.
-    function el(tag, text, cls) {
-      const e = document.createElement(tag);
-      if (text !== undefined) e.textContent = text;
-      if (cls) e.className = cls;
-      return e;
-    }
-    function cell(text, cls) { return el("td", text, cls); }
-
-    async function j(url) {
-      const r = await fetch(url);
-      if (!r.ok) throw new Error(url + " -> " + r.status);
-      return r.json();
-    }
-
-    // State-changing requests must carry X-Indago-Client (CSRF protection).
-    async function act(scanId, action) {
-      const r = await fetch("/api/scans/" + encodeURIComponent(scanId) + "/" + action, {
-        method: "POST", headers: { "X-Indago-Client": "ui" },
-      });
-      if (!r.ok) {
-        let msg = r.status;
-        try { msg = (await r.json()).error || msg; } catch (e) {}
-        showError(action + " failed: " + msg);
-      }
-      loadScans();
-    }
-
-    function showError(msg) {
-      const box = document.getElementById("error");
-      box.textContent = msg;
-      setTimeout(() => { if (box.textContent === msg) box.textContent = ""; }, 6000);
-    }
-
-    function actionsFor(st) {
-      const id = st.scan.id;
-      const mk = (label, action) => {
-        const b = el("button", label);
-        b.addEventListener("click", () => act(id, action));
-        return b;
-      };
-      switch (st.scan.state) {
-        case "created": return [mk("Start", "start"), mk("Cancel", "cancel")];
-        case "running": return [mk("Pause", "pause"), mk("Cancel", "cancel")];
-        case "paused":
-        case "awaiting_auth": return [mk("Resume", "resume"), mk("Cancel", "cancel")];
-        default: return [];
-      }
-    }
-
-    function scanRow(st) {
-      const tr = el("tr");
-      tr.appendChild(cell(st.scan.name || "(unnamed)"));
-      const state = el("td"); state.appendChild(el("span", st.scan.state, "pill"));
-      tr.appendChild(state);
-      tr.appendChild(cell(st.discovery.state));
-      tr.appendChild(cell(st.discovery.endpoints));
-      tr.appendChild(cell(st.discovery.parameters));
-      const jobs = st.jobs;
-      tr.appendChild(cell(jobs.queued + " / " + (jobs.running + jobs.leased) + " / " + jobs.succeeded, "mono"));
-      const f = st.findings;
-      tr.appendChild(cell(f.confirmed + " / " + f.pending + " / " + f.rejected + " / " + f.inconclusive, "mono"));
-      const actions = el("td");
-      actionsFor(st).forEach(b => actions.appendChild(b));
-      const findingsBtn = el("button", "Findings");
-      findingsBtn.addEventListener("click", () => selectScan(st.scan.id, st.scan.name || st.scan.id));
-      actions.appendChild(findingsBtn);
-      tr.appendChild(actions);
-      return tr;
-    }
-
-    function setBody(id, rows, emptyText, cols) {
-      const body = document.getElementById(id);
-      body.replaceChildren();
-      if (!rows.length) {
-        const tr = el("tr"); const td = cell(emptyText, "empty"); td.colSpan = cols;
-        tr.appendChild(td); body.appendChild(tr); return;
-      }
-      rows.forEach(r => body.appendChild(r));
-    }
-
-    async function loadScans() {
-      try {
-        const scans = (await j("/api/scans")) || [];
-        const statuses = await Promise.all(scans.map(s => j("/api/scans/" + encodeURIComponent(s.id) + "/status")));
-        setBody("scans", statuses.map(scanRow), "No scans yet.", 8);
-        document.getElementById("refreshed").textContent = "updated " + new Date().toLocaleTimeString();
-      } catch (e) {
-        setBody("scans", [], "error loading scans", 7);
-      }
-    }
-
-    async function loadProjects() {
-      try {
-        const projects = (await j("/api/projects")) || [];
-        setBody("projects", projects.map(p => {
-          const tr = el("tr");
-          tr.appendChild(cell(p.name));
-          tr.appendChild(cell(p.id, "mono"));
-          tr.appendChild(cell((p.created_at || "").slice(0, 19).replace("T", " ")));
-          return tr;
-        }), "No projects yet.", 3);
-      } catch (e) {
-        setBody("projects", [], "error loading projects", 3);
-      }
-    }
-
-    // --- findings & reports ---
-
-    let selectedScanId = null;
-    let selectedFindingIds = new Set();
-
-    function selectScan(id, label) {
-      selectedScanId = id;
-      selectedFindingIds = new Set();
-      document.getElementById("findingsScanLabel").textContent = "— " + label;
-      document.getElementById("reportsScanLabel").textContent = "— " + label;
-      document.getElementById("reportsCard").style.display = "";
-      loadFindings();
-      loadReports();
-    }
-
-    // Finding.Detail comes over the wire as base64 (Go []byte -> JSON string);
-    // decoding it here mirrors the read-only shape internal/report and the web
-    // API's own detail endpoint use, just for the list's Parameter/Context
-    // columns — the full detail view below still comes from the server, which
-    // also resolves endpoint/parameter/evidence.
-    function decodeDetail(raw) {
-      try { return JSON.parse(atob(raw)); } catch (e) { return {}; }
-    }
-
-    function findingDetailEl(f) {
-      const box = el("div", undefined, "detail");
-      const dl = document.createElement("dl");
-      function row(label, value) {
-        if (!value) return;
-        dl.appendChild(el("dt", label));
-        dl.appendChild(el("dd", value));
-      }
-      row("Verdict", f.verdict + "   (confidence: " + f.confidence + ")");
-      if (f.endpoint) row("Endpoint", f.endpoint.method + " " + f.endpoint.url);
-      if (f.parameter) row("Parameter", f.parameter.name + " (" + f.parameter.location + ")");
-      else if (f.parsed_detail && f.parsed_detail.parameter_name) row("Parameter", f.parsed_detail.parameter_name);
-
-      const cands = (f.parsed_detail && f.parsed_detail.candidates) || [];
-      if (cands.length) {
-        dl.appendChild(el("dt", "Candidates (" + cands.length + ", " + (f.parsed_detail.occurrences || 0) + " occurrence(s))"));
-        const dd = document.createElement("dd");
-        const ul = document.createElement("ul");
-        cands.forEach(c => {
-          ul.appendChild(el("li", "[" + c.category + "/" + c.context + "] " + c.value + " — " + c.rationale));
-        });
-        dd.appendChild(ul);
-        dl.appendChild(dd);
-      }
-
-      if (f.provenance) {
-        let p = f.provenance.engine + ", discovered via " + f.provenance.discovery_source;
-        if (f.provenance.ai_assisted) p += " (AI-assisted; advisory only, not the verdict authority)";
-        row("Provenance", p);
-      }
-
-      if (f.evidence && f.evidence.length) {
-        dl.appendChild(el("dt", "Evidence (" + f.evidence.length + ") — metadata only; opening fetches the actual content"));
-        const dd = document.createElement("dd");
-        const ul = document.createElement("ul");
-        f.evidence.forEach(ev => {
-          const li = document.createElement("li");
-          li.appendChild(document.createTextNode(ev.kind + " · " + (ev.media_type || "") + " · " + ev.size + " bytes · "));
-          const a = document.createElement("a");
-          a.href = "/api/evidence/" + encodeURIComponent(ev.id) + "/content";
-          a.target = "_blank"; a.rel = "noopener";
-          a.textContent = "open";
-          li.appendChild(a);
-          ul.appendChild(li);
-        });
-        dd.appendChild(ul);
-        dl.appendChild(dd);
-      }
-      box.appendChild(dl);
-      return box;
-    }
-
-    function findingRow(f) {
-      const tr = el("tr");
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.title = "include in next generated report";
-      cb.addEventListener("change", () => {
-        if (cb.checked) selectedFindingIds.add(f.id); else selectedFindingIds.delete(f.id);
-      });
-      const cbTd = el("td"); cbTd.appendChild(cb); tr.appendChild(cbTd);
-
-      const titleTd = cell(f.title || "(untitled)", "clickable");
-      tr.appendChild(titleTd);
-
-      const vTd = el("td");
-      vTd.appendChild(el("span", f.verdict, "pill " + (f.verdict === "confirmed" ? "confirmed" : f.verdict === "pending" ? "pending" : "")));
-      tr.appendChild(vTd);
-      tr.appendChild(cell(f.severity));
-
-      const detail = decodeDetail(f.detail || "");
-      tr.appendChild(cell(detail.parameter_name || ""));
-      const firstCand = (detail.candidates || [])[0];
-      tr.appendChild(cell(firstCand ? firstCand.context : ""));
-
-      let detailRow = null;
-      titleTd.addEventListener("click", async () => {
-        if (detailRow) { detailRow.remove(); detailRow = null; return; }
-        detailRow = el("tr");
-        const td = el("td"); td.colSpan = 6;
-        td.appendChild(el("div", "loading…", "muted"));
-        detailRow.appendChild(td);
-        tr.after(detailRow);
-        try {
-          const full = await j("/api/scans/" + encodeURIComponent(selectedScanId) + "/findings/" + encodeURIComponent(f.id));
-          td.replaceChildren(findingDetailEl(full));
-        } catch (e) {
-          td.replaceChildren(el("div", "failed to load detail", "err"));
-        }
-      });
-      return tr;
-    }
-
-    async function loadFindings() {
-      if (!selectedScanId) return;
-      try {
-        const findings = (await j("/api/scans/" + encodeURIComponent(selectedScanId) + "/findings")) || [];
-        setBody("findings", findings.map(findingRow), "No findings for this scan.", 6);
-      } catch (e) {
-        setBody("findings", [], "error loading findings", 6);
-      }
-    }
-
-    function reportRow(r) {
-      const tr = el("tr");
-      tr.appendChild(cell((r.created_at || "").slice(0, 19).replace("T", " ")));
-      tr.appendChild(cell(r.format));
-      tr.appendChild(cell(String((r.summary && r.summary.total_findings) || 0)));
-      tr.appendChild(cell(String((r.summary && r.summary.confirmed_count) || 0)));
-      const openTd = el("td");
-      const view = document.createElement("a");
-      view.href = "/api/reports/" + encodeURIComponent(r.id) + "/content";
-      view.target = "_blank"; view.rel = "noopener";
-      view.textContent = "view";
-      const dl = document.createElement("a");
-      dl.href = "/api/reports/" + encodeURIComponent(r.id) + "/content?download";
-      dl.textContent = "download";
-      dl.style.marginLeft = "10px";
-      openTd.appendChild(view); openTd.appendChild(dl);
-      tr.appendChild(openTd);
-      return tr;
-    }
-
-    async function loadReports() {
-      if (!selectedScanId) return;
-      try {
-        const reports = (await j("/api/scans/" + encodeURIComponent(selectedScanId) + "/reports")) || [];
-        setBody("reports", reports.map(reportRow), "No reports yet.", 5);
-      } catch (e) {
-        setBody("reports", [], "error loading reports", 5);
-      }
-    }
-
-    async function generateReport() {
-      if (!selectedScanId) return;
-      const format = document.getElementById("reportFormat").value;
-      try {
-        const r = await fetch("/api/scans/" + encodeURIComponent(selectedScanId) + "/reports", {
-          method: "POST",
-          headers: { "X-Indago-Client": "ui", "Content-Type": "application/json" },
-          body: JSON.stringify({ format: format, finding_ids: Array.from(selectedFindingIds) }),
-        });
-        if (!r.ok) {
-          let msg = r.status;
-          try { msg = (await r.json()).error || msg; } catch (e) {}
-          showError("generate report failed: " + msg);
-          return;
-        }
-        loadReports();
-      } catch (e) {
-        showError("generate report failed: " + e);
-      }
-    }
-
-    async function init() {
-      try {
-        const v = await j("/api/version");
-        document.getElementById("version").textContent = "v" + (v.version || "dev");
-      } catch (e) { /* ignore */ }
-      document.getElementById("generateReport").addEventListener("click", generateReport);
-      loadProjects();
-      loadScans();
-      setInterval(loadScans, 2000);
-    }
-    init();
-  </script>
+  <script src="app.js"></script>
 </body>
 </html>

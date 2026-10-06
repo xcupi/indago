@@ -42,7 +42,31 @@ type Server struct {
 	// allowedHosts, when non-nil, is the set of acceptable Host header values
 	// (DNS-rebinding protection). ListenAndServe sets it from the bind address.
 	allowedHosts map[string]bool
+
+	// login, when non-nil, performs an interactive browser login and returns
+	// the path to the saved session file. Nil disables the interactive-login
+	// endpoint (it then reports the feature is unavailable). Wired by
+	// cmd/indago only when a browser is configured (-browser).
+	login LoginFunc
 }
+
+// LoginFunc runs an interactive browser login: it opens a visible browser at
+// LoginParams.LoginURL, lets the operator authenticate (including any MFA),
+// waits for success, and saves the resulting session material to disk. It
+// returns the saved file's path and the final URL reached. The path is a
+// server-side filename, not session material — implementations must never
+// return cookies, tokens, or storage-state contents.
+type LoginFunc func(ctx context.Context, p LoginParams) (statePath, finalURL string, err error)
+
+// LoginParams are the inputs to an interactive login.
+type LoginParams struct {
+	LoginURL   string // page to open for the operator to log in on
+	SuccessURL string // optional glob; login is considered done when the browser reaches it
+}
+
+// SetLoginFunc installs the interactive-login implementation. A nil fn (the
+// default) leaves the endpoint reporting the feature unavailable.
+func (s *Server) SetLoginFunc(fn LoginFunc) { s.login = fn }
 
 // NewServer builds a Server. A nil logger uses slog.Default. evStore and
 // reportsDir are optional (nil/"" disables evidence content serving and
@@ -66,8 +90,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/projects/{id}", s.handleGetProject)
 	mux.HandleFunc("GET /api/projects/{id}/targets", s.handleListTargets)
 	mux.HandleFunc("POST /api/projects/{id}/targets", s.handleCreateTarget)
+	mux.HandleFunc("GET /api/projects/{id}/targets/{tid}", s.handleGetTarget)
 	mux.HandleFunc("GET /api/projects/{id}/scope", s.handleGetScope)
 	mux.HandleFunc("PUT /api/projects/{id}/scope", s.handlePutScope)
+
+	// Interactive login: drives a visible browser to capture a session file an
+	// operator can then use via auth_mode "existing". Available only when the
+	// server was given a login function (indago serve -browser).
+	mux.HandleFunc("POST /api/auth/login", s.handleInteractiveLogin)
 
 	mux.HandleFunc("GET /api/scans", s.handleListScans)
 	mux.HandleFunc("POST /api/scans", s.handleCreateScan)
@@ -78,6 +108,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/scans/{id}/findings/{fid}", s.handleGetFinding)
 	mux.HandleFunc("GET /api/scans/{id}/reports", s.handleListReports)
 	mux.HandleFunc("POST /api/scans/{id}/reports", s.handleCreateReport)
+	// A specific pattern takes precedence over {action}, so runtime reconfigure
+	// has its own route rather than going through handleScanAction.
+	mux.HandleFunc("POST /api/scans/{id}/config", s.handleReconfigureScan)
 	mux.HandleFunc("POST /api/scans/{id}/{action}", s.handleScanAction)
 
 	mux.HandleFunc("GET /api/evidence/{id}", s.handleGetEvidence)

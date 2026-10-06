@@ -96,7 +96,9 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 }
 
 // discoveryConfig derives the per-scan discovery config from the controller
-// defaults and the scan's discovery concurrency.
+// defaults and the scan's own concurrency and crawl-extent controls. The crawl
+// controls are read here (at discovery start); a value of 0 means "keep the
+// server/profile default", except QuickScan which forces seeds-only.
 func (c *Controller) discoveryConfig(sc *domain.Scan) discovery.Config {
 	cfg := discovery.DefaultConfig()
 	if c.opts.Discovery != nil {
@@ -104,6 +106,18 @@ func (c *Controller) discoveryConfig(sc *domain.Scan) discovery.Config {
 	}
 	if sc.Config.DiscoveryConcurrency > 0 {
 		cfg.Concurrency = sc.Config.DiscoveryConcurrency
+	}
+	if sc.Config.MaxDepth > 0 {
+		cfg.MaxDepth = sc.Config.MaxDepth
+	}
+	if sc.Config.MaxPages > 0 {
+		cfg.MaxPages = sc.Config.MaxPages
+	}
+	if sc.Config.MaxEndpoints > 0 {
+		cfg.MaxEndpoints = sc.Config.MaxEndpoints
+	}
+	if sc.Config.QuickScan {
+		cfg.MaxDepth = 0 // seeds only: do not follow links
 	}
 	return cfg
 }
