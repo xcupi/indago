@@ -187,6 +187,12 @@ Implemented so far (infrastructure and **discovery**):
   tests live in `internal/scan/stress_test.go`. When changing restart, queue,
   or browser lifecycle code, keep `assertScanIntegrity`'s invariants
   passing under `-race -count=20`.
+- ✅ Finding presentation & candidate profiles (see `docs/finding-correlation.md`,
+  `docs/reflection-candidates.md`): logical findings with per-candidate attempts,
+  confirmed-first default views/reports with the verified candidate shown, and
+  bounded, deterministic `minimal`/`standard`/`thorough` candidate profiles
+  (ceiling 32) that only select from the planner's output. No new vectors, no
+  verdict changes.
 - ⏳ Stubs: detection engines (non-XSS classes), Password/Interactive/MFA auth
   modes, AI providers
 

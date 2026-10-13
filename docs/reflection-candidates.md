@@ -49,6 +49,47 @@ library:
 | `css` | `<style>` body | `</style><svg onload=M>` (a `style=""` attribute can't break into markup, so nothing) |
 | `unknown_mixed` | unclassifiable / ambiguous | generic low-priority markup probes |
 
+### Trigger classes and what "rejected" means
+
+Every built-in candidate carries a `Trigger`:
+
+- `load` — the marker is a bare JS expression that runs when the page loads
+  (`<svg onload=M>`, `";M//`, `${M}`, direct code `M`, `</style><svg onload=M>`).
+  Only these can be **confirmed** by passive browser verification.
+- `interaction` — needs a user action the verifier deliberately never
+  simulates (`onmouseover=M`, `javascript:M`, `data:text/html,…`).
+- `none` — markup probes (`<Mx>`) that show markup is injectable but carry no
+  executable reference.
+
+So **Rejected means "no passive execution signal was observed for this
+candidate", not "the parameter is not vulnerable"**: an interaction-only
+candidate can reflect unescaped yet always ends rejected. This is a deliberate
+limit (AGENTS.md §3: no simulated activation), and the coverage gaps it leaves —
+event handlers that need interaction, DOM-only sinks, stored sinks, filters
+that only a differently-shaped breakout would pass — are **not** closed by
+adding more vectors; that would drift into a payload library or evasion.
+Rejected/inconclusive attempts stay stored as diagnostics on the finding.
+
+## Candidate profiles
+
+A profile bounds how many planned candidates are *sent* per injection point. It
+only **selects** from what context classification and transformation analysis
+already planned (never adds or rewrites a candidate), is a pure function of the
+plan, and keeps the plan's deterministic order. After filtering, if a reflection
+context would be left with nothing, its best candidate is kept; then the cap is
+applied taking one candidate per context first.
+
+| Profile | Cap / injection point | Filter |
+|---------|-----------------------|--------|
+| `minimal` | 3 | load-trigger only; skip candidates the site neutralizes |
+| `standard` (default) | 8 | none |
+| `thorough` | 16 | none |
+
+`max_candidates` (CLI `-max-candidates`, API `max_candidates`) overrides the cap
+up to a hard ceiling of **32**; larger values are rejected at scan creation
+(`ErrBadConfig`). Profiles do not alter rate limits, concurrency, scope checks,
+or the state-changing opt-in, and have no bearing on verdicts.
+
 ## Transformation-aware priority
 
 Each built-in lists the canary metacharacters (`<`, `>`, `"`, `'`) it depends on.

@@ -345,6 +345,8 @@ func (c *cli) scanCreate(args []string) error {
 	stopN := fs.Int("stop-n", 0, "confirmed-finding limit for -stop after_n_confirmed")
 	authMode := fs.String("auth", "", "auth mode: anonymous (default) | existing")
 	authState := fs.String("auth-state", "", "saved session material (Playwright storage-state JSON) for -auth existing")
+	candProfile := fs.String("candidate-profile", "", "XSS candidate profile: minimal | standard | thorough (default: server default)")
+	maxCand := fs.Int("max-candidates", 0, "cap on candidates tried per injection point (0 = the profile's own; hard ceiling 32)")
 	quick := fs.Bool("quick", false, "quick scan: test the seeds only, do not follow links (crawl depth 0)")
 	depth := fs.Int("depth", 0, "crawl depth for a full scan (0 = server default; ignored with -quick)")
 	maxPages := fs.Int("max-pages", 0, "cap on pages fetched by the crawler (0 = server default)")
@@ -355,12 +357,18 @@ func (c *cli) scanCreate(args []string) error {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
 		"profile": *profile, "seed_urls": []string(seeds),
 		"quick_scan": *quick, "max_depth": *depth, "max_pages": *maxPages, "max_endpoints": *maxEndpoints,
+	}
+	if *candProfile != "" {
+		req["candidate_profile"] = *candProfile
+	}
+	if *maxCand != 0 {
+		req["max_candidates"] = *maxCand
 	}
 	if *authState != "" && *authMode == "" {
 		*authMode = string(domain.AuthExisting) // the only mode that takes a state file
@@ -645,29 +653,56 @@ func (c *cli) findingList(args []string) error {
 	fs := c.newFlags("finding list")
 	scanRef := fs.String("scan", "", "scan ID or prefix")
 	asJSON := fs.Bool("json", false, "print JSON")
+	verdict := fs.String("verdict", "", "verdicts to list: confirmed | pending | inconclusive | rejected | comma-separated list | all (default: confirmed; all with -json)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *scanRef == "" {
-		return errors.New("usage: indago finding list -scan <scan-id|prefix> [-json]")
+		return errors.New("usage: indago finding list -scan <scan-id|prefix> [-verdict confirmed|all|...] [-json]")
 	}
 	scanID, err := c.resolveScanID(*scanRef)
 	if err != nil {
 		return err
 	}
+	// The human-readable default is confirmed-only; -json defaults to every
+	// finding, so a script consuming the JSON never silently loses the
+	// pending/rejected rows it used to get (it has no place for a hint).
+	if *verdict == "" {
+		*verdict = "confirmed"
+		if *asJSON {
+			*verdict = "all"
+		}
+	}
 	var findings []domain.Finding
-	if err := c.call("GET", "/api/scans/"+url.PathEscape(scanID)+"/findings", nil, &findings); err != nil {
+	if err := c.call("GET", "/api/scans/"+url.PathEscape(scanID)+"/findings?verdict="+url.QueryEscape(*verdict), nil, &findings); err != nil {
 		return err
 	}
 	if *asJSON {
 		return writeJSON(c.out, findings)
 	}
+	// Unless everything was asked for, say how many findings the filter hides:
+	// the default view lists confirmed vulnerabilities only, and silence would
+	// make rejected/pending diagnostics look like they do not exist.
+	hidden := 0
+	if *verdict != "all" {
+		var all []domain.Finding
+		if err := c.call("GET", "/api/scans/"+url.PathEscape(scanID)+"/findings", nil, &all); err != nil {
+			return err
+		}
+		hidden = len(all) - len(findings)
+	}
 	if len(findings) == 0 {
-		fmt.Fprintln(c.out, "no findings")
+		fmt.Fprintf(c.out, "no %s findings\n", strings.TrimSpace(*verdict))
+		if hidden > 0 {
+			fmt.Fprintf(c.out, "%d other finding(s) hidden; list them with -verdict all\n", hidden)
+		}
 		return nil
 	}
 	for _, f := range findings {
 		fmt.Fprintf(c.out, "%s  %-12s %-8s %-14s %s\n", f.ID, f.Verdict, f.Severity, f.VulnClass, f.Title)
+	}
+	if hidden > 0 {
+		fmt.Fprintf(c.out, "(%d other finding(s) hidden; list them with -verdict all)\n", hidden)
 	}
 	return nil
 }
@@ -694,6 +729,14 @@ type findingDetailOut struct {
 		Occurrences   int                `json:"occurrences"`
 		Candidates    []findingCandidate `json:"candidates"`
 	} `json:"parsed_detail"`
+	Verified *struct {
+		CandidateValue string `json:"candidate_value"`
+		Notes          string `json:"notes"`
+	} `json:"verified_candidate"`
+	Attempts []struct {
+		CandidateValue string `json:"candidate_value"`
+		Verdict        string `json:"verdict"`
+	} `json:"attempts"`
 	Endpoint  *domain.Endpoint   `json:"endpoint"`
 	Parameter *domain.Parameter  `json:"parameter"`
 	Evidence  []*domain.Evidence `json:"evidence"`
@@ -741,6 +784,18 @@ func printFindingDetail(w io.Writer, server string, fd *findingDetailOut) {
 	} else if fd.ParsedDetail.ParameterName != "" {
 		fmt.Fprintf(w, "Parameter  %s\n", fd.ParsedDetail.ParameterName)
 	}
+	if fd.Verified != nil {
+		fmt.Fprintf(w, "Verified   %s\n", fd.Verified.CandidateValue)
+		if fd.Verified.Notes != "" {
+			fmt.Fprintf(w, "           %s\n", fd.Verified.Notes)
+		}
+	}
+	if len(fd.Attempts) > 0 {
+		fmt.Fprintf(w, "Attempts   %d (kept as diagnostics):\n", len(fd.Attempts))
+		for _, a := range fd.Attempts {
+			fmt.Fprintf(w, "  - %-12s %s\n", a.Verdict, a.CandidateValue)
+		}
+	}
 	if len(fd.ParsedDetail.Candidates) > 0 {
 		fmt.Fprintf(w, "Candidates (%d, %d occurrence(s)):\n", len(fd.ParsedDetail.Candidates), fd.ParsedDetail.Occurrences)
 		for _, cand := range fd.ParsedDetail.Candidates {
@@ -780,13 +835,14 @@ func (c *cli) reportCreate(args []string) error {
 	scanRef := fs.String("scan", "", "scan ID or prefix")
 	format := fs.String("format", "json", "json | markdown | html")
 	out := fs.String("out", "", "also write the rendered report to this file")
+	mode := fs.String("mode", "", "all | confirmed | selected (default: selected when -finding is given, else all)")
 	var findingIDs stringList
-	fs.Var(&findingIDs, "finding", "finding ID to include (repeatable; default: every finding in the scan)")
+	fs.Var(&findingIDs, "finding", "finding ID to include with -mode selected (repeatable)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *scanRef == "" {
-		return errors.New("usage: indago report create -scan <scan-id|prefix> -format json|markdown|html [-finding ID]... [-out FILE]")
+		return errors.New("usage: indago report create -scan <scan-id|prefix> -format json|markdown|html [-mode all|confirmed|selected] [-finding ID]... [-out FILE]")
 	}
 	scanID, err := c.resolveScanID(*scanRef)
 	if err != nil {
@@ -794,14 +850,31 @@ func (c *cli) reportCreate(args []string) error {
 	}
 	var rpt domain.Report
 	if err := c.call("POST", "/api/scans/"+url.PathEscape(scanID)+"/reports",
-		map[string]any{"format": *format, "finding_ids": []string(findingIDs)}, &rpt); err != nil {
+		map[string]any{"format": *format, "mode": *mode, "finding_ids": []string(findingIDs)}, &rpt); err != nil {
 		return err
 	}
-	fmt.Fprintf(c.out, "created report %s (%s, %d finding(s))\n", rpt.ID, rpt.Format, rpt.Summary.TotalFindings)
+	fmt.Fprintf(c.out, "created report %s (%s, %d finding(s); selection %s, %d of %d in scan; %s)\n",
+		rpt.ID, rpt.Format, rpt.Summary.TotalFindings, rpt.Summary.Selection,
+		rpt.Summary.TotalFindings, rpt.Summary.ScanFindings, verdictBreakdown(rpt.Summary.ByVerdict))
 	if *out != "" {
 		return c.downloadReport(string(rpt.ID), *out)
 	}
 	return nil
+}
+
+// verdictBreakdown renders verdict counts in a fixed order, e.g.
+// "confirmed 2, rejected 1" (zero counts omitted; "no findings" when empty).
+func verdictBreakdown(by map[domain.Verdict]int) string {
+	var parts []string
+	for _, v := range []domain.Verdict{domain.VerdictConfirmed, domain.VerdictInconclusive, domain.VerdictRejected, domain.VerdictPending} {
+		if n := by[v]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", v, n))
+		}
+	}
+	if len(parts) == 0 {
+		return "no findings"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (c *cli) reportList(args []string) error {

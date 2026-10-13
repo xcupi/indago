@@ -70,6 +70,8 @@ type uiHarness struct {
 	ev   evidence.Store
 	page *browser.Page
 	ctx  context.Context
+	bctx *browser.Context
+	url  string
 }
 
 // newUIHarness builds the full stack with a blocking JobTest handler (so a
@@ -134,7 +136,7 @@ func newUIHarness(t *testing.T) *uiHarness {
 	if _, err := page.Navigate(ctx, srv.URL, browser.NavOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	u := &uiHarness{t: t, st: st, ctrl: ctrl, ev: evStore, page: page, ctx: ctx}
+	u := &uiHarness{t: t, st: st, ctrl: ctrl, ev: evStore, page: page, ctx: ctx, bctx: bctx, url: srv.URL}
 	u.waitUI("app initialized", `document.getElementById('version').textContent.indexOf('v')===0`)
 	return u
 }
@@ -325,13 +327,21 @@ func TestUIOperationalWorkflow(t *testing.T) {
 	u.mustClickText(".page-head button", "Resume")
 	u.waitUI("scan resumed", `/running/.test(document.querySelector('.page-head').textContent)`)
 
-	// Finding display: seed one, open the Findings tab.
+	// Finding display: seed one (pending — not yet browser-verified) and open the
+	// Findings tab. The default view shows confirmed vulnerabilities only, so the
+	// pending finding is reachable through "Needs review", not listed up front.
 	seedFinding(t, api{t: t, st: u.st, ev: u.ev}, domain.ID(scanID))
 	u.mustClickText(".tabs a", "Findings")
-	u.waitUI("finding shown", `/Reflected XSS candidate/.test(document.getElementById('tabPanel').textContent)`)
+	u.waitUI("default view explains hidden findings", `/No confirmed vulnerabilities yet\. 1 other finding\(s\)/.test(document.getElementById('tabPanel').textContent)`)
+	u.click("view_review")
+	u.waitUI("finding shown under Needs review", `/Reflected XSS candidate/.test(document.getElementById('tabPanel').textContent)`)
 
-	// Report creation on the Findings tab's generator.
-	u.mustClickText("#tabPanel button", "Generate report")
+	// Report creation: the mode defaults to Confirmed only (nothing confirmed →
+	// Generate disabled, never an empty report by accident); All is an explicit choice.
+	u.waitUI("generate disabled with nothing confirmed", `document.getElementById('generateReport').disabled`)
+	u.click("r_mode_all")
+	u.waitUI("all mode enables generate", `!document.getElementById('generateReport').disabled`)
+	u.click("generateReport")
 	u.waitUI("report row appears", `!/No reports yet/.test(document.getElementById('reportsBody').textContent) && document.querySelectorAll('#reportsBody tr').length>=1`)
 
 	// Cancel (confirm auto-accepted).
@@ -375,4 +385,46 @@ func mustScan(t *testing.T, st *memory.Store, id string) *domain.Scan {
 		t.Fatal(err)
 	}
 	return s
+}
+
+// Live refresh "Off": no polling timer, the header says so, and the manual
+// Refresh button reloads the current view on demand. A non-live view (Settings)
+// hides the button.
+func TestUILiveRefreshOff(t *testing.T) {
+	u := newUIHarness(t)
+	u.eval(`prefs.set("refreshMs","off")`)
+	u.eval(`navigate("#/dashboard")`)
+	u.waitUI("dashboard rendered", `document.getElementById('view').dataset.view==='dashboard' && currentView.refresh`)
+
+	if got := u.evalStr(`document.getElementById('liveState').textContent`); got != "Live off" {
+		t.Fatalf("live indicator = %q, want \"Live off\"", got)
+	}
+	if !u.evalBool(`currentView.timer === null`) {
+		t.Fatal("a refresh timer is running while live refresh is off")
+	}
+	if u.evalBool(`document.getElementById('refreshNow').classList.contains('hidden')`) {
+		t.Fatal("manual Refresh button hidden on a live view while live refresh is off")
+	}
+
+	// Count refreshes: none in the background, exactly one per click.
+	u.eval(`window.__n = 0; { const r = currentView.refresh; currentView.refresh = async () => { window.__n++; return r(); }; } true`)
+	time.Sleep(1200 * time.Millisecond)
+	if n := u.evalStr(`window.__n`); n != "0" {
+		t.Fatalf("view refreshed %s time(s) in the background with live refresh off", n)
+	}
+	u.click("refreshNow")
+	u.waitUI("manual refresh ran", `window.__n === 1 && !document.getElementById('refreshNow').disabled`)
+
+	// Turning it back on restores the timer and the indicator.
+	u.eval(`prefs.set("refreshMs","1000"); route()`)
+	u.waitUI("live again", `document.getElementById('liveState').textContent === 'Live · 1s' && currentView.timer !== null`)
+
+	u.eval(`navigate("#/settings")`)
+	u.waitUI("settings rendered", `document.getElementById('view').dataset.view==='settings'`)
+	if !u.evalBool(`document.getElementById('refreshNow').classList.contains('hidden')`) {
+		t.Fatal("Refresh button shown on a view with nothing to refresh")
+	}
+	if errs := u.page.PageErrors(); len(errs) > 0 {
+		t.Fatalf("JS errors: %v", errs)
+	}
 }

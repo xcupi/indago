@@ -179,6 +179,16 @@ type ScanConfig struct {
 	MaxPages int `json:"max_pages,omitempty"`
 	// MaxEndpoints caps endpoints discovered (0 = server default).
 	MaxEndpoints int `json:"max_endpoints,omitempty"`
+
+	// CandidateProfile selects how many/which of the planner's candidates are
+	// sent per injection point: "minimal", "standard" (default when empty), or
+	// "thorough" (see internal/detection/profile.go). MaxCandidates, when > 0,
+	// overrides the profile's per-injection-point cap (hard ceiling in
+	// detection.MaxCandidatesCeiling). Like the crawl controls, both are set at
+	// creation and read when a reflection step plans its candidates; they
+	// select among the built-in candidates and never affect verification.
+	CandidateProfile string `json:"candidate_profile,omitempty"`
+	MaxCandidates    int    `json:"max_candidates,omitempty"`
 }
 
 // StopMode controls when a scan stops relative to confirmed findings.

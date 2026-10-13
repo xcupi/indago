@@ -36,6 +36,7 @@ import (
 
 	"github.com/indago/indago/internal/auth"
 	"github.com/indago/indago/internal/browser"
+	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
@@ -245,6 +246,12 @@ type CreateScanParams struct {
 	MaxDepth     int
 	MaxPages     int
 	MaxEndpoints int
+
+	// CandidateProfile ("minimal" | "standard" | "thorough"; empty = standard)
+	// and MaxCandidates (> 0 overrides the profile's per-injection-point cap)
+	// bound the candidates sent per injection point. See domain.ScanConfig.
+	CandidateProfile string
+	MaxCandidates    int
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -318,6 +325,17 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	}
 	if err := validateCrawlExtent(cfg); err != nil {
 		return nil, err
+	}
+	// Candidate selection (like the crawl extent) applies whatever the profile
+	// preset. Validated now so a typo fails at creation, not mid-scan.
+	if p.CandidateProfile != "" {
+		cfg.CandidateProfile = p.CandidateProfile
+	}
+	if p.MaxCandidates != 0 { // negative is passed through so ResolveProfile rejects it
+		cfg.MaxCandidates = p.MaxCandidates
+	}
+	if _, err := detection.ResolveProfile(cfg.CandidateProfile, cfg.MaxCandidates); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBadConfig, err)
 	}
 
 	mode := p.AuthMode

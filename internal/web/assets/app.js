@@ -179,9 +179,33 @@ const prefs = {
     try { if (val === null || val === undefined) localStorage.removeItem("indago." + key); else localStorage.setItem("indago." + key, String(val)); } catch (e) { /* ignore */ }
   },
 };
+// refreshMs is the live-refresh interval; 0 means "off" (the operator
+// refreshes by hand with the header's Refresh button).
 function refreshMs() {
-  const v = parseInt(prefs.get("refreshMs", "2000"), 10);
+  const raw = prefs.get("refreshMs", "2000");
+  if (raw === "off") return 0;
+  const v = parseInt(raw, 10);
   return Number.isFinite(v) && v >= 500 ? v : 2000;
+}
+
+// updateLiveCtl reflects the interval and whether the current view is live in
+// the header: "Live · 2s" / "Live off", plus a manual Refresh button whenever
+// the view has something to refresh.
+function updateLiveCtl() {
+  const ms = refreshMs();
+  const state = $("liveState");
+  state.textContent = ms > 0 ? "Live · " + (ms / 1000) + "s" : "Live off";
+  state.classList.toggle("off", ms === 0);
+  $("refreshNow").classList.toggle("hidden", !currentView.refresh);
+}
+
+async function refreshNow() {
+  const btn = $("refreshNow");
+  btn.disabled = true;
+  try {
+    await loadProjects();
+    if (currentView.refresh) await currentView.refresh();
+  } finally { btn.disabled = false; }
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +285,7 @@ async function route() {
   const hash = location.hash || "#/dashboard";
   if (currentView.timer) clearInterval(currentView.timer);
   currentView = { name: "", refresh: null, timer: null };
+  updateLiveCtl();
   closeModal();
 
   const path = hash.replace(/^#/, "");
@@ -285,10 +310,14 @@ async function route() {
     if (token !== currentView) return; // navigated away while rendering
     if (typeof refresh === "function") {
       currentView.refresh = refresh;
-      currentView.timer = setInterval(() => {
-        if (token === currentView && $("modal").classList.contains("hidden")) refresh();
-      }, refreshMs());
+      const ms = refreshMs();
+      if (ms > 0) {
+        currentView.timer = setInterval(() => {
+          if (token === currentView && $("modal").classList.contains("hidden")) refresh();
+        }, ms);
+      }
     }
+    updateLiveCtl();
   } catch (e) {
     if (token !== currentView) return;
     view.replaceChildren(card("Error", el("p", "Could not load this view: " + e.message, "err")));

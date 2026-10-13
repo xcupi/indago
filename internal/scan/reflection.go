@@ -98,6 +98,7 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 	detection.PlanCandidates(&report, detection.PlanOptions{
 		ScanID:           tc.ScanID,
 		InjectionPointID: tc.InjectionPointID,
+		Profile:          e.candidateProfile(ctx, tc.ScanID),
 	})
 
 	r.outcome = domain.OutcomeSuccess
@@ -112,6 +113,26 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 	r.reflection = &report
 	r.baselineReq, r.baselineResp = bl.reqEvidence, bl.respEvidence
 	return r
+}
+
+// candidateProfile resolves the scan's candidate-selection policy. An
+// unreadable scan or an invalid stored value falls back to the standard
+// profile — still BOUNDED — never to the unbounded planner: a failure to read
+// configuration must not turn into more requests against a target.
+func (e *executor) candidateProfile(ctx context.Context, scanID domain.ID) detection.ProfileSpec {
+	var name string
+	var max int
+	if sc, err := e.store.Scans().Get(ctx, scanID); err == nil {
+		name, max = sc.Config.CandidateProfile, sc.Config.MaxCandidates
+	} else {
+		e.log.Warn("load scan for candidate profile; using the standard profile", "scan", scanID, "err", err)
+	}
+	spec, err := detection.ResolveProfile(name, max)
+	if err != nil {
+		e.log.Warn("invalid stored candidate profile; using the standard profile", "scan", scanID, "err", err)
+		spec, _ = detection.ResolveProfile("", 0)
+	}
+	return spec
 }
 
 // contextSummary renders the distinct site contexts, e.g. "context: html_text, js_string".
@@ -247,7 +268,7 @@ func (e *executor) persistBaselineEvidence(ctx context.Context, scanID domain.ID
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 
-	note := "baseline " + req.Method + " " + req.URL
+	note := domain.EvidenceNoteBaselinePrefix + req.Method + " " + req.URL
 	if id, err := e.putEvidence(wctx, scanID, domain.EvidenceRequest, dumpRequest(capturedFrom(req, resp)), note+" request"); err == nil {
 		reqID = id
 	} else {

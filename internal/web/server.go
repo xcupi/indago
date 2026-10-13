@@ -106,8 +106,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/scans/{id}/status", s.handleScanStatus)
 	mux.HandleFunc("GET /api/scans/{id}/findings", s.handleListFindings)
 	mux.HandleFunc("GET /api/scans/{id}/findings/{fid}", s.handleGetFinding)
+	mux.HandleFunc("GET /api/scans/{id}/evidence", s.handleListScanEvidence)
 	mux.HandleFunc("GET /api/scans/{id}/reports", s.handleListReports)
 	mux.HandleFunc("POST /api/scans/{id}/reports", s.handleCreateReport)
+	mux.HandleFunc("GET /api/scans/{id}/reports/preview", s.handlePreviewReport)
 	// A specific pattern takes precedence over {action}, so runtime reconfigure
 	// has its own route rather than going through handleScanAction.
 	mux.HandleFunc("POST /api/scans/{id}/config", s.handleReconfigureScan)

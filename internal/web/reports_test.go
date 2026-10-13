@@ -1,6 +1,8 @@
 package web_test
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -8,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
@@ -55,6 +58,7 @@ func TestCreateReportAllFindingsEachFormat(t *testing.T) {
 			t.Fatalf("%s: expected inline by default, got %q", tc.format, d)
 		}
 
+		assertSandboxedContent(t, content.Header())
 		download := a.do("GET", "/api/reports/"+string(rpt.ID)+"/content?download", nil)
 		if d := download.Header().Get("Content-Disposition"); !strings.HasPrefix(d, "attachment") {
 			t.Fatalf("%s: expected attachment with ?download, got %q", tc.format, d)
@@ -171,5 +175,149 @@ func TestInternalErrorDoesNotLeakDetailToClient(t *testing.T) {
 	}
 	if !strings.Contains(body, "store report failed") {
 		t.Fatalf("response should carry the generic error message: %s", body)
+	}
+}
+
+// seedVerdictFinding stores a minimal finding with the given verdict.
+func seedVerdictFinding(t *testing.T, a api, scanID domain.ID, v domain.Verdict, title string, at time.Time) *domain.Finding {
+	t.Helper()
+	f := &domain.Finding{ID: domain.NewID(), ScanID: scanID, VulnClass: domain.VulnReflectedXSS, Verdict: v,
+		Severity: domain.SeverityHigh, Confidence: domain.ConfidenceMedium, Title: title, CreatedAt: at, UpdatedAt: at}
+	if err := a.st.Findings().Create(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+type reportPreview struct {
+	TotalFindings  int            `json:"total_findings"`
+	ConfirmedCount int            `json:"confirmed_count"`
+	ByVerdict      map[string]int `json:"by_verdict"`
+	Selection      string         `json:"selection"`
+	ScanFindings   int            `json:"scan_findings"`
+}
+
+// Explicit selection modes: All Findings, Confirmed Only, Selected Findings.
+// The preview reports exactly what generate will include, and the persisted
+// report summary carries the same counts, verdict breakdown, and mode.
+func TestReportSelectionModes(t *testing.T) {
+	a := newAPI(t, nil)
+	scanID := createTestScan(t, a)
+	base := time.Now()
+	c1 := seedVerdictFinding(t, a, scanID, domain.VerdictConfirmed, "c1", base)
+	seedVerdictFinding(t, a, scanID, domain.VerdictConfirmed, "c2", base.Add(time.Second))
+	r1 := seedVerdictFinding(t, a, scanID, domain.VerdictRejected, "r1", base.Add(2*time.Second))
+	seedVerdictFinding(t, a, scanID, domain.VerdictPending, "p1", base.Add(3*time.Second))
+
+	cases := []struct {
+		name      string
+		mode      string
+		ids       []string
+		total     int
+		confirmed int
+		byVerdict map[string]int
+	}{
+		{"all", "all", nil, 4, 2, map[string]int{"confirmed": 2, "rejected": 1, "pending": 1}},
+		{"confirmed", "confirmed", nil, 2, 2, map[string]int{"confirmed": 2}},
+		{"selected", "selected", []string{string(c1.ID), string(r1.ID)}, 2, 1, map[string]int{"confirmed": 1, "rejected": 1}},
+	}
+	for _, tc := range cases {
+		q := "?mode=" + tc.mode
+		for _, id := range tc.ids {
+			q += "&finding_id=" + id
+		}
+		var pv reportPreview
+		a.mustJSON(a.do("GET", "/api/scans/"+string(scanID)+"/reports/preview"+q, nil), http.StatusOK, &pv)
+		check := func(where string, got reportPreview) {
+			t.Helper()
+			if got.TotalFindings != tc.total || got.ConfirmedCount != tc.confirmed || got.Selection != tc.mode || got.ScanFindings != 4 {
+				t.Fatalf("%s/%s: %+v", tc.name, where, got)
+			}
+			if len(got.ByVerdict) != len(tc.byVerdict) {
+				t.Fatalf("%s/%s: by_verdict = %v, want %v", tc.name, where, got.ByVerdict, tc.byVerdict)
+			}
+			for k, v := range tc.byVerdict {
+				if got.ByVerdict[k] != v {
+					t.Fatalf("%s/%s: by_verdict = %v, want %v", tc.name, where, got.ByVerdict, tc.byVerdict)
+				}
+			}
+		}
+		check("preview", pv)
+
+		var rpt struct {
+			ID      domain.ID     `json:"id"`
+			Summary reportPreview `json:"summary"`
+		}
+		a.mustJSON(a.do("POST", "/api/scans/"+string(scanID)+"/reports", map[string]any{"format": "markdown", "mode": tc.mode, "finding_ids": tc.ids}), http.StatusCreated, &rpt)
+		check("generated", rpt.Summary)
+
+		body := a.do("GET", "/api/reports/"+string(rpt.ID)+"/content", nil).Body.String()
+		if !strings.Contains(body, "**Selection:**") || !strings.Contains(body, fmt.Sprintf("(%d of 4 findings in the scan)", tc.total)) {
+			t.Fatalf("%s: report does not state its own selection:\n%s", tc.name, body)
+		}
+	}
+}
+
+// Confirmed Only filters on the STORED verdict; with none confirmed it yields
+// an honest, empty report rather than inventing or upgrading anything.
+func TestReportConfirmedOnlyWithNoneConfirmed(t *testing.T) {
+	a := newAPI(t, nil)
+	scanID := createTestScan(t, a)
+	seedVerdictFinding(t, a, scanID, domain.VerdictRejected, "r", time.Now())
+	var pv reportPreview
+	a.mustJSON(a.do("GET", "/api/scans/"+string(scanID)+"/reports/preview?mode=confirmed", nil), http.StatusOK, &pv)
+	if pv.TotalFindings != 0 || pv.ScanFindings != 1 {
+		t.Fatalf("preview = %+v", pv)
+	}
+}
+
+func TestReportSelectionValidation(t *testing.T) {
+	a := newAPI(t, nil)
+	scanID := createTestScan(t, a)
+	f := seedVerdictFinding(t, a, scanID, domain.VerdictConfirmed, "c", time.Now())
+	for _, body := range []map[string]any{
+		{"format": "json", "mode": "selected"},                                         // selected with no ids
+		{"format": "json", "mode": "confirmed", "finding_ids": []string{string(f.ID)}}, // ids ignored by mode
+		{"format": "json", "mode": "all", "finding_ids": []string{string(f.ID)}},
+		{"format": "json", "mode": "bogus"},
+	} {
+		if rec := a.do("POST", "/api/scans/"+string(scanID)+"/reports", body); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%v: status = %d, want 400: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := a.do("GET", "/api/scans/"+string(scanID)+"/reports/preview?mode=selected", nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("preview selected-without-ids: status = %d, want 400", rec.Code)
+	}
+}
+
+// Same mode over the same findings is byte-identical across all formats,
+// regardless of the order the IDs were selected in.
+func TestReportSelectionDeterministic(t *testing.T) {
+	a := newAPI(t, nil)
+	scanID := createTestScan(t, a)
+	base := time.Now()
+	f1 := seedVerdictFinding(t, a, scanID, domain.VerdictConfirmed, "a", base)
+	f2 := seedVerdictFinding(t, a, scanID, domain.VerdictRejected, "b", base.Add(time.Second))
+	strip := func(s string) string {
+		// GeneratedAt differs per generation by design; compare the rest.
+		var out []string
+		for _, line := range strings.Split(s, "\n") {
+			if !strings.Contains(line, "enerated") {
+				out = append(out, line)
+			}
+		}
+		return strings.Join(out, "\n")
+	}
+	for _, format := range []string{"json", "markdown", "html"} {
+		var r1, r2 struct {
+			ID domain.ID `json:"id"`
+		}
+		a.mustJSON(a.do("POST", "/api/scans/"+string(scanID)+"/reports", map[string]any{"format": format, "mode": "selected", "finding_ids": []string{string(f1.ID), string(f2.ID)}}), http.StatusCreated, &r1)
+		a.mustJSON(a.do("POST", "/api/scans/"+string(scanID)+"/reports", map[string]any{"format": format, "mode": "selected", "finding_ids": []string{string(f2.ID), string(f1.ID)}}), http.StatusCreated, &r2)
+		b1 := strip(a.do("GET", "/api/reports/"+string(r1.ID)+"/content", nil).Body.String())
+		b2 := strip(a.do("GET", "/api/reports/"+string(r2.ID)+"/content", nil).Body.String())
+		if b1 != b2 {
+			t.Fatalf("%s: output depends on selection order:\n%s\n---\n%s", format, b1, b2)
+		}
 	}
 }

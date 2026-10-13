@@ -189,6 +189,12 @@ type createScanReq struct {
 	MaxDepth     int  `json:"max_depth"`
 	MaxPages     int  `json:"max_pages"`
 	MaxEndpoints int  `json:"max_endpoints"`
+
+	// Candidate selection: "minimal" | "standard" (default) | "thorough", and an
+	// optional per-injection-point cap overriding the profile's. Validated by
+	// the controller (unknown profile / cap above the ceiling → 400).
+	CandidateProfile string `json:"candidate_profile"`
+	MaxCandidates    int    `json:"max_candidates"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -250,6 +256,9 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		MaxDepth:      req.MaxDepth,
 		MaxPages:      req.MaxPages,
 		MaxEndpoints:  req.MaxEndpoints,
+
+		CandidateProfile: req.CandidateProfile,
+		MaxCandidates:    req.MaxCandidates,
 	})
 	if err != nil {
 		s.writeScanError(w, err)

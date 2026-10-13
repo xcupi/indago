@@ -18,7 +18,10 @@ identity. Anyone who can reach it can:
   specify (scope is enforced, but the API lets its caller set the scope)
 - read every finding, including candidate values and evidence metadata
 - fetch evidence **content**, which can include captured session cookies for
-  the scanned target (`GET /api/evidence/{id}/content`)
+  the scanned target (`GET /api/evidence/{id}/content`). Content is served
+  under a script-less CSP sandbox, so opening a captured page never runs the
+  target's scripts with the console's origin — see
+  `docs/finding-correlation.md` ("Opening evidence safely").
 - generate and read reports
 
 This is an intentional trade-off for a local-first, single-operator tool, not

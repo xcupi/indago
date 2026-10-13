@@ -90,15 +90,15 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER, default http://
   target add -project ID -name NAME -url URL | target list -project ID
   scope set -project ID -include host[,host] [-exclude ..] [-include-path ..] [-exclude-path ..] [-subdomains]
   scope show -project ID
-  scan create -project ID -target ID [-name N] [-profile P] [-seed URL]... [-stop MODE [-stop-n N]]
+  scan create -project ID -target ID [-name N] [-profile P] [-candidate-profile minimal|standard|thorough] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]]
               [-quick | -depth N] [-max-pages N] [-max-endpoints N] [-auth existing -auth-state FILE]
   scan list [-json]
   scan status <scan-id|prefix> [-json]
   scan start|pause|resume|cancel <scan-id|prefix>
   scan config <scan-id|prefix> [-discovery N] [-http N] [-browser N] [-rate N]   (runtime tuning)
-  finding list -scan <scan-id|prefix> [-json]
+  finding list -scan <scan-id|prefix> [-verdict confirmed|pending|inconclusive|rejected|all] [-json]   (default: confirmed; all with -json)
   finding show -scan <scan-id|prefix> <finding-id|prefix> [-json]
-  report create -scan <scan-id|prefix> -format json|markdown|html [-finding ID]... [-out FILE]
+  report create -scan <scan-id|prefix> -format json|markdown|html [-mode all|confirmed|selected] [-finding ID]... [-out FILE]
   report list -scan <scan-id|prefix> [-json]
   report show <report-id|prefix> [-out FILE] [-download]
 

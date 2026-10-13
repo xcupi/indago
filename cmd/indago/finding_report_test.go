@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -94,8 +95,41 @@ func TestCLIFindingListAndShow(t *testing.T) {
 	if err := cList.runClient("finding", []string{"list", "-scan", string(scanID)}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), string(findingID)) || !strings.Contains(out.String(), "Reflected XSS candidate") {
-		t.Fatalf("finding list output: %q", out.String())
+	// The seeded finding is pending: the default (confirmed-only) list hides it
+	// but says so, and -verdict all / pending shows it.
+	if strings.Contains(out.String(), string(findingID)) || !strings.Contains(out.String(), "1 other finding(s) hidden") {
+		t.Fatalf("default finding list should hide the pending finding with a hint: %q", out.String())
+	}
+	for _, v := range []string{"all", "pending"} {
+		out.Reset()
+		if err := cList.runClient("finding", []string{"list", "-scan", string(scanID), "-verdict", v}); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), string(findingID)) || !strings.Contains(out.String(), "Reflected XSS candidate") {
+			t.Fatalf("finding list -verdict %s output: %q", v, out.String())
+		}
+	}
+
+	// -json without -verdict returns every finding (scripts must not silently
+	// lose the pending one); an explicit -verdict still filters JSON output.
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"list", "-scan", string(scanID), "-json"}, true},
+		{[]string{"list", "-scan", string(scanID), "-json", "-verdict", "confirmed"}, false},
+	} {
+		out.Reset()
+		if err := cList.runClient("finding", tc.args); err != nil {
+			t.Fatal(err)
+		}
+		var got []domain.Finding
+		if err := json.Unmarshal([]byte(out.String()), &got); err != nil {
+			t.Fatalf("%v: decode JSON: %v (%q)", tc.args, err, out.String())
+		}
+		if has := len(got) == 1 && got[0].ID == findingID; has != tc.want {
+			t.Fatalf("%v: got %d finding(s) %q, want pending finding present=%v", tc.args, len(got), out.String(), tc.want)
+		}
 	}
 
 	out.Reset()
@@ -173,5 +207,34 @@ func TestCLIReportCreateWithOutFile(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "wrote report to "+path) {
 		t.Fatalf("output: %q", out.String())
+	}
+}
+
+// -mode confirmed reports only confirmed findings and the CLI prints the
+// included count and verdict breakdown (the seeded finding is pending, so
+// confirmed-only is an honest, empty report).
+func TestCLIReportCreateModeConfirmed(t *testing.T) {
+	c, _, st, ev := newTestServerAndStore(t)
+	scanID, _ := seedScanWithFinding(t, c, st, ev)
+
+	var out strings.Builder
+	cc := newCLI(c.server, &out)
+	if err := cc.runClient("report", []string{"create", "-scan", string(scanID), "-format", "json", "-mode", "confirmed"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "0 finding(s); selection confirmed, 0 of 1 in scan; no findings") {
+		t.Fatalf("output: %q", out.String())
+	}
+
+	out.Reset()
+	if err := cc.runClient("report", []string{"create", "-scan", string(scanID), "-format", "json", "-mode", "all"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "1 finding(s); selection all, 1 of 1 in scan; pending 1") {
+		t.Fatalf("output: %q", out.String())
+	}
+
+	if err := cc.runClient("report", []string{"create", "-scan", string(scanID), "-format", "json", "-mode", "selected"}); err == nil {
+		t.Fatal("-mode selected without -finding must be rejected by the server")
 	}
 }

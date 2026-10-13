@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,6 +79,16 @@ func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob,
 	if e.store == nil {
 		return
 	}
+	// A finding is only ever created from a PLANNED breakout, which always
+	// embeds this injection point's unique marker. A value without it — an
+	// ordinary baseline value such as the observed "hello" — is not a candidate
+	// and must never become one, however it got here.
+	marker := detection.NewProbe(job.ScanID, job.Target.InjectionPointID).Token
+	if !strings.Contains(cand.Value, marker) {
+		e.log.Warn("enqueue verification: candidate does not embed the injection point's marker; no finding created",
+			"job", job.ID, "candidate", cand.DedupKey)
+		return
+	}
 	// Serialized: two candidates correlating to the same site can run on
 	// different HTTP workers at the same time, and the correlation lookup
 	// (ListByScan + match by dedup key) is not atomic at the store layer.
@@ -94,7 +105,7 @@ func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob,
 
 	now := time.Now()
 	payload, err := json.Marshal(verifyJob{
-		Candidate: cand, Marker: detection.NewProbe(job.ScanID, job.Target.InjectionPointID).Token,
+		Candidate: cand, Marker: marker,
 		FindingID: f.ID, CandidateTestCaseID: candTestCaseID,
 	})
 	if err != nil {
@@ -316,7 +327,7 @@ func (e *verifyExecutor) finish(ctx context.Context, job *domain.TestJob, tc *do
 	}
 
 	if !vj.FindingID.Empty() && r.result != nil {
-		e.correlateVerification(ctx, vj.FindingID, vj.CandidateTestCaseID, r.result, tc.ID, evidenceIDs)
+		e.correlateVerification(ctx, vj.FindingID, vj.Candidate, vj.CandidateTestCaseID, r.result, tc.ID, evidenceIDs)
 	}
 }
 

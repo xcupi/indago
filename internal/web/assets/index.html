@@ -10,6 +10,10 @@
   <header class="topbar">
     <a class="brand" href="#/dashboard">INDAGO</a>
     <span class="ver" id="version">…</span>
+    <div class="live-ctl">
+      <a class="live-state" id="liveState" href="#/settings" title="Live refresh interval — change it in Settings">…</a>
+      <button id="refreshNow" class="small hidden" title="Reload this view's data now">↻ Refresh</button>
+    </div>
     <div class="project-picker">
       <label for="projectSelect">Project</label>
       <select id="projectSelect"><option value="">— select a project —</option></select>

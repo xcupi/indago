@@ -20,6 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/indago/indago/internal/detection"
@@ -39,6 +42,28 @@ type findingDetail struct {
 	Occurrences   int                   `json:"occurrences"`
 	TestCaseIDs   []domain.ID           `json:"test_case_ids,omitempty"`
 	Candidates    []detection.Candidate `json:"candidates,omitempty"`
+	// Attempts records every browser-verification attempt correlated into this
+	// finding with its OWN verdict and evidence. The Finding's Verdict is the
+	// ratcheted maximum across attempts (see verdictRank); this keeps the
+	// per-candidate outcomes that produced it — a confirming attempt and a
+	// later rejected one both stay visible instead of collapsing into one value.
+	Attempts []verificationAttempt `json:"attempts,omitempty"`
+}
+
+// verificationAttempt is one browser-verification attempt correlated into a
+// Finding: which candidate was replayed, what verification decided for that
+// candidate, and the evidence that attempt (plus its candidate request/
+// response) produced.
+type verificationAttempt struct {
+	CandidateValue      string            `json:"candidate_value"`
+	CandidateDedupKey   string            `json:"candidate_dedup_key,omitempty"`
+	CandidateTestCaseID domain.ID         `json:"candidate_test_case_id,omitempty"`
+	VerifyTestCaseID    domain.ID         `json:"verify_test_case_id"`
+	Verdict             domain.Verdict    `json:"verdict"`
+	Confidence          domain.Confidence `json:"confidence,omitempty"`
+	Notes               string            `json:"notes,omitempty"`
+	EvidenceIDs         []domain.ID       `json:"evidence_ids,omitempty"`
+	At                  time.Time         `json:"at"`
 }
 
 func decodeFindingDetail(b []byte) findingDetail {
@@ -78,8 +103,65 @@ func severityFor(cand detection.Candidate) domain.Severity {
 	}
 }
 
-func findingTitle(cand detection.Candidate, focus *domain.Parameter) string {
-	return fmt.Sprintf("Reflected XSS candidate (%s) in parameter %q", cand.Category, focus.Name)
+// findingTitle names a finding by everything its dedup key distinguishes that
+// an operator can see: parameter, reflection context, and endpoint (method +
+// path + the parameter-name set that keys an endpoint in discovery). Naming
+// it by candidate category alone made distinct findings indistinguishable —
+// every html_text reflection of "q" on any endpoint shared one title, as did
+// js_string and js_code reflections (both category "javascript").
+func findingTitle(cand detection.Candidate, focus *domain.Parameter, ep *domain.Endpoint) string {
+	return fmt.Sprintf("Reflected XSS candidate in parameter %q (%s) at %s %s", focus.Name, cand.Context, ep.Method, endpointLabel(ep.URL))
+}
+
+// confirmedTitle drops "candidate" from a finding's title once browser
+// verification has confirmed it: a verified vulnerability is not a candidate.
+// Everything else the title says (parameter, context, endpoint) is unchanged,
+// and an unconfirmed finding keeps its "candidate" wording.
+func confirmedTitle(title string) string {
+	return strings.Replace(title, "Reflected XSS candidate in", "Reflected XSS in", 1)
+}
+
+// verifiedAttempt returns the attempt that confirmed the finding — the
+// candidate whose browser verification produced the deterministic execution
+// signal — or nil if none did. With several confirming attempts the earliest
+// (then lowest verify TestCase ID) wins, so the choice never depends on the
+// order concurrent verifications happened to complete in.
+func (d findingDetail) verifiedAttempt() *verificationAttempt {
+	var best *verificationAttempt
+	for i := range d.Attempts {
+		a := &d.Attempts[i]
+		if a.Verdict != domain.VerdictConfirmed {
+			continue
+		}
+		if best == nil || a.At.Before(best.At) || (a.At.Equal(best.At) && a.VerifyTestCaseID < best.VerifyTestCaseID) {
+			best = a
+		}
+	}
+	return best
+}
+
+// endpointLabel is path plus sorted query-parameter NAMES (values dropped),
+// mirroring discovery's endpoint identity so two endpoints that differ only
+// by their parameter set are told apart.
+func endpointLabel(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	label := u.EscapedPath()
+	if label == "" {
+		label = "/"
+	}
+	q := u.Query()
+	if len(q) == 0 {
+		return label
+	}
+	names := make([]string, 0, len(q))
+	for k := range q {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return label + "?" + strings.Join(names, "&")
 }
 
 // upsertPendingFinding returns the Finding a reflected candidate correlates
@@ -127,7 +209,7 @@ func upsertPendingFinding(ctx context.Context, st store.Store, scanID domain.ID,
 	f := &domain.Finding{
 		ID: domain.NewID(), ScanID: scanID, ProjectID: sc.ProjectID, VulnClass: domain.VulnReflectedXSS,
 		Verdict: domain.VerdictPending, Severity: severityFor(cand), Confidence: domain.ConfidenceLow,
-		Title:            findingTitle(cand, focus),
+		Title:            findingTitle(cand, focus, ep),
 		Summary:          cand.Rationale,
 		EndpointID:       ep.ID,
 		InjectionPointID: injectionPointID,
@@ -168,7 +250,7 @@ func verdictRank(v domain.Verdict) int {
 // original candidate's own request/response evidence) and the contributing
 // TestCase IDs are unioned in every time, so correlating never discards raw
 // evidence. It is the only place a Finding's Verdict leaves Pending.
-func (e *verifyExecutor) correlateVerification(ctx context.Context, findingID domain.ID, candTestCaseID domain.ID, vres *verification.Result, verifyTestCaseID domain.ID, newEvidenceIDs []domain.ID) {
+func (e *verifyExecutor) correlateVerification(ctx context.Context, findingID domain.ID, cand detection.Candidate, candTestCaseID domain.ID, vres *verification.Result, verifyTestCaseID domain.ID, newEvidenceIDs []domain.ID) {
 	// Serialized: two verify jobs for the same correlated finding (two
 	// candidates at the same site) can complete at the same time on different
 	// browser workers, and this is a plain Get-mutate-Update — without the
@@ -190,6 +272,9 @@ func (e *verifyExecutor) correlateVerification(ctx context.Context, findingID do
 		if vres.Notes != "" {
 			f.Summary = vres.Notes
 		}
+		if f.Verdict == domain.VerdictConfirmed {
+			f.Title = confirmedTitle(f.Title)
+		}
 	}
 
 	// Include request, response, browser event, DOM/screenshot evidence where
@@ -207,6 +292,12 @@ func (e *verifyExecutor) correlateVerification(ctx context.Context, findingID do
 	d := decodeFindingDetail(f.Detail)
 	d.TestCaseIDs = appendUniqueID(d.TestCaseIDs, verifyTestCaseID)
 	d.TestCaseIDs = appendUniqueID(d.TestCaseIDs, candTestCaseID)
+	d.Attempts = appendAttempt(d.Attempts, verificationAttempt{
+		CandidateValue: cand.Value, CandidateDedupKey: cand.DedupKey,
+		CandidateTestCaseID: candTestCaseID, VerifyTestCaseID: verifyTestCaseID,
+		Verdict: vres.Verdict, Confidence: vres.Confidence, Notes: vres.Notes,
+		EvidenceIDs: appendUniqueIDs(nil, all), At: now,
+	})
 	f.Detail = d.encode()
 
 	f.Provenance.VerifiedAt = &now
@@ -226,6 +317,17 @@ func appendUniqueID(ids []domain.ID, id domain.ID) []domain.ID {
 		}
 	}
 	return append(ids, id)
+}
+
+// appendAttempt records a verification attempt once per verify TestCase, so a
+// re-delivered correlation for the same attempt does not double-count it.
+func appendAttempt(attempts []verificationAttempt, a verificationAttempt) []verificationAttempt {
+	for _, x := range attempts {
+		if x.VerifyTestCaseID == a.VerifyTestCaseID {
+			return attempts
+		}
+	}
+	return append(attempts, a)
 }
 
 func appendUniqueIDs(existing, add []domain.ID) []domain.ID {

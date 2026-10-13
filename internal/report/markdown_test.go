@@ -60,7 +60,8 @@ func TestMarkdownGeneratorProducesValidReport(t *testing.T) {
 		"## Summary",
 		"**Total findings:** 2",
 		"**Confirmed:** 1",
-		"## Findings",
+		"## Confirmed vulnerabilities",
+		"## Unconfirmed — needs review",
 		"CONFIRMED",
 		"PENDING",
 		"Reflected XSS candidate (html_text)",
@@ -73,9 +74,10 @@ func TestMarkdownGeneratorProducesValidReport(t *testing.T) {
 	}
 }
 
-// Findings are rendered oldest-first regardless of input order, so a report
-// reads chronologically and is reproducible.
-func TestMarkdownGeneratorOrdersFindingsByCreatedAt(t *testing.T) {
+// Confirmed vulnerabilities come first, even when an unconfirmed finding is
+// older; within a section findings are oldest-first. Neither depends on input
+// order, so a report is reproducible.
+func TestMarkdownGeneratorOrdersConfirmedFirstThenByCreatedAt(t *testing.T) {
 	gen, _ := report.For(domain.ReportMarkdown)
 	var buf bytes.Buffer
 	if err := gen.Generate(&buf, sampleReportData()); err != nil {
@@ -87,8 +89,8 @@ func TestMarkdownGeneratorOrdersFindingsByCreatedAt(t *testing.T) {
 	if pendingIdx < 0 || confirmedIdx < 0 {
 		t.Fatalf("both findings should be rendered: %s", out)
 	}
-	if pendingIdx > confirmedIdx {
-		t.Fatal("the earlier-created (pending) finding should be rendered before the later one")
+	if confirmedIdx > pendingIdx {
+		t.Fatal("the confirmed finding must be rendered before the older, unconfirmed one")
 	}
 }
 

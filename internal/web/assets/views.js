@@ -230,6 +230,10 @@ async function renderScansList(_params, view) {
 // ---------------------------------------------------------------------------
 // Findings (project-level, aggregated across the project's scans)
 // ---------------------------------------------------------------------------
+// Project-level findings filter (confirmed by default, like a scan's Findings
+// tab: rejected attempts are diagnostics, not vulnerabilities).
+let projectFindingsView = "confirmed";
+
 async function renderFindings(_params, view) {
   if (!currentProject()) { needProject(view, "Findings"); return; }
   view.appendChild(pageHead("Findings — " + currentProject().name));
@@ -237,19 +241,29 @@ async function renderFindings(_params, view) {
   view.appendChild(body);
 
   const scans = await projectScans();
-  const rows = [];
+  const all = [];
   for (const s of scans) {
     let findings = [];
     try { findings = (await getJSON(api.scan(s.id) + "/findings")) || []; } catch (e) { continue; }
-    findings.forEach((f) => {
-      const tr = findingRow(f, s.id, null);
-      const scanCell = el("td"); scanCell.appendChild(link(s.name || "(unnamed)", "#/scans/" + encodeURIComponent(s.id) + "/findings"));
-      tr.insertBefore(scanCell, tr.firstChild);
-      rows.push(tr);
-    });
+    findings.forEach((f) => all.push({ f, scan: s }));
   }
-  body.replaceChildren(table(["Scan", "Title", "Verdict", "Severity", "Parameter", "Context"], rows,
-    "No findings in this project yet.", null));
+  const render = () => {
+    const counts = sectionCountsOf(all.map((x) => x.f));
+    const pred = viewPredicate(projectFindingsView);
+    const rows = all.filter((x) => pred(x.f)).map(({ f, scan }) => {
+      const tr = findingRow(f, scan.id, null);
+      const scanCell = el("td"); scanCell.appendChild(link(scan.name || "(unnamed)", "#/scans/" + encodeURIComponent(scan.id) + "/findings"));
+      tr.insertBefore(scanCell, tr.firstChild);
+      return tr;
+    });
+    const empty = projectFindingsView === "confirmed" && all.length
+      ? "No confirmed vulnerabilities in this project yet. " + (all.length - counts.confirmed) + " other finding(s) are hidden in this view."
+      : "No findings in this view.";
+    body.replaceChildren(
+      filterBar(counts, projectFindingsView, (name) => { projectFindingsView = name; render(); }),
+      table(["Scan", ...FINDING_HEADERS], rows, empty, null));
+  };
+  render();
 }
 
 // ---------------------------------------------------------------------------
@@ -274,7 +288,7 @@ async function renderReports(_params, view) {
       rows.push(tr);
     });
   }
-  body.replaceChildren(table(["Scan", "Created", "Format", "Findings", "Confirmed", "Open"], rows, "No reports in this project yet.", null));
+  body.replaceChildren(table(["Scan", "Created", "Format", "Selection", "Findings", "Verdicts", "Open"], rows, "No reports in this project yet.", null));
 }
 
 // ---------------------------------------------------------------------------
@@ -283,11 +297,11 @@ async function renderReports(_params, view) {
 async function renderSettings(_params, view) {
   view.appendChild(pageHead("Settings"));
 
-  const interval = select("set_refresh", [["1000", "1 second"], ["2000", "2 seconds"], ["5000", "5 seconds"], ["10000", "10 seconds"]], prefs.get("refreshMs", "2000"));
+  const interval = select("set_refresh", [["off", "Off (refresh manually)"], ["1000", "1 second"], ["2000", "2 seconds"], ["5000", "5 seconds"], ["10000", "10 seconds"]], prefs.get("refreshMs", "2000"));
   interval.style.width = "200px";
   interval.addEventListener("change", () => { prefs.set("refreshMs", interval.value); route(); });
   view.appendChild(card("Live refresh interval", field("How often live views poll for updates", interval),
-    el("p", "A per-browser preference only; it changes nothing on the server.", "hint")));
+    el("p", "Off stops all background polling; use \u21bb Refresh in the header to update a view. A per-browser preference only; it changes nothing on the server.", "hint")));
 
   let login = "unknown";
   try {
@@ -325,12 +339,14 @@ async function init() {
   try { const v = await getJSON("/api/version"); $("version").textContent = "v" + (v.version || "dev"); } catch (e) { /* ignore */ }
   $("projectSelect").addEventListener("change", (e) => setProject(e.target.value));
   $("modalClose").addEventListener("click", closeModal);
+  $("refreshNow").addEventListener("click", refreshNow);
   $("modal").addEventListener("click", (e) => { if (e.target === $("modal")) closeModal(); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
   window.addEventListener("hashchange", route);
   await loadProjects();
   route();
   // Keep the project list fresh for the header without disturbing the view.
-  setInterval(loadProjects, 10000);
+  // Respects "Live off": no background polling at all then.
+  setInterval(() => { if (refreshMs() > 0) loadProjects(); }, 10000);
 }
 init();

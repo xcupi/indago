@@ -30,6 +30,31 @@ type ReportSummary struct {
 	ByVulnClass       map[VulnClass]int `json:"by_vuln_class"`
 	ConfirmedCount    int               `json:"confirmed_count"`
 	GeneratedFromScan ID                `json:"generated_from_scan"`
+	// Selection is how the report's findings were chosen from the scan
+	// (ReportSelectAll/Confirmed/Selected); ScanFindings is how many findings
+	// the scan held at generation time, so "3 of 8" is always reconstructible.
+	// Both are additive JSON fields on the persisted summary blob.
+	Selection    ReportSelection `json:"selection,omitempty"`
+	ScanFindings int             `json:"scan_findings,omitempty"`
+}
+
+// ReportSelection names how a report's findings were chosen.
+type ReportSelection string
+
+const (
+	ReportSelectAll       ReportSelection = "all"       // every finding in the scan
+	ReportSelectConfirmed ReportSelection = "confirmed" // only verdict=confirmed
+	ReportSelectSelected  ReportSelection = "selected"  // an explicit list of finding IDs
+)
+
+// IsValid reports whether the selection is a known value.
+func (s ReportSelection) IsValid() bool {
+	switch s {
+	case ReportSelectAll, ReportSelectConfirmed, ReportSelectSelected:
+		return true
+	default:
+		return false
+	}
 }
 
 // Report is a generated artifact summarizing a scan's findings. The rendered

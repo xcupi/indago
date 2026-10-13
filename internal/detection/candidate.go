@@ -41,6 +41,13 @@ const (
 	CatUnknown  CandidateCategory = "unknown_mixed"
 )
 
+// Candidate triggers (see Candidate.Trigger).
+const (
+	TriggerLoad        = "load"
+	TriggerInteraction = "interaction"
+	TriggerNone        = "none"
+)
+
 // Candidate sources.
 const (
 	SourceBuiltin = "builtin"
@@ -71,6 +78,14 @@ type Candidate struct {
 	// candidate depends on: "raw" (survive) or an encoding (html/url/js/stripped/
 	// mixed) that neutralizes them. Derived from the reflection encoding analysis.
 	Transformation string `json:"transformation"`
+	// Trigger is how this breakout could ever produce an execution signal:
+	// TriggerLoad fires on page load (what the passive browser verifier can
+	// observe), TriggerInteraction needs a user action (hover, click,
+	// navigation) the verifier deliberately never simulates, and TriggerNone is
+	// a markup-injection probe that carries no executable reference at all.
+	// Only TriggerLoad candidates can ever be Confirmed by verification; the
+	// others document reflection behaviour and end Rejected/unconfirmed.
+	Trigger string `json:"trigger,omitempty"`
 	// Priority orders execution: higher first. Candidates whose required
 	// characters the site neutralizes are deprioritized, not hidden.
 	Priority  int    `json:"priority"`
@@ -86,6 +101,13 @@ type CandidatePlan struct {
 	Marker     string      `json:"marker"`
 	Generated  int         `json:"generated"` // total built before deduplication
 	Candidates []Candidate `json:"candidates,omitempty"`
+	// Profile/Limit/Dropped record the selection policy applied (profile.go):
+	// the profile name, its per-injection-point cap, and how many deduplicated
+	// candidates it left unsent — so a bounded plan is never mistaken for the
+	// complete built-in set.
+	Profile CandidateProfile `json:"profile,omitempty"`
+	Limit   int              `json:"limit,omitempty"`
+	Dropped int              `json:"dropped,omitempty"`
 }
 
 // PlanOptions configures planning.
@@ -96,6 +118,9 @@ type PlanOptions struct {
 	// Provenance stamped onto every candidate.
 	ScanID           domain.ID
 	InjectionPointID domain.ID
+	// Profile selects which of the planned candidates are kept (and how many).
+	// The zero value keeps every candidate, as before profiles existed.
+	Profile ProfileSpec
 }
 
 // PlanCandidates builds the candidate plan for rep and stores it in rep.Plan. It
@@ -132,6 +157,7 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 				Context:          loc.Context.Context,
 				ContextSub:       loc.Context.Sub,
 				Value:            tpl.value,
+				Trigger:          tpl.trigger,
 				Rationale:        tpl.rationale,
 			}
 			c.Transformation, c.Priority = transform(loc, tpl, &c)
@@ -149,6 +175,10 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 	sort.Slice(plan.Candidates, func(i, j int) bool {
 		return lessCandidate(plan.Candidates[i], plan.Candidates[j])
 	})
+	if opts.Profile != (ProfileSpec{}) {
+		plan.Candidates, plan.Dropped = opts.Profile.Select(plan.Candidates)
+		plan.Profile, plan.Limit = opts.Profile.Name, opts.Profile.MaxPerInjectionPoint
+	}
 	rep.Plan = plan
 	return plan
 }
@@ -208,6 +238,7 @@ type candTemplate struct {
 	needs     string
 	priority  int
 	rationale string
+	trigger   string // TriggerLoad / TriggerInteraction / TriggerNone
 }
 
 // templatesFor returns the built-in candidates for a site's context.
@@ -228,6 +259,18 @@ func templatesFor(a ContextAnalysis, m string) []candTemplate {
 	}
 }
 
+// Template constructors: the trigger is part of each built-in's definition, so
+// a profile can select on it (see profile.go).
+func onLoad(value, needs string, priority int, why string) candTemplate {
+	return candTemplate{value, needs, priority, why, TriggerLoad}
+}
+func onInteraction(value, needs string, priority int, why string) candTemplate {
+	return candTemplate{value, needs, priority, why, TriggerInteraction}
+}
+func markupProbe(value, needs string, priority int, why string) candTemplate {
+	return candTemplate{value, needs, priority, why, TriggerNone}
+}
+
 func htmlTextTemplates(a ContextAnalysis, m string) []candTemplate {
 	// In RCDATA/RAWTEXT (title/textarea/iframe/xmp/…) or a comment, markup is not
 	// parsed until the construct closes, so the breakout must close it first.
@@ -241,10 +284,10 @@ func htmlTextTemplates(a ContextAnalysis, m string) []candTemplate {
 		}
 	}
 	return []candTemplate{
-		{prefix + "<svg onload=" + m + ">", "<>", 90,
-			prefixReason(prefix, "inject an <svg> element whose onload handler references the benign marker")},
-		{prefix + "<" + m + "x>", "<>", 60,
-			prefixReason(prefix, "inject a marker element to detect raw markup injection without script")},
+		onLoad(prefix+"<svg onload="+m+">", "<>", 90,
+			prefixReason(prefix, "inject an <svg> element whose onload handler references the benign marker")),
+		markupProbe(prefix+"<"+m+"x>", "<>", 60,
+			prefixReason(prefix, "inject a marker element to detect raw markup injection without script")),
 	}
 }
 
@@ -271,32 +314,34 @@ func htmlAttrTemplates(a ContextAnalysis, m string) []candTemplate {
 	}
 
 	return []candTemplate{
-		{q + "><svg onload=" + m + ">", needs + "<>", 90,
-			"break out of the attribute and tag, then inject an <svg> element with an onload handler"},
-		{handler, needs, 85, handlerRationale},
+		onLoad(q+"><svg onload="+m+">", needs+"<>", 90,
+			"break out of the attribute and tag, then inject an <svg> element with an onload handler"),
+		// onmouseover needs a hover the passive verifier never simulates, so this
+		// documents attribute injection but cannot itself be Confirmed.
+		onInteraction(handler, needs, 85, handlerRationale),
 	}
 }
 
 func jsTemplates(a ContextAnalysis, m string) []candTemplate {
 	switch {
 	case a.Context == CtxJSString && a.Sub == "single_quoted":
-		return []candTemplate{{"';" + m + "//", "'", 90, "close the single-quoted JS string and start a statement that references the marker"}}
+		return []candTemplate{onLoad("';"+m+"//", "'", 90, "close the single-quoted JS string and start a statement that references the marker")}
 	case a.Context == CtxJSString && a.Sub == "double_quoted":
-		return []candTemplate{{`";` + m + "//", `"`, 90, "close the double-quoted JS string and start a statement that references the marker"}}
+		return []candTemplate{onLoad(`";`+m+"//", `"`, 90, "close the double-quoted JS string and start a statement that references the marker")}
 	case a.Context == CtxJSString && a.Sub == "template_literal":
-		return []candTemplate{{"${" + m + "}", "", 85, "inject a ${} substitution into the template literal"}}
+		return []candTemplate{onLoad("${"+m+"}", "", 85, "inject a ${} substitution into the template literal")}
 	case a.Context == CtxJSComment:
 		// Escaping a comment needs a newline (line) or the close sequence (block).
 		if a.Sub == "block" {
-			return []candTemplate{{"*/" + m + "/*", "", 35, "close the block comment, reference the marker, reopen a comment"}}
+			return []candTemplate{onLoad("*/"+m+"/*", "", 35, "close the block comment, reference the marker, reopen a comment")}
 		}
-		return []candTemplate{{"\n" + m, "", 20, "inside a line comment; a newline is required to escape it and may be stripped"}}
+		return []candTemplate{onLoad("\n"+m, "", 20, "inside a line comment; a newline is required to escape it and may be stripped")}
 	case a.Context == CtxJSRegex:
-		return []candTemplate{{"/;" + m + "//", "", 40, "terminate the regular-expression literal, then reference the marker"}}
+		return []candTemplate{onLoad("/;"+m+"//", "", 40, "terminate the regular-expression literal, then reference the marker")}
 	default: // js_code / template expression
 		return []candTemplate{
-			{m, "", 95, "already a JavaScript code position: the marker is a direct code reference"},
-			{";" + m + ";", "", 70, "introduce the marker as its own statement"},
+			onLoad(m, "", 95, "already a JavaScript code position: the marker is a direct code reference"),
+			onLoad(";"+m+";", "", 70, "introduce the marker as its own statement"),
 		}
 	}
 }
@@ -304,11 +349,12 @@ func jsTemplates(a ContextAnalysis, m string) []candTemplate {
 func urlTemplates(a ContextAnalysis, m string) []candTemplate {
 	switch a.Sub {
 	case "start", "relative_first_segment":
-		return []candTemplate{{"javascript:" + m, "", 90,
-			"inject a javascript: scheme so the marker runs when the link is activated/navigated"}}
+		// Runs only when the link is activated; the verifier never clicks.
+		return []candTemplate{onInteraction("javascript:"+m, "", 90,
+			"inject a javascript: scheme so the marker runs when the link is activated/navigated")}
 	case "data_uri":
-		return []candTemplate{{"data:text/html,<svg onload=" + m + ">", "<>", 55,
-			"a data: URI whose HTML body contains a marker handler (depends on the sink)"}}
+		return []candTemplate{onInteraction("data:text/html,<svg onload="+m+">", "<>", 55,
+			"a data: URI whose HTML body contains a marker handler (depends on the sink)")}
 	default:
 		// query/path/fragment/host: reflection inside a URL component rarely yields
 		// script execution. Plan nothing rather than noise.
@@ -320,16 +366,16 @@ func cssTemplates(a ContextAnalysis, m string) []candTemplate {
 	// Modern CSS cannot execute JavaScript; the only route to XSS is breaking out
 	// of a <style> element back into markup. A style="" attribute cannot do that.
 	if a.ConstructKind == "style_body" {
-		return []candTemplate{{"</style><svg onload=" + m + ">", "<>", 80,
-			"break out of the <style> element into HTML and inject a marker handler"}}
+		return []candTemplate{onLoad("</style><svg onload="+m+">", "<>", 80,
+			"break out of the <style> element into HTML and inject a marker handler")}
 	}
 	return nil
 }
 
 func unknownTemplates(m string) []candTemplate {
 	return []candTemplate{
-		{"<svg onload=" + m + ">", "<>", 30, "context could not be determined; generic markup/script probe"},
-		{"<" + m + "x>", "<>", 25, "context could not be determined; generic markup-injection probe"},
+		onLoad("<svg onload="+m+">", "<>", 30, "context could not be determined; generic markup/script probe"),
+		markupProbe("<"+m+"x>", "<>", 25, "context could not be determined; generic markup-injection probe"),
 	}
 }
 
