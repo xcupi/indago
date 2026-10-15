@@ -154,7 +154,7 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 	if report.Reflected {
 		r.note = fmt.Sprintf("%s: reflected at %d location(s); %s", note, report.Count, contextSummary(&report))
 	} else {
-		r.note = note + ": not reflected"
+		r.note = note + ": not reflected" + possibleBlockNote(bl.status, resp.Status)
 	}
 	r.reflection = &report
 	r.baselineReq, r.baselineResp = bl.reqEvidence, bl.respEvidence

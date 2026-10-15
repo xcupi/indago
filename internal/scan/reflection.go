@@ -99,6 +99,7 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 		ScanID:           tc.ScanID,
 		InjectionPointID: tc.InjectionPointID,
 		Profile:          e.candidateProfile(ctx, tc.ScanID),
+		EnableEvasion:    e.enableEvasion(ctx, tc.ScanID),
 	})
 
 	r.outcome = domain.OutcomeSuccess
@@ -108,7 +109,7 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 			r.note += fmt.Sprintf("; planned %d candidate(s)", n)
 		}
 	} else {
-		r.note = note + ": not reflected"
+		r.note = note + ": not reflected" + possibleBlockNote(bl.status, resp.Status)
 	}
 	r.reflection = &report
 	r.baselineReq, r.baselineResp = bl.reqEvidence, bl.respEvidence
@@ -133,6 +134,20 @@ func (e *executor) candidateProfile(ctx context.Context, scanID domain.ID) detec
 		spec, _ = detection.ResolveProfile("", 0)
 	}
 	return spec
+}
+
+// enableEvasion reports whether the scan opted into WAF/filter-bypass
+// candidate variants (domain.ScanConfig.EnableEvasion, off by default). An
+// unreadable scan fails closed to false — never silently widening the probe
+// set a failure to read configuration should not turn into more request
+// shapes against a target.
+func (e *executor) enableEvasion(ctx context.Context, scanID domain.ID) bool {
+	sc, err := e.store.Scans().Get(ctx, scanID)
+	if err != nil {
+		e.log.Warn("load scan for evasion flag; defaulting to off", "scan", scanID, "err", err)
+		return false
+	}
+	return sc.Config.EnableEvasion
 }
 
 // contextSummary renders the distinct site contexts, e.g. "context: html_text, js_string".

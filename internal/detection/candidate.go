@@ -86,6 +86,12 @@ type Candidate struct {
 	// Only TriggerLoad candidates can ever be Confirmed by verification; the
 	// others document reflection behaviour and end Rejected/unconfirmed.
 	Trigger string `json:"trigger,omitempty"`
+	// Technique names the WAF/filter-bypass shape this candidate uses (e.g.
+	// "case_variation", "alt_separator", "double_url_encoding"), empty for
+	// every canonical (non-evasion) candidate. Only ever set when the scan
+	// opted in via PlanOptions.EnableEvasion — see evasion.go. Kept distinct
+	// from Rationale so a report can filter/group on it directly.
+	Technique string `json:"technique,omitempty"`
 	// Priority orders execution: higher first. Candidates whose required
 	// characters the site neutralizes are deprioritized, not hidden.
 	Priority  int    `json:"priority"`
@@ -121,6 +127,11 @@ type PlanOptions struct {
 	// Profile selects which of the planned candidates are kept (and how many).
 	// The zero value keeps every candidate, as before profiles existed.
 	Profile ProfileSpec
+	// EnableEvasion additionally plans WAF/filter-bypass variants (see
+	// evasion.go) for the contexts that have them, ON TOP OF the canonical
+	// candidates — it never replaces or hides them. Defaults to false
+	// (conservative by design, AGENTS.md §2.3): an operator opts in per scan.
+	EnableEvasion bool
 }
 
 // PlanCandidates builds the candidate plan for rep and stores it in rep.Plan. It
@@ -143,7 +154,11 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 		if loc.Context == nil {
 			continue
 		}
-		for _, tpl := range templatesFor(*loc.Context, marker) {
+		tpls := templatesFor(*loc.Context, marker)
+		if opts.EnableEvasion {
+			tpls = append(tpls, evasionTemplatesFor(*loc.Context, marker)...)
+		}
+		for _, tpl := range tpls {
 			plan.Generated++
 			c := Candidate{
 				Source:           SourceBuiltin,
@@ -158,6 +173,7 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 				ContextSub:       loc.Context.Sub,
 				Value:            tpl.value,
 				Trigger:          tpl.trigger,
+				Technique:        tpl.technique,
 				Rationale:        tpl.rationale,
 			}
 			c.Transformation, c.Priority = transform(loc, tpl, &c)
@@ -239,6 +255,7 @@ type candTemplate struct {
 	priority  int
 	rationale string
 	trigger   string // TriggerLoad / TriggerInteraction / TriggerNone
+	technique string // "" for every canonical template; see evasion.go
 }
 
 // templatesFor returns the built-in candidates for a site's context.
@@ -262,13 +279,13 @@ func templatesFor(a ContextAnalysis, m string) []candTemplate {
 // Template constructors: the trigger is part of each built-in's definition, so
 // a profile can select on it (see profile.go).
 func onLoad(value, needs string, priority int, why string) candTemplate {
-	return candTemplate{value, needs, priority, why, TriggerLoad}
+	return candTemplate{value: value, needs: needs, priority: priority, rationale: why, trigger: TriggerLoad}
 }
 func onInteraction(value, needs string, priority int, why string) candTemplate {
-	return candTemplate{value, needs, priority, why, TriggerInteraction}
+	return candTemplate{value: value, needs: needs, priority: priority, rationale: why, trigger: TriggerInteraction}
 }
 func markupProbe(value, needs string, priority int, why string) candTemplate {
-	return candTemplate{value, needs, priority, why, TriggerNone}
+	return candTemplate{value: value, needs: needs, priority: priority, rationale: why, trigger: TriggerNone}
 }
 
 func htmlTextTemplates(a ContextAnalysis, m string) []candTemplate {
@@ -286,6 +303,13 @@ func htmlTextTemplates(a ContextAnalysis, m string) []candTemplate {
 	return []candTemplate{
 		onLoad(prefix+"<svg onload="+m+">", "<>", 90,
 			prefixReason(prefix, "inject an <svg> element whose onload handler references the benign marker")),
+		// img onerror is a second, independent auto-firing vector: a filter
+		// that specifically blocks "svg" (but not "img") still misses this one.
+		// Not evasion — both are standard, unobfuscated constructs; this is
+		// coverage of a second real-world auto-trigger, same as the planner
+		// already tries two shapes elsewhere.
+		onLoad(prefix+"<img src=x onerror="+m+">", "<>", 88,
+			prefixReason(prefix, "inject an <img> with a deliberately-broken src so its onerror handler (fires automatically, no interaction) references the marker")),
 		markupProbe(prefix+"<"+m+"x>", "<>", 60,
 			prefixReason(prefix, "inject a marker element to detect raw markup injection without script")),
 	}
@@ -306,16 +330,27 @@ func htmlAttrTemplates(a ContextAnalysis, m string) []candTemplate {
 	// delimiter (not <,>), so it survives when < and > are encoded.
 	handler := q + " onmouseover=" + m
 	handlerRationale := "close the attribute and add an onmouseover handler referencing the marker, without needing < or >"
+	// autofocus+onfocus is the LOAD-TRIGGER sibling of onmouseover: a focusable
+	// element with the autofocus attribute fires onfocus automatically when the
+	// page loads — no click/hover needed — so, unlike onmouseover, this one CAN
+	// be Confirmed by the passive verifier. Same shape (new attribute inside the
+	// tag), same character requirement.
+	autofocusHandler := q + " autofocus onfocus=" + m
+	autofocusRationale := "close the attribute and add an autofocus element whose onfocus handler (fires automatically on page load) references the marker, without needing < or >"
 	if q == "" {
 		handler = " onmouseover=" + m + " "
 		handlerRationale = "add a new event-handler attribute (unquoted value ends at whitespace)"
+		autofocusHandler = " autofocus onfocus=" + m + " "
+		autofocusRationale = "add a new autofocus/onfocus attribute pair (fires automatically on page load; unquoted value ends at whitespace)"
 	} else {
 		handler += " x=" + q // swallow the original closing quote
+		autofocusHandler += " x=" + q
 	}
 
 	return []candTemplate{
 		onLoad(q+"><svg onload="+m+">", needs+"<>", 90,
 			"break out of the attribute and tag, then inject an <svg> element with an onload handler"),
+		onLoad(autofocusHandler, needs, 87, autofocusRationale),
 		// onmouseover needs a hover the passive verifier never simulates, so this
 		// documents attribute injection but cannot itself be Confirmed.
 		onInteraction(handler, needs, 85, handlerRationale),

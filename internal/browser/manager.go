@@ -3,6 +3,7 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -475,6 +476,56 @@ func (p *Page) Navigate(ctx context.Context, url string, opts NavOptions) (*NavR
 // Content returns the current page HTML.
 func (p *Page) Content(ctx context.Context) (string, error) {
 	return callCtx(ctx, func() (string, error) { return p.handle.Content() })
+}
+
+// formPoster is implemented by drivers that can submit a real, top-level
+// browser POST navigation (needed to verify a POST/form-encoded reflected-XSS
+// candidate — Goto only supports GET-style navigation). It is a separate,
+// OPTIONAL interface rather than a new pageHandle method so a test fake that
+// only implements pageHandle keeps compiling unchanged; NavigateForm reports
+// ErrFormPostUnsupported when the concrete driver does not implement it.
+type formPoster interface {
+	GotoForm(method, url string, fields map[string]string, waitUntil string, timeout time.Duration) (status int, finalURL string, err error)
+}
+
+// ErrFormPostUnsupported is returned by NavigateForm when the underlying
+// driver cannot submit a form POST (e.g. a test fake).
+var ErrFormPostUnsupported = errors.New("browser: this driver cannot submit a form POST")
+
+// NavigateForm submits url as a real, top-level POST navigation: it renders a
+// throwaway auto-submitting <form method=post> whose hidden inputs are fields,
+// and lets the browser submit it — the SAME mechanism an ordinary HTML form
+// uses to send a POST. This exists only so a POST/form-encoded candidate gets
+// the same chance to execute on page load that Navigate already gives a GET
+// candidate; it is not simulated user interaction to force an otherwise-inert
+// payload to fire (AGENTS.md §3) — fields carries the exact body the candidate
+// step already sent (including the parameter holding the candidate's own
+// breakout), nothing new is chosen or clicked.
+func (p *Page) NavigateForm(ctx context.Context, method, url string, fields map[string]string, opts NavOptions) (*NavResult, error) {
+	fp, ok := p.handle.(formPoster)
+	if !ok {
+		return nil, ErrFormPostUnsupported
+	}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = p.ctxp.mgr.cfg.NavigationTimeout
+	}
+	wait := opts.WaitUntil
+	if wait == "" {
+		wait = WaitLoad
+	}
+	type nav struct {
+		status   int
+		finalURL string
+	}
+	r, err := callCtx(ctx, func() (nav, error) {
+		s, u, err := fp.GotoForm(method, url, fields, wait, timeout)
+		return nav{s, u}, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("browser: navigate form: %w", err)
+	}
+	return &NavResult{Status: r.status, FinalURL: r.finalURL}, nil
 }
 
 // Evaluate runs a JavaScript expression in the page and returns its result.

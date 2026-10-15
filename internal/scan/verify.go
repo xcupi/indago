@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -99,7 +100,7 @@ func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob,
 		e.log.Warn("enqueue verification: upsert finding", "job", job.ID, "err", err)
 		return
 	}
-	if e.queue == nil || !isSafeMethod(ep.Method) {
+	if e.queue == nil || !canBrowserVerify(ep.Method, focus.Location) {
 		return
 	}
 
@@ -230,8 +231,8 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 		return verifyResult{outcome: domain.OutcomeError, permanent: true, err: err, note: note}
 	}
 	tc.URL = req.URL
-	if req.Method != "GET" && req.Method != "HEAD" {
-		return verifyResult{skipped: true, note: note + ": browser verification supports GET/HEAD-navigable candidates only in this phase"}
+	if !canBrowserVerify(ep.Method, focus.Location) {
+		return verifyResult{skipped: true, note: note + ": browser verification supports GET/HEAD navigation, or POST with a form-encoded (application/x-www-form-urlencoded) body, only in this phase"}
 	}
 
 	var statePath string
@@ -246,8 +247,20 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 		Marker:           vj.Marker,
 		Method:           req.Method,
 		URL:              req.URL,
+		Location:         focus.Location,
 		Scope:            e.scope,
 		SessionStatePath: statePath,
+	}
+	if req.Method == "POST" && focus.Location == domain.LocationForm {
+		if vals, err := url.ParseQuery(string(req.Body)); err == nil {
+			fv := make(map[string]string, len(vals))
+			for k, v := range vals {
+				if len(v) > 0 {
+					fv[k] = v[0]
+				}
+			}
+			in.FormValues = fv
+		}
 	}
 
 	vres, err := e.verifier.Verify(ctx, in)

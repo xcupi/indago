@@ -50,7 +50,7 @@ func (s *Server) handleListFindings(w http.ResponseWriter, r *http.Request) {
 		v := lookup.view(f)
 		item := findingListItem{
 			Finding: f, Section: v.Section, ParameterName: v.ParamName,
-			Verified: v.Verified, AttemptCount: len(v.Attempts),
+			Verified: v.Verified, AttemptCount: len(v.Attempts), ReviewReasonLabel: v.ReviewReasonLabel,
 		}
 		if len(v.Candidates) > 0 {
 			item.Context = v.Candidates[0].Context
@@ -95,13 +95,14 @@ func parseVerdictFilter(raw string) (map[domain.Verdict]bool, string) {
 // CLI) is unaffected.
 type findingListItem struct {
 	*domain.Finding
-	EndpointMethod string              `json:"endpoint_method,omitempty"`
-	EndpointURL    string              `json:"endpoint_url,omitempty"`
-	Section        report.Section      `json:"section"`
-	ParameterName  string              `json:"parameter_name,omitempty"`
-	Context        string              `json:"context,omitempty"`
-	Verified       *report.AttemptView `json:"verified_candidate,omitempty"`
-	AttemptCount   int                 `json:"attempt_count"`
+	EndpointMethod    string              `json:"endpoint_method,omitempty"`
+	EndpointURL       string              `json:"endpoint_url,omitempty"`
+	Section           report.Section      `json:"section"`
+	ParameterName     string              `json:"parameter_name,omitempty"`
+	Context           string              `json:"context,omitempty"`
+	Verified          *report.AttemptView `json:"verified_candidate,omitempty"`
+	AttemptCount      int                 `json:"attempt_count"`
+	ReviewReasonLabel string              `json:"review_reason_label,omitempty"`
 }
 
 // findingCandidate mirrors detection.Candidate's JSON shape (by field name)
@@ -116,6 +117,7 @@ type findingCandidate struct {
 	Context          string `json:"context,omitempty"`
 	ContextSub       string `json:"context_sub,omitempty"`
 	Value            string `json:"value,omitempty"`
+	Technique        string `json:"technique,omitempty"`
 	Transformation   string `json:"transformation,omitempty"`
 	Priority         int    `json:"priority,omitempty"`
 	Rationale        string `json:"rationale,omitempty"`
@@ -165,13 +167,14 @@ func decodeFindingDetail(b []byte) findingDetail {
 // request/response, then the baseline reference last).
 type findingView struct {
 	*domain.Finding
-	ParsedDetail findingDetail         `json:"parsed_detail"`
-	Endpoint     *domain.Endpoint      `json:"endpoint,omitempty"`
-	Parameter    *domain.Parameter     `json:"parameter,omitempty"`
-	Section      report.Section        `json:"section"`
-	Verified     *report.AttemptView   `json:"verified_candidate,omitempty"`
-	Attempts     []report.AttemptView  `json:"attempts,omitempty"`
-	Evidence     []report.EvidenceView `json:"evidence"`
+	ParsedDetail      findingDetail         `json:"parsed_detail"`
+	Endpoint          *domain.Endpoint      `json:"endpoint,omitempty"`
+	Parameter         *domain.Parameter     `json:"parameter,omitempty"`
+	Section           report.Section        `json:"section"`
+	Verified          *report.AttemptView   `json:"verified_candidate,omitempty"`
+	Attempts          []report.AttemptView  `json:"attempts,omitempty"`
+	Evidence          []report.EvidenceView `json:"evidence"`
+	ReviewReasonLabel string                `json:"review_reason_label,omitempty"`
 }
 
 // handleGetFinding returns a finding's full detail view, scoped to the scan
@@ -201,6 +204,7 @@ func (s *Server) handleGetFinding(w http.ResponseWriter, r *http.Request) {
 	view := &findingView{
 		Finding: f, ParsedDetail: decodeFindingDetail(f.Detail),
 		Section: rv.Section, Verified: rv.Verified, Attempts: rv.Attempts, Evidence: nonNil(rv.Evidence),
+		ReviewReasonLabel: rv.ReviewReasonLabel,
 	}
 	if f.EndpointID != "" {
 		if ep, err := s.store.Endpoints().Get(r.Context(), f.EndpointID); err == nil {

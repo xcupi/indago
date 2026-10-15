@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	pw "github.com/mxschmitt/playwright-go"
@@ -159,6 +160,75 @@ func (p *pwPage) Goto(url, waitUntil string, timeout time.Duration) (int, string
 		status = resp.Status()
 	}
 	return status, p.p.URL(), nil
+}
+
+// GotoForm submits a real, top-level POST navigation by rendering a throwaway
+// auto-submitting <form> (method=POST, action=url) whose hidden inputs carry
+// fields, then letting the BROWSER submit it — the same mechanism an ordinary
+// HTML form uses. This is how a POST/form-encoded candidate gets the same
+// chance to execute on page load that a GET candidate already gets via Goto;
+// it is not simulated interaction to force an otherwise-inert payload (see
+// AGENTS.md §3) since it only reproduces the HTTP method/body the candidate
+// step already sent, carrying the EXACT field values (including the one
+// holding the candidate's own breakout) byte-for-byte.
+func (p *pwPage) GotoForm(method, url string, fields map[string]string, waitUntil string, timeout time.Duration) (int, string, error) {
+	if err := p.p.SetContent(formHTML(method, url, fields)); err != nil {
+		return 0, "", err
+	}
+	navOpts := pw.PageExpectNavigationOptions{}
+	if timeout > 0 {
+		navOpts.Timeout = pw.Float(float64(timeout.Milliseconds()))
+	}
+	if waitUntil != "" {
+		ws := pw.WaitUntilState(waitUntil)
+		navOpts.WaitUntil = &ws
+	}
+	resp, err := p.p.ExpectNavigation(func() error {
+		_, evalErr := p.p.EvalOnSelector("#indago-form", "form => form.submit()", nil)
+		return evalErr
+	}, navOpts)
+	if err != nil {
+		return 0, "", err
+	}
+	status := 0
+	if resp != nil {
+		status = resp.Status()
+	}
+	return status, p.p.URL(), nil
+}
+
+// formHTML renders a minimal, auto-submitting form carrying fields as hidden
+// inputs. Values are placed in the "value" attribute (never as text content,
+// which would put them in an HTML_TEXT context instead of reproducing the
+// exact form field the candidate step sent) and HTML-attribute-escaped only
+// for well-formedness — this preserves the field's byte value, it does not
+// alter or filter it.
+func formHTML(method, url string, fields map[string]string) string {
+	var b strings.Builder
+	b.WriteString(`<!doctype html><html><body><form id="indago-form" method="`)
+	b.WriteString(htmlAttrEscape(method))
+	b.WriteString(`" action="`)
+	b.WriteString(htmlAttrEscape(url))
+	b.WriteString("\">\n")
+	for k, v := range fields {
+		b.WriteString(`<input type="hidden" name="`)
+		b.WriteString(htmlAttrEscape(k))
+		b.WriteString(`" value="`)
+		b.WriteString(htmlAttrEscape(v))
+		b.WriteString("\">\n")
+	}
+	b.WriteString("</form></body></html>")
+	return b.String()
+}
+
+// htmlAttrEscape escapes the characters that would break out of a double-quoted
+// HTML attribute value. This is well-formedness, not XSS filtering: the field
+// value reaches the server exactly as given, because the browser decodes the
+// entity back to the original byte before putting it in the submitted form
+// field — identical to how a real <form> carries any character.
+func htmlAttrEscape(s string) string {
+	r := strings.NewReplacer("&", "&amp;", `"`, "&quot;", "<", "&lt;", ">", "&gt;")
+	return r.Replace(s)
 }
 
 func (p *pwPage) Content() (string, error) { return p.p.Content() }

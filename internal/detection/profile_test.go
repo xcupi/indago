@@ -171,8 +171,8 @@ func TestMinimalProfileNeverLeavesAReflectingContextEmpty(t *testing.T) {
 	spec, _ := detection.ResolveProfile("minimal", 0)
 	encode := func(v string) string { return strings.NewReplacer("<", "&lt;", ">", "&gt;", `"`, "&quot;").Replace(v) }
 	full := planWith(t, `<p>{{M}}</p>`, encode, detection.ProfileSpec{})
-	if len(full.Candidates) != 2 {
-		t.Fatalf("setup: the unfiltered plan should hold both html_text candidates, got %v", valuesOf(full))
+	if len(full.Candidates) != 3 {
+		t.Fatalf("setup: the unfiltered plan should hold all three html_text candidates, got %v", valuesOf(full))
 	}
 	for _, c := range full.Candidates {
 		if c.Transformation == "raw" {

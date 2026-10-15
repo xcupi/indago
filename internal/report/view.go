@@ -53,7 +53,10 @@ func (s Section) Title() string {
 	}
 }
 
-// SectionOf maps a stored verdict to its report section.
+// SectionOf maps a stored verdict to its report section, with no finding
+// context — see FindingSection for the context-aware version every call site
+// in this package actually uses. Kept exported for compatibility with any
+// caller that only has a bare Verdict.
 func SectionOf(v domain.Verdict) Section {
 	switch v {
 	case domain.VerdictConfirmed:
@@ -108,6 +111,7 @@ type CandidateView struct {
 	ContextSub     string `json:"context_sub,omitempty"`
 	Value          string `json:"value"`
 	Trigger        string `json:"trigger,omitempty"`
+	Technique      string `json:"technique,omitempty"`
 	Transformation string `json:"transformation,omitempty"`
 	Rationale      string `json:"rationale,omitempty"`
 }
@@ -131,6 +135,12 @@ type FindingView struct {
 	Section   Section `json:"section"`
 	Method    string  `json:"method,omitempty"`
 	ParamName string  `json:"parameter_name,omitempty"`
+	// ReviewReason is set only when Section is needs_review BECAUSE a Rejected
+	// verdict's own candidates give reason to doubt the negative is clean (see
+	// findingReviewReason) — empty for every other case, including the
+	// ordinary pending/inconclusive needs-review section.
+	ReviewReason      ReviewReason `json:"review_reason,omitempty"`
+	ReviewReasonLabel string       `json:"review_reason_label,omitempty"`
 	// Verified is the confirming attempt (nil unless the finding is confirmed).
 	Verified   *AttemptView    `json:"verified_candidate,omitempty"`
 	Candidates []CandidateView `json:"candidates,omitempty"`
@@ -150,6 +160,7 @@ type detailShape struct {
 		ContextSub     string `json:"context_sub"`
 		Value          string `json:"value"`
 		Trigger        string `json:"trigger"`
+		Technique      string `json:"technique"`
 		Transformation string `json:"transformation"`
 		Rationale      string `json:"rationale"`
 	} `json:"candidates"`
@@ -164,19 +175,112 @@ type detailShape struct {
 	} `json:"attempts"`
 }
 
+// decodeDetail is the one place Finding.Detail is unmarshaled into
+// detailShape, so FindingSection and NewFindingView never disagree about what
+// it contains.
+func decodeDetail(b []byte) detailShape {
+	var d detailShape
+	if len(b) > 0 {
+		_ = json.Unmarshal(b, &d)
+	}
+	return d
+}
+
+// ReviewReason explains why a Rejected finding was placed in needs-review
+// instead of diagnostics — a distinction "rejected" alone cannot make: a
+// rejected VERDICT always means "no execution signal was observed", but that
+// covers two operator-meaningfully-different situations this type separates.
+type ReviewReason string
+
+const (
+	// ReviewInteractionOnly: the candidate that survived unescaped needs a user
+	// action (click/hover/navigation) the verifier deliberately never simulates
+	// (AGENTS.md §3) — it may be genuinely exploitable; passive verification
+	// simply could never confirm it either way.
+	ReviewInteractionOnly ReviewReason = "interaction_required"
+	// ReviewAllCandidatesFiltered: every candidate this site's context offered
+	// was encoded/stripped by the target (none survived raw). Indago tries only
+	// the small, canonical breakout(s) for that context — never alternate
+	// shapes/evasion variants (AGENTS.md §2.2) — so a DIFFERENTLY shaped
+	// breakout bypassing this specific filter is simply untested, not ruled out.
+	ReviewAllCandidatesFiltered ReviewReason = "all_candidates_filtered"
+)
+
+// Label is the human-readable explanation of a ReviewReason.
+func (r ReviewReason) Label() string {
+	switch r {
+	case ReviewInteractionOnly:
+		return "a candidate reflected unescaped but requires a user action (click/hover/navigation) that passive browser verification deliberately never simulates — it may still be exploitable; this was never actually confirmed OR ruled out"
+	case ReviewAllCandidatesFiltered:
+		return "every candidate tried at this site was encoded or stripped by the target; Indago only tries the small, canonical breakout(s) for this context (never alternate shapes or evasion variants), so a differently-shaped payload bypassing this specific filter is untested, not ruled out"
+	default:
+		return string(r)
+	}
+}
+
+// findingReviewReason inspects a Rejected finding's own candidates and reports
+// the review reason, if any, that means "rejected" should not read as "ruled
+// out safe" here. Returns ("", false) for every other verdict, or when a
+// Rejected finding's candidates give no reason to doubt the negative. A
+// candidate whose Transformation was never recorded (""  — e.g. a
+// hand-built test fixture, never a real scan's candidate.go output, which
+// always sets "raw" or a specific encoding) is treated as UNKNOWN, not as
+// evidence of filtering, so this never fires on data that simply didn't say.
+func findingReviewReason(verdict domain.Verdict, d detailShape) (ReviewReason, bool) {
+	if verdict != domain.VerdictRejected || len(d.Candidates) == 0 {
+		return "", false
+	}
+	sawKnownFiltered, allKnownFiltered := false, true
+	for _, c := range d.Candidates {
+		if c.Trigger == "interaction" && c.Transformation == "raw" {
+			return ReviewInteractionOnly, true
+		}
+		switch c.Transformation {
+		case "raw":
+			allKnownFiltered = false
+		case "html", "url", "js", "stripped", "mixed":
+			sawKnownFiltered = true
+		default: // "" / unrecognized: unknown, not evidence of filtering
+			allKnownFiltered = false
+		}
+	}
+	if sawKnownFiltered && allKnownFiltered {
+		return ReviewAllCandidatesFiltered, true
+	}
+	return "", false
+}
+
+// FindingSection is the context-aware section a finding belongs in: it starts
+// from its Verdict (see SectionOf) but moves a Rejected finding into
+// needs-review when findingReviewReason says the negative is not a clean one.
+// Every section-determining call in this package uses this, not SectionOf
+// directly, so a finding can never be sorted into one section while its
+// FindingView claims another.
+func FindingSection(f *domain.Finding) Section {
+	sec := SectionOf(f.Verdict)
+	if sec != SectionDiagnostic {
+		return sec
+	}
+	if _, ok := findingReviewReason(f.Verdict, decodeDetail(f.Detail)); ok {
+		return SectionNeedsReview
+	}
+	return sec
+}
+
 // NewFindingView derives the presentation of f. evidence resolves evidence IDs
 // to their metadata; an ID that does not resolve is skipped, never invented.
 func NewFindingView(f *domain.Finding, evidence map[domain.ID]*domain.Evidence) FindingView {
-	var d detailShape
-	if len(f.Detail) > 0 {
-		_ = json.Unmarshal(f.Detail, &d)
+	d := decodeDetail(f.Detail)
+	v := FindingView{Section: FindingSection(f), Method: d.Method, ParamName: d.ParameterName}
+	if reason, ok := findingReviewReason(f.Verdict, d); ok {
+		v.ReviewReason = reason
+		v.ReviewReasonLabel = reason.Label()
 	}
-	v := FindingView{Section: SectionOf(f.Verdict), Method: d.Method, ParamName: d.ParameterName}
 
 	for _, c := range d.Candidates {
 		v.Candidates = append(v.Candidates, CandidateView{
 			Source: c.Source, Category: c.Category, Context: c.Context, ContextSub: c.ContextSub,
-			Value: c.Value, Trigger: c.Trigger, Transformation: c.Transformation, Rationale: c.Rationale,
+			Value: c.Value, Trigger: c.Trigger, Technique: c.Technique, Transformation: c.Transformation, Rationale: c.Rationale,
 		})
 	}
 
@@ -268,7 +372,7 @@ func sortEvidence(evs []EvidenceView) {
 func Prioritized(findings []*domain.Finding) []*domain.Finding {
 	out := append([]*domain.Finding(nil), findings...)
 	sort.SliceStable(out, func(i, j int) bool {
-		si, sj := SectionOf(out[i].Verdict).rank(), SectionOf(out[j].Verdict).rank()
+		si, sj := FindingSection(out[i]).rank(), FindingSection(out[j]).rank()
 		if si != sj {
 			return si < sj
 		}

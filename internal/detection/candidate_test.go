@@ -216,11 +216,11 @@ func TestPlanDeduplication(t *testing.T) {
 	body := []byte("<p>" + rawSite + "</p><div>" + encSite + "</div>")
 	rep := planBody(t, body, candHTML)
 
-	if rep.Plan.Generated != 4 {
-		t.Fatalf("Generated = %d, want 4 (2 sites × 2 templates)", rep.Plan.Generated)
+	if rep.Plan.Generated != 6 {
+		t.Fatalf("Generated = %d, want 6 (2 sites × 3 templates)", rep.Plan.Generated)
 	}
-	if len(rep.Plan.Candidates) != 2 {
-		t.Fatalf("after dedup want 2 candidates, got %v", valuesOf(rep.Plan))
+	if len(rep.Plan.Candidates) != 3 {
+		t.Fatalf("after dedup want 3 candidates, got %v", valuesOf(rep.Plan))
 	}
 	seen := map[string]bool{}
 	for _, c := range rep.Plan.Candidates {

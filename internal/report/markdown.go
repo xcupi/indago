@@ -64,7 +64,7 @@ func (MarkdownGenerator) Generate(w io.Writer, data Data) error {
 	for _, sec := range sectionOrder {
 		var inSec []*domain.Finding
 		for _, f := range findings {
-			if SectionOf(f.Verdict) == sec {
+			if FindingSection(f) == sec {
 				inSec = append(inSec, f)
 			}
 		}
@@ -88,7 +88,7 @@ func (MarkdownGenerator) Generate(w io.Writer, data Data) error {
 func sectionCounts(findings []*domain.Finding) map[Section]int {
 	m := map[Section]int{}
 	for _, f := range findings {
-		m[SectionOf(f.Verdict)]++
+		m[FindingSection(f)]++
 	}
 	return m
 }
@@ -143,6 +143,9 @@ func writeFinding(b *strings.Builder, n int, f *domain.Finding, v FindingView) {
 	if f.Summary != "" {
 		fmt.Fprintf(b, "- **Notes:** %s\n", f.Summary)
 	}
+	if v.ReviewReasonLabel != "" {
+		fmt.Fprintf(b, "- **Why this needs manual review (not a clean negative):** %s\n", v.ReviewReasonLabel)
+	}
 	b.WriteString("\n")
 
 	if v.Verified != nil {
@@ -153,6 +156,9 @@ func writeFinding(b *strings.Builder, n int, f *domain.Finding, v FindingView) {
 		}
 		if c := candidateFor(v, v.Verified.CandidateValue); c != nil {
 			fmt.Fprintf(b, "- **Context:** %s\n", c.Context)
+			if c.Technique != "" {
+				fmt.Fprintf(b, "- **Bypass technique:** %s — %s\n", c.Technique, c.Rationale)
+			}
 		}
 		b.WriteString("\n")
 		if len(v.Verified.Evidence) > 0 {

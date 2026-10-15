@@ -42,11 +42,20 @@ type Input struct {
 	// value — is what an uncaught-exception message would name, and what is
 	// searched for in the rendered DOM.
 	Marker string
-	// Method and URL are the exact request that produced the reflection. Browser
-	// navigation is GET-only; a non-GET/HEAD/OPTIONS Method yields
+	// Method and URL are the exact request that produced the reflection.
+	// Browser navigation is GET/HEAD, or POST when Location is LocationForm and
+	// FormValues is set (replayed as a real <form> submission — see
+	// browser.Page.NavigateForm); any other Method/Location combination (in
+	// particular POST+JSON, which no HTML form can carry) yields
 	// ErrUnsupportedMethod.
-	Method string
-	URL    string
+	Method   string
+	URL      string
+	Location domain.ParamLocation
+	// FormValues carries the exact application/x-www-form-urlencoded body the
+	// candidate step sent (every observed field, with the injection point's
+	// field holding the candidate's own value) — only consulted when Method is
+	// POST and Location is LocationForm.
+	FormValues map[string]string
 
 	// Scope gates every request the browser makes (navigation, redirects,
 	// subresources) — see browser.ContextOptions.AllowRequest. A zero Scope

@@ -252,6 +252,8 @@ type CreateScanParams struct {
 	// bound the candidates sent per injection point. See domain.ScanConfig.
 	CandidateProfile string
 	MaxCandidates    int
+	// EnableEvasion — see domain.ScanConfig.EnableEvasion. Off by default.
+	EnableEvasion bool
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -337,6 +339,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	if _, err := detection.ResolveProfile(cfg.CandidateProfile, cfg.MaxCandidates); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrBadConfig, err)
 	}
+	cfg.EnableEvasion = p.EnableEvasion
 
 	mode := p.AuthMode
 	if !mode.IsValid() {

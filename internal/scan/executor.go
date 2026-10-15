@@ -489,6 +489,24 @@ func isSafeMethod(m domain.HTTPMethod) bool {
 	}
 }
 
+// canBrowserVerify reports whether method+location is something the browser
+// verifier can replay as a real navigation: ordinary GET/HEAD, or POST with a
+// form-encoded (application/x-www-form-urlencoded) body — replayed as a real
+// <form> submission (see browser.Page.NavigateForm) so a POST/form candidate
+// gets the same chance to execute on page load a GET one already gets.
+// POST+JSON has no browser-navigable form (an HTML form cannot carry
+// application/json) and stays unsupported — that Finding stays Pending.
+func canBrowserVerify(method domain.HTTPMethod, loc domain.ParamLocation) bool {
+	switch method {
+	case domain.MethodGET, domain.MethodHEAD, "":
+		return true
+	case domain.MethodPOST:
+		return loc == domain.LocationForm
+	default:
+		return false
+	}
+}
+
 func hasBody(m domain.HTTPMethod) bool {
 	switch m {
 	case domain.MethodPOST, domain.MethodPUT, domain.MethodPATCH, domain.MethodDELETE:
@@ -496,6 +514,26 @@ func hasBody(m domain.HTTPMethod) bool {
 	default:
 		return false
 	}
+}
+
+// possibleBlockNote flags a suspicious status-code change between the
+// baseline (unmodified) request and a mutated/candidate request that did NOT
+// reflect: if the baseline succeeded (2xx/3xx) but the mutated request came
+// back 403/429/503 — common WAF/rate-limit/maintenance signals — "not
+// reflected" could mean "blocked", not "safe". This is detection only, never
+// evasion (AGENTS.md §2.2: no anti-bot/WAF bypass of any kind is added here;
+// the exact same request is still sent, once): it exists so an operator does
+// not mistake a blocked probe for a clean negative. Returns "" when nothing
+// looks anomalous.
+func possibleBlockNote(baselineStatus, mutatedStatus int) string {
+	baselineOK := baselineStatus >= 200 && baselineStatus < 400
+	suspicious := mutatedStatus == 403 || mutatedStatus == 429 || mutatedStatus == 503
+	if baselineOK && suspicious && mutatedStatus != baselineStatus {
+		return fmt.Sprintf(" (possible block/filter: status changed %d -> %d from baseline; "+
+			"this may not be a clean negative — Indago does not retry or evade, see AGENTS.md §2.2)",
+			baselineStatus, mutatedStatus)
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------

@@ -89,7 +89,8 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	if method == "" {
 		method = "GET"
 	}
-	if method != "GET" && method != "HEAD" {
+	isFormPost := method == "POST" && in.Location == domain.LocationForm && in.FormValues != nil
+	if method != "GET" && method != "HEAD" && !isFormPost {
 		return nil, ErrUnsupportedMethod
 	}
 	if in.URL == "" {
@@ -130,10 +131,18 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	baseDialogs := len(page.DialogMessages())
 
 	navigatedAt := time.Now()
-	nav, err := page.Navigate(ctx, in.URL, browser.NavOptions{
-		WaitUntil: browser.WaitLoad,
-		Timeout:   v.cfg.NavigationTimeout,
-	})
+	var nav *browser.NavResult
+	if isFormPost {
+		nav, err = page.NavigateForm(ctx, method, in.URL, in.FormValues, browser.NavOptions{
+			WaitUntil: browser.WaitLoad,
+			Timeout:   v.cfg.NavigationTimeout,
+		})
+	} else {
+		nav, err = page.Navigate(ctx, in.URL, browser.NavOptions{
+			WaitUntil: browser.WaitLoad,
+			Timeout:   v.cfg.NavigationTimeout,
+		})
+	}
 	if err != nil {
 		return nil, classifyBrowserErr(ctx, err)
 	}

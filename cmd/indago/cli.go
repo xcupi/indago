@@ -347,6 +347,7 @@ func (c *cli) scanCreate(args []string) error {
 	authState := fs.String("auth-state", "", "saved session material (Playwright storage-state JSON) for -auth existing")
 	candProfile := fs.String("candidate-profile", "", "XSS candidate profile: minimal | standard | thorough (default: server default)")
 	maxCand := fs.Int("max-candidates", 0, "cap on candidates tried per injection point (0 = the profile's own; hard ceiling 32)")
+	enableEvasion := fs.Bool("enable-evasion", false, "opt in to WAF/filter-bypass candidate variants (case variation, alt separators, double URL-encoding) ON TOP OF the canonical set; OFF by default — only for an authorized engagement where a bypass is itself the reportable finding (see AGENTS.md §2.3)")
 	quick := fs.Bool("quick", false, "quick scan: test the seeds only, do not follow links (crawl depth 0)")
 	depth := fs.Int("depth", 0, "crawl depth for a full scan (0 = server default; ignored with -quick)")
 	maxPages := fs.Int("max-pages", 0, "cap on pages fetched by the crawler (0 = server default)")
@@ -363,6 +364,7 @@ func (c *cli) scanCreate(args []string) error {
 		"project_id": *project, "target_id": *target, "name": *name,
 		"profile": *profile, "seed_urls": []string(seeds),
 		"quick_scan": *quick, "max_depth": *depth, "max_pages": *maxPages, "max_endpoints": *maxEndpoints,
+		"enable_evasion": *enableEvasion,
 	}
 	if *candProfile != "" {
 		req["candidate_profile"] = *candProfile
@@ -716,6 +718,7 @@ type findingCandidate struct {
 	Category       string `json:"category"`
 	Context        string `json:"context"`
 	Value          string `json:"value"`
+	Technique      string `json:"technique"`
 	Transformation string `json:"transformation"`
 	Rationale      string `json:"rationale"`
 	Priority       int    `json:"priority"`
@@ -737,9 +740,10 @@ type findingDetailOut struct {
 		CandidateValue string `json:"candidate_value"`
 		Verdict        string `json:"verdict"`
 	} `json:"attempts"`
-	Endpoint  *domain.Endpoint   `json:"endpoint"`
-	Parameter *domain.Parameter  `json:"parameter"`
-	Evidence  []*domain.Evidence `json:"evidence"`
+	Endpoint          *domain.Endpoint   `json:"endpoint"`
+	Parameter         *domain.Parameter  `json:"parameter"`
+	Evidence          []*domain.Evidence `json:"evidence"`
+	ReviewReasonLabel string             `json:"review_reason_label"`
 }
 
 func (c *cli) findingShow(args []string) error {
@@ -796,10 +800,17 @@ func printFindingDetail(w io.Writer, server string, fd *findingDetailOut) {
 			fmt.Fprintf(w, "  - %-12s %s\n", a.Verdict, a.CandidateValue)
 		}
 	}
+	if fd.ReviewReasonLabel != "" {
+		fmt.Fprintf(w, "Review     needs manual review: %s\n", fd.ReviewReasonLabel)
+	}
 	if len(fd.ParsedDetail.Candidates) > 0 {
 		fmt.Fprintf(w, "Candidates (%d, %d occurrence(s)):\n", len(fd.ParsedDetail.Candidates), fd.ParsedDetail.Occurrences)
 		for _, cand := range fd.ParsedDetail.Candidates {
-			fmt.Fprintf(w, "  - [%s/%s] %s — %s\n", cand.Category, cand.Context, cand.Value, cand.Rationale)
+			tech := ""
+			if cand.Technique != "" {
+				tech = " [bypass: " + cand.Technique + "]"
+			}
+			fmt.Fprintf(w, "  - [%s/%s]%s %s — %s\n", cand.Category, cand.Context, tech, cand.Value, cand.Rationale)
 		}
 	}
 	fmt.Fprintf(w, "Provenance %s, discovered via %s", fd.Provenance.Engine, fd.Provenance.DiscoverySource)

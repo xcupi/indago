@@ -64,6 +64,7 @@ type htmlFinding struct {
 	DetectedAt      string
 	VerifiedAt      string
 	Summary         string
+	ReviewReason    string
 
 	// Verified candidate (confirmed findings with a recorded confirming attempt).
 	HasVerified      bool
@@ -135,7 +136,7 @@ func (HTMLGenerator) Generate(w io.Writer, data Data) error {
 			hs.Note = "These candidates reflected but browser verification found no execution. They are kept for diagnosis; they are not vulnerabilities."
 		}
 		for _, f := range findings {
-			if SectionOf(f.Verdict) != sec {
+			if FindingSection(f) != sec {
 				continue
 			}
 			n++
@@ -176,6 +177,7 @@ func toHTMLFinding(n int, f *domain.Finding, v FindingView) htmlFinding {
 		Discovery:       string(f.Provenance.DiscoverySource),
 		AIAssisted:      f.Provenance.AIAssisted,
 		Summary:         f.Summary,
+		ReviewReason:    v.ReviewReasonLabel,
 	}
 	if !f.Provenance.DetectedAt.IsZero() {
 		hf.DetectedAt = f.Provenance.DetectedAt.UTC().Format("2006-01-02T15:04:05Z")
@@ -319,6 +321,7 @@ const htmlTemplateSrc = `<!doctype html>
     {{if .DetectedAt}}<li><strong>Detected:</strong> {{.DetectedAt}}</li>{{end}}
     {{if .VerifiedAt}}<li><strong>{{.VerifiedAtLabel}}:</strong> {{.VerifiedAt}}</li>{{end}}
     {{if .Summary}}<li><strong>Notes:</strong> {{.Summary}}</li>{{end}}
+    {{if .ReviewReason}}<li><strong>Why this needs manual review (not a clean negative):</strong> {{.ReviewReason}}</li>{{end}}
   </ul>
   {{if .Others}}<p><strong>{{.OthersLabel}}:</strong></p>
   <table><tr><th>Candidate</th><th>Verdict</th></tr>
