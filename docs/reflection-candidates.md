@@ -42,8 +42,8 @@ library:
 
 | Category | Context | Built-in candidates (marker = `M`) |
 |----------|---------|-------------------------------------|
-| `html_text` | element text, comment, RCDATA/RAWTEXT | `<svg onload=M>`, `<Mx>` — prefixed with the construct's closer (`-->`, `</title>`, …) where needed |
-| `html_attribute` | attribute value / name, tag name | quote-aware `"><svg onload=M>` and an in-tag `onmouseover=M` handler (which needs only the delimiter, not `<`/`>`) |
+| `html_text` | element text, comment, RCDATA/RAWTEXT | `<svg onload=M>`, `<img src=x onerror=M>` (a second, independent auto-firing vector), `<Mx>` — prefixed with the construct's closer (`-->`, `</title>`, …) where needed |
+| `html_attribute` | attribute value / name, tag name | quote-aware `"><svg onload=M>`, an in-tag `autofocus onfocus=M` handler (fires on load, no interaction — same character requirement as the onmouseover one below), and an in-tag `onmouseover=M` handler (which needs only the delimiter, not `<`/`>`) |
 | `javascript` | JS string / template / code / comment / regex | quote-aware string escape `";M//`, template `${M}`, direct code `M` |
 | `url` | URL attribute | `javascript:M` only at a scheme position (`start`, `relative_first_segment`); `data:` where plausible; nothing in a query/path/host |
 | `css` | `<style>` body | `</style><svg onload=M>` (a `style=""` attribute can't break into markup, so nothing) |
@@ -64,10 +64,13 @@ Every built-in candidate carries a `Trigger`:
 So **Rejected means "no passive execution signal was observed for this
 candidate", not "the parameter is not vulnerable"**: an interaction-only
 candidate can reflect unescaped yet always ends rejected. This is a deliberate
-limit (AGENTS.md §3: no simulated activation), and the coverage gaps it leaves —
-event handlers that need interaction, DOM-only sinks, stored sinks, filters
-that only a differently-shaped breakout would pass — are **not** closed by
-adding more vectors; that would drift into a payload library or evasion.
+limit (AGENTS.md §3: no simulated activation) — these findings now surface a
+`ReviewReason`/`ReviewReasonLabel` ("needs manual review") instead of reading
+as a clean negative; see `report.FindingSection`/`findingReviewReason`.
+The coverage gaps it leaves — event handlers that need interaction, DOM-only
+sinks, stored sinks — stay out of scope. A filter that only a differently-shaped
+breakout would pass is now addressed too, but only as an explicit operator
+opt-in (see "Evasion candidates (opt-in)" below), never by default.
 Rejected/inconclusive attempts stay stored as diagnostics on the finding.
 
 ## Candidate profiles
@@ -131,7 +134,50 @@ verification. See [`scan-orchestration.md`](scan-orchestration.md).
 
 ## Boundaries
 
-No verdict, no browser verification, no exploit generation, no obfuscation/
-evasion variants, no LLM. Candidate values embed a benign marker and are sent
-only to in-scope targets; state-changing methods require the operator opt-in.
-See `AGENTS.md` §2–§3.
+No verdict, no exploit generation, no LLM. Candidate values embed a benign
+marker and are sent only to in-scope targets; state-changing methods require
+the operator opt-in. Browser verification only observes the same navigation a
+candidate step already made (GET, or POST+form — see `scan-orchestration.md`
+and `AGENTS.md` §3); it never simulates clicks/hovers. Obfuscation/evasion
+variants exist only behind the explicit `EnableEvasion` opt-in described
+above — never in the default candidate set. See `AGENTS.md` §2–§3.
+
+## Evasion candidates (opt-in)
+
+`internal/detection/evasion.go` is a second, separate template generator,
+called by the planner ONLY when `PlanOptions.EnableEvasion` is true — itself
+only ever set when the operator turns on `ScanConfig.EnableEvasion` (CLI
+`scan create -enable-evasion`; API `enable_evasion`) for that scan. Default:
+off, and the canonical set (above) is completely unaffected either way — these
+candidates are planned *in addition to*, never instead of, the canonical ones.
+
+Rationale: a WAF/filter bypass is itself a valid, often-rewarded bug bounty
+finding. Indago's canonical candidates intentionally try only the literal,
+unobfuscated breakout shape; that alone cannot find a bypass a naive filter
+happens to miss. This generator closes that one specific, scoped gap — nothing
+else changes (same scope enforcement, same rate/concurrency limits, same
+benign-marker-only rule, same lack of exploit generation).
+
+Current techniques (`Candidate.Technique`, same `candTemplate`/`Candidate`
+shape as the canonical set, `Trigger: TriggerLoad` only — an evasion variant
+of an interaction-only shape would be just as unconfirmable as the canonical
+one already is):
+
+| Technique | Idea | Reliability |
+|-----------|------|--------------|
+| `case_variation` | `<SvG OnLoad=M>` — mixed-case tag/attribute name | bypasses a case-sensitive literal-string filter |
+| `alt_separator` | `<svg/onload=M>` / a tab instead of a space before the attribute | valid HTML5 (the tokenizer treats `/` and tab as attribute-boundary whitespace here); bypasses a filter expecting a literal space |
+| `double_url_encoding` | the breakout pre-encoded (`%3Csvg...%3E`), which the transport encodes again on the wire | opportunistic only — works solely against a target that decodes twice (e.g. a WAF that decodes once to inspect, then an app that decodes once more); a single-decode target will reflect the literal percent-string, which is the correct, honest outcome, not a false negative |
+
+Explicitly NOT in scope here, and not planned: request-fingerprint spoofing,
+TLS fingerprint randomization, IP/proxy rotation, timing jitter, CAPTCHA
+handling. That class of evasion depends on infrastructure a single local
+scanner process does not have — adding it would be a materially different,
+larger change and needs its own explicit decision, not a quiet extension of
+this generator.
+
+`TestEvasionCandidatesAreOffByDefault`, `TestEvasionCandidatesAreAdditive`
+and `TestEvasionCandidatesAreBenignMarkers` (`internal/detection/
+evasion_test.go`) enforce exactly these properties: off unless asked for,
+additive never destructive, and still benign-marker-only — the same
+guarantee `TestPlanCandidatesAreBenignMarkers` holds for the canonical set.

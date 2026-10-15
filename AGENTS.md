@@ -28,9 +28,25 @@ and must be preserved by every change:
 1. **Explicit scope is mandatory.** Nothing is ever tested until an operator has
    defined and the system has validated a `Scope`. Scope enforcement lives in
    the domain/scan layers and must fail closed.
-2. **No anti-bot / WAF / detection evasion.** Do not add payload obfuscation for
-   evasion, request-fingerprint spoofing, CAPTCHA solving, or similar. (Context-
-   aware payload *encoding* required purely for correctness is not evasion.)
+2. **WAF/anti-bot evasion is opt-in, scope-gated, and payload-shape only.**
+   By default Indago sends only its canonical, non-obfuscated candidates (no
+   evasion). An operator may explicitly set `ScanConfig.EnableEvasion` (CLI
+   `-enable-evasion`) to ALSO try a small set of documented bypass shapes
+   (case variation, alternate HTML separators, double URL-encoding — see
+   `internal/detection/evasion.go` and `docs/reflection-candidates.md`
+   "Evasion candidates (opt-in)") for an authorized engagement where a
+   bypass is itself the reportable finding (e.g. a bug bounty program).
+   This does NOT touch the boundaries below, which stay absolute even with
+   evasion enabled: every evasion candidate still goes through the SAME
+   scope-enforcing engine as every other request (never widens WHAT may be
+   targeted, only which payload SHAPES are tried against an already-in-scope
+   target); still a benign-marker detection probe, never alert/cookie/
+   exfiltration; still rate/concurrency-bounded by the scan's profile; never
+   includes request-fingerprint spoofing, IP/proxy rotation, timing-based
+   evasion, or CAPTCHA handling — that class of evasion needs infrastructure
+   this local, single-process scanner does not have and remains out of scope.
+   A change that would weaken any of THESE properties must still stop and
+   raise it, per point 6 below.
 3. **Conservative by default.** Default profiles use low concurrency and request
    rates. Aggressive behavior is opt-in and operator-configured.
 4. **No DoS / high-volume abuse.** Rate and concurrency controls exist to protect
