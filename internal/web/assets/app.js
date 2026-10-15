@@ -117,6 +117,50 @@ function card(title, ...children) {
   return c;
 }
 
+// collapsible wraps body in a native <details>: closed content stays in the
+// DOM (so querySelectorAll / Ctrl-F still reach it) but is not painted —
+// exactly "shorten the page, don't throw the data away". summary is prepended
+// with an extra hint span when given, right-aligned (see CSS).
+function collapsible(summaryContent, body, open, hint) {
+  const d = el("details", undefined, "collapsible");
+  if (open) d.open = true;
+  const s = el("summary");
+  if (typeof summaryContent === "string") s.appendChild(el("span", summaryContent));
+  else s.appendChild(summaryContent);
+  if (hint) s.appendChild(el("span", hint, "hint"));
+  const bodyWrap = el("div", undefined, "collapsible-body");
+  bodyWrap.appendChild(body);
+  d.append(s, bodyWrap);
+  return d;
+}
+
+// pagedList renders `items` pageSize at a time: renderPage(pageItems) builds
+// the visible content for the current page. Only the current page's items
+// are ever in the DOM — for a handful of items (the common case) `pages` is 1
+// and no pager controls appear at all.
+function pagedList(items, pageSize, renderPage, emptyText) {
+  const wrap = el("div");
+  const body = el("div");
+  const pager = el("div", undefined, "pager");
+  let page = 0;
+  const pages = Math.max(1, Math.ceil(items.length / pageSize));
+  function show() {
+    const start = page * pageSize;
+    const slice = items.slice(start, start + pageSize);
+    body.replaceChildren(slice.length ? renderPage(slice) : el("div", emptyText || "nothing to show", "empty"));
+    pager.replaceChildren();
+    if (pages > 1) {
+      const prev = button("‹ Prev", () => { page = Math.max(0, page - 1); show(); }, "small");
+      const next = button("Next ›", () => { page = Math.min(pages - 1, page + 1); show(); }, "small");
+      prev.disabled = page === 0; next.disabled = page >= pages - 1;
+      pager.append(prev, el("span", "Page " + (page + 1) + " of " + pages + " (" + items.length + " item(s))", "hint"), next);
+    }
+  }
+  show();
+  wrap.append(body, pager);
+  return wrap;
+}
+
 // ---------------------------------------------------------------------------
 // HTTP
 // ---------------------------------------------------------------------------

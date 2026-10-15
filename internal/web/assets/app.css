@@ -1,6 +1,7 @@
 :root {
   --bg: #0f1115; --panel: #171a21; --fg: #e6e9ef; --muted: #8b93a7;
   --accent: #5b9dff; --border: #262b36; --ok: #4caf50; --warn: #e0b24c; --bad: #ff7b7b;
+  --sev-critical: #ff4d6d; --sev-low: #7ec8e3;
   --sidebar: 210px;
 }
 * { box-sizing: border-box; }
@@ -75,14 +76,46 @@ th { color: var(--muted); font-weight: 600; font-size: 12px; }
 
 /* ---- pills / metrics ---- */
 .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
-.pill.confirmed, .pill.running, .pill.active, .pill.completed { color: var(--ok); border-color: var(--ok); }
-.pill.pending, .pill.paused, .pill.awaiting_auth, .pill.expired, .pill.inconclusive, .pill.canceling { color: var(--warn); border-color: var(--warn); }
-.pill.failed, .pill.canceled, .pill.rejected { color: var(--bad); border-color: var(--bad); }
+.pill.confirmed, .pill.running, .pill.active, .pill.completed { color: var(--ok); border-color: var(--ok); background: rgba(76, 175, 80, 0.1); }
+.pill.pending, .pill.paused, .pill.awaiting_auth, .pill.expired, .pill.inconclusive, .pill.canceling { color: var(--warn); border-color: var(--warn); background: rgba(224, 178, 76, 0.1); }
+.pill.failed, .pill.canceled, .pill.rejected { color: var(--bad); border-color: var(--bad); background: rgba(255, 123, 123, 0.1); }
+/* Severity pills share the verdict pill's shape; findingRow() renders
+   f.severity through the same pill() helper, so these are keyed on the
+   domain.Severity string values (critical/high/medium/low/info). Colour is
+   the main way to scan a findings table for what matters at a glance. */
+.pill.critical { color: var(--sev-critical); border-color: var(--sev-critical); background: rgba(255, 77, 109, 0.12); font-weight: 600; }
+.pill.high { color: var(--bad); border-color: var(--bad); background: rgba(255, 123, 123, 0.1); }
+.pill.medium { color: var(--warn); border-color: var(--warn); background: rgba(224, 178, 76, 0.1); }
+.pill.low { color: var(--sev-low); border-color: var(--sev-low); background: rgba(126, 200, 227, 0.1); }
+.pill.info { color: var(--muted); }
 .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
-.metric { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.metric { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; transition: border-color .15s; }
 .metric .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
 .metric .v { font-size: 18px; margin-top: 2px; }
 .metric .hint { margin-top: 4px; }
+/* Accent metrics: the dashboard's headline numbers get a bigger, coloured
+   figure and a matching left border so the eye finds "what matters" (running
+   scans, confirmed findings) before reading any label. */
+.metric.accent { border-left: 3px solid var(--border); }
+.metric.accent .v { font-size: 26px; font-weight: 700; line-height: 1.2; }
+.metric.accent-ok { border-left-color: var(--ok); }
+.metric.accent-ok .v { color: var(--ok); }
+.metric.accent-bad { border-left-color: var(--bad); }
+.metric.accent-bad .v { color: var(--bad); }
+.metric.accent-warn { border-left-color: var(--warn); }
+.metric.accent-warn .v { color: var(--warn); }
+.metric.accent-accent { border-left-color: var(--accent); }
+.metric.accent-accent .v { color: var(--accent); }
+
+/* ---- severity breakdown bar (dashboard) ---- */
+.sev-bar { display: flex; height: 10px; border-radius: 999px; overflow: hidden; background: var(--border); margin-top: 8px; }
+.sev-bar > div { height: 100%; transition: width .2s; }
+.sev-bar .critical { background: var(--sev-critical); }
+.sev-bar .high { background: var(--bad); }
+.sev-bar .medium { background: var(--warn); }
+.sev-bar .low { background: var(--sev-low); }
+.sev-legend { display: flex; gap: 14px; margin-top: 8px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
+.sev-legend .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
 
 /* ---- tabs ---- */
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; flex-wrap: wrap; }
@@ -183,10 +216,7 @@ td.c-title { min-width: 24ch; }
 td.verified-cell { min-width: 10ch; max-width: 34ch; }
 tr.baseline td, li.baseline { color: var(--muted); }
 
-/* ---- findings: filter, verified candidate ---- */
-.filter-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-.filter-bar .seg { border-radius: 999px; }
-.filter-bar .seg.active { border-color: var(--accent); color: var(--accent); background: rgba(91, 157, 255, 0.1); }
+/* ---- findings: verified candidate ---- */
 .section-note { color: var(--warn); font-size: 12px; margin-bottom: 8px; }
 .verified { border: 1px solid var(--ok); background: rgba(76, 175, 80, 0.07); border-radius: 8px; padding: 10px 12px; margin: 0 0 10px; }
 .verified-title { color: var(--ok); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
@@ -195,3 +225,51 @@ pre.payload {
   border-radius: 6px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14em; overflow: auto;
 }
+
+/* ---- collapsible (evidence, attempts, candidates) ---- */
+/* Native <details>/<summary>: content that is closed stays in the DOM (so
+   querySelectorAll-based checks, and Ctrl-F page search, still find it) but
+   is not painted — exactly "collapse it, don't remove it". */
+details.collapsible { border: 1px solid var(--border); border-radius: 8px; margin: 6px 0; background: var(--bg); }
+details.collapsible > summary {
+  cursor: pointer; padding: 8px 12px; color: var(--fg); font-size: 12px; list-style: none;
+  display: flex; align-items: center; gap: 8px; user-select: none;
+}
+details.collapsible > summary::-webkit-details-marker { display: none; }
+details.collapsible > summary::before { content: "\25B8"; color: var(--muted); display: inline-block; transition: transform .15s; }
+details.collapsible[open] > summary::before { transform: rotate(90deg); }
+details.collapsible > summary:hover { color: var(--accent); }
+details.collapsible > summary:hover::before { color: var(--accent); }
+details.collapsible > summary .hint { margin-left: auto; }
+details.collapsible > .collapsible-body { padding: 0 12px 10px; }
+/* Explicit, not relied on from the UA stylesheet: a plain wrapper <div> is
+   not one of the native elements some browsers auto-collapse inside a
+   closed <details> (confirmed empirically — the div's own box can still
+   report its full, painted height even while genuinely invisible/zero-size
+   to the user, which breaks "no element exceeds the footer" layout checks
+   that read getBoundingClientRect()). Forcing display:none ourselves when
+   the parent isn't [open] removes that ambiguity outright. */
+details.collapsible:not([open]) > .collapsible-body { display: none; }
+details.collapsible > table { margin: 0; }
+
+/* ---- pagination ---- */
+.pager { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.pager button.small { padding: 3px 10px; font-size: 12px; }
+.pager .hint { margin: 0; }
+
+/* ---- findings: filter, verified candidate ---- */
+.filter-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.filter-bar .seg { border-radius: 999px; }
+.filter-bar .seg.active { border-color: var(--accent); color: var(--accent); background: rgba(91, 157, 255, 0.1); }
+/* Severity filter pills reuse the pill colour variables so a toggled
+   "high" button looks like the severity it filters for. */
+.filter-bar .seg.sev-critical.active { border-color: var(--sev-critical); color: var(--sev-critical); background: rgba(255, 77, 109, 0.12); }
+.filter-bar .seg.sev-high.active { border-color: var(--bad); color: var(--bad); background: rgba(255, 123, 123, 0.1); }
+.filter-bar .seg.sev-medium.active { border-color: var(--warn); color: var(--warn); background: rgba(224, 178, 76, 0.1); }
+.filter-bar .seg.sev-low.active { border-color: var(--sev-low); color: var(--sev-low); background: rgba(126, 200, 227, 0.1); }
+/* findings-filters: severity/context/search — independent of, and below, the
+   section tabs (Confirmed/Needs review/…) above. */
+.findings-filters { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: flex-end; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.findings-filters > div { min-width: 160px; }
+.findings-filters input[type=search] { width: 220px; }
+.findings-filters label { margin-top: 0; }

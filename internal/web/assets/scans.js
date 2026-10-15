@@ -243,6 +243,10 @@ function uiState(scanId) {
     s = {
       selected: new Set(), expanded: new Set(),
       view: "confirmed",                       // findings filter: confirmed | review | diagnostic | all
+      // Independent of the section filter above: severity (multi-select,
+      // empty = all), context (single-select, "" = all) and a free-text
+      // search over title/endpoint/parameter.
+      filters: { severity: new Set(), context: "", search: "", knownSeverities: [] },
       mode: "confirmed", modeExplicit: false,  // report mode
       format: "json", visible: [], listeners: [],
     };
@@ -285,6 +289,82 @@ function filterBar(counts, current, onChange) {
     bar.appendChild(b);
   });
   return bar;
+}
+
+const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
+
+// buildExtraFilters is the severity/context/search bar — independent of, and
+// below, the section filter above. Its nodes are built ONCE and never
+// replaced: only matchesExtraFilters' callers re-render the findings TABLE on
+// a change, so typing in the search box never loses focus or cursor
+// position (a rebuild-everything re-render, as filterBar above gets on every
+// click, would recreate the <input> on every keystroke).
+function buildExtraFilters(state, onChange) {
+  const wrap = el("div", undefined, "findings-filters");
+  const sevRow = el("div", undefined, "filter-bar");
+  sevRow.setAttribute("role", "group"); sevRow.setAttribute("aria-label", "Severity filter");
+
+  function refreshSevButtons() {
+    sevRow.replaceChildren();
+    state.filters.knownSeverities.forEach((sv) => {
+      const active = state.filters.severity.has(sv);
+      const b = button(sv, () => {
+        if (state.filters.severity.has(sv)) state.filters.severity.delete(sv); else state.filters.severity.add(sv);
+        refreshSevButtons(); onChange();
+      }, (active ? "seg active sev-" : "seg sev-") + sv, "f_sev_" + sv);
+      sevRow.appendChild(b);
+    });
+  }
+
+  const ctxSelect = select("f_ctxfilter", [["", "All contexts"]], "");
+  ctxSelect.addEventListener("change", () => { state.filters.context = ctxSelect.value; onChange(); });
+
+  const searchInput = input("f_search", "search", "Search title, endpoint, parameter…", state.filters.search);
+  searchInput.addEventListener("input", () => { state.filters.search = searchInput.value; onChange(); });
+
+  const clearBtn = button("Clear filters", () => {
+    state.filters.severity.clear(); state.filters.context = ""; state.filters.search = "";
+    ctxSelect.value = ""; searchInput.value = "";
+    refreshSevButtons(); onChange();
+  }, "small", "f_clearfilters");
+
+  wrap.append(field("Severity", sevRow), field("Context", ctxSelect), field("Search", searchInput), clearBtn);
+
+  // refreshOptions re-derives which severities/contexts actually occur in
+  // `findings` and updates the two option lists — called only when new scan
+  // data loads (never on a keystroke), so it cannot steal focus from the
+  // search box (a completely separate node it never touches).
+  function refreshOptions(findings) {
+    state.filters.knownSeverities = [...new Set(findings.map((f) => f.severity).filter(Boolean))]
+      .sort((a, b) => SEVERITY_ORDER.indexOf(a) - SEVERITY_ORDER.indexOf(b));
+    // Severities that vanished (e.g. a re-scoped scan) shouldn't stay "stuck" selected.
+    [...state.filters.severity].forEach((sv) => { if (!state.filters.knownSeverities.includes(sv)) state.filters.severity.delete(sv); });
+    refreshSevButtons();
+    const ctxs = [...new Set(findings.map((f) => f.context).filter(Boolean))].sort();
+    const cur = state.filters.context;
+    ctxSelect.replaceChildren();
+    [["", "All contexts"], ...ctxs.map((c) => [c, c])].forEach(([v, text]) => {
+      const o = el("option", text); o.value = v;
+      if (v === cur) o.selected = true;
+      ctxSelect.appendChild(o);
+    });
+    if (cur && !ctxs.includes(cur)) { state.filters.context = ""; ctxSelect.value = ""; }
+  }
+
+  return { el: wrap, refreshOptions };
+}
+
+// matchesExtraFilters is applied ON TOP of (after) the section filter
+// (viewPredicate) — a finding must pass both to be shown.
+function matchesExtraFilters(f, filters) {
+  if (filters.severity.size && !filters.severity.has(f.severity)) return false;
+  if (filters.context && f.context !== filters.context) return false;
+  const q = (filters.search || "").trim().toLowerCase();
+  if (q) {
+    const hay = ((f.title || "") + " " + (f.endpoint_url || "") + " " + (f.parameter_name || "")).toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
 }
 
 // endpointLabel mirrors the server's finding titles: path plus sorted
@@ -399,32 +479,44 @@ function findingDetailEl(f) {
   if (f.parameter) row("Parameter", f.parameter.name + " (" + f.parameter.location + ")");
   else if (pd.parameter_name) row("Parameter", pd.parameter_name);
   if (cands.length && cands[0].context) row("Execution context", cands[0].context + (cands[0].context_sub ? " (" + cands[0].context_sub + ")" : ""));
+  // dl is placed here (not at the end) so the compact metadata block reads
+  // first; the attempts/candidates/evidence collapsibles that follow are
+  // appended straight to box and so always render AFTER it, however long
+  // they are — row("Provenance", …) below still lands inside this same dl
+  // (appendChild on an already-placed node still inserts live).
+  box.appendChild(dl);
 
   const attempts = (f.attempts || []).filter((a) => !(f.verified_candidate && a.verify_test_case_id === f.verified_candidate.verify_test_case_id));
   if (attempts.length) {
-    dl.appendChild(el("dt", (f.verified_candidate ? "Other attempts" : "Attempts") + " (" + attempts.length + ") — kept as diagnostics"));
-    const dd = el("dd"); const ul = el("ul", undefined, "attempts");
-    attempts.forEach((a) => {
-      const li = el("li");
-      li.appendChild(pill(a.verdict));
-      li.appendChild(document.createTextNode(" "));
-      li.appendChild(el("code", a.candidate_value, "wrap"));
-      const c = candidateByValue(a.candidate_value);
-      if (c && c.technique) li.appendChild(el("span", " [bypass: " + c.technique + "]", "hint"));
-      if (a.notes) li.appendChild(el("div", a.notes, "hint"));
-      ul.appendChild(li);
+    const heading = (f.verified_candidate ? "Other attempts" : "Attempts") + " (" + attempts.length + ") — kept as diagnostics";
+    const list = pagedList(attempts, 10, (page) => {
+      const ul = el("ul", undefined, "attempts");
+      page.forEach((a) => {
+        const li = el("li");
+        li.appendChild(pill(a.verdict));
+        li.appendChild(document.createTextNode(" "));
+        li.appendChild(el("code", a.candidate_value, "wrap"));
+        const c = candidateByValue(a.candidate_value);
+        if (c && c.technique) li.appendChild(el("span", " [bypass: " + c.technique + "]", "hint"));
+        if (a.notes) li.appendChild(el("div", a.notes, "hint"));
+        ul.appendChild(li);
+      });
+      return ul;
     });
-    dd.appendChild(ul); dl.appendChild(dd);
+    box.appendChild(collapsible(heading, list, attempts.length <= 6));
   } else if (!f.verified_candidate && cands.length) {
-    dl.appendChild(el("dt", "Candidates that reflected (" + cands.length + ") — not yet verified"));
-    const dd = el("dd"); const ul = el("ul");
-    cands.forEach((c) => {
-      const li = el("li");
-      li.appendChild(el("code", c.value, "wrap"));
-      if (c.technique) li.appendChild(el("span", " [bypass: " + c.technique + "]", "hint"));
-      ul.appendChild(li);
+    const heading = "Candidates that reflected (" + cands.length + ") — not yet verified";
+    const list = pagedList(cands, 10, (page) => {
+      const ul = el("ul");
+      page.forEach((c) => {
+        const li = el("li");
+        li.appendChild(el("code", c.value, "wrap"));
+        if (c.technique) li.appendChild(el("span", " [bypass: " + c.technique + "]", "hint"));
+        ul.appendChild(li);
+      });
+      return ul;
     });
-    dd.appendChild(ul); dl.appendChild(dd);
+    box.appendChild(collapsible(heading, list, cands.length <= 6));
   }
 
   if (f.provenance) {
@@ -434,15 +526,15 @@ function findingDetailEl(f) {
   }
 
   const evs = f.evidence || [];
-  dl.appendChild(el("dt", "Evidence (" + evs.length + ")"));
-  const evdd = el("dd");
+  const evHeading = "Evidence (" + evs.length + ")";
   if (evs.length) {
-    const ul = el("ul"); evs.forEach((e) => ul.appendChild(evidenceLine(e))); evdd.appendChild(ul);
+    const list = pagedList(evs, 10, (page) => {
+      const ul = el("ul"); page.forEach((e) => ul.appendChild(evidenceLine(e))); return ul;
+    });
+    box.appendChild(collapsible(evHeading, list, evs.length <= 6));
   } else {
-    evdd.appendChild(el("span", "none recorded yet", "hint"));
+    box.appendChild(el("div", evHeading + ": none recorded yet", "hint"));
   }
-  dl.appendChild(evdd);
-  box.appendChild(dl);
   return box;
 }
 
@@ -483,7 +575,7 @@ function findingRow(f, scanId, state) {
   const titleTd = cell(f.title || "(untitled)", "clickable c-title");
   tr.appendChild(titleTd);
   const vTd = el("td"); vTd.appendChild(pill(f.verdict)); tr.appendChild(vTd);
-  tr.appendChild(cell(f.severity));
+  const sevTd = el("td"); if (f.severity) sevTd.appendChild(pill(f.severity)); tr.appendChild(sevTd);
   tr.appendChild(cell(endpointLabel(f.endpoint_method, f.endpoint_url), "mono c-endpoint"));
   tr.appendChild(cell(f.parameter_name || "", "c-ident"));
   tr.appendChild(cell(f.context || "", "c-ident c-words"));
@@ -755,6 +847,15 @@ function metric(k, v, pillCls, hint) {
   return d;
 }
 
+// accentMetric is metric() with a bigger, coloured figure (dashboard
+// headline numbers) — accent is one of ok/bad/warn/accent, matching the
+// .metric.accent-* CSS classes.
+function accentMetric(k, v, accent, hint) {
+  const m = metric(k, v, undefined, hint);
+  m.classList.add("accent", "accent-" + accent);
+  return m;
+}
+
 function overviewPanel(st, scanId) {
   const s = st.scan, cfg = s.config || {};
   const wrap = el("div");
@@ -841,10 +942,12 @@ function findingsTabPanel(scanId) {
   const body = el("div");
   body.appendChild(el("div", "loading…", "hint"));
   let all = null, sig = null, shownView = null;
+  const extra = buildExtraFilters(state, () => render());
 
   function render() {
     const counts = sectionCountsOf(all);
-    const shown = all.filter(viewPredicate(state.view));
+    const sectioned = all.filter(viewPredicate(state.view));
+    const shown = sectioned.filter((f) => matchesExtraFilters(f, state.filters));
     state.visible = shown.map((f) => f.id);
     const hidden = all.length - counts.confirmed;
     let empty = "No findings in this view.";
@@ -852,6 +955,8 @@ function findingsTabPanel(scanId) {
       empty = all.length
         ? "No confirmed vulnerabilities yet. " + hidden + " other finding(s) — unconfirmed or rejected diagnostics — are hidden in this view."
         : "No findings for this scan yet.";
+    } else if (sectioned.length && !shown.length) {
+      empty = "No findings in this view match the current severity/context/search filters.";
     }
     const bar = filterBar(counts, state.view, (name) => { state.view = name; render(); notifySelection(state); });
     body.replaceChildren(bar, findingsTable(shown, scanId, state, empty));
@@ -864,6 +969,7 @@ function findingsTabPanel(scanId) {
       if (next === sig && shownView === state.view) return; // nothing changed: keep the DOM (and open rows)
       sig = next;
       all = findings;
+      extra.refreshOptions(all);
       // Drop selections/open rows for findings that no longer exist.
       const known = new Set(findings.map((f) => f.id));
       [...state.selected].forEach((id) => { if (!known.has(id)) state.selected.delete(id); });
@@ -875,7 +981,7 @@ function findingsTabPanel(scanId) {
     }
   }
   const rp = reportsPanel(scanId);
-  wrap.append(card("Findings", body), card("Generate report", rp));
+  wrap.append(card("Findings", extra.el, body), card("Generate report", rp));
   wrap.live = () => { load(); rp.live(); };
   load();
   return wrap;
@@ -904,23 +1010,44 @@ function evidencePanel(scanId) {
           : "No findings yet — evidence appears once candidates are executed and verified.", "empty"));
         return;
       }
-      const rows = [];
-      groups.forEach((g) => {
-        g.evidence.forEach((ev, i) => {
-          const tr = el("tr", undefined, ev.role === "baseline" ? "baseline" : "");
-          const ftd = el("td");
-          if (i === 0) {
-            ftd.append(pill(g.verdict), document.createTextNode(" " + (g.finding_title || "(untitled)")));
-            if (g.verified_candidate) ftd.appendChild(el("div", "verified: " + g.verified_candidate, "hint mono wrap"));
-          }
-          tr.append(ftd, cell(ROLE_LABELS[ev.role] || ev.role, "c-words"), cell(ev.kind, "c-words"), cell(ev.media_type || "", "c-words"),
-            cell(ev.size + " bytes", "c-words"), cell((ev.sha256 || "").slice(0, 12), "mono"), cell(fmtTime(ev.created_at), "c-words"));
-          const openTd = el("td"); openTd.appendChild(evidenceLinks(ev)); tr.appendChild(openTd);
-          rows.push(tr);
+      const nonEmptyGroups = groups.filter((g) => g.evidence.length);
+      // Each finding's own evidence is a separate, collapsible table (open by
+      // default only for a small scan) so a long scan's Evidence tab reads as
+      // a short list of headings instead of one giant flat table; the groups
+      // themselves are paginated too for a scan with many findings.
+      // Paginate at a generous size: a normal-to-large scan's finding count
+      // (seen in practice, and in this project's own test fixtures) stays on
+      // one page; pagination only kicks in for a genuinely huge scan.
+      const groupList = pagedList(nonEmptyGroups, 50, (page) => {
+        const frag = document.createDocumentFragment();
+        page.forEach((g) => {
+          const t = el("table");
+          const thead = el("thead"); const hr = el("tr");
+          ["Finding", "Role", "Kind", "Type", "Size", "SHA-256", "Captured", "Open"].forEach((h) => hr.appendChild(el("th", h)));
+          thead.appendChild(hr); t.appendChild(thead);
+          const tbody = el("tbody");
+          g.evidence.forEach((ev, i) => {
+            const tr = el("tr", undefined, ev.role === "baseline" ? "baseline" : "");
+            const ftd = el("td");
+            if (i === 0) {
+              ftd.append(pill(g.verdict), document.createTextNode(" " + (g.finding_title || "(untitled)")));
+              if (g.verified_candidate) ftd.appendChild(el("div", "verified: " + g.verified_candidate, "hint mono wrap"));
+            }
+            tr.append(ftd, cell(ROLE_LABELS[ev.role] || ev.role, "c-words"), cell(ev.kind, "c-words"), cell(ev.media_type || "", "c-words"),
+              cell(ev.size + " bytes", "c-words"), cell((ev.sha256 || "").slice(0, 12), "mono"), cell(fmtTime(ev.created_at), "c-words"));
+            const openTd = el("td"); openTd.appendChild(evidenceLinks(ev)); tr.appendChild(openTd);
+            tbody.appendChild(tr);
+          });
+          t.appendChild(tbody);
+          const summary = document.createDocumentFragment();
+          summary.append(pill(g.verdict), document.createTextNode(" " + (g.finding_title || "(untitled)")));
+          if (g.verified_candidate) summary.appendChild(el("span", " — verified: " + g.verified_candidate, "hint mono"));
+          frag.appendChild(collapsible(summary, t, nonEmptyGroups.length <= 3, g.evidence.length + " item(s)"));
         });
+        return frag;
       });
-      body.replaceChildren(el("p", total + " evidence item(s) across " + groups.filter((g) => g.evidence.length).length + " finding(s). Content opens sandboxed: scripts in captured pages never run.", "hint"),
-        table(["Finding", "Role", "Kind", "Type", "Size", "SHA-256", "Captured", "Open"], rows, ""));
+      body.replaceChildren(el("p", total + " evidence item(s) across " + nonEmptyGroups.length + " finding(s). Content opens sandboxed: scripts in captured pages never run.", "hint"),
+        groupList);
     } catch (e) {
       if (sig === null) body.replaceChildren(el("div", "error loading evidence", "err"));
     }
