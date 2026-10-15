@@ -91,9 +91,12 @@ async function openNewScanModal() {
 
   const candProfile = select("f_candprofile", [["standard", "Standard — up to 8 candidates per injection point"], ["minimal", "Minimal — up to 3, load-trigger only"], ["thorough", "Thorough — up to 16"]], "standard");
   const maxCand = input("f_maxcand", "number", "profile default"); maxCand.min = 0; maxCand.max = 32;
+  const enableEvasion = el("input"); enableEvasion.type = "checkbox"; enableEvasion.id = "f_evasion";
   const candFs = el("fieldset");
   candFs.append(legend("XSS candidates"), rowOf(field("Candidate profile", candProfile), field("Max candidates per injection point", maxCand)),
-    el("div", "Selects among the built-in benign-marker candidates by the site's execution context and encoding. Never changes how a finding is confirmed (always a browser-observed execution signal).", "hint"));
+    el("div", "Selects among the built-in benign-marker candidates by the site's execution context and encoding. Never changes how a finding is confirmed (always a browser-observed execution signal).", "hint"),
+    labelInline(enableEvasion, "Also try WAF/filter-bypass variants (case variation, alternate separators, double URL-encoding)"),
+    el("div", "Off by default. Adds these ON TOP OF the candidates above for an authorized engagement where a bypass is itself the reportable finding — still benign-marker-only and scope-enforced the same as every other request. See AGENTS.md §2 and docs/reflection-candidates.md.", "hint"));
 
   const typeFs = el("fieldset"); typeFs.append(legend("Scan type & discovery"), typeRow, field("Seed URLs", seeds), crawlLimits);
   const perfFs = el("fieldset"); perfFs.append(legend("Performance profile"), field("Profile", profile), customCfg);
@@ -115,6 +118,7 @@ async function openNewScanModal() {
       seed_urls: lines(seeds), quick_scan: typeQuick.checked,
       max_depth: typeQuick.checked ? 0 : numOrZero(depth), max_pages: numOrZero(maxPages), max_endpoints: numOrZero(maxEndpoints),
       candidate_profile: candProfile.value, max_candidates: numOrZero(maxCand),
+      enable_evasion: enableEvasion.checked,
     };
     if (profile.value === "custom") {
       req.config = { discovery_concurrency: numOrZero(cfgD), http_concurrency: numOrZero(cfgH), browser_concurrency: parseInt(cfgB.value, 10) || 0, requests_per_second: parseFloat(cfgR.value) || 0 };
@@ -342,9 +346,15 @@ function sectionNote(f) {
   switch (f.section) {
     case "confirmed": return null;
     case "diagnostic": return "Not a vulnerability: the candidate(s) reflected, but browser verification observed no execution. Kept as a diagnostic.";
-    default: return f.verdict === "inconclusive"
-      ? "Not yet a confirmed vulnerability: the marker could not be re-observed during browser verification."
-      : "Not yet a confirmed vulnerability: awaiting browser verification (or it cannot be verified, e.g. a POST/body-carrying request).";
+    default:
+      // review_reason_label (set by the API when the review is specific — an
+      // interaction-only candidate, or every candidate was filtered) is the
+      // accurate reason; fall back to a generic one only when it's absent
+      // (verdict pending/inconclusive with no specific reason recorded).
+      if (f.review_reason_label) return f.review_reason_label;
+      return f.verdict === "inconclusive"
+        ? "Not yet a confirmed vulnerability: the marker could not be re-observed during browser verification."
+        : "Not yet a confirmed vulnerability: awaiting browser verification (or it cannot be verified, e.g. a POST/body-carrying request).";
   }
 }
 
@@ -353,6 +363,15 @@ function findingDetailEl(f) {
   const dl = el("dl");
   const row = (k, v) => { if (!v) return; dl.appendChild(el("dt", k)); dl.appendChild(el("dd", v)); };
   const pd = f.parsed_detail || {};
+  const cands = pd.candidates || [];
+  // candidateByValue finds the PLANNED candidate matching a verification
+  // attempt's value, so a confirmed/attempted candidate can show its
+  // Technique (set only when the scan opted into evasion candidates) even
+  // though AttemptView itself doesn't carry one.
+  const candidateByValue = (value) => cands.find((c) => c.value === value);
+  const techniqueNote = (c) => c && c.technique
+    ? el("div", "Bypass technique: " + c.technique + " — " + (c.rationale || ""), "hint")
+    : null;
 
   if (f.verified_candidate) {
     // The candidate whose browser verification produced the deterministic
@@ -361,6 +380,8 @@ function findingDetailEl(f) {
     const hero = el("div", undefined, "verified");
     hero.appendChild(el("div", "Verified candidate — confirmed by browser verification", "verified-title"));
     hero.appendChild(payloadBox(v.candidate_value));
+    const tn = techniqueNote(candidateByValue(v.candidate_value));
+    if (tn) hero.appendChild(tn);
     if (v.notes) hero.appendChild(el("div", "Signal: " + v.notes, "hint"));
     const own = (v.evidence || []).filter((e) => e.role !== "baseline");
     if (own.length) {
@@ -377,7 +398,6 @@ function findingDetailEl(f) {
   if (f.endpoint) row("Endpoint", f.endpoint.method + " " + f.endpoint.url);
   if (f.parameter) row("Parameter", f.parameter.name + " (" + f.parameter.location + ")");
   else if (pd.parameter_name) row("Parameter", pd.parameter_name);
-  const cands = pd.candidates || [];
   if (cands.length && cands[0].context) row("Execution context", cands[0].context + (cands[0].context_sub ? " (" + cands[0].context_sub + ")" : ""));
 
   const attempts = (f.attempts || []).filter((a) => !(f.verified_candidate && a.verify_test_case_id === f.verified_candidate.verify_test_case_id));
@@ -389,6 +409,8 @@ function findingDetailEl(f) {
       li.appendChild(pill(a.verdict));
       li.appendChild(document.createTextNode(" "));
       li.appendChild(el("code", a.candidate_value, "wrap"));
+      const c = candidateByValue(a.candidate_value);
+      if (c && c.technique) li.appendChild(el("span", " [bypass: " + c.technique + "]", "hint"));
       if (a.notes) li.appendChild(el("div", a.notes, "hint"));
       ul.appendChild(li);
     });
@@ -396,7 +418,12 @@ function findingDetailEl(f) {
   } else if (!f.verified_candidate && cands.length) {
     dl.appendChild(el("dt", "Candidates that reflected (" + cands.length + ") — not yet verified"));
     const dd = el("dd"); const ul = el("ul");
-    cands.forEach((c) => { const li = el("li"); li.appendChild(el("code", c.value, "wrap")); ul.appendChild(li); });
+    cands.forEach((c) => {
+      const li = el("li");
+      li.appendChild(el("code", c.value, "wrap"));
+      if (c.technique) li.appendChild(el("span", " [bypass: " + c.technique + "]", "hint"));
+      ul.appendChild(li);
+    });
     dd.appendChild(ul); dl.appendChild(dd);
   }
 
@@ -742,6 +769,10 @@ function overviewPanel(st, scanId) {
     metric("Findings", st.findings.confirmed + " confirmed", undefined,
       st.findings.pending + " pending · " + st.findings.inconclusive + " inconclusive · " + st.findings.rejected + " rejected"),
   );
+  if (cfg.enable_evasion) {
+    m.appendChild(metric("Evasion candidates", "ON", undefined,
+      "Also tried WAF/filter-bypass variants (case variation, alt separators, double URL-encoding) on top of the canonical candidates — look for a \"bypass: …\" tag on a candidate."));
+  }
   if (st.session) {
     const sess = st.session;
     m.appendChild(metric("Auth / session", sess.mode + " · " + sess.state + (sess.has_state ? " · on file" : ""), sess.state));
