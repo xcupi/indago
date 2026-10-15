@@ -398,13 +398,31 @@ func urlTemplates(a ContextAnalysis, m string) []candTemplate {
 }
 
 func cssTemplates(a ContextAnalysis, m string) []candTemplate {
-	// Modern CSS cannot execute JavaScript; the only route to XSS is breaking out
-	// of a <style> element back into markup. A style="" attribute cannot do that.
-	if a.ConstructKind == "style_body" {
+	// Modern CSS cannot execute JavaScript; the only route to XSS is breaking
+	// out of CSS back into HTML markup. There are two distinct ways in: a
+	// <style> element's raw-text body, and — just as validly, and previously
+	// missed entirely — the style="" ATTRIBUTE value, which is still an
+	// ordinary HTML attribute: closing its quote and the tag reaches markup
+	// regardless of whether the CSS before the quote is well-formed. The
+	// browser's HTML parser finds the attribute's end by the quote character
+	// alone; it never validates the CSS inside first.
+	switch a.ConstructKind {
+	case "style_body":
 		return []candTemplate{onLoad("</style><svg onload="+m+">", "<>", 80,
 			"break out of the <style> element into HTML and inject a marker handler")}
+	case "attribute_value":
+		var q, needs string
+		switch a.Quote {
+		case "double":
+			q, needs = `"`, `"`
+		case "single":
+			q, needs = `'`, `'`
+		}
+		return []candTemplate{onLoad(q+"><svg onload="+m+">", needs+"<>", 80,
+			"break out of the style attribute's quote and the tag, then inject a marker element — the CSS content before the quote never needs to be valid")}
+	default:
+		return nil
 	}
-	return nil
 }
 
 func unknownTemplates(m string) []candTemplate {

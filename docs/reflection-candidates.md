@@ -46,7 +46,7 @@ library:
 | `html_attribute` | attribute value / name, tag name | quote-aware `"><svg onload=M>`, an in-tag `autofocus onfocus=M` handler (fires on load, no interaction — same character requirement as the onmouseover one below), and an in-tag `onmouseover=M` handler (which needs only the delimiter, not `<`/`>`) |
 | `javascript` | JS string / template / code / comment / regex | quote-aware string escape `";M//`, template `${M}`, direct code `M` |
 | `url` | URL attribute | `javascript:M` only at a scheme position (`start`, `relative_first_segment`); `data:` where plausible; nothing in a query/path/host |
-| `css` | `<style>` body | `</style><svg onload=M>` (a `style=""` attribute can't break into markup, so nothing) |
+| `css` | `<style>` body, `style=""` attribute | `</style><svg onload=M>` for the element body; quote-aware `"><svg onload=M>` for the attribute (closing the attribute's quote and the tag reaches markup regardless of whether the CSS before it is valid — same mechanism as any other attribute breakout) |
 | `unknown_mixed` | unclassifiable / ambiguous | generic low-priority markup probes |
 
 ### Trigger classes and what "rejected" means
