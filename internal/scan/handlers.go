@@ -19,7 +19,7 @@ func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope) 
 	// newExecutor's doc comment.
 	findingsMu := &sync.Mutex{}
 	h[domain.JobTest] = newExecutor(c.store, eng, c.opts.Evidence, c.queue, c.opts.Executor, c.log, findingsMu)
-	h[domain.JobVerify] = newVerifyExecutor(c.store, c.verifier(), c.opts.Evidence, scope, c.opts.Executor, c.log, findingsMu)
+	h[domain.JobVerify] = newVerifyExecutor(c.store, eng, c.verifier(), c.opts.Evidence, scope, c.opts.Executor, c.log, findingsMu)
 	return h
 }
 

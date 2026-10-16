@@ -114,7 +114,7 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 
 	// Mutated request: the candidate value goes ONLY into the focused parameter;
 	// all other parameters keep their observed values.
-	mutReq, err := buildRequest(ep, params, &injection{param: focus, value: cand.Value})
+	mutReq, err := buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), &injection{param: focus, value: cand.Value})
 	if err != nil {
 		return result{outcome: domain.OutcomeError, permanent: true, err: err, note: note, vulnClass: domain.VulnReflectedXSS, sharedEvidence: bl.evidenceIDs()}
 	}

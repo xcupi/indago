@@ -32,6 +32,7 @@ import (
 	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
+	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/verification"
 	"github.com/indago/indago/internal/worker"
@@ -132,6 +133,7 @@ func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob,
 // the outcome, evidence, and the resulting Finding verdict.
 type verifyExecutor struct {
 	store    store.Store
+	engine   httpengine.Engine // scope-enforcing; used only to refresh a dynamic anti-CSRF token right before replaying the candidate — see refreshDynamicParams
 	verifier verification.Verifier
 	evidence evidence.Store // nil: outcomes are recorded without evidence blobs
 	scope    domain.Scope
@@ -142,14 +144,14 @@ type verifyExecutor struct {
 	findingsMu *sync.Mutex
 }
 
-func newVerifyExecutor(st store.Store, v verification.Verifier, ev evidence.Store, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex) *verifyExecutor {
+func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Verifier, ev evidence.Store, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex) *verifyExecutor {
 	if v == nil {
 		v = verification.Stub{}
 	}
 	if findingsMu == nil {
 		findingsMu = &sync.Mutex{}
 	}
-	return &verifyExecutor{store: st, verifier: v, evidence: ev, scope: scope, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu}
+	return &verifyExecutor{store: st, engine: eng, verifier: v, evidence: ev, scope: scope, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu}
 }
 
 var _ worker.Handler = (*verifyExecutor)(nil)
@@ -226,7 +228,7 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 		return verifyResult{skipped: true, note: fmt.Sprintf("%s skipped: %s is state-changing and AllowStateChanging is off", note, ep.Method)}
 	}
 
-	req, err := buildRequest(ep, params, &injection{param: focus, value: vj.Candidate.Value})
+	req, err := buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), &injection{param: focus, value: vj.Candidate.Value})
 	if err != nil {
 		return verifyResult{outcome: domain.OutcomeError, permanent: true, err: err, note: note}
 	}

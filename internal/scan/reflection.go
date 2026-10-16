@@ -55,7 +55,7 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 
 	// Mutated request: the marker goes only into the focused parameter.
 	probe := detection.NewProbe(tc.ScanID, tc.InjectionPointID)
-	mutReq, err := buildRequest(ep, params, &injection{param: focus, value: probe.Value()})
+	mutReq, err := buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), &injection{param: focus, value: probe.Value()})
 	if err != nil {
 		return result{outcome: domain.OutcomeError, permanent: true, err: err, note: note, vulnClass: domain.VulnReflectedXSS, sharedEvidence: bl.evidenceIDs()}
 	}
