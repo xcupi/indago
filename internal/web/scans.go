@@ -176,10 +176,20 @@ type createScanReq struct {
 	AuthMode  string `json:"auth_mode"`
 	// AuthStatePath is the absolute, server-side path of saved session
 	// material (Playwright storage state) for auth_mode "existing".
-	AuthStatePath string             `json:"auth_state_path"`
-	SeedURLs      []string           `json:"seed_urls"`
-	Stop          *stopReq           `json:"stop"`
-	Config        *domain.ScanConfig `json:"config"`
+	AuthStatePath string `json:"auth_state_path"`
+	// LoginURL/SuccessURL/Login*Selector drive the login itself for auth_mode
+	// "interactive", "mfa", or "password" — see CreateScanParams.LoginURL
+	// and friends for the full contract (success_url is REQUIRED for all
+	// three; password mode also needs INDAGO_AUTH_USER/INDAGO_AUTH_PASS set
+	// in the SERVER's own environment, never in this request body).
+	LoginURL              string             `json:"login_url"`
+	SuccessURL            string             `json:"success_url"`
+	LoginUsernameSelector string             `json:"login_username_selector"`
+	LoginPasswordSelector string             `json:"login_password_selector"`
+	LoginSubmitSelector   string             `json:"login_submit_selector"`
+	SeedURLs              []string           `json:"seed_urls"`
+	Stop                  *stopReq           `json:"stop"`
+	Config                *domain.ScanConfig `json:"config"`
 
 	// Crawl extent, applied on top of the chosen profile (any profile). Quick
 	// limits discovery to the seeds (no link following); a full "crawl" scan
@@ -259,19 +269,24 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sc, err := s.ctrl.CreateScan(r.Context(), scan.CreateScanParams{
-		ProjectID:     domain.ID(req.ProjectID),
-		TargetID:      domain.ID(req.TargetID),
-		Name:          strings.TrimSpace(req.Name),
-		Profile:       profile,
-		Config:        req.Config,
-		Stop:          stop,
-		AuthMode:      mode,
-		AuthStatePath: req.AuthStatePath,
-		SeedURLs:      req.SeedURLs,
-		QuickScan:     req.QuickScan,
-		MaxDepth:      req.MaxDepth,
-		MaxPages:      req.MaxPages,
-		MaxEndpoints:  req.MaxEndpoints,
+		ProjectID:             domain.ID(req.ProjectID),
+		TargetID:              domain.ID(req.TargetID),
+		Name:                  strings.TrimSpace(req.Name),
+		Profile:               profile,
+		Config:                req.Config,
+		Stop:                  stop,
+		AuthMode:              mode,
+		AuthStatePath:         req.AuthStatePath,
+		LoginURL:              req.LoginURL,
+		SuccessURL:            req.SuccessURL,
+		LoginUsernameSelector: req.LoginUsernameSelector,
+		LoginPasswordSelector: req.LoginPasswordSelector,
+		LoginSubmitSelector:   req.LoginSubmitSelector,
+		SeedURLs:              req.SeedURLs,
+		QuickScan:             req.QuickScan,
+		MaxDepth:              req.MaxDepth,
+		MaxPages:              req.MaxPages,
+		MaxEndpoints:          req.MaxEndpoints,
 
 		CandidateProfile:        req.CandidateProfile,
 		MaxCandidates:           req.MaxCandidates,

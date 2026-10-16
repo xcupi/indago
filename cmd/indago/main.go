@@ -59,7 +59,7 @@ func main() {
 		err = cmdDB(args)
 	case "serve":
 		err = cmdServe(args)
-	case "project", "target", "scope", "scan", "finding", "endpoint", "report":
+	case "project", "target", "scope", "scan", "finding", "endpoint", "auth", "report":
 		err = newCLI(defaultServer(), os.Stdout).runClient(cmd, args)
 	case "help", "-h", "--help":
 		usage()
@@ -91,7 +91,9 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER, default http://
   scope set -project ID -include host[,host] [-exclude ..] [-include-path ..] [-exclude-path ..] [-subdomains]
   scope show -project ID
   scan create -project ID -target ID [-name N] [-profile P] [-candidate-profile minimal|standard|thorough] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]]
-              [-quick | -depth N] [-max-pages N] [-max-endpoints N] [-auth existing -auth-state FILE] [-proxy URL]... [-randomize-tls-fingerprint]
+              [-quick | -depth N] [-max-pages N] [-max-endpoints N] [-proxy URL]... [-randomize-tls-fingerprint]
+              [-auth anonymous|existing|interactive|mfa|password] [-auth-state FILE] [-login-url URL] [-success-url GLOB]
+              [-login-username-selector SEL] [-login-password-selector SEL] [-login-submit-selector SEL]
   scan list [-json]
   scan status <scan-id|prefix> [-json]
   scan start|pause|resume|cancel <scan-id|prefix>
@@ -99,6 +101,7 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER, default http://
   finding list -scan <scan-id|prefix> [-verdict confirmed|pending|inconclusive|rejected|all] [-json]   (default: confirmed; all with -json)
   finding show -scan <scan-id|prefix> <finding-id|prefix> [-json]
   endpoint list -scan <scan-id|prefix> [-json]   (discovered endpoints + their parameters, for debugging why a scan is Inconclusive)
+  auth login -login-url URL [-success-url GLOB]   (standalone interactive-login capture; requires indago serve -browser)
   report create -scan <scan-id|prefix> -format json|markdown|html [-mode all|confirmed|selected] [-finding ID]... [-out FILE]
   report list -scan <scan-id|prefix> [-json]
   report show <report-id|prefix> [-out FILE] [-download]
@@ -214,10 +217,11 @@ func cmdServe(args []string) error {
 	}
 
 	opts := scan.Options{
-		HTTP:       eng,
-		HTTPConfig: httpCfg,
-		Evidence:   evStore,
-		Executor:   scan.ExecutorConfig{AllowStateChanging: *allowUnsafe},
+		HTTP:        eng,
+		HTTPConfig:  httpCfg,
+		Evidence:    evStore,
+		Executor:    scan.ExecutorConfig{AllowStateChanging: *allowUnsafe},
+		SessionsDir: cfg.SessionsDir(),
 	}
 	if *allowUnsafe {
 		log.Warn("state-changing methods (POST/PUT/PATCH/DELETE) will be executed against in-scope targets")

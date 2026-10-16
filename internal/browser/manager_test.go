@@ -239,8 +239,14 @@ func (p *fakePage) Evaluate(script string, arg any) (any, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if strings.Contains(script, "setItem") {
-		if kv, ok := arg.(map[string]string); ok {
-			p.localStorage[kv["k"]] = kv["v"]
+		// Real playwright-go's own serializer requires map[string]any for a
+		// composite argument (a map[string]string panics there — see
+		// Manager.AutoLogin/writeStorage) — accept the same shape here so
+		// this fake's contract matches the real driver's, not a looser one.
+		if kv, ok := arg.(map[string]any); ok {
+			k, _ := kv["k"].(string)
+			v, _ := kv["v"].(string)
+			p.localStorage[k] = v
 		}
 		return nil, nil
 	}

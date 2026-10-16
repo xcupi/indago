@@ -163,6 +163,34 @@ type LoginResult struct {
 	FinalURL         string
 }
 
+// AutoLoginOptions configure a non-interactive, auto-filled login (AuthMode
+// "password"): Indago itself submits operator-supplied credentials into a
+// login form, headless, with no human present. This is ordinary browser
+// automation to establish an authenticated session — distinct from, and
+// never in tension with, AGENTS.md's "no simulated user activation"
+// boundary, which is specifically about never faking interaction to force
+// an XSS candidate to execute (see AGENTS.md §2.2).
+type AutoLoginOptions struct {
+	LoginURL string
+	Username string
+	Password string
+	// UsernameSelector/PasswordSelector/SubmitSelector are CSS selectors
+	// that override the built-in heuristic (see autoLoginScript) for a
+	// login form it can't guess correctly. Empty uses the heuristic.
+	UsernameSelector string
+	PasswordSelector string
+	SubmitSelector   string
+	// SuccessURLGlob is REQUIRED (unlike LoginOptions.SuccessURLGlob,
+	// optional for a human-watched interactive login): with no operator
+	// present to judge success, Indago needs an objective, programmatic
+	// signal before it ever saves a session file — a fully silent success
+	// would otherwise save an UNAUTHENTICATED state the moment the form
+	// submits, however long that actually takes.
+	SuccessURLGlob   string
+	StorageStatePath string
+	Timeout          time.Duration // overall wait (0 → 2m; shorter than interactive's 5m since no human step is involved)
+}
+
 // PoolStats is a snapshot of Manager resources.
 type PoolStats struct {
 	Browsers     int

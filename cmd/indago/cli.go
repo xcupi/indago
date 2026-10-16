@@ -194,6 +194,8 @@ func (c *cli) runClient(group string, args []string) error {
 		return c.finding(sub, rest)
 	case "endpoint":
 		return c.endpoint(sub, rest)
+	case "auth":
+		return c.auth(sub, rest)
 	case "report":
 		return c.report(sub, rest)
 	}
@@ -345,8 +347,13 @@ func (c *cli) scanCreate(args []string) error {
 	profile := fs.String("profile", "balanced", "conservative | balanced | fast")
 	stop := fs.String("stop", "", "stop policy: continue_all | first_confirmed | after_n_confirmed | pause_and_ask")
 	stopN := fs.Int("stop-n", 0, "confirmed-finding limit for -stop after_n_confirmed")
-	authMode := fs.String("auth", "", "auth mode: anonymous (default) | existing")
+	authMode := fs.String("auth", "", "auth mode: anonymous (default) | existing | interactive | mfa | password")
 	authState := fs.String("auth-state", "", "saved session material (Playwright storage-state JSON) for -auth existing")
+	loginURL := fs.String("login-url", "", "login page to open; REQUIRED for -auth interactive|mfa|password")
+	successURL := fs.String("success-url", "", "URL glob the browser must reach for the login to count as done; REQUIRED for -auth interactive|mfa|password")
+	loginUserSel := fs.String("login-username-selector", "", "CSS selector override for the username/email field; -auth password only, empty = heuristic")
+	loginPassSel := fs.String("login-password-selector", "", "CSS selector override for the password field; -auth password only, empty = heuristic (input[type=password])")
+	loginSubmitSel := fs.String("login-submit-selector", "", "CSS selector override for the submit control; -auth password only, empty = heuristic")
 	candProfile := fs.String("candidate-profile", "", "XSS candidate profile: minimal | standard | thorough (default: server default)")
 	maxCand := fs.Int("max-candidates", 0, "cap on candidates tried per injection point (0 = the profile's own; hard ceiling 32)")
 	enableEvasion := fs.Bool("enable-evasion", false, "opt in to WAF/filter-bypass candidate variants (case variation, alt separators, double URL-encoding) ON TOP OF the canonical set; OFF by default — only for an authorized engagement where a bypass is itself the reportable finding (see AGENTS.md §2.3)")
@@ -397,6 +404,21 @@ func (c *cli) scanCreate(args []string) error {
 			return fmt.Errorf("-auth-state: %w", err)
 		}
 		req["auth_state_path"] = abs
+	}
+	if *loginURL != "" {
+		req["login_url"] = *loginURL
+	}
+	if *successURL != "" {
+		req["success_url"] = *successURL
+	}
+	if *loginUserSel != "" {
+		req["login_username_selector"] = *loginUserSel
+	}
+	if *loginPassSel != "" {
+		req["login_password_selector"] = *loginPassSel
+	}
+	if *loginSubmitSel != "" {
+		req["login_submit_selector"] = *loginSubmitSel
 	}
 	if *stop != "" {
 		req["stop"] = map[string]any{"mode": *stop, "confirmed_limit": *stopN}
@@ -648,6 +670,46 @@ func printStatus(w io.Writer, st *scan.Status) {
 	if s.Error != "" {
 		fmt.Fprintf(w, "Error      %s\n", s.Error)
 	}
+}
+
+// --- auth ---
+
+// auth dispatches `indago auth login -login-url URL [-success-url GLOB]`,
+// a thin client over the standalone POST /api/auth/login endpoint — for
+// capturing a session ONCE to reuse across several `scan create -auth
+// existing -auth-state FILE` runs, or to test login mechanics before
+// wiring `-auth interactive` directly into `scan create`. Requires the
+// server to have been started with `-browser` (opens a real, visible
+// browser the operator logs into).
+func (c *cli) auth(sub string, args []string) error {
+	switch sub {
+	case "login":
+		return c.authLogin(args)
+	}
+	return fmt.Errorf("unknown auth subcommand %q (login)", sub)
+}
+
+func (c *cli) authLogin(args []string) error {
+	fs := c.newFlags("auth login")
+	loginURL := fs.String("login-url", "", "login page to open in a real, visible browser")
+	successURL := fs.String("success-url", "", "URL glob the browser must reach before the login counts as done (optional, but a login with none saves state IMMEDIATELY with no wait at all)")
+	if _, err := parseInterspersed(fs, args); err != nil {
+		return err
+	}
+	if *loginURL == "" {
+		return errors.New("usage: indago auth login -login-url URL [-success-url GLOB]")
+	}
+	var out struct {
+		StatePath string `json:"state_path"`
+		FinalURL  string `json:"final_url"`
+	}
+	if err := c.call("POST", "/api/auth/login", map[string]string{"login_url": *loginURL, "success_url": *successURL}, &out); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "saved session: %s\n", out.StatePath)
+	fmt.Fprintf(c.out, "final URL: %s\n", out.FinalURL)
+	fmt.Fprintf(c.out, "use it with: scan create ... -auth existing -auth-state %s\n", out.StatePath)
+	return nil
 }
 
 // --- endpoints ---

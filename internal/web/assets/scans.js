@@ -66,8 +66,13 @@ async function openNewScanModal() {
   const cfgR = input("f_cfgR", "number", "", "10"); cfgR.min = 0; cfgR.max = 1000; cfgR.step = "0.1";
   const stop = select("f_stop", [["continue_all", "Continue (test everything)"], ["first_confirmed", "Stop at first confirmed"], ["after_n_confirmed", "Stop after N confirmed"], ["pause_and_ask", "Pause & ask on confirmed"]], "continue_all");
   const stopN = input("f_stopn", "number", "", "1"); stopN.min = 1;
-  const auth = select("f_auth", [["anonymous", "Anonymous (no login)"], ["existing", "Existing session (import saved state)"]], "anonymous");
+  const auth = select("f_auth", [["anonymous", "Anonymous (no login)"], ["existing", "Existing session (import saved state)"], ["interactive", "Interactive login (you log in in a real browser)"], ["mfa", "Interactive login + MFA (same as above, any second factor)"], ["password", "Auto-login (Indago fills the form itself)"]], "anonymous");
   const authState = input("f_authstate", "text", "/data/sessions/login-….json"); authState.className = "mono";
+  const loginURL = input("f_loginurl", "text", "https://target/login"); loginURL.className = "mono";
+  const successURL = input("f_successurl", "text", "https://target/dashboard*"); successURL.className = "mono";
+  const loginUserSel = input("f_loginusersel", "text", "optional, e.g. #email"); loginUserSel.className = "mono";
+  const loginPassSel = input("f_loginpasssel", "text", "optional, e.g. #password"); loginPassSel.className = "mono";
+  const loginSubmitSel = input("f_loginsubmitsel", "text", "optional, e.g. button[type=submit]"); loginSubmitSel.className = "mono";
 
   // scan type
   const typeCrawl = el("input"); typeCrawl.type = "radio"; typeCrawl.name = "f_type"; typeCrawl.value = "crawl"; typeCrawl.checked = true;
@@ -83,10 +88,19 @@ async function openNewScanModal() {
   const stopNWrap = field("N confirmed", stopN); stopNWrap.classList.add("hidden");
   const authWrap = el("div");
   const loginBtn = button("Interactive login…", () => openLoginModal((p) => { authState.value = p; }), "");
-  authWrap.append(field("Session state file (absolute server-side path)", authState),
+  const existingFields = el("div");
+  existingFields.append(field("Session state file (absolute server-side path)", authState),
     el("div", "Capture one with interactive login, or point at a Playwright storage-state file. Its contents are never shown.", "hint"),
     el("div", undefined, "form-actions"));
-  authWrap.querySelector(".form-actions").appendChild(loginBtn);
+  existingFields.querySelector(".form-actions").appendChild(loginBtn);
+  const loginFields = el("div");
+  loginFields.append(field("Login URL", loginURL), field("Success URL (glob, required)", successURL),
+    el("div", "Indago opens this URL in a real browser and waits for navigation to match the success glob before it saves the session. Required — with no UI step watching, Indago needs an objective signal the login actually finished.", "hint"));
+  const passwordFields = el("div");
+  passwordFields.append(rowOf(field("Username selector (optional)", loginUserSel), field("Password selector (optional)", loginPassSel), field("Submit selector (optional)", loginSubmitSel)),
+    el("div", "Credentials are NEVER entered here or sent in this request — set INDAGO_AUTH_USER and INDAGO_AUTH_PASS in the SERVER process's own environment before creating this scan. The selectors above are an escape hatch for a login form Indago's own heuristic can't locate; leave them empty to let it guess (input[type=password], then the nearest username/email field).", "hint"));
+  passwordFields.classList.add("hidden");
+  authWrap.append(existingFields, loginFields, passwordFields);
   authWrap.classList.add("hidden");
 
   const candProfile = select("f_candprofile", [["standard", "Standard — up to 8 candidates per injection point"], ["minimal", "Minimal — up to 3, load-trigger only"], ["thorough", "Thorough — up to 16"]], "standard");
@@ -115,7 +129,10 @@ async function openNewScanModal() {
     crawlLimits.classList.toggle("hidden", typeQuick.checked);
     customCfg.classList.toggle("hidden", profile.value !== "custom");
     stopNWrap.classList.toggle("hidden", stop.value !== "after_n_confirmed");
-    authWrap.classList.toggle("hidden", auth.value !== "existing");
+    authWrap.classList.toggle("hidden", auth.value === "anonymous");
+    existingFields.classList.toggle("hidden", auth.value !== "existing");
+    loginFields.classList.toggle("hidden", !["interactive", "mfa", "password"].includes(auth.value));
+    passwordFields.classList.toggle("hidden", auth.value !== "password");
   };
   [typeCrawl, typeQuick, profile, stop, auth].forEach((x) => x.addEventListener("change", sync));
   sync();
@@ -137,7 +154,16 @@ async function openNewScanModal() {
       req.stop = { mode: stop.value };
       if (stop.value === "after_n_confirmed") req.stop.confirmed_limit = parseInt(stopN.value, 10) || 1;
     }
-    if (auth.value === "existing") { req.auth_mode = "existing"; req.auth_state_path = authState.value.trim(); }
+    if (auth.value === "existing") {
+      req.auth_mode = "existing"; req.auth_state_path = authState.value.trim();
+    } else if (auth.value === "interactive" || auth.value === "mfa") {
+      req.auth_mode = auth.value; req.login_url = loginURL.value.trim(); req.success_url = successURL.value.trim();
+    } else if (auth.value === "password") {
+      req.auth_mode = "password"; req.login_url = loginURL.value.trim(); req.success_url = successURL.value.trim();
+      if (loginUserSel.value.trim()) req.login_username_selector = loginUserSel.value.trim();
+      if (loginPassSel.value.trim()) req.login_password_selector = loginPassSel.value.trim();
+      if (loginSubmitSel.value.trim()) req.login_submit_selector = loginSubmitSel.value.trim();
+    }
     const res = await mutate("POST", "/api/scans", req);
     if (!res.ok) { setMsg(errBox, errMsg(res, "create scan failed")); return; }
     closeModal();
