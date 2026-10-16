@@ -28,25 +28,47 @@ and must be preserved by every change:
 1. **Explicit scope is mandatory.** Nothing is ever tested until an operator has
    defined and the system has validated a `Scope`. Scope enforcement lives in
    the domain/scan layers and must fail closed.
-2. **WAF/anti-bot evasion is opt-in, scope-gated, and payload-shape only.**
+2. **WAF/anti-bot evasion is opt-in, scope-gated, and narrowly bounded.**
    By default Indago sends only its canonical, non-obfuscated candidates (no
-   evasion). An operator may explicitly set `ScanConfig.EnableEvasion` (CLI
-   `-enable-evasion`) to ALSO try a small set of documented bypass shapes
-   (case variation, alternate HTML separators, double URL-encoding — see
-   `internal/detection/evasion.go` and `docs/reflection-candidates.md`
-   "Evasion candidates (opt-in)") for an authorized engagement where a
-   bypass is itself the reportable finding (e.g. a bug bounty program).
-   This does NOT touch the boundaries below, which stay absolute even with
-   evasion enabled: every evasion candidate still goes through the SAME
-   scope-enforcing engine as every other request (never widens WHAT may be
-   targeted, only which payload SHAPES are tried against an already-in-scope
-   target); still a benign-marker detection probe, never alert/cookie/
-   exfiltration; still rate/concurrency-bounded by the scan's profile; never
-   includes request-fingerprint spoofing, IP/proxy rotation, timing-based
-   evasion, or CAPTCHA handling — that class of evasion needs infrastructure
-   this local, single-process scanner does not have and remains out of scope.
-   A change that would weaken any of THESE properties must still stop and
-   raise it, per point 6 below.
+   evasion), through Indago's real network identity: no proxy, no TLS
+   fingerprint spoofing. An operator may explicitly opt into each of the
+   following, independently, per scan — never as a default:
+   - `ScanConfig.EnableEvasion` (CLI `-enable-evasion`): ALSO try a small
+     set of documented payload-shape bypasses (case variation, alternate
+     HTML separators, double URL-encoding — see
+     `internal/detection/evasion.go` and `docs/reflection-candidates.md`
+     "Evasion candidates (opt-in)") for an engagement where a bypass is
+     itself the reportable finding (e.g. a bug bounty program).
+   - `ScanConfig.ProxyPool` (CLI `-proxy`, repeatable): route outbound
+     traffic — raw HTTP requests AND browser verification alike — through
+     operator-supplied proxy infrastructure, round-robin. Indago never
+     discovers, purchases, or manages proxies itself.
+   - `ScanConfig.RandomizeTLSFingerprint` (CLI `-randomize-tls-fingerprint`):
+     perform the raw HTTP engine's TLS handshake with a randomized
+     ClientHello (JA3, via uTLS) instead of Go's own default, which has its
+     own distinct, fingerprintable signature regardless of the UserAgent
+     header. MUTUALLY EXCLUSIVE with `ProxyPool` — Go's `http.Transport`
+     never consults a custom TLS dialer for a proxied connection, so the
+     server rejects the combination outright rather than silently no-op the
+     override (see `internal/httpengine/client.go`). Has no effect on
+     browser verification: a real browser's own TLS stack is already
+     genuine and unspoofed.
+   None of these touch the boundaries below, which stay absolute regardless
+   of what is opted into: every request still goes through the SAME
+   scope-enforcing engine (never widens WHAT may be targeted, only which
+   payload shape, network path, or TLS signature is used against an
+   already-in-scope target); still a benign-marker detection probe, never
+   alert/cookie/exfiltration; still rate/concurrency-bounded by the scan's
+   profile. Two related capabilities remain fully OUT OF SCOPE even with
+   every opt-in above enabled, and need their own explicit operator
+   decision plus an AGENTS.md update before either could ever be added:
+   timing-based evasion (deliberate request jitter to evade rate-based
+   detection), and CAPTCHA SOLVING or bypass of any kind — Indago only
+   DETECTS a CAPTCHA/bot-challenge newly appearing during testing
+   (`internal/detection/captcha.go`, surfaced as its own diagnostic
+   Finding), it never attempts to solve or defeat one.
+   A change that would weaken any of THESE remaining boundaries must still
+   stop and raise it, per point 6 below.
 3. **Conservative by default.** Default profiles use low concurrency and request
    rates. Aggressive behavior is opt-in and operator-configured.
 4. **No DoS / high-volume abuse.** Rate and concurrency controls exist to protect
