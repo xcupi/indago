@@ -55,15 +55,24 @@ type findingDetail struct {
 // candidate, and the evidence that attempt (plus its candidate request/
 // response) produced.
 type verificationAttempt struct {
-	CandidateValue      string            `json:"candidate_value"`
-	CandidateDedupKey   string            `json:"candidate_dedup_key,omitempty"`
-	CandidateTestCaseID domain.ID         `json:"candidate_test_case_id,omitempty"`
-	VerifyTestCaseID    domain.ID         `json:"verify_test_case_id"`
-	Verdict             domain.Verdict    `json:"verdict"`
-	Confidence          domain.Confidence `json:"confidence,omitempty"`
-	Notes               string            `json:"notes,omitempty"`
-	EvidenceIDs         []domain.ID       `json:"evidence_ids,omitempty"`
-	At                  time.Time         `json:"at"`
+	CandidateValue      string    `json:"candidate_value"`
+	CandidateDedupKey   string    `json:"candidate_dedup_key,omitempty"`
+	CandidateTestCaseID domain.ID `json:"candidate_test_case_id,omitempty"`
+	VerifyTestCaseID    domain.ID `json:"verify_test_case_id"`
+	// URL is the exact URL this attempt navigated to — the candidate value
+	// already substituted into its injection point. Surfaced so an operator
+	// can copy-paste it into their own browser to manually exercise a
+	// candidate the passive verifier can never confirm itself (an
+	// interaction-only trigger: onmouseover, javascript: href, …) — see
+	// ReviewInteractionOnly in internal/report/view.go. Empty for a
+	// non-GET-navigable attempt (POST+JSON, state-changing without the
+	// operator's AllowStateChanging opt-in) that never actually navigated.
+	URL         string            `json:"url,omitempty"`
+	Verdict     domain.Verdict    `json:"verdict"`
+	Confidence  domain.Confidence `json:"confidence,omitempty"`
+	Notes       string            `json:"notes,omitempty"`
+	EvidenceIDs []domain.ID       `json:"evidence_ids,omitempty"`
+	At          time.Time         `json:"at"`
 }
 
 func decodeFindingDetail(b []byte) findingDetail {
@@ -250,7 +259,7 @@ func verdictRank(v domain.Verdict) int {
 // original candidate's own request/response evidence) and the contributing
 // TestCase IDs are unioned in every time, so correlating never discards raw
 // evidence. It is the only place a Finding's Verdict leaves Pending.
-func (e *verifyExecutor) correlateVerification(ctx context.Context, findingID domain.ID, cand detection.Candidate, candTestCaseID domain.ID, vres *verification.Result, verifyTestCaseID domain.ID, newEvidenceIDs []domain.ID) {
+func (e *verifyExecutor) correlateVerification(ctx context.Context, findingID domain.ID, cand detection.Candidate, candTestCaseID domain.ID, vres *verification.Result, verifyTestCaseID domain.ID, newEvidenceIDs []domain.ID, verifiedURL string) {
 	// Serialized: two verify jobs for the same correlated finding (two
 	// candidates at the same site) can complete at the same time on different
 	// browser workers, and this is a plain Get-mutate-Update — without the
@@ -295,6 +304,7 @@ func (e *verifyExecutor) correlateVerification(ctx context.Context, findingID do
 	d.Attempts = appendAttempt(d.Attempts, verificationAttempt{
 		CandidateValue: cand.Value, CandidateDedupKey: cand.DedupKey,
 		CandidateTestCaseID: candTestCaseID, VerifyTestCaseID: verifyTestCaseID,
+		URL:     verifiedURL,
 		Verdict: vres.Verdict, Confidence: vres.Confidence, Notes: vres.Notes,
 		EvidenceIDs: appendUniqueIDs(nil, all), At: now,
 	})

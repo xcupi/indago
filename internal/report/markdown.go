@@ -145,6 +145,9 @@ func writeFinding(b *strings.Builder, n int, f *domain.Finding, v FindingView) {
 	}
 	if v.ReviewReasonLabel != "" {
 		fmt.Fprintf(b, "- **Why this needs manual review (not a clean negative):** %s\n", v.ReviewReasonLabel)
+		if v.ReviewReason == ReviewInteractionOnly {
+			b.WriteString("- **How to check it yourself:** open the Tested URL for the attempt(s) below in a real browser and perform the action the candidate needs (hover, click, navigate) — Indago deliberately never simulates this (AGENTS.md §3).\n")
+		}
 	}
 	b.WriteString("\n")
 
@@ -177,9 +180,13 @@ func writeFinding(b *strings.Builder, n int, f *domain.Finding, v FindingView) {
 		if v.Verified == nil {
 			heading = "**Attempts:**"
 		}
-		b.WriteString(heading + "\n\n| Candidate | Verdict |\n|---|---|\n")
+		b.WriteString(heading + "\n\n| Candidate | Verdict | Tested URL |\n|---|---|---|\n")
 		for _, a := range others {
-			fmt.Fprintf(b, "| %s | %s |\n", mdCell(a.CandidateValue), a.Verdict)
+			url := "—"
+			if a.URL != "" {
+				url = "`" + a.URL + "`"
+			}
+			fmt.Fprintf(b, "| %s | %s | %s |\n", mdCell(a.CandidateValue), a.Verdict, url)
 		}
 		b.WriteString("\n")
 	}

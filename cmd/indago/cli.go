@@ -734,10 +734,12 @@ type findingDetailOut struct {
 	} `json:"parsed_detail"`
 	Verified *struct {
 		CandidateValue string `json:"candidate_value"`
+		URL            string `json:"url"`
 		Notes          string `json:"notes"`
 	} `json:"verified_candidate"`
 	Attempts []struct {
 		CandidateValue string `json:"candidate_value"`
+		URL            string `json:"url"`
 		Verdict        string `json:"verdict"`
 	} `json:"attempts"`
 	Endpoint          *domain.Endpoint   `json:"endpoint"`
@@ -798,10 +800,16 @@ func printFindingDetail(w io.Writer, server string, fd *findingDetailOut) {
 		fmt.Fprintf(w, "Attempts   %d (kept as diagnostics):\n", len(fd.Attempts))
 		for _, a := range fd.Attempts {
 			fmt.Fprintf(w, "  - %-12s %s\n", a.Verdict, a.CandidateValue)
+			if a.URL != "" {
+				fmt.Fprintf(w, "    %s\n", a.URL)
+			}
 		}
 	}
 	if fd.ReviewReasonLabel != "" {
 		fmt.Fprintf(w, "Review     needs manual review: %s\n", fd.ReviewReasonLabel)
+		if strings.Contains(fd.ReviewReasonLabel, "user action") {
+			fmt.Fprintln(w, "           Open the attempt URL(s) above yourself and perform the action (click/hover/navigate) to actually exercise it — Indago deliberately never simulates this (AGENTS.md \u00a73).")
+		}
 	}
 	if len(fd.ParsedDetail.Candidates) > 0 {
 		fmt.Fprintf(w, "Candidates (%d, %d occurrence(s)):\n", len(fd.ParsedDetail.Candidates), fd.ParsedDetail.Occurrences)

@@ -367,7 +367,7 @@ func (e *verifyExecutor) finish(ctx context.Context, job *domain.TestJob, tc *do
 	}
 
 	if !vj.FindingID.Empty() && r.result != nil {
-		e.correlateVerification(ctx, vj.FindingID, vj.Candidate, vj.CandidateTestCaseID, r.result, tc.ID, evidenceIDs)
+		e.correlateVerification(ctx, vj.FindingID, vj.Candidate, vj.CandidateTestCaseID, r.result, tc.ID, evidenceIDs, tc.URL)
 	}
 }
 

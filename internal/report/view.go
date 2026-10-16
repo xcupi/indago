@@ -119,7 +119,15 @@ type CandidateView struct {
 // AttemptView is one browser-verification attempt: the candidate replayed, that
 // attempt's OWN verdict, and the evidence it produced.
 type AttemptView struct {
-	CandidateValue   string            `json:"candidate_value"`
+	CandidateValue string `json:"candidate_value"`
+	// URL is the exact URL this attempt navigated to (candidate value
+	// already substituted into its injection point) — a ready, copy-paste
+	// manual proof-of-concept, most useful for an interaction-only
+	// candidate (onmouseover, javascript: href, …) the passive verifier can
+	// reflect-but-never-confirm itself; see ReviewInteractionOnly below.
+	// Empty when the attempt never actually navigated (POST+JSON, or a
+	// state-changing request without AllowStateChanging).
+	URL              string            `json:"url,omitempty"`
 	Verdict          domain.Verdict    `json:"verdict"`
 	Confidence       domain.Confidence `json:"confidence,omitempty"`
 	Notes            string            `json:"notes,omitempty"`
@@ -166,6 +174,7 @@ type detailShape struct {
 	} `json:"candidates"`
 	Attempts []struct {
 		CandidateValue   string            `json:"candidate_value"`
+		URL              string            `json:"url"`
 		VerifyTestCaseID domain.ID         `json:"verify_test_case_id"`
 		Verdict          domain.Verdict    `json:"verdict"`
 		Confidence       domain.Confidence `json:"confidence"`
@@ -302,7 +311,7 @@ func NewFindingView(f *domain.Finding, evidence map[domain.ID]*domain.Evidence) 
 
 	for _, a := range d.Attempts {
 		v.Attempts = append(v.Attempts, AttemptView{
-			CandidateValue: a.CandidateValue, Verdict: a.Verdict, Confidence: a.Confidence, Notes: a.Notes,
+			CandidateValue: a.CandidateValue, URL: a.URL, Verdict: a.Verdict, Confidence: a.Confidence, Notes: a.Notes,
 			VerifyTestCaseID: a.VerifyTestCaseID, At: a.At, Evidence: evidenceFor(a.EvidenceIDs),
 		})
 	}

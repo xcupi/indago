@@ -426,15 +426,19 @@ function sectionNote(f) {
   switch (f.section) {
     case "confirmed": return null;
     case "diagnostic": return "Not a vulnerability: the candidate(s) reflected, but browser verification observed no execution. Kept as a diagnostic.";
-    default:
+    default: {
       // review_reason_label (set by the API when the review is specific — an
       // interaction-only candidate, or every candidate was filtered) is the
       // accurate reason; fall back to a generic one only when it's absent
       // (verdict pending/inconclusive with no specific reason recorded).
-      if (f.review_reason_label) return f.review_reason_label;
-      return f.verdict === "inconclusive"
+      let note = f.review_reason_label || (f.verdict === "inconclusive"
         ? "Not yet a confirmed vulnerability: the marker could not be re-observed during browser verification."
-        : "Not yet a confirmed vulnerability: awaiting browser verification (or it cannot be verified, e.g. a POST/body-carrying request).";
+        : "Not yet a confirmed vulnerability: awaiting browser verification (or it cannot be verified, e.g. a POST/body-carrying request).");
+      if (f.review_reason === "interaction_only") {
+        note += " Open the tested URL in the attempts list below yourself and perform the action (hover/click/navigate) — Indago never simulates user interaction (AGENTS.md §3).";
+      }
+      return note;
+    }
   }
 }
 
@@ -499,6 +503,12 @@ function findingDetailEl(f) {
         const c = candidateByValue(a.candidate_value);
         if (c && c.technique) li.appendChild(el("span", " [bypass: " + c.technique + "]", "hint"));
         if (a.notes) li.appendChild(el("div", a.notes, "hint"));
+        if (a.url) {
+          const urlLine = el("div", undefined, "hint");
+          urlLine.appendChild(document.createTextNode("tested URL: "));
+          urlLine.appendChild(el("code", a.url, "wrap"));
+          li.appendChild(urlLine);
+        }
         ul.appendChild(li);
       });
       return ul;

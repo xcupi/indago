@@ -141,6 +141,7 @@ type findingDetail struct {
 // verification attempt's own verdict and evidence; see findingCandidate.
 type findingAttempt struct {
 	CandidateValue      string      `json:"candidate_value"`
+	URL                 string      `json:"url,omitempty"`
 	CandidateTestCaseID domain.ID   `json:"candidate_test_case_id,omitempty"`
 	VerifyTestCaseID    domain.ID   `json:"verify_test_case_id,omitempty"`
 	Verdict             string      `json:"verdict"`
