@@ -738,6 +738,10 @@ function reportsPanel(scanId) {
   const fmt = select("r_fmt", [["json", "JSON"], ["markdown", "Markdown"], ["html", "HTML"]], state.format);
   fmt.style.width = "auto";
   fmt.addEventListener("change", () => { state.format = fmt.value; });
+  const aiSummaryChk = el("input"); aiSummaryChk.type = "checkbox"; aiSummaryChk.id = "r_ai_summary";
+  aiSummaryChk.checked = !!state.aiSummary;
+  aiSummaryChk.addEventListener("change", () => { state.aiSummary = aiSummaryChk.checked; });
+  const aiSummaryLabel = labelInline(aiSummaryChk, " AI-generated summary (advisory only; no effect unless the server has -ai-provider configured)");
   const preview = el("div", undefined, "hint"); preview.id = "reportPreview";
 
   let previewTotal = null;
@@ -765,7 +769,7 @@ function reportsPanel(scanId) {
   }
 
   const gen = button("Generate report", async () => {
-    const body = { format: state.format, mode: state.mode };
+    const body = { format: state.format, mode: state.mode, ai_summary: !!state.aiSummary };
     if (state.mode === "selected") body.finding_ids = [...state.selected].sort();
     gen.disabled = true;
     const res = await mutate("POST", api.scan(scanId) + "/reports", body);
@@ -802,7 +806,7 @@ function reportsPanel(scanId) {
   }
 
   const controls = el("div", undefined, "form-actions");
-  controls.append(fmt, gen);
+  controls.append(fmt, aiSummaryLabel, gen);
   wrap.append(modeRow, preview, controls, errBox, t);
   wrap.live = () => { reload(); refreshPreview(); };
   update();

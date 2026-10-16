@@ -2,6 +2,8 @@ package web
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/indago/indago/internal/ai"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/report"
 )
@@ -37,6 +40,12 @@ type createReportReq struct {
 	// contract: "selected" when FindingIDs is non-empty, otherwise "all".
 	Mode       string   `json:"mode,omitempty"`
 	FindingIDs []string `json:"finding_ids,omitempty"`
+	// AISummary requests an advisory executive-summary paragraph from the
+	// AI Gateway, prepended to the report and clearly labeled as such (see
+	// report.Data.AISummary). Ignored (no error) when AI is disabled or
+	// unconfigured — report creation always succeeds either way; a failed
+	// or skipped advisory call just means no AI section in the output.
+	AISummary bool `json:"ai_summary,omitempty"`
 }
 
 // handleCreateReport renders a report over the selected (or, if none given,
@@ -104,6 +113,10 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
+	var aiSummary string
+	if req.AISummary {
+		aiSummary = s.draftAISummary(r.Context(), scanID, proj, sc, findings, len(all))
+	}
 	var buf bytes.Buffer
 	data := report.Data{
 		Project:      *proj,
@@ -114,6 +127,7 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		ToolVersion:  s.version,
 		Selection:    mode,
 		ScanFindings: len(all),
+		AISummary:    aiSummary,
 	}
 	if err := gen.Generate(&buf, data); err != nil {
 		s.writeInternalError(w, "generate report", err)
@@ -145,6 +159,92 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, rpt)
+}
+
+// draftAISummaryTimeout bounds the advisory call specifically, separate
+// from the gateway's own per-request HTTP timeout: a slow or unreachable
+// provider must make report creation merely slower-then-skip the AI
+// section, never hang the whole request for the gateway's full budget.
+const draftAISummaryTimeout = 30 * time.Second
+
+// draftAISummary asks the AI Gateway for an advisory executive-summary
+// paragraph over the report's findings, persisting the attempt as a
+// domain.AITask (succeeded or failed) for audit regardless of outcome.
+// Returns "" on any error or when AI is disabled — the caller always
+// still produces a complete, correct report; this is best-effort, never a
+// precondition. See AGENTS.md §2.5 and report.Data.AISummary's doc comment:
+// AI output here is prose only, never a finding, verdict, or evidence.
+func (s *Server) draftAISummary(ctx context.Context, scanID domain.ID, proj *domain.Project, sc *domain.Scan, findings []*domain.Finding, totalInScan int) string {
+	gw := s.aiGateway()
+	if !gw.Enabled() {
+		return ""
+	}
+
+	byVerdict := map[domain.Verdict]int{}
+	var confirmedTitles []string
+	for _, f := range findings {
+		byVerdict[f.Verdict]++
+		if f.Verdict == domain.VerdictConfirmed {
+			title := f.Title
+			if title == "" {
+				title = string(f.ID)
+			}
+			confirmedTitles = append(confirmedTitles, title)
+		}
+	}
+	prompt := "Draft a short (3-6 sentence) executive summary paragraph for a reflected-XSS scan report. " +
+		"Plain prose, no markdown headings, no bullet lists. State the overall posture and call out the " +
+		"confirmed findings by name if there are any; otherwise say none were confirmed."
+	scanName := sc.Name
+	if scanName == "" {
+		scanName = string(sc.ID)
+	}
+	reqCtx := map[string]any{
+		"project":          proj.Name,
+		"scan":             scanName,
+		"total_in_scan":    totalInScan,
+		"in_report":        len(findings),
+		"by_verdict":       byVerdict,
+		"confirmed_titles": confirmedTitles,
+	}
+
+	task := &domain.AITask{
+		ID:        domain.NewID(),
+		ScanID:    scanID,
+		Kind:      domain.AIDraftReport,
+		State:     domain.AIRunning,
+		Advisory:  true,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if reqJSON, err := json.Marshal(reqCtx); err == nil {
+		task.Request = reqJSON
+	}
+	if err := s.store.AITasks().Create(ctx, task); err != nil {
+		s.log.Warn("ai: record task", "err", err)
+		// Not fatal to the summary attempt itself — persistence failing
+		// doesn't mean the advisory call shouldn't still be tried.
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, draftAISummaryTimeout)
+	defer cancel()
+	resp, err := gw.Advise(callCtx, ai.Request{Kind: domain.AIDraftReport, Prompt: prompt, Context: reqCtx})
+	task.UpdatedAt = time.Now()
+	if err != nil {
+		s.log.Warn("ai: draft report summary failed", "err", err)
+		task.State = domain.AIFailed
+		task.Error = err.Error()
+		_ = s.store.AITasks().Update(ctx, task)
+		return ""
+	}
+	task.State = domain.AISucceeded
+	task.Provider = resp.Provider
+	task.Model = resp.Model
+	task.Response = []byte(resp.Text)
+	if err := s.store.AITasks().Update(ctx, task); err != nil {
+		s.log.Warn("ai: record task result", "err", err)
+	}
+	return resp.Text
 }
 
 // resolveSelection applies a report selection mode to the scan's findings

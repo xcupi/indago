@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/indago/indago/internal/ai"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/scan"
@@ -48,6 +49,11 @@ type Server struct {
 	// endpoint (it then reports the feature is unavailable). Wired by
 	// cmd/indago only when a browser is configured (-browser).
 	login LoginFunc
+
+	// ai is the advisory AI Gateway (see internal/ai). Nil means
+	// ai.Disabled{} (the scanner must work with AI disabled): report
+	// creation then skips AI-drafted summaries, never fails because of it.
+	ai ai.Gateway
 }
 
 // LoginFunc runs an interactive browser login: it opens a visible browser at
@@ -67,6 +73,20 @@ type LoginParams struct {
 // SetLoginFunc installs the interactive-login implementation. A nil fn (the
 // default) leaves the endpoint reporting the feature unavailable.
 func (s *Server) SetLoginFunc(fn LoginFunc) { s.login = fn }
+
+// SetAIGateway wires the advisory AI Gateway. Not calling this (or passing
+// nil) leaves AI disabled — aiGateway() below falls back to ai.Disabled{}.
+func (s *Server) SetAIGateway(g ai.Gateway) { s.ai = g }
+
+// aiGateway returns the configured gateway, or ai.Disabled{} if none was
+// set — callers never need their own nil check to honor "AI disabled is
+// the default and the scanner must work fully without it".
+func (s *Server) aiGateway() ai.Gateway {
+	if s.ai == nil {
+		return ai.Disabled{}
+	}
+	return s.ai
+}
 
 // NewServer builds a Server. A nil logger uses slog.Default. evStore and
 // reportsDir are optional (nil/"" disables evidence content serving and

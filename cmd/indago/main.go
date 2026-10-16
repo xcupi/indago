@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/indago/indago/internal/ai"
 	"github.com/indago/indago/internal/browser"
 	"github.com/indago/indago/internal/config"
 	"github.com/indago/indago/internal/domain"
@@ -164,6 +165,9 @@ func cmdServe(args []string) error {
 	chromium := fs.String("chromium", "", "Chromium executable for -browser (default: $INDAGO_CHROMIUM_PATH or the Playwright cache)")
 	allowRemote := fs.Bool("allow-remote", false,
 		"allow binding a non-loopback address; required because the API has no authentication (see docs/deployment.md)")
+	aiProvider := fs.String("ai-provider", "", "enable the advisory AI Gateway with this provider (openai|anthropic|openrouter|ollama|vllm); empty keeps AI fully disabled")
+	aiModel := fs.String("ai-model", "", "model name for -ai-provider (required if -ai-provider is set)")
+	aiBaseURL := fs.String("ai-base-url", "", "override the provider's default base URL (required for a non-default ollama/vllm deployment)")
 	_ = fs.Parse(args)
 
 	log := newLogger(*debug)
@@ -276,6 +280,23 @@ func cmdServe(args []string) error {
 
 	srv := web.NewServer(db, ctrl, version, log, evStore, cfg.ReportsDir())
 	srv.SetLoginFunc(loginFn) // nil unless -browser: endpoint then reports unavailable
+	gw, err := ai.New(ai.Settings{
+		Enabled:  *aiProvider != "",
+		Provider: *aiProvider,
+		Model:    *aiModel,
+		BaseURL:  *aiBaseURL,
+		// Read fresh here, once, at startup — same pattern as
+		// INDAGO_AUTH_USER/PASS for AuthMode password: a secret never
+		// arrives via a CLI flag (shell history, `ps`) or a request body.
+		APIKey: os.Getenv("INDAGO_AI_API_KEY"),
+	})
+	if err != nil {
+		return fmt.Errorf("configure AI gateway (-ai-provider): %w", err)
+	}
+	srv.SetAIGateway(gw)
+	if gw.Enabled() {
+		log.Info("AI gateway enabled (advisory only)", "provider", *aiProvider, "model", *aiModel)
+	}
 	log.Info("indago starting", "version", version, "data", cfg.DataDir)
 	err = srv.ListenAndServe(ctx, cfg.Server.Addr)
 	ctrl.Shutdown()

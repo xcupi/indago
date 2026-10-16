@@ -43,6 +43,12 @@ func (MarkdownGenerator) Generate(w io.Writer, data Data) error {
 	fmt.Fprintf(&b, "- **Project:** %s\n", nonEmpty(data.Project.Name, string(data.Project.ID)))
 	fmt.Fprintf(&b, "- **Scan:** %s (`%s`)\n\n", nonEmpty(data.Scan.Name, string(data.Scan.ID)), data.Scan.ID)
 
+	if data.AISummary != "" {
+		b.WriteString("## AI-generated advisory summary (NOT verified — see Findings below for actual evidence)\n\n")
+		b.WriteString(data.AISummary)
+		b.WriteString("\n\n")
+	}
+
 	b.WriteString("## Summary\n\n")
 	if sel := selectionLine(summary); sel != "" {
 		fmt.Fprintf(&b, "- **Selection:** %s\n", sel)

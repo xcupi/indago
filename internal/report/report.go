@@ -28,6 +28,14 @@ type Data struct {
 	// scan.
 	Selection    domain.ReportSelection
 	ScanFindings int
+	// AISummary, when non-empty, is an advisory executive summary drafted
+	// by the AI Gateway (domain.AIDraftReport) — rendered prominently
+	// labeled as AI-generated and unverified, NEVER as part of the
+	// findings themselves. Empty (the default: AI disabled, not
+	// requested, or the advisory call failed) renders no AI section at
+	// all — see AGENTS.md §2.5: the scanner must work identically with AI
+	// disabled, and AI output is never authoritative.
+	AISummary string
 }
 
 // dataSummary is Summarize plus the report's own selection metadata.

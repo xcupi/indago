@@ -985,13 +985,14 @@ func (c *cli) reportCreate(args []string) error {
 	format := fs.String("format", "json", "json | markdown | html")
 	out := fs.String("out", "", "also write the rendered report to this file")
 	mode := fs.String("mode", "", "all | confirmed | selected (default: selected when -finding is given, else all)")
+	aiSummary := fs.Bool("ai-summary", false, "ask the AI Gateway (if configured with -ai-provider on `indago serve`) for an advisory executive summary, prepended to the report and clearly labeled; no effect if AI is disabled")
 	var findingIDs stringList
 	fs.Var(&findingIDs, "finding", "finding ID to include with -mode selected (repeatable)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *scanRef == "" {
-		return errors.New("usage: indago report create -scan <scan-id|prefix> -format json|markdown|html [-mode all|confirmed|selected] [-finding ID]... [-out FILE]")
+		return errors.New("usage: indago report create -scan <scan-id|prefix> -format json|markdown|html [-mode all|confirmed|selected] [-finding ID]... [-ai-summary] [-out FILE]")
 	}
 	scanID, err := c.resolveScanID(*scanRef)
 	if err != nil {
@@ -999,7 +1000,7 @@ func (c *cli) reportCreate(args []string) error {
 	}
 	var rpt domain.Report
 	if err := c.call("POST", "/api/scans/"+url.PathEscape(scanID)+"/reports",
-		map[string]any{"format": *format, "mode": *mode, "finding_ids": []string(findingIDs)}, &rpt); err != nil {
+		map[string]any{"format": *format, "mode": *mode, "finding_ids": []string(findingIDs), "ai_summary": *aiSummary}, &rpt); err != nil {
 		return err
 	}
 	fmt.Fprintf(c.out, "created report %s (%s, %d finding(s); selection %s, %d of %d in scan; %s)\n",

@@ -94,6 +94,7 @@ type htmlView struct {
 	ScanName      string
 	ScanID        string
 	Selection     string
+	AISummary     string
 	TotalFindings int
 	Confirmed     int
 	NeedsReview   int
@@ -121,6 +122,7 @@ func (HTMLGenerator) Generate(w io.Writer, data Data) error {
 		ScanName:      nonEmpty(data.Scan.Name, string(data.Scan.ID)),
 		ScanID:        string(data.Scan.ID),
 		Selection:     selectionLine(summary),
+		AISummary:     data.AISummary,
 		TotalFindings: summary.TotalFindings,
 		Confirmed:     summary.ConfirmedCount,
 		NeedsReview:   counts[SectionNeedsReview],
@@ -259,6 +261,7 @@ const htmlTemplateSrc = `<!doctype html>
   pre.payload { background: #f6f8fa; border: 1px solid #d0d7de; border-left: 4px solid #b42318; border-radius: 4px; padding: 0.6rem 0.8rem; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.3rem 0 0.8rem; }
   .note { color: #57606a; font-style: italic; }
   .baseline { color: #57606a; }
+  .ai-summary { background: #fff8e6; border: 1px solid #d4a72c; border-radius: 6px; padding: 0.8rem 1rem; margin: 0.5rem 0 1.5rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -269,6 +272,12 @@ const htmlTemplateSrc = `<!doctype html>
   <strong>Project:</strong> {{.ProjectName}}<br>
   <strong>Scan:</strong> {{.ScanName}} (<code>{{.ScanID}}</code>)
 </p>
+
+{{if .AISummary}}
+<h2>AI-generated advisory summary</h2>
+<p class="note">NOT verified — advisory only, not a security verdict. See Findings below for the actual evidence.</p>
+<div class="ai-summary">{{.AISummary}}</div>
+{{end}}
 
 <h2>Summary</h2>
 {{if .Selection}}<p><strong>Selection:</strong> {{.Selection}}</p>{{end}}
