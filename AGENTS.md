@@ -268,6 +268,20 @@ Implemented so far (infrastructure and **discovery**):
   (`verification.Input.ExtraHeaders`/`ExtraCookies`); a real shadowing bug
   (session cookies were appended after request cookies, so a same-named
   override silently lost to the session's value) was found and fixed live.
+- ✅ Combined (multi-parameter) candidates (`internal/detection/combined.go`,
+  `internal/scan/combined.go`; see `docs/reflection-candidates.md`): a small,
+  BOUNDED, deterministic fallback probe for reflected XSS that genuinely
+  needs TWO parameters controlled together to break out (one supplies a
+  closing sequence, the other supplies the breakout). Pair-only (never
+  triple+), same-context only (`html_attr_value` or `js_string`), fallback
+  only (runs for an endpoint only after its single-parameter candidate
+  testing already ran and found no Confirmed finding there), hard ceiling
+  of 5 pairs per endpoint, picked deterministically. Still ONE real HTTP
+  request per pair, carrying both overrides — no new verification
+  machinery. A combined finding gets its own disjoint identity (both
+  parameter names + context in the dedup key) so it never collides with
+  either single-parameter finding, and is clearly labeled as combined
+  across every presentation surface.
 - ⏳ Stubs: detection engines for non-Reflected-XSS vulnerability classes
   (Stored XSS, DOM XSS)
 
