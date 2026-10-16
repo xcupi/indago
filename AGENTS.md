@@ -231,8 +231,45 @@ Implemented so far (infrastructure and **discovery**):
   bounded, deterministic `minimal`/`standard`/`thorough` candidate profiles
   (ceiling 32) that only select from the planner's output. No new vectors, no
   verdict changes.
-- ⏳ Stubs: detection engines (non-XSS classes), Password/Interactive/MFA auth
-  modes, AI providers
+- ✅ AuthMode password/interactive/mfa (`internal/auth`): all 5 `domain.AuthMode`
+  values are real. Interactive/MFA drive `browser.Manager.InteractiveLogin`
+  (operator logs in themselves, visible browser, however many steps/MFA that
+  needs); Password drives `browser.Manager.AutoLogin` (headless, heuristic
+  locates the password field then the nearest username field, CSS-selector
+  overrides are the escape hatch). Password credentials come ONLY from the
+  server process's own `INDAGO_AUTH_USER`/`INDAGO_AUTH_PASS` env vars — never
+  persisted, never accepted over the API/CLI. The login is driven ONCE at
+  scan-create time; every later Start/Resume just validates+imports the
+  already-captured session state, never re-drives the login.
+- ✅ AI Gateway (`internal/ai`): real providers — one OpenAI-Chat-Completions-
+  shaped implementation covers OpenAI/OpenRouter/Ollama/vLLM, plus a separate
+  Anthropic Messages-API implementation. Disabled by default; a hosted
+  provider with no API key fails closed at construction, not on first call.
+  First integration point is AI-assisted report drafting
+  (`report create -ai-summary`, opt-in per report): best-effort, its own
+  shorter timeout, and ANY provider error falls back to a plain report —
+  AI health never blocks report creation. Still advisory-only per §2.5: no
+  AI output ever decides scope or a verdict.
+- ✅ Header/Cookie/Path injection points (`internal/discovery/extra_locations.go`,
+  `path_segments.go`; see `docs/reflection-candidates.md`): `LocationHeader`/
+  `LocationCookie`/`LocationPath` were declared in the domain model but never
+  constructed until now. Reuses the SAME reflect → context → plan → execute →
+  verify → correlate pipeline Query/Form/JSON already go through — only
+  injection-point construction and mutated-request building are
+  location-specific. Header: a small conservative default set (User-Agent,
+  Referer, X-Forwarded-For), one overridden per candidate, others untouched.
+  Cookie: only cookies the scan's own session actually carries, excluding
+  whatever looks like the session/auth cookie itself — no session means
+  nothing to register, never fabricated. Path: only a segment that looks like
+  a variable value (numeric, UUID-shaped, opaque slug with a digit), never a
+  literal route keyword — an endpoint with no qualifying segment correctly
+  gets zero Path injection points. Browser verification threads the exact
+  same header/cookie override into the verifying context before navigation
+  (`verification.Input.ExtraHeaders`/`ExtraCookies`); a real shadowing bug
+  (session cookies were appended after request cookies, so a same-named
+  override silently lost to the session's value) was found and fixed live.
+- ⏳ Stubs: detection engines for non-Reflected-XSS vulnerability classes
+  (Stored XSS, DOM XSS)
 
 **The dividing line:** transport, browser, discovery, orchestration, and the
 full Reflected XSS pipeline (reflect → context → plan → execute candidates →
