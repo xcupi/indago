@@ -53,15 +53,27 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 		}
 	}
 
-	// Mutated request: the marker goes only into the focused parameter.
+	// Mutated request: the marker goes only into the focused parameter. The
+	// whole refresh→build→send sequence runs inside withDynamicTokenLock so
+	// it is atomic with respect to every other such sequence in the scan
+	// (candidate testing, browser verification) when a dynamic/single-use
+	// token parameter is involved — see dynamic_params.go.
 	probe := detection.NewProbe(tc.ScanID, tc.InjectionPointID)
-	mutReq, err := buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), &injection{param: focus, value: probe.Value()})
-	if err != nil {
+	var mutReq *httpengine.Request
+	var resp *httpengine.Response
+	var dur time.Duration
+	withDynamicTokenLock(e.tokenMu, params, focus, func() {
+		mutReq, err = buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), &injection{param: focus, value: probe.Value()})
+		if err != nil {
+			return
+		}
+		resp, outcome, err, dur = e.send(ctx, mutReq)
+	})
+	if mutReq == nil {
 		return result{outcome: domain.OutcomeError, permanent: true, err: err, note: note, vulnClass: domain.VulnReflectedXSS, sharedEvidence: bl.evidenceIDs()}
 	}
 	tc.URL = mutReq.URL
 
-	resp, outcome, err, dur := e.send(ctx, mutReq)
 	r := result{
 		note:           note,
 		duration:       dur,

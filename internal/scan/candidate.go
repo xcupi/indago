@@ -8,6 +8,7 @@ import (
 
 	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/httpengine"
 )
 
 // This file executes the candidate plan the reflection step produces. After a
@@ -113,14 +114,26 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 	}
 
 	// Mutated request: the candidate value goes ONLY into the focused parameter;
-	// all other parameters keep their observed values.
-	mutReq, err := buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), &injection{param: focus, value: cand.Value})
-	if err != nil {
+	// all other parameters keep their observed values. The whole
+	// refresh→build→send sequence runs inside withDynamicTokenLock so it is
+	// atomic with respect to every other such sequence in the scan (the
+	// reflection step, browser verification) when a dynamic/single-use token
+	// parameter is involved — see dynamic_params.go.
+	var mutReq *httpengine.Request
+	var resp *httpengine.Response
+	var dur time.Duration
+	withDynamicTokenLock(e.tokenMu, params, focus, func() {
+		mutReq, err = buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), &injection{param: focus, value: cand.Value})
+		if err != nil {
+			return
+		}
+		resp, outcome, err, dur = e.send(ctx, mutReq)
+	})
+	if mutReq == nil {
 		return result{outcome: domain.OutcomeError, permanent: true, err: err, note: note, vulnClass: domain.VulnReflectedXSS, sharedEvidence: bl.evidenceIDs()}
 	}
 	tc.URL = mutReq.URL
 
-	resp, outcome, err, dur := e.send(ctx, mutReq)
 	r := result{
 		note:           note,
 		duration:       dur,

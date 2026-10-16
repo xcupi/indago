@@ -65,22 +65,35 @@ type executor struct {
 	// correlateVerification for the same scan — see newExecutor's doc. Never
 	// nil (the constructor defaults it).
 	findingsMu *sync.Mutex
+	// tokenMu — see withDynamicTokenLock in dynamic_params.go. MUST be the
+	// same mutex given to this scan's verifyExecutor (see defaultHandlers):
+	// a dynamic (rotating/single-use) token is tied to the whole session, not
+	// to this executor alone, so a candidate request here and a verification
+	// navigation in verifyExecutor can race for the same token slot without
+	// a lock shared across both. Never nil (the constructor defaults it).
+	tokenMu *sync.Mutex
 }
 
-// newExecutor builds a test-job executor. findingsMu, when non-nil, MUST be
-// the SAME mutex given to this scan's verifyExecutor (see defaultHandlers):
-// both enqueueVerification (here) and correlateVerification read-then-write
-// Finding rows keyed by a correlation lookup, not a store-level unique
-// constraint, so without a shared lock, two candidates (or a candidate and a
-// verification) racing on the same site can create a duplicate Finding or
-// lose an update. nil defaults to a fresh mutex, which is correct whenever a
-// caller (e.g. a test exercising only this executor) never shares a scan with
-// a separately-constructed verifyExecutor.
-func newExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, q queue.Queue, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex) *executor {
+// newExecutor builds a test-job executor. findingsMu and tokenMu, when
+// non-nil, MUST be the SAME mutexes given to this scan's verifyExecutor (see
+// defaultHandlers): both enqueueVerification (here) and
+// correlateVerification read-then-write Finding rows keyed by a correlation
+// lookup, not a store-level unique constraint, so without a shared
+// findingsMu, two candidates (or a candidate and a verification) racing on
+// the same site can create a duplicate Finding or lose an update; without a
+// shared tokenMu, a candidate request here and a verification navigation
+// there can race for the same single-use session token (see
+// dynamic_params.go). nil defaults to a fresh mutex for each, which is
+// correct whenever a caller (e.g. a test exercising only this executor)
+// never shares a scan with a separately-constructed verifyExecutor.
+func newExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, q queue.Queue, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, tokenMu *sync.Mutex) *executor {
 	if findingsMu == nil {
 		findingsMu = &sync.Mutex{}
 	}
-	return &executor{store: st, engine: eng, evidence: ev, queue: q, cfg: cfg.withDefaults(), log: log, baselines: newBaselineCache(), findingsMu: findingsMu}
+	if tokenMu == nil {
+		tokenMu = &sync.Mutex{}
+	}
+	return &executor{store: st, engine: eng, evidence: ev, queue: q, cfg: cfg.withDefaults(), log: log, baselines: newBaselineCache(), findingsMu: findingsMu, tokenMu: tokenMu}
 }
 
 var _ worker.Handler = (*executor)(nil)

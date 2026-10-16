@@ -21,19 +21,23 @@ package scan
 // self-submitting GET forms, and POST forms that render their own token on
 // the same URL they post to) are covered.
 //
-// Also not solved: true concurrency against a single shared, single-use,
-// session-bound token. Each call here does its own independent priming
-// fetch immediately before its own real request, which is correct for
-// sequential testing of one injection point, but two requests racing in
-// parallel against the SAME session can still both prime, then both try to
-// spend what is — server-side — a single current token slot, and one loses.
-// Lowering http/browser concurrency for a target known to use this pattern
-// remains the operator's mitigation; this is not attempted here.
+// Also solved here (see withDynamicTokenLock): true concurrency against a
+// single shared, single-use, session-bound token. Without it, two requests
+// racing in parallel against the SAME session could both prime (read the
+// same still-current token) and then both try to spend what is, server-side,
+// a single current token slot — one wins, the other's now-stale token gets
+// rejected exactly like the un-refreshed case this file otherwise fixes.
+// withDynamicTokenLock closes that: every refresh-then-send sequence for a
+// request that touches a dynamic-looking parameter runs under one shared
+// per-scan lock, so no two such sequences ever interleave. Requests with no
+// dynamic-looking parameter (the overwhelming majority of traffic) never
+// touch the lock at all.
 
 import (
 	"context"
 	"net/url"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/indago/indago/internal/discovery"
@@ -52,6 +56,43 @@ var dynamicTokenName = regexp.MustCompile(`(?i)token|csrf|xsrf|nonce`)
 
 func isDynamicTokenName(name string) bool { return dynamicTokenName.MatchString(name) }
 
+// hasDynamicParam reports whether any parameter OTHER than focus looks like
+// a rotating token — the shared test both refreshDynamicParams (skip the
+// fetch) and withDynamicTokenLock (skip the lock) use to leave ordinary,
+// non-CSRF-protected requests completely untouched.
+func hasDynamicParam(params []*domain.Parameter, focus *domain.Parameter) bool {
+	for _, p := range params {
+		if p != focus && isDynamicTokenName(p.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+// withDynamicTokenLock runs fn while holding mu, but ONLY when params
+// contains a dynamic-looking parameter besides focus. Callers must put the
+// ENTIRE refresh-then-send sequence inside fn (not just the refresh, and not
+// just the request build) — the thing that actually needs to be atomic with
+// respect to every other such sequence in the scan is "read the current
+// token, then be the one to spend it", and the spend only happens once the
+// request actually reaches the server. mu is the scan's single shared lock
+// (see newExecutor/newVerifyExecutor's tokenMu, built once in
+// defaultHandlers and passed to both) — this is deliberately one blunt
+// scan-wide lock, not a finer per-endpoint one: most real targets that use
+// this pattern at all (DVWA, Django, Rails defaults) key the token to the
+// whole session, not to an individual form, so per-endpoint locking would
+// not actually prevent the race it looks like it prevents. A nil mu (tests
+// that construct an executor without one) just runs fn unlocked.
+func withDynamicTokenLock(mu *sync.Mutex, params []*domain.Parameter, focus *domain.Parameter, fn func()) {
+	if mu == nil || !hasDynamicParam(params, focus) {
+		fn()
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	fn()
+}
+
 // refreshDynamicParams returns params with any dynamic-looking parameter's
 // Example updated to what the server is currently issuing — a fresh GET of
 // the endpoint's own page (query stripped), re-parsed for its current form
@@ -60,16 +101,11 @@ func isDynamicTokenName(name string) bool { return dynamicTokenName.MatchString(
 // parameter looks dynamic, or eng is nil (unit tests, or a scan with no HTTP
 // engine wired up), or the priming fetch fails for any reason, params is
 // returned completely unchanged — this is a best-effort improvement, never
-// a precondition for testing to proceed.
+// a precondition for testing to proceed. Callers that care about the
+// concurrency race (see withDynamicTokenLock) must call this ALREADY inside
+// the locked section, not before it.
 func refreshDynamicParams(ctx context.Context, eng httpengine.Engine, timeout time.Duration, ep *domain.Endpoint, params []*domain.Parameter, focus *domain.Parameter) []*domain.Parameter {
-	hasDynamic := false
-	for _, p := range params {
-		if p != focus && isDynamicTokenName(p.Name) {
-			hasDynamic = true
-			break
-		}
-	}
-	if !hasDynamic || eng == nil {
+	if !hasDynamicParam(params, focus) || eng == nil {
 		return params
 	}
 

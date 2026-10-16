@@ -142,16 +142,23 @@ type verifyExecutor struct {
 	// findingsMu — see newExecutor's doc comment. MUST be the same mutex given
 	// to this scan's executor for correlation to be race-free.
 	findingsMu *sync.Mutex
+	// tokenMu — see executor's doc comment and withDynamicTokenLock in
+	// dynamic_params.go. MUST be the same mutex given to this scan's
+	// executor, for the same reason findingsMu must be.
+	tokenMu *sync.Mutex
 }
 
-func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Verifier, ev evidence.Store, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex) *verifyExecutor {
+func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Verifier, ev evidence.Store, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, tokenMu *sync.Mutex) *verifyExecutor {
 	if v == nil {
 		v = verification.Stub{}
 	}
 	if findingsMu == nil {
 		findingsMu = &sync.Mutex{}
 	}
-	return &verifyExecutor{store: st, engine: eng, verifier: v, evidence: ev, scope: scope, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu}
+	if tokenMu == nil {
+		tokenMu = &sync.Mutex{}
+	}
+	return &verifyExecutor{store: st, engine: eng, verifier: v, evidence: ev, scope: scope, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu, tokenMu: tokenMu}
 }
 
 var _ worker.Handler = (*verifyExecutor)(nil)
@@ -228,56 +235,74 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 		return verifyResult{skipped: true, note: fmt.Sprintf("%s skipped: %s is state-changing and AllowStateChanging is off", note, ep.Method)}
 	}
 
-	req, err := buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), &injection{param: focus, value: vj.Candidate.Value})
+	// The whole refresh→build→verify sequence runs inside
+	// withDynamicTokenLock so it is atomic with respect to every other such
+	// sequence in the scan (the reflection step, candidate testing) when a
+	// dynamic/single-use token parameter is involved — see
+	// dynamic_params.go. The browser navigation inside Verify is what
+	// actually spends the token, so the lock must cover it too, not just the
+	// request build.
+	var req *httpengine.Request
+	var vres *verification.Result
+	var verifyErr error
+	withDynamicTokenLock(e.tokenMu, params, focus, func() {
+		req, err = buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), &injection{param: focus, value: vj.Candidate.Value})
+		if err != nil {
+			return
+		}
+		tc.URL = req.URL
+		if !canBrowserVerify(ep.Method, focus.Location) {
+			return
+		}
+
+		var statePath string
+		if sess, serr := e.store.Sessions().GetByScan(ctx, job.ScanID); serr == nil && sess != nil {
+			statePath = sess.StatePath
+		}
+
+		in := verification.Input{
+			ScanID: job.ScanID, VulnClass: domain.VulnReflectedXSS,
+			InjectionPoint:   domain.InjectionPoint{ID: job.Target.InjectionPointID, ScanID: job.ScanID, EndpointID: job.Target.EndpointID},
+			Candidate:        vj.Candidate,
+			Marker:           vj.Marker,
+			Method:           req.Method,
+			URL:              req.URL,
+			Location:         focus.Location,
+			Scope:            e.scope,
+			SessionStatePath: statePath,
+		}
+		if req.Method == "POST" && focus.Location == domain.LocationForm {
+			if vals, perr := url.ParseQuery(string(req.Body)); perr == nil {
+				fv := make(map[string]string, len(vals))
+				for k, v := range vals {
+					if len(v) > 0 {
+						fv[k] = v[0]
+					}
+				}
+				in.FormValues = fv
+			}
+		}
+
+		vres, verifyErr = e.verifier.Verify(ctx, in)
+	})
 	if err != nil {
 		return verifyResult{outcome: domain.OutcomeError, permanent: true, err: err, note: note}
 	}
-	tc.URL = req.URL
 	if !canBrowserVerify(ep.Method, focus.Location) {
 		return verifyResult{skipped: true, note: note + ": browser verification supports GET/HEAD navigation, or POST with a form-encoded (application/x-www-form-urlencoded) body, only in this phase"}
 	}
-
-	var statePath string
-	if sess, err := e.store.Sessions().GetByScan(ctx, job.ScanID); err == nil && sess != nil {
-		statePath = sess.StatePath
-	}
-
-	in := verification.Input{
-		ScanID: job.ScanID, VulnClass: domain.VulnReflectedXSS,
-		InjectionPoint:   domain.InjectionPoint{ID: job.Target.InjectionPointID, ScanID: job.ScanID, EndpointID: job.Target.EndpointID},
-		Candidate:        vj.Candidate,
-		Marker:           vj.Marker,
-		Method:           req.Method,
-		URL:              req.URL,
-		Location:         focus.Location,
-		Scope:            e.scope,
-		SessionStatePath: statePath,
-	}
-	if req.Method == "POST" && focus.Location == domain.LocationForm {
-		if vals, err := url.ParseQuery(string(req.Body)); err == nil {
-			fv := make(map[string]string, len(vals))
-			for k, v := range vals {
-				if len(v) > 0 {
-					fv[k] = v[0]
-				}
-			}
-			in.FormValues = fv
-		}
-	}
-
-	vres, err := e.verifier.Verify(ctx, in)
-	if err != nil {
+	if verifyErr != nil {
 		switch {
-		case errors.Is(err, verification.ErrNotImplemented):
+		case errors.Is(verifyErr, verification.ErrNotImplemented):
 			return verifyResult{skipped: true, note: note + ": browser verification unavailable (no browser configured for this scan)"}
-		case errors.Is(err, verification.ErrUnsupportedMethod):
+		case errors.Is(verifyErr, verification.ErrUnsupportedMethod):
 			return verifyResult{skipped: true, note: note + ": browser verification supports GET/HEAD-navigable candidates only"}
 		case ctx.Err() != nil:
 			return verifyResult{outcome: domain.OutcomeCancelled, err: ctx.Err(), note: note}
-		case errors.Is(err, context.DeadlineExceeded) || isNetTimeout(err):
-			return verifyResult{outcome: domain.OutcomeTimeout, err: err, note: note + " (timed out)"}
+		case errors.Is(verifyErr, context.DeadlineExceeded) || isNetTimeout(verifyErr):
+			return verifyResult{outcome: domain.OutcomeTimeout, err: verifyErr, note: note + " (timed out)"}
 		default:
-			return verifyResult{outcome: domain.OutcomeError, err: err, note: note + ": verification failed"}
+			return verifyResult{outcome: domain.OutcomeError, err: verifyErr, note: note + ": verification failed"}
 		}
 	}
 

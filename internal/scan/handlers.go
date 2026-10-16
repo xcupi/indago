@@ -16,10 +16,13 @@ func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope) 
 	h := phase0Handlers(c.log)
 	// Shared by both executors so Finding correlation (candidate-side upsert
 	// and verification-side update) is race-free across the whole scan — see
-	// newExecutor's doc comment.
+	// newExecutor's doc comment. tokenMu is the same sharing pattern for the
+	// dynamic (rotating/single-use) anti-CSRF token refresh — see
+	// withDynamicTokenLock in dynamic_params.go.
 	findingsMu := &sync.Mutex{}
-	h[domain.JobTest] = newExecutor(c.store, eng, c.opts.Evidence, c.queue, c.opts.Executor, c.log, findingsMu)
-	h[domain.JobVerify] = newVerifyExecutor(c.store, eng, c.verifier(), c.opts.Evidence, scope, c.opts.Executor, c.log, findingsMu)
+	tokenMu := &sync.Mutex{}
+	h[domain.JobTest] = newExecutor(c.store, eng, c.opts.Evidence, c.queue, c.opts.Executor, c.log, findingsMu, tokenMu)
+	h[domain.JobVerify] = newVerifyExecutor(c.store, eng, c.verifier(), c.opts.Evidence, scope, c.opts.Executor, c.log, findingsMu, tokenMu)
 	return h
 }
 
