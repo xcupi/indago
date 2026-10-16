@@ -192,6 +192,8 @@ func (c *cli) runClient(group string, args []string) error {
 		return c.scan(sub, rest)
 	case "finding":
 		return c.finding(sub, rest)
+	case "endpoint":
+		return c.endpoint(sub, rest)
 	case "report":
 		return c.report(sub, rest)
 	}
@@ -642,6 +644,63 @@ func printStatus(w io.Writer, st *scan.Status) {
 	if s.Error != "" {
 		fmt.Fprintf(w, "Error      %s\n", s.Error)
 	}
+}
+
+// --- endpoints ---
+
+// endpoint dispatches `indago endpoint list -scan ID`. There is deliberately
+// no "show" — an operator debugging why an authenticated scan went
+// Inconclusive wants the whole discovered surface at a glance (esp. anything
+// that looks like a session-terminating link or a dynamic-token parameter),
+// not one endpoint at a time.
+func (c *cli) endpoint(sub string, args []string) error {
+	switch sub {
+	case "list":
+		return c.endpointList(args)
+	}
+	return fmt.Errorf("unknown endpoint subcommand %q (list)", sub)
+}
+
+// endpointListItem mirrors web.endpointListItem's JSON shape (Endpoint +
+// its Parameters), decoded here the same read-only way findingCandidate
+// mirrors the finding JSON shape above — never by importing internal/web.
+type endpointListItem struct {
+	domain.Endpoint
+	Parameters []domain.Parameter `json:"parameters"`
+}
+
+func (c *cli) endpointList(args []string) error {
+	fs := c.newFlags("endpoint list")
+	scanRef := fs.String("scan", "", "scan ID or prefix")
+	asJSON := fs.Bool("json", false, "print JSON")
+	if _, err := parseInterspersed(fs, args); err != nil {
+		return err
+	}
+	if *scanRef == "" {
+		return errors.New("usage: indago endpoint list -scan <scan-id|prefix> [-json]")
+	}
+	scanID, err := c.resolveScanID(*scanRef)
+	if err != nil {
+		return err
+	}
+	var items []endpointListItem
+	if err := c.call("GET", "/api/scans/"+url.PathEscape(scanID)+"/endpoints", nil, &items); err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(c.out, items)
+	}
+	if len(items) == 0 {
+		fmt.Fprintln(c.out, "no endpoints discovered yet")
+		return nil
+	}
+	for _, ep := range items {
+		fmt.Fprintf(c.out, "%s  %-6s %-10s %s\n", ep.ID, ep.Method, ep.Source, ep.URL)
+		for _, p := range ep.Parameters {
+			fmt.Fprintf(c.out, "    %-10s %-8s %s\n", p.Location, p.Name, p.Example)
+		}
+	}
+	return nil
 }
 
 // --- findings ---

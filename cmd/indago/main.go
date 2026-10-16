@@ -59,7 +59,7 @@ func main() {
 		err = cmdDB(args)
 	case "serve":
 		err = cmdServe(args)
-	case "project", "target", "scope", "scan", "finding", "report":
+	case "project", "target", "scope", "scan", "finding", "endpoint", "report":
 		err = newCLI(defaultServer(), os.Stdout).runClient(cmd, args)
 	case "help", "-h", "--help":
 		usage()
@@ -98,6 +98,7 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER, default http://
   scan config <scan-id|prefix> [-discovery N] [-http N] [-browser N] [-rate N]   (runtime tuning)
   finding list -scan <scan-id|prefix> [-verdict confirmed|pending|inconclusive|rejected|all] [-json]   (default: confirmed; all with -json)
   finding show -scan <scan-id|prefix> <finding-id|prefix> [-json]
+  endpoint list -scan <scan-id|prefix> [-json]   (discovered endpoints + their parameters, for debugging why a scan is Inconclusive)
   report create -scan <scan-id|prefix> -format json|markdown|html [-mode all|confirmed|selected] [-finding ID]... [-out FILE]
   report list -scan <scan-id|prefix> [-json]
   report show <report-id|prefix> [-out FILE] [-download]

@@ -103,6 +103,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/scans", s.handleCreateScan)
 	mux.HandleFunc("GET /api/scans/{id}", s.handleGetScan)
 	mux.HandleFunc("GET /api/scans/{id}/stats", s.handleScanStats)
+	mux.HandleFunc("GET /api/scans/{id}/endpoints", s.handleListEndpoints)
 	mux.HandleFunc("GET /api/scans/{id}/status", s.handleScanStatus)
 	mux.HandleFunc("GET /api/scans/{id}/findings", s.handleListFindings)
 	mux.HandleFunc("GET /api/scans/{id}/findings/{fid}", s.handleGetFinding)
