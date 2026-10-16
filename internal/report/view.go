@@ -164,9 +164,11 @@ type detailShape struct {
 	// BlockSuspected/BlockDetail mirror scan.findingDetail's fields of the
 	// same name — see upsertBlockFinding. Set only on a diagnostic Finding
 	// for a possible WAF/rate-limit/maintenance block seen during testing.
-	BlockSuspected bool   `json:"block_suspected,omitempty"`
-	BlockDetail    string `json:"block_detail,omitempty"`
-	Candidates     []struct {
+	BlockSuspected   bool   `json:"block_suspected,omitempty"`
+	BlockDetail      string `json:"block_detail,omitempty"`
+	CaptchaSuspected bool   `json:"captcha_suspected,omitempty"`
+	CaptchaLabel     string `json:"captcha_label,omitempty"`
+	Candidates       []struct {
 		Source         string `json:"source"`
 		Category       string `json:"category"`
 		Context        string `json:"context"`
@@ -225,6 +227,11 @@ const (
 	// always Inconclusive), never inferred from a Rejected finding's
 	// candidates the way the other two reasons are.
 	ReviewPossibleBlock ReviewReason = "possible_block"
+	// ReviewCaptchaDetected: a CAPTCHA/bot-challenge page newly appeared for
+	// the mutated/candidate request during testing — detect-only (AGENTS.md
+	// §2.2), set on its own dedicated diagnostic Finding the same way
+	// ReviewPossibleBlock is.
+	ReviewCaptchaDetected ReviewReason = "captcha_detected"
 )
 
 // Label is the human-readable explanation of a ReviewReason.
@@ -236,6 +243,8 @@ func (r ReviewReason) Label() string {
 		return "every candidate tried at this site was encoded or stripped by the target; Indago only tries the small, canonical breakout(s) for this context (never alternate shapes or evasion variants), so a differently-shaped payload bypassing this specific filter is untested, not ruled out"
 	case ReviewPossibleBlock:
 		return "a request during testing came back with a suspicious status-code change from the baseline (e.g. 403/429/503) — this may be a WAF/rate-limit/maintenance block, not a clean negative; Indago never retries or evades a block (see AGENTS.md §2.2)"
+	case ReviewCaptchaDetected:
+		return "a response during testing matched a known CAPTCHA/bot-challenge pattern (reCAPTCHA/hCaptcha/Cloudflare challenge) that was not present in the baseline response — Indago only detects this, it never attempts to solve or bypass a CAPTCHA (see AGENTS.md §2.2)"
 	default:
 		return string(r)
 	}
@@ -252,6 +261,9 @@ func (r ReviewReason) Label() string {
 func findingReviewReason(verdict domain.Verdict, d detailShape) (ReviewReason, bool) {
 	if d.BlockSuspected {
 		return ReviewPossibleBlock, true
+	}
+	if d.CaptchaSuspected {
+		return ReviewCaptchaDetected, true
 	}
 	if verdict != domain.VerdictRejected || len(d.Candidates) == 0 {
 		return "", false

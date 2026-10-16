@@ -97,6 +97,15 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 	report.Baseline = detection.ResponseSummary{Status: bl.status, BodyLen: bl.bodyLen}
 	report.Mutated = detection.ResponseSummary{Status: resp.Status, BodyLen: len(resp.Body)}
 
+	// CAPTCHA/bot-challenge detection (pure, advisory only — AGENTS.md §2.2:
+	// detect-only, Indago never attempts to solve or bypass a CAPTCHA). Only a
+	// challenge that newly appears for the mutated request (not already on the
+	// baseline page) is a signal; see detection.CaptchaSuspected.
+	if label, ok := detection.CaptchaSuspected(bl.body, resp.Body); ok {
+		r.captchaSuspected = true
+		r.captchaLabel = label
+	}
+
 	// Context analysis (pure): classify every reflection site against the actual
 	// response bytes. Still no verdict.
 	detection.ClassifyContexts(&report, resp.Body, detection.ContextOptions{

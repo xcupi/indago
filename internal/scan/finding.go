@@ -56,6 +56,13 @@ type findingDetail struct {
 	// they never share a row).
 	BlockSuspected bool   `json:"block_suspected,omitempty"`
 	BlockDetail    string `json:"block_detail,omitempty"`
+
+	// CaptchaSuspected/CaptchaLabel: see upsertCaptchaFinding. Set only on a
+	// diagnostic Finding recording a CAPTCHA/bot-challenge that newly
+	// appeared during testing — detect-only (AGENTS.md §2.2), disjoint dedup
+	// key from both the real candidate findings and the block diagnostic.
+	CaptchaSuspected bool   `json:"captcha_suspected,omitempty"`
+	CaptchaLabel     string `json:"captcha_label,omitempty"`
 }
 
 // verificationAttempt is one browser-verification attempt correlated into a
@@ -318,6 +325,77 @@ func upsertBlockFinding(ctx context.Context, st store.Store, scanID domain.ID, e
 	}
 	if err := st.Findings().Create(ctx, f); err != nil {
 		return nil, fmt.Errorf("create block finding: %w", err)
+	}
+	return f, nil
+}
+
+// captchaFindingDedupKey distinguishes a CAPTCHA diagnostic from both a real
+// candidate finding and the status-code block diagnostic at the same
+// injection point — see blockFindingDedupKey for why a disjoint suffix is
+// enough to guarantee no collision.
+func captchaFindingDedupKey(injectionPointID domain.ID) string {
+	return string(injectionPointID) + "\x00captcha"
+}
+
+// upsertCaptchaFinding records (or bumps the occurrence count of) a
+// diagnostic Finding for a CAPTCHA/bot-challenge that newly appeared during
+// testing (see detection.CaptchaSuspected). Detect-only: Indago never
+// attempts to solve or bypass a CAPTCHA (AGENTS.md §2.2) — this exists so
+// the operator sees the signal on the report instead of only in a raw
+// TestCase note. Same Verdict/Severity contract as upsertBlockFinding
+// (Inconclusive/Info: a coverage diagnostic, never itself a vulnerability),
+// and the same correlate-by-dedup-key-or-create shape.
+func upsertCaptchaFinding(ctx context.Context, st store.Store, scanID domain.ID, ep *domain.Endpoint, injectionPointID domain.ID, focus *domain.Parameter, label string, testCaseID domain.ID) (*domain.Finding, error) {
+	key := captchaFindingDedupKey(injectionPointID)
+	detail := fmt.Sprintf("%s challenge newly appeared for this parameter's test request (not present on the baseline response)", label)
+
+	existing, err := st.Findings().ListByScan(ctx, scanID)
+	if err != nil {
+		return nil, fmt.Errorf("list findings for captcha correlation: %w", err)
+	}
+	for _, f := range existing {
+		if f.VulnClass != domain.VulnReflectedXSS {
+			continue
+		}
+		d := decodeFindingDetail(f.Detail)
+		if d.DedupKey != key {
+			continue
+		}
+		d.Occurrences++
+		d.TestCaseIDs = appendUniqueID(d.TestCaseIDs, testCaseID)
+		d.CaptchaLabel = label
+		f.Detail = d.encode()
+		f.UpdatedAt = time.Now()
+		if err := st.Findings().Update(ctx, f); err != nil {
+			return nil, fmt.Errorf("update captcha finding: %w", err)
+		}
+		return f, nil
+	}
+
+	sc, err := st.Scans().Get(ctx, scanID)
+	if err != nil {
+		return nil, fmt.Errorf("load scan: %w", err)
+	}
+	now := time.Now()
+	d := findingDetail{
+		Method: ep.Method, ParameterName: focus.Name, DedupKey: key, Occurrences: 1,
+		TestCaseIDs: []domain.ID{testCaseID}, CaptchaSuspected: true, CaptchaLabel: label,
+	}
+	f := &domain.Finding{
+		ID: domain.NewID(), ScanID: scanID, ProjectID: sc.ProjectID, VulnClass: domain.VulnReflectedXSS,
+		Verdict: domain.VerdictInconclusive, Severity: domain.SeverityInfo, Confidence: domain.ConfidenceMedium,
+		Title:            fmt.Sprintf("Possible %s challenge triggered while testing parameter %q (%s) at %s %s", label, focus.Name, focus.Location, ep.Method, endpointLabel(ep.URL)),
+		Summary:          detail + " — detect-only; Indago never attempts to solve or bypass a CAPTCHA (AGENTS.md §2.2)",
+		EndpointID:       ep.ID,
+		InjectionPointID: injectionPointID,
+		ParameterID:      focus.ID,
+		Location:         focus.Location,
+		Provenance:       domain.Provenance{Engine: "reflected-xss", DiscoverySource: ep.Source, DetectedAt: now, AIAssisted: false},
+		Detail:           d.encode(),
+		CreatedAt:        now, UpdatedAt: now,
+	}
+	if err := st.Findings().Create(ctx, f); err != nil {
+		return nil, fmt.Errorf("create captcha finding: %w", err)
 	}
 	return f, nil
 }

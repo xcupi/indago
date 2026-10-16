@@ -178,6 +178,15 @@ type result struct {
 	blockSuspected      bool
 	blockBaselineStatus int
 	blockMutatedStatus  int
+
+	// captchaSuspected/captchaLabel: see detection.CaptchaSuspected. Set when
+	// a CAPTCHA/bot-challenge page newly appears for the mutated/candidate
+	// request (not present on the baseline) — detect-only, never attempted
+	// to solve or bypass (AGENTS.md §2.2). run() calls recordCaptchaFinding
+	// (verify.go) for this, same pattern as blockSuspected above; the two
+	// are independent signals and can both be set on the same result.
+	captchaSuspected bool
+	captchaLabel     string
 }
 
 func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.TestCase) result {
@@ -224,6 +233,9 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		} else if res.blockSuspected {
 			e.recordBlockFinding(ctx, job, ep, focus, res.blockBaselineStatus, res.blockMutatedStatus, tc.ID)
 		}
+		if res.captchaSuspected {
+			e.recordCaptchaFinding(ctx, job, ep, focus, res.captchaLabel, tc.ID)
+		}
 		return res
 	case focus != nil:
 		res := e.runReflection(ctx, tc, ep, params, focus)
@@ -235,6 +247,9 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		}
 		if res.blockSuspected {
 			e.recordBlockFinding(ctx, job, ep, focus, res.blockBaselineStatus, res.blockMutatedStatus, tc.ID)
+		}
+		if res.captchaSuspected {
+			e.recordCaptchaFinding(ctx, job, ep, focus, res.captchaLabel, tc.ID)
 		}
 		return res
 	default:

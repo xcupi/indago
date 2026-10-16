@@ -145,6 +145,24 @@ func (e *executor) recordBlockFinding(ctx context.Context, job *domain.TestJob, 
 	}
 }
 
+// recordCaptchaFinding is recordBlockFinding's counterpart for a result
+// where detection.CaptchaSuspected found a CAPTCHA/bot-challenge page newly
+// appearing for the mutated/candidate request (see result.captchaSuspected).
+// Detect-only, same as the status-code block signal: this never attempts to
+// solve or bypass the challenge (AGENTS.md §2.2), it only records the
+// diagnostic Finding described in upsertCaptchaFinding.
+func (e *executor) recordCaptchaFinding(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, focus *domain.Parameter, label string, testCaseID domain.ID) {
+	if e.store == nil {
+		return
+	}
+	e.findingsMu.Lock()
+	_, err := upsertCaptchaFinding(ctx, e.store, job.ScanID, ep, job.Target.InjectionPointID, focus, label, testCaseID)
+	e.findingsMu.Unlock()
+	if err != nil {
+		e.log.Warn("record captcha finding", "job", job.ID, "err", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // verify executor: runs JobVerify jobs
 // ---------------------------------------------------------------------------

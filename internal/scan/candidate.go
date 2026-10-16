@@ -159,6 +159,14 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 	report.Baseline = detection.ResponseSummary{Status: bl.status, BodyLen: bl.bodyLen}
 	report.Mutated = detection.ResponseSummary{Status: resp.Status, BodyLen: len(resp.Body)}
 	report.Candidate = &cand // mark this as a candidate re-analysis, not a fresh probe
+
+	// CAPTCHA/bot-challenge detection — see the matching comment in
+	// runReflection; same detect-only contract (AGENTS.md §2.2).
+	if label, ok := detection.CaptchaSuspected(bl.body, resp.Body); ok {
+		r.captchaSuspected = true
+		r.captchaLabel = label
+	}
+
 	detection.ClassifyContexts(&report, resp.Body, detection.ContextOptions{
 		ContentType: resp.Headers.Get("Content-Type"),
 	})
