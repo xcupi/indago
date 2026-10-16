@@ -200,6 +200,12 @@ type createScanReq struct {
 	// (see domain.ScanConfig.EnableEvasion). Off by default — an authorized
 	// operator sets this explicitly per scan.
 	EnableEvasion bool `json:"enable_evasion"`
+
+	// ProxyPool, when non-empty, routes this scan's outbound traffic (raw HTTP
+	// and browser verification alike) through one of the listed proxies,
+	// round-robin. See domain.ScanConfig.ProxyPool. Empty (the default) means
+	// a direct connection.
+	ProxyPool []string `json:"proxy_pool"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -265,6 +271,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		CandidateProfile: req.CandidateProfile,
 		MaxCandidates:    req.MaxCandidates,
 		EnableEvasion:    req.EnableEvasion,
+		ProxyPool:        cleanList(req.ProxyPool),
 	})
 	if err != nil {
 		s.writeScanError(w, err)

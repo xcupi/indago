@@ -98,6 +98,11 @@ async function openNewScanModal() {
     labelInline(enableEvasion, "Also try WAF/filter-bypass variants (case variation, alternate separators, double URL-encoding)"),
     el("div", "Off by default. Adds these ON TOP OF the candidates above for an authorized engagement where a bypass is itself the reportable finding — still benign-marker-only and scope-enforced the same as every other request. See AGENTS.md §2 and docs/reflection-candidates.md.", "hint"));
 
+  const proxyPool = textarea("f_proxypool", 2, "one proxy per line, e.g. http://host:port or socks5://user:pass@host:port — empty = direct connection");
+  const advFs = el("fieldset");
+  advFs.append(legend("Proxy pool (opt-in, operator infrastructure)"), field("Proxies", proxyPool),
+    el("div", "Routes this scan's outbound traffic — raw HTTP requests AND browser verification alike — through one of the listed proxies, round-robin. Indago never discovers or manages proxies itself; this is entirely operator-supplied infrastructure. Leave empty for Indago's normal direct connection. See AGENTS.md §2.3.", "hint"));
+
   const typeFs = el("fieldset"); typeFs.append(legend("Scan type & discovery"), typeRow, field("Seed URLs", seeds), crawlLimits);
   const perfFs = el("fieldset"); perfFs.append(legend("Performance profile"), field("Profile", profile), customCfg);
   const stopFs = el("fieldset"); stopFs.append(legend("Stop policy"), rowOf(field("When to stop", stop), stopNWrap));
@@ -119,6 +124,7 @@ async function openNewScanModal() {
       max_depth: typeQuick.checked ? 0 : numOrZero(depth), max_pages: numOrZero(maxPages), max_endpoints: numOrZero(maxEndpoints),
       candidate_profile: candProfile.value, max_candidates: numOrZero(maxCand),
       enable_evasion: enableEvasion.checked,
+      proxy_pool: lines(proxyPool),
     };
     if (profile.value === "custom") {
       req.config = { discovery_concurrency: numOrZero(cfgD), http_concurrency: numOrZero(cfgH), browser_concurrency: parseInt(cfgB.value, 10) || 0, requests_per_second: parseFloat(cfgR.value) || 0 };
@@ -136,7 +142,7 @@ async function openNewScanModal() {
 
   const actions = el("div", undefined, "form-actions");
   actions.append(create, button("Cancel", closeModal));
-  body.append(rowOf(field("Scan name", name), field("Target", target)), typeFs, candFs, perfFs, stopFs, authFs, actions, errBox);
+  body.append(rowOf(field("Scan name", name), field("Target", target)), typeFs, candFs, advFs, perfFs, stopFs, authFs, actions, errBox);
   openModal("New scan", body);
 }
 

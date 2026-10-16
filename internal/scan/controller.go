@@ -94,6 +94,18 @@ type Options struct {
 	// seeds are still registered, nothing is fetched.
 	HTTP httpengine.Engine
 
+	// HTTPConfig is the Config HTTP was built from. It is otherwise unused —
+	// every scan shares HTTP directly — EXCEPT when a scan sets its own
+	// domain.ScanConfig.ProxyPool: scanHTTPEngine then clones HTTPConfig with
+	// that pool substituted in and builds a fresh, scan-scoped client from it,
+	// so a per-scan proxy pool actually changes where that scan's raw
+	// discovery/candidate requests go instead of only affecting browser
+	// verification. Left zero-value when HTTP is a Stub/fake (tests): a scan
+	// configuring ProxyPool without a real HTTPConfig still gets SOME client
+	// (built from the zero Config), just not one tuned the way the real one
+	// would be.
+	HTTPConfig httpengine.Config
+
 	// Browser, when non-nil, enables browser network-observation discovery AND
 	// (when it is the concrete *browser.Manager) browser verification of
 	// reflected candidates. Scope IS enforced for verification (and for
@@ -254,6 +266,9 @@ type CreateScanParams struct {
 	MaxCandidates    int
 	// EnableEvasion — see domain.ScanConfig.EnableEvasion. Off by default.
 	EnableEvasion bool
+	// ProxyPool — see domain.ScanConfig.ProxyPool. Empty (the default) means a
+	// direct connection for both raw HTTP traffic and browser verification.
+	ProxyPool []string
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -340,6 +355,10 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 		return nil, fmt.Errorf("%w: %v", ErrBadConfig, err)
 	}
 	cfg.EnableEvasion = p.EnableEvasion
+	cfg.ProxyPool = p.ProxyPool
+	if err := validateProxyPool(cfg.ProxyPool); err != nil {
+		return nil, err
+	}
 
 	mode := p.AuthMode
 	if !mode.IsValid() {
@@ -711,6 +730,24 @@ func validateCrawlExtent(cfg domain.ScanConfig) error {
 		return fmt.Errorf("%w: max_pages must be between 0 and %d", ErrBadConfig, maxCrawlPages)
 	case cfg.MaxEndpoints < 0 || cfg.MaxEndpoints > maxCrawlEndpoints:
 		return fmt.Errorf("%w: max_endpoints must be between 0 and %d", ErrBadConfig, maxCrawlEndpoints)
+	}
+	return nil
+}
+
+// validateProxyPool rejects an implausible proxy entry up front (not a URL,
+// or a scheme Indago's HTTP transport can't dial) rather than letting a typo
+// surface later as every request in the scan silently failing to connect.
+func validateProxyPool(pool []string) error {
+	for _, p := range pool {
+		u, err := url.Parse(p)
+		if err != nil || u.Host == "" {
+			return fmt.Errorf("%w: proxy_pool entry %q is not a valid proxy URL (want http://host:port, https://host:port, or socks5://host:port)", ErrBadConfig, p)
+		}
+		switch u.Scheme {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return fmt.Errorf("%w: proxy_pool entry %q has unsupported scheme %q (want http, https, socks5, or socks5h)", ErrBadConfig, p, u.Scheme)
+		}
 	}
 	return nil
 }

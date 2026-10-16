@@ -213,9 +213,10 @@ func cmdServe(args []string) error {
 	}
 
 	opts := scan.Options{
-		HTTP:     eng,
-		Evidence: evStore,
-		Executor: scan.ExecutorConfig{AllowStateChanging: *allowUnsafe},
+		HTTP:       eng,
+		HTTPConfig: httpCfg,
+		Evidence:   evStore,
+		Executor:   scan.ExecutorConfig{AllowStateChanging: *allowUnsafe},
 	}
 	if *allowUnsafe {
 		log.Warn("state-changing methods (POST/PUT/PATCH/DELETE) will be executed against in-scope targets")
