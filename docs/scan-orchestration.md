@@ -43,6 +43,20 @@ per scan:
   silently dropped).
 - **Provenance** (`user_provided`, `crawler`, `form`, `sitemap`, `robots`, …) is
   stored on every endpoint/parameter and surfaced in status.
+- **Session-terminating links are skipped on authenticated scans.** When the
+  scan carries a session (`RunParams.SessionStatePath` non-empty), the
+  Collector refuses to register a crawler-style-discovered (not
+  `user_provided`) endpoint whose path looks like a logout/sign-out
+  endpoint (`internal/discovery/safety.go`: `looksSessionTerminating`,
+  matched word-bounded against `logout`/`log-off`/`sign-out` and
+  underscore/hyphen variants). Almost every authenticated page's nav
+  includes a "Logout" link; without this, a crawler following it mid-scan
+  silently ends the session, and every test after that point runs
+  unauthenticated instead of reaching whatever sits behind the login the
+  scan was specifically given a session to get past. An operator-provided
+  seed URL is never skipped by this check, even if it matches — that is
+  explicit intent. Unauthenticated scans skip nothing (there is no session
+  to protect).
 
 ## 1b. Test job execution
 

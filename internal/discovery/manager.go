@@ -88,7 +88,7 @@ type RunResult struct {
 // testing proceeds in parallel; the Collector enqueues test jobs as discovery
 // progresses, so testing never waits for discovery to finish.
 func (m *Manager) Run(ctx context.Context, p RunParams) (*RunResult, error) {
-	collector := NewCollector(m.store, m.queue, p.ScanID, p.Scope, m.cfg, m.log)
+	collector := NewCollector(m.store, m.queue, p.ScanID, p.Scope, p.SessionStatePath != "", m.cfg, m.log)
 	// Rebuild dedup state from persisted discovery so a resumed scan does not
 	// duplicate endpoints, parameters, or test jobs. A no-op for a fresh scan.
 	if err := collector.Hydrate(ctx); err != nil {

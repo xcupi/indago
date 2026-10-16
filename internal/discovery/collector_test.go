@@ -21,8 +21,75 @@ func newCollector(t *testing.T, cfg discovery.Config) (*discovery.Collector, *me
 	q := queue.NewMemory()
 	scanID := domain.NewID()
 	scope := domain.Scope{IncludeHosts: []string{"example.com"}}
-	c := discovery.NewCollector(st, q, scanID, scope, cfg, quiet())
+	c := discovery.NewCollector(st, q, scanID, scope, false, cfg, quiet())
 	return c, st, q, scanID
+}
+
+// newAuthenticatedCollector is newCollector's counterpart for tests of the
+// session-terminating-link skip, which only applies to an authenticated scan.
+func newAuthenticatedCollector(t *testing.T, cfg discovery.Config) (*discovery.Collector, *memory.Store, *queue.Memory, domain.ID) {
+	t.Helper()
+	st := memory.New()
+	q := queue.NewMemory()
+	scanID := domain.NewID()
+	scope := domain.Scope{IncludeHosts: []string{"example.com"}}
+	c := discovery.NewCollector(st, q, scanID, scope, true, cfg, quiet())
+	return c, st, q, scanID
+}
+
+// A crawler-found link that looks like a logout endpoint must not be
+// followed on an authenticated scan — visiting it would end the session the
+// scan was specifically given to get past the login wall, silently turning
+// every subsequent test unauthenticated. This was found via a real scan
+// against DVWA: its nav bar's "Logout" link got crawled (even under -quick,
+// which still follows links one hop from the seed page) and killed the
+// session mid-scan, so the actually-interesting authenticated-only finding
+// came back Inconclusive instead of Confirmed.
+func TestCollectorSkipsLogoutLinkOnAuthenticatedScan(t *testing.T) {
+	c, _, _, _ := newAuthenticatedCollector(t, discovery.DefaultConfig())
+	ctx := context.Background()
+
+	for _, u := range []string{
+		"http://example.com/logout.php",
+		"http://example.com/auth/sign-out",
+		"http://example.com/user/log_off",
+		"http://example.com/LOGOUT",
+	} {
+		id, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{URL: u, Method: domain.MethodGET, Source: domain.SourceCrawler})
+		if err != nil {
+			t.Fatalf("AddEndpoint(%q) returned an error, want a silent skip: %v", u, err)
+		}
+		if id != "" {
+			t.Fatalf("AddEndpoint(%q) = %q, want skipped (empty id) on an authenticated scan", u, id)
+		}
+	}
+
+	// A non-logout-looking link is unaffected.
+	id, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{URL: "http://example.com/vulnerabilities/xss_r/", Method: domain.MethodGET, Source: domain.SourceCrawler})
+	if err != nil || id == "" {
+		t.Fatalf("an ordinary crawled link should not be skipped: id=%q err=%v", id, err)
+	}
+}
+
+// An unauthenticated scan has no session to lose, so nothing is skipped.
+func TestCollectorDoesNotSkipLogoutLinkWhenUnauthenticated(t *testing.T) {
+	c, _, _, _ := newCollector(t, discovery.DefaultConfig())
+	ctx := context.Background()
+	id, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{URL: "http://example.com/logout.php", Method: domain.MethodGET, Source: domain.SourceCrawler})
+	if err != nil || id == "" {
+		t.Fatalf("an anonymous scan should not skip a logout-looking link: id=%q err=%v", id, err)
+	}
+}
+
+// An operator-provided seed is explicit intent and is never skipped, even on
+// an authenticated scan and even though its URL matches the heuristic.
+func TestCollectorNeverSkipsUserProvidedSeedEvenIfLogoutLooking(t *testing.T) {
+	c, _, _, _ := newAuthenticatedCollector(t, discovery.DefaultConfig())
+	ctx := context.Background()
+	id, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{URL: "http://example.com/logout.php", Method: domain.MethodGET, Source: domain.SourceUserProvided})
+	if err != nil || id == "" {
+		t.Fatalf("an explicit user-provided seed must never be skipped: id=%q err=%v", id, err)
+	}
 }
 
 func TestCollectorScopeEnforcement(t *testing.T) {
@@ -168,7 +235,7 @@ func TestCollectorHydrateAvoidsDuplicatesAfterRestart(t *testing.T) {
 	scope := domain.Scope{IncludeHosts: []string{"example.com"}}
 	ctx := context.Background()
 
-	first := discovery.NewCollector(st, q, scanID, scope, discovery.DefaultConfig(), quiet())
+	first := discovery.NewCollector(st, q, scanID, scope, false, discovery.DefaultConfig(), quiet())
 	if _, err := first.AddEndpoint(ctx, discovery.EndpointCandidate{URL: "http://example.com/s?q=1", Method: domain.MethodGET, Source: domain.SourceCrawler}); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +246,7 @@ func TestCollectorHydrateAvoidsDuplicatesAfterRestart(t *testing.T) {
 	e1, p1, _ := first.Counts()
 
 	// "Restart": brand-new collector, same store and queue.
-	second := discovery.NewCollector(st, q, scanID, scope, discovery.DefaultConfig(), quiet())
+	second := discovery.NewCollector(st, q, scanID, scope, false, discovery.DefaultConfig(), quiet())
 	if err := second.Hydrate(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +311,7 @@ func TestCollectorHydrateEnqueuesJobsLostToInterruption(t *testing.T) {
 	scope := domain.Scope{IncludeHosts: []string{"example.com"}}
 	ctx := context.Background()
 
-	first := discovery.NewCollector(st, failingEnqueue{q}, scanID, scope, discovery.DefaultConfig(), quiet())
+	first := discovery.NewCollector(st, failingEnqueue{q}, scanID, scope, false, discovery.DefaultConfig(), quiet())
 	if _, err := first.AddEndpoint(ctx, discovery.EndpointCandidate{URL: "http://example.com/s?q=1", Method: domain.MethodGET, Source: domain.SourceCrawler}); err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +323,7 @@ func TestCollectorHydrateEnqueuesJobsLostToInterruption(t *testing.T) {
 		t.Fatalf("setup: interrupted run must have enqueued nothing, got %+v", st)
 	}
 
-	second := discovery.NewCollector(st, q, scanID, scope, discovery.DefaultConfig(), quiet())
+	second := discovery.NewCollector(st, q, scanID, scope, false, discovery.DefaultConfig(), quiet())
 	for i := 0; i < 2; i++ { // second pass proves idempotence
 		if err := second.Hydrate(ctx); err != nil {
 			t.Fatal(err)
@@ -291,7 +358,7 @@ func TestCollectorHydrateRegistersMissingQueryParams(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := discovery.NewCollector(st, q, scanID, scope, discovery.DefaultConfig(), quiet())
+	c := discovery.NewCollector(st, q, scanID, scope, false, discovery.DefaultConfig(), quiet())
 	if err := c.Hydrate(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +387,7 @@ func TestCollectorHydrateCreatesMissingInjectionPoint(t *testing.T) {
 	scope := domain.Scope{IncludeHosts: []string{"example.com"}}
 	ctx := context.Background()
 
-	first := discovery.NewCollector(st, q, scanID, scope, discovery.DefaultConfig(), quiet())
+	first := discovery.NewCollector(st, q, scanID, scope, false, discovery.DefaultConfig(), quiet())
 	if err := first.AddParameter(ctx, discovery.ParamCandidate{EndpointURL: "http://example.com/post", EndpointMethod: domain.MethodPOST, Name: "body", Location: domain.LocationForm, Source: domain.SourceForm}); err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +398,7 @@ func TestCollectorHydrateCreatesMissingInjectionPoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	second := discovery.NewCollector(st, q, scanID, scope, discovery.DefaultConfig(), quiet())
+	second := discovery.NewCollector(st, q, scanID, scope, false, discovery.DefaultConfig(), quiet())
 	if err := second.Hydrate(ctx); err != nil {
 		t.Fatal(err)
 	}

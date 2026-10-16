@@ -17,12 +17,13 @@ import (
 // enqueues a test job — so testing can begin immediately. It is safe for
 // concurrent use by many sources.
 type Collector struct {
-	store  store.Store
-	queue  queue.Queue
-	log    *slog.Logger
-	scanID domain.ID
-	scope  domain.Scope
-	cfg    Config
+	store         store.Store
+	queue         queue.Queue
+	log           *slog.Logger
+	scanID        domain.ID
+	scope         domain.Scope
+	authenticated bool // true when the scan carries a session; see AddEndpoint
+	cfg           Config
 
 	mu            sync.Mutex
 	seenEndpoints map[string]domain.ID // endpoint key → canonical ID
@@ -34,8 +35,11 @@ type Collector struct {
 
 var _ Sink = (*Collector)(nil)
 
-// NewCollector builds a collector for one scan.
-func NewCollector(st store.Store, q queue.Queue, scanID domain.ID, scope domain.Scope, cfg Config, log *slog.Logger) *Collector {
+// NewCollector builds a collector for one scan. authenticated marks whether
+// the scan is running with a session (non-empty RunParams.SessionStatePath)
+// — see AddEndpoint for why this changes which crawler-found links get
+// followed.
+func NewCollector(st store.Store, q queue.Queue, scanID domain.ID, scope domain.Scope, authenticated bool, cfg Config, log *slog.Logger) *Collector {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -45,6 +49,7 @@ func NewCollector(st store.Store, q queue.Queue, scanID domain.ID, scope domain.
 		log:           log,
 		scanID:        scanID,
 		scope:         scope,
+		authenticated: authenticated,
 		cfg:           cfg.withDefaults(),
 		seenEndpoints: make(map[string]domain.ID),
 		seenParams:    make(map[string]struct{}),
@@ -211,6 +216,22 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 	}
 	if d := c.scope.Permits(info.Canonical); !d.Allowed {
 		return "", nil // out of scope: silently skip (fail closed)
+	}
+
+	// An authenticated scan's crawler-style sources (crawler, forms, browser
+	// network capture, sitemap, robots, content discovery) must not follow a
+	// link that looks like it logs the session out — e.g. a "Logout" link
+	// present in the nav of almost every authenticated page. Doing so would
+	// silently end the session mid-scan: every test after that point runs
+	// unauthenticated and the scan never finds anything behind the login it
+	// was specifically given a session to get past. An operator-provided
+	// seed URL is NEVER skipped here, even if it happens to match — that is
+	// explicit intent (e.g. deliberately testing the logout endpoint
+	// itself), not an accidental link-follow. Unauthenticated scans have no
+	// session to lose, so nothing is skipped for them either.
+	if c.authenticated && ep.Source != domain.SourceUserProvided && looksSessionTerminating(info.Canonical) {
+		c.log.Debug("discovery: skipping likely session-terminating link", "url", info.Canonical, "source", ep.Source)
+		return "", nil
 	}
 
 	key := EndpointKey(method, info)
