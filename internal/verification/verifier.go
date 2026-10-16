@@ -64,6 +64,11 @@ type Input struct {
 	// SessionStatePath, when non-empty, seeds the browser context with the
 	// scan's saved (authenticated) session material.
 	SessionStatePath string
+	// ProxyServer, when non-empty, routes this one verification attempt's
+	// browser context through the given proxy (operator-supplied; see
+	// domain.ScanConfig.ProxyPool and browser.ContextOptions.ProxyServer).
+	// "" (the default) is a direct connection.
+	ProxyServer string
 }
 
 // ResultEvidence carries the raw artifacts a verification attempt produced. The

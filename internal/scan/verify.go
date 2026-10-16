@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/indago/indago/internal/detection"
@@ -146,9 +147,15 @@ type verifyExecutor struct {
 	// dynamic_params.go. MUST be the same mutex given to this scan's
 	// executor, for the same reason findingsMu must be.
 	tokenMu *sync.Mutex
+	// proxyPool is this scan's operator-supplied proxy list (domain.ScanConfig.
+	// ProxyPool); empty means every verification browser context is a direct
+	// connection. proxyNext round-robins through it across concurrent verify
+	// jobs — see nextProxy.
+	proxyPool []string
+	proxyNext atomic.Uint64
 }
 
-func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Verifier, ev evidence.Store, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, tokenMu *sync.Mutex) *verifyExecutor {
+func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Verifier, ev evidence.Store, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, tokenMu *sync.Mutex, proxyPool []string) *verifyExecutor {
 	if v == nil {
 		v = verification.Stub{}
 	}
@@ -158,7 +165,17 @@ func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Ver
 	if tokenMu == nil {
 		tokenMu = &sync.Mutex{}
 	}
-	return &verifyExecutor{store: st, engine: eng, verifier: v, evidence: ev, scope: scope, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu, tokenMu: tokenMu}
+	return &verifyExecutor{store: st, engine: eng, verifier: v, evidence: ev, scope: scope, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu, tokenMu: tokenMu, proxyPool: proxyPool}
+}
+
+// nextProxy round-robins through proxyPool ("" when empty: direct connection,
+// the overwhelmingly common case that must stay free of any extra state).
+func (e *verifyExecutor) nextProxy() string {
+	if len(e.proxyPool) == 0 {
+		return ""
+	}
+	i := e.proxyNext.Add(1) - 1
+	return e.proxyPool[i%uint64(len(e.proxyPool))]
 }
 
 var _ worker.Handler = (*verifyExecutor)(nil)
@@ -270,6 +287,7 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 			Location:         focus.Location,
 			Scope:            e.scope,
 			SessionStatePath: statePath,
+			ProxyServer:      e.nextProxy(),
 		}
 		if req.Method == "POST" && focus.Location == domain.LocationForm {
 			if vals, perr := url.ParseQuery(string(req.Body)); perr == nil {

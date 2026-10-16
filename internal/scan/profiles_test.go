@@ -1,6 +1,7 @@
 package scan_test
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/indago/indago/internal/domain"
@@ -22,7 +23,7 @@ func TestProfileConfigDefaults(t *testing.T) {
 	}
 	// Unknown profile falls back to balanced.
 	unk := scan.ProfileConfig(domain.ProfileName("weird"))
-	if unk != bal {
+	if !reflect.DeepEqual(unk, bal) {
 		t.Fatalf("unknown profile should fall back to balanced, got %+v", unk)
 	}
 }

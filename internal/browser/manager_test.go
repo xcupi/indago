@@ -87,7 +87,7 @@ type fakeBrowser struct {
 	contexts []*fakeContext
 }
 
-func (b *fakeBrowser) NewContext(storageStatePath string, allow func(string) bool) (contextHandle, error) {
+func (b *fakeBrowser) NewContext(storageStatePath, proxyServer string, allow func(string) bool) (contextHandle, error) {
 	if b.drv.createDelay > 0 {
 		time.Sleep(b.drv.createDelay)
 	}
@@ -96,7 +96,7 @@ func (b *fakeBrowser) NewContext(storageStatePath string, allow func(string) boo
 	if b.closed {
 		return nil, errors.New("browser closed")
 	}
-	c := &fakeContext{br: b, gated: allow != nil, storagePath: storageStatePath, cookies: map[string]Cookie{}, gotoDelay: b.drv.gotoDelay}
+	c := &fakeContext{br: b, gated: allow != nil, storagePath: storageStatePath, proxyServer: proxyServer, cookies: map[string]Cookie{}, gotoDelay: b.drv.gotoDelay}
 	b.contexts = append(b.contexts, c)
 	return c, nil
 }
@@ -137,6 +137,7 @@ type fakeContext struct {
 	gated       bool
 	br          *fakeBrowser
 	storagePath string
+	proxyServer string
 	savedPath   string
 	gotoDelay   time.Duration
 	mu          sync.Mutex

@@ -203,6 +203,24 @@ type ScanConfig struct {
 	// candidate SHAPES tried, not what may be targeted. See
 	// docs/reflection-candidates.md "Evasion candidates (opt-in)".
 	EnableEvasion bool `json:"enable_evasion,omitempty"`
+
+	// ProxyPool, when non-empty, routes every outbound request this scan
+	// makes — raw HTTP engine requests AND browser verification navigation
+	// alike — through one of the listed proxies ("http://host:port",
+	// "socks5://host:port", optionally with embedded "user:pass@" creds),
+	// picked round-robin per request/context. Empty (the default) means a
+	// direct connection: no proxy, Indago's real network identity.
+	//
+	// This is entirely operator-supplied infrastructure — Indago never
+	// discovers, purchases, or manages proxies itself, and never silently
+	// rotates through anything the operator did not explicitly list here.
+	// Off by default (AGENTS.md §2.3: aggressive/identity-concealing
+	// behavior is opt-in and operator-configured, never silent). Pairs with
+	// EnableEvasion for an engagement where the target's own anti-automation
+	// defenses (rate limiting, IP-based blocking) are themselves in scope —
+	// it does not widen WHAT may be targeted, only hides WHICH network
+	// identity is doing the targeting.
+	ProxyPool []string `json:"proxy_pool,omitempty"`
 }
 
 // StopMode controls when a scan stops relative to confirmed findings.

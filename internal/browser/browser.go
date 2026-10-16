@@ -121,6 +121,15 @@ type ContextOptions struct {
 	// material (cookies + localStorage), yielding a persistent authenticated
 	// context.
 	StorageStatePath string
+	// ProxyServer, when set, routes every request this context makes (page
+	// loads, subresources, XHR/fetch) through the given proxy
+	// ("http://host:port", "socks5://host:port", optionally with embedded
+	// credentials). "" (the default) uses no proxy — a direct connection.
+	// Indago never picks or supplies a proxy itself; this is operator-provided
+	// infrastructure (AGENTS.md's "evade target-side identity/rate defenses
+	// only via infrastructure the operator explicitly supplies and opts into,
+	// never infrastructure Indago invents or manages itself").
+	ProxyServer string
 }
 
 // NavOptions control a single navigation.

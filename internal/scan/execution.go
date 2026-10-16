@@ -63,7 +63,7 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 
 	handlers := c.opts.Handlers
 	if handlers == nil {
-		handlers = c.defaultHandlers(eng, scope)
+		handlers = c.defaultHandlers(eng, scope, sc.Config.ProxyPool)
 	}
 	pool := worker.New(c.queue, handlers, c.poolConfig(sc), c.log)
 	if err := pool.Start(runCtx); err != nil {

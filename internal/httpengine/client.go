@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -30,7 +31,13 @@ type Config struct {
 	// MaxRedirects caps the redirect chain when following (<=0 → 10).
 	MaxRedirects int
 	// ProxyURL routes requests through an http/https/socks5 proxy ("" = direct).
+	// Ignored when ProxyPool is non-empty.
 	ProxyURL string
+	// ProxyPool, when non-empty, routes requests through one of the listed
+	// proxies, picked round-robin per request (operator-supplied
+	// infrastructure; see domain.ScanConfig.ProxyPool for the full
+	// rationale and boundary). Takes priority over ProxyURL.
+	ProxyPool []string
 	// UserAgent is sent unless a request/default header overrides it ("" = none).
 	UserAgent string
 	// MaxBodyBytes caps response body reads. 0 → DefaultMaxBodyBytes; negative →
@@ -101,6 +108,21 @@ func New(cfg Config) (*Client, error) {
 			return nil, fmt.Errorf("httpengine: invalid proxy url %q: %w", cfg.ProxyURL, err)
 		}
 		tr.Proxy = http.ProxyURL(pu)
+	}
+	if len(cfg.ProxyPool) > 0 {
+		pool := make([]*url.URL, 0, len(cfg.ProxyPool))
+		for _, p := range cfg.ProxyPool {
+			pu, err := url.Parse(p)
+			if err != nil {
+				return nil, fmt.Errorf("httpengine: invalid proxy pool entry %q: %w", p, err)
+			}
+			pool = append(pool, pu)
+		}
+		var next uint64
+		tr.Proxy = func(*http.Request) (*url.URL, error) {
+			i := atomic.AddUint64(&next, 1) - 1
+			return pool[i%uint64(len(pool))], nil
+		}
 	}
 	if tr.TLSClientConfig == nil {
 		tr.TLSClientConfig = &tls.Config{}

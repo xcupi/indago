@@ -114,7 +114,7 @@ func (m *Manager) NewContext(ctx context.Context, opts ContextOptions) (*Context
 	ch, err := callCtxCreate(ctx, func() (contextHandle, error) {
 		m.createMu.Lock()
 		defer m.createMu.Unlock()
-		return b.NewContext(opts.StorageStatePath, opts.AllowRequest)
+		return b.NewContext(opts.StorageStatePath, opts.ProxyServer, opts.AllowRequest)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("browser: new context: %w", err)
@@ -281,7 +281,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext(opts.StorageStatePath, nil) // operator-driven login: no scope gate
+	ch, err := b.NewContext(opts.StorageStatePath, "", nil) // operator-driven login: no scope gate, no proxy (operator's own action)
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}

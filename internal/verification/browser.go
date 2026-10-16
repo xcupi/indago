@@ -108,6 +108,7 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	bctx, err := v.manager.NewContext(ctx, browser.ContextOptions{
 		AllowRequest:     allow,
 		StorageStatePath: in.SessionStatePath,
+		ProxyServer:      in.ProxyServer,
 	})
 	if err != nil {
 		return nil, classifyBrowserErr(ctx, err)
