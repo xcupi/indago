@@ -121,7 +121,13 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 			r.note += fmt.Sprintf("; planned %d candidate(s)", n)
 		}
 	} else {
-		r.note = note + ": not reflected" + possibleBlockNote(bl.status, resp.Status)
+		note2, suspected := possibleBlockNote(bl.status, resp.Status)
+		r.note = note + ": not reflected" + note2
+		if suspected {
+			r.blockSuspected = true
+			r.blockBaselineStatus = bl.status
+			r.blockMutatedStatus = resp.Status
+		}
 	}
 	r.reflection = &report
 	r.baselineReq, r.baselineResp = bl.reqEvidence, bl.respEvidence

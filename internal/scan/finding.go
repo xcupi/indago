@@ -48,6 +48,14 @@ type findingDetail struct {
 	// per-candidate outcomes that produced it — a confirming attempt and a
 	// later rejected one both stay visible instead of collapsing into one value.
 	Attempts []verificationAttempt `json:"attempts,omitempty"`
+
+	// BlockSuspected/BlockDetail: see upsertBlockFinding. Set only on a
+	// diagnostic Finding recording a possible WAF/rate-limit/maintenance
+	// block seen during testing — never on a real reflected-XSS candidate
+	// finding (the two use disjoint dedup keys, see blockFindingDedupKey, so
+	// they never share a row).
+	BlockSuspected bool   `json:"block_suspected,omitempty"`
+	BlockDetail    string `json:"block_detail,omitempty"`
 }
 
 // verificationAttempt is one browser-verification attempt correlated into a
@@ -230,6 +238,86 @@ func upsertPendingFinding(ctx context.Context, st store.Store, scanID domain.ID,
 	}
 	if err := st.Findings().Create(ctx, f); err != nil {
 		return nil, fmt.Errorf("create finding: %w", err)
+	}
+	return f, nil
+}
+
+// blockFindingDedupKey distinguishes a possible-block diagnostic from a real
+// candidate finding at the same injection point: "\x00block" never collides
+// with findingDedupKey's "\x00<category>\x00<context>" shape (detection never
+// emits an empty category or context), so a real reflected-XSS finding and a
+// block diagnostic for the same parameter are always two separate rows.
+func blockFindingDedupKey(injectionPointID domain.ID) string {
+	return string(injectionPointID) + "\x00block"
+}
+
+// upsertBlockFinding records (or bumps the occurrence count of) a diagnostic
+// Finding for a "not reflected" result whose status-code change from
+// baseline looks like a WAF/rate-limit/maintenance block rather than a clean
+// negative (see possibleBlockNote in executor.go). Before this existed, that
+// signal only ever reached a raw TestCase note — invisible on every report
+// surface (markdown/html/CLI/web UI) unless an operator went digging through
+// individual test-case rows.
+//
+// Verdict is always Inconclusive: a possible block means the real test may
+// never have reached the application at all, which is strictly less
+// informative than a confirmed negative (see verdictRank) — never Rejected,
+// which would read as a clean "tried and didn't execute". Severity is always
+// Info: this is a testing-coverage diagnostic about Indago's OWN probe, never
+// itself a vulnerability. Like upsertPendingFinding, repeated blocks at the
+// same injection point absorb into one Finding (occurrence count bumped)
+// rather than multiplying rows.
+func upsertBlockFinding(ctx context.Context, st store.Store, scanID domain.ID, ep *domain.Endpoint, injectionPointID domain.ID, focus *domain.Parameter, baselineStatus, mutatedStatus int, testCaseID domain.ID) (*domain.Finding, error) {
+	key := blockFindingDedupKey(injectionPointID)
+	detail := fmt.Sprintf("status changed %d -> %d from baseline while testing this parameter", baselineStatus, mutatedStatus)
+
+	existing, err := st.Findings().ListByScan(ctx, scanID)
+	if err != nil {
+		return nil, fmt.Errorf("list findings for block correlation: %w", err)
+	}
+	for _, f := range existing {
+		if f.VulnClass != domain.VulnReflectedXSS {
+			continue
+		}
+		d := decodeFindingDetail(f.Detail)
+		if d.DedupKey != key {
+			continue
+		}
+		d.Occurrences++
+		d.TestCaseIDs = appendUniqueID(d.TestCaseIDs, testCaseID)
+		d.BlockDetail = detail
+		f.Detail = d.encode()
+		f.UpdatedAt = time.Now()
+		if err := st.Findings().Update(ctx, f); err != nil {
+			return nil, fmt.Errorf("update block finding: %w", err)
+		}
+		return f, nil
+	}
+
+	sc, err := st.Scans().Get(ctx, scanID)
+	if err != nil {
+		return nil, fmt.Errorf("load scan: %w", err)
+	}
+	now := time.Now()
+	d := findingDetail{
+		Method: ep.Method, ParameterName: focus.Name, DedupKey: key, Occurrences: 1,
+		TestCaseIDs: []domain.ID{testCaseID}, BlockSuspected: true, BlockDetail: detail,
+	}
+	f := &domain.Finding{
+		ID: domain.NewID(), ScanID: scanID, ProjectID: sc.ProjectID, VulnClass: domain.VulnReflectedXSS,
+		Verdict: domain.VerdictInconclusive, Severity: domain.SeverityInfo, Confidence: domain.ConfidenceMedium,
+		Title:            fmt.Sprintf("Possible block/filter while testing parameter %q (%s) at %s %s", focus.Name, focus.Location, ep.Method, endpointLabel(ep.URL)),
+		Summary:          detail + " — this may not be a clean negative; Indago does not retry or evade (AGENTS.md §2.2)",
+		EndpointID:       ep.ID,
+		InjectionPointID: injectionPointID,
+		ParameterID:      focus.ID,
+		Location:         focus.Location,
+		Provenance:       domain.Provenance{Engine: "reflected-xss", DiscoverySource: ep.Source, DetectedAt: now, AIAssisted: false},
+		Detail:           d.encode(),
+		CreatedAt:        now, UpdatedAt: now,
+	}
+	if err := st.Findings().Create(ctx, f); err != nil {
+		return nil, fmt.Errorf("create block finding: %w", err)
 	}
 	return f, nil
 }

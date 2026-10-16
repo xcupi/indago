@@ -125,6 +125,26 @@ func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob,
 	}
 }
 
+// recordBlockFinding is enqueueVerification's counterpart for a result that
+// looks blocked rather than reflected (see result.blockSuspected /
+// possibleBlockNote): it records, or bumps the occurrence count of, the
+// diagnostic Finding described in upsertBlockFinding (finding.go). There is
+// no verify-job enqueue here — a block diagnostic is never browser-verified,
+// only recorded, same best-effort-logged-not-fatal contract as
+// enqueueVerification: a failure here never affects the already-persisted
+// TestCase result.
+func (e *executor) recordBlockFinding(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, focus *domain.Parameter, baselineStatus, mutatedStatus int, testCaseID domain.ID) {
+	if e.store == nil {
+		return
+	}
+	e.findingsMu.Lock()
+	_, err := upsertBlockFinding(ctx, e.store, job.ScanID, ep, job.Target.InjectionPointID, focus, baselineStatus, mutatedStatus, testCaseID)
+	e.findingsMu.Unlock()
+	if err != nil {
+		e.log.Warn("record block finding", "job", job.ID, "err", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // verify executor: runs JobVerify jobs
 // ---------------------------------------------------------------------------

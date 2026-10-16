@@ -168,6 +168,16 @@ type result struct {
 	reflection   *detection.ReflectionReport
 	baselineReq  domain.ID
 	baselineResp domain.ID
+
+	// blockSuspected/blockBaselineStatus/blockMutatedStatus: see
+	// possibleBlockNote. Set on a "not reflected" result whose status code
+	// looks like a WAF/rate-limit/maintenance block rather than a clean
+	// negative, so run() can record the diagnostic Finding described in
+	// upsertBlockFinding (finding.go) — this is the ONLY consumer; the note
+	// text alone (always set regardless) stays on the TestCase either way.
+	blockSuspected      bool
+	blockBaselineStatus int
+	blockMutatedStatus  int
 }
 
 func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.TestCase) result {
@@ -211,6 +221,8 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		// Pending — see docs/scan-orchestration.md).
 		if res.reflection != nil && res.reflection.Reflected {
 			e.enqueueVerification(ctx, job, ep, cand, focus, tc.ID)
+		} else if res.blockSuspected {
+			e.recordBlockFinding(ctx, job, ep, focus, res.blockBaselineStatus, res.blockMutatedStatus, tc.ID)
 		}
 		return res
 	case focus != nil:
@@ -220,6 +232,9 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		// re-plan, so this does not recurse.
 		if res.reflection != nil && res.reflection.Plan != nil {
 			e.enqueueCandidates(ctx, job, res.reflection.Plan)
+		}
+		if res.blockSuspected {
+			e.recordBlockFinding(ctx, job, ep, focus, res.blockBaselineStatus, res.blockMutatedStatus, tc.ID)
 		}
 		return res
 	default:
@@ -538,15 +553,19 @@ func hasBody(m domain.HTTPMethod) bool {
 // the exact same request is still sent, once): it exists so an operator does
 // not mistake a blocked probe for a clean negative. Returns "" when nothing
 // looks anomalous.
-func possibleBlockNote(baselineStatus, mutatedStatus int) string {
+// The bool return additionally tells the caller whether to record a
+// diagnostic Finding for this (see result.blockSuspected / upsertBlockFinding
+// in finding.go) — before that was wired, this signal only ever reached a raw
+// TestCase note, invisible on every report surface.
+func possibleBlockNote(baselineStatus, mutatedStatus int) (string, bool) {
 	baselineOK := baselineStatus >= 200 && baselineStatus < 400
 	suspicious := mutatedStatus == 403 || mutatedStatus == 429 || mutatedStatus == 503
 	if baselineOK && suspicious && mutatedStatus != baselineStatus {
 		return fmt.Sprintf(" (possible block/filter: status changed %d -> %d from baseline; "+
 			"this may not be a clean negative — Indago does not retry or evade, see AGENTS.md §2.2)",
-			baselineStatus, mutatedStatus)
+			baselineStatus, mutatedStatus), true
 	}
-	return ""
+	return "", false
 }
 
 // ---------------------------------------------------------------------------

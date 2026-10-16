@@ -161,7 +161,12 @@ type FindingView struct {
 type detailShape struct {
 	Method        string `json:"method,omitempty"`
 	ParameterName string `json:"parameter_name,omitempty"`
-	Candidates    []struct {
+	// BlockSuspected/BlockDetail mirror scan.findingDetail's fields of the
+	// same name — see upsertBlockFinding. Set only on a diagnostic Finding
+	// for a possible WAF/rate-limit/maintenance block seen during testing.
+	BlockSuspected bool   `json:"block_suspected,omitempty"`
+	BlockDetail    string `json:"block_detail,omitempty"`
+	Candidates     []struct {
 		Source         string `json:"source"`
 		Category       string `json:"category"`
 		Context        string `json:"context"`
@@ -213,6 +218,13 @@ const (
 	// shapes/evasion variants (AGENTS.md §2.2) — so a DIFFERENTLY shaped
 	// breakout bypassing this specific filter is simply untested, not ruled out.
 	ReviewAllCandidatesFiltered ReviewReason = "all_candidates_filtered"
+	// ReviewPossibleBlock: a request during testing came back with a
+	// suspicious status-code change from baseline (403/429/503) — the real
+	// test may never have reached the application at all. Set on the
+	// dedicated diagnostic Finding upsertBlockFinding creates (verdict
+	// always Inconclusive), never inferred from a Rejected finding's
+	// candidates the way the other two reasons are.
+	ReviewPossibleBlock ReviewReason = "possible_block"
 )
 
 // Label is the human-readable explanation of a ReviewReason.
@@ -222,6 +234,8 @@ func (r ReviewReason) Label() string {
 		return "a candidate reflected unescaped but requires a user action (click/hover/navigation) that passive browser verification deliberately never simulates — it may still be exploitable; this was never actually confirmed OR ruled out"
 	case ReviewAllCandidatesFiltered:
 		return "every candidate tried at this site was encoded or stripped by the target; Indago only tries the small, canonical breakout(s) for this context (never alternate shapes or evasion variants), so a differently-shaped payload bypassing this specific filter is untested, not ruled out"
+	case ReviewPossibleBlock:
+		return "a request during testing came back with a suspicious status-code change from the baseline (e.g. 403/429/503) — this may be a WAF/rate-limit/maintenance block, not a clean negative; Indago never retries or evades a block (see AGENTS.md §2.2)"
 	default:
 		return string(r)
 	}
@@ -236,6 +250,9 @@ func (r ReviewReason) Label() string {
 // always sets "raw" or a specific encoding) is treated as UNKNOWN, not as
 // evidence of filtering, so this never fires on data that simply didn't say.
 func findingReviewReason(verdict domain.Verdict, d detailShape) (ReviewReason, bool) {
+	if d.BlockSuspected {
+		return ReviewPossibleBlock, true
+	}
 	if verdict != domain.VerdictRejected || len(d.Candidates) == 0 {
 		return "", false
 	}
