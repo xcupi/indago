@@ -120,11 +120,12 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 // defaultHandlers) — this is the raw-HTTP-side half of the same "every
 // outbound request this scan makes" contract (domain.ScanConfig.ProxyPool).
 func (c *Controller) scanHTTPEngine(sc *domain.Scan) (httpengine.Engine, func()) {
-	if len(sc.Config.ProxyPool) == 0 {
+	if len(sc.Config.ProxyPool) == 0 && !sc.Config.RandomizeTLSFingerprint {
 		return c.opts.HTTP, func() {}
 	}
 	cfg := c.opts.HTTPConfig
 	cfg.ProxyPool = sc.Config.ProxyPool
+	cfg.RandomizeTLSFingerprint = sc.Config.RandomizeTLSFingerprint
 	eng, err := httpengine.New(cfg)
 	if err != nil {
 		// A scan-scoped client failing to build (e.g. a malformed proxy URL

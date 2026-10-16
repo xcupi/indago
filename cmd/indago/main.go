@@ -91,7 +91,7 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER, default http://
   scope set -project ID -include host[,host] [-exclude ..] [-include-path ..] [-exclude-path ..] [-subdomains]
   scope show -project ID
   scan create -project ID -target ID [-name N] [-profile P] [-candidate-profile minimal|standard|thorough] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]]
-              [-quick | -depth N] [-max-pages N] [-max-endpoints N] [-auth existing -auth-state FILE]
+              [-quick | -depth N] [-max-pages N] [-max-endpoints N] [-auth existing -auth-state FILE] [-proxy URL]... [-randomize-tls-fingerprint]
   scan list [-json]
   scan status <scan-id|prefix> [-json]
   scan start|pause|resume|cancel <scan-id|prefix>

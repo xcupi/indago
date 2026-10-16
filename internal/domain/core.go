@@ -221,6 +221,18 @@ type ScanConfig struct {
 	// it does not widen WHAT may be targeted, only hides WHICH network
 	// identity is doing the targeting.
 	ProxyPool []string `json:"proxy_pool,omitempty"`
+
+	// RandomizeTLSFingerprint: see httpengine.Config.RandomizeTLSFingerprint
+	// for the full mechanism and its one real limitation (HTTP/1.1 only).
+	// Off by default, same AGENTS.md §2.3 contract as ProxyPool/EnableEvasion
+	// above. MUTUALLY EXCLUSIVE with ProxyPool (validated at scan-create
+	// time, see controller.go) — Go's http.Transport only consults a custom
+	// TLS dialer for a DIRECT connection, never a proxied one, so combining
+	// both would silently drop the fingerprint override instead of erroring.
+	// Browser verification is unaffected either way: a real Chromium
+	// context has its own, genuine (unspoofed) TLS stack that this setting
+	// has no way to reach into.
+	RandomizeTLSFingerprint bool `json:"randomize_tls_fingerprint,omitempty"`
 }
 
 // StopMode controls when a scan stops relative to confirmed findings.

@@ -269,6 +269,9 @@ type CreateScanParams struct {
 	// ProxyPool — see domain.ScanConfig.ProxyPool. Empty (the default) means a
 	// direct connection for both raw HTTP traffic and browser verification.
 	ProxyPool []string
+	// RandomizeTLSFingerprint — see domain.ScanConfig.RandomizeTLSFingerprint.
+	// Off by default; mutually exclusive with ProxyPool (validated below).
+	RandomizeTLSFingerprint bool
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -358,6 +361,12 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.ProxyPool = p.ProxyPool
 	if err := validateProxyPool(cfg.ProxyPool); err != nil {
 		return nil, err
+	}
+	cfg.RandomizeTLSFingerprint = p.RandomizeTLSFingerprint
+	if cfg.RandomizeTLSFingerprint && len(cfg.ProxyPool) > 0 {
+		return nil, fmt.Errorf("%w: randomize_tls_fingerprint and proxy_pool cannot both be set — "+
+			"Go's HTTP transport performs TLS internally after any proxy tunnel, never through a "+
+			"custom TLS dialer, so the fingerprint override would silently have no effect through a proxy", ErrBadConfig)
 	}
 
 	mode := p.AuthMode

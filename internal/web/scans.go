@@ -206,6 +206,11 @@ type createScanReq struct {
 	// round-robin. See domain.ScanConfig.ProxyPool. Empty (the default) means
 	// a direct connection.
 	ProxyPool []string `json:"proxy_pool"`
+
+	// RandomizeTLSFingerprint — see domain.ScanConfig.RandomizeTLSFingerprint.
+	// Off by default; the server rejects this combined with ProxyPool (see
+	// Controller.CreateScan) rather than silently no-op the override.
+	RandomizeTLSFingerprint bool `json:"randomize_tls_fingerprint"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -268,10 +273,11 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		MaxPages:      req.MaxPages,
 		MaxEndpoints:  req.MaxEndpoints,
 
-		CandidateProfile: req.CandidateProfile,
-		MaxCandidates:    req.MaxCandidates,
-		EnableEvasion:    req.EnableEvasion,
-		ProxyPool:        cleanList(req.ProxyPool),
+		CandidateProfile:        req.CandidateProfile,
+		MaxCandidates:           req.MaxCandidates,
+		EnableEvasion:           req.EnableEvasion,
+		ProxyPool:               cleanList(req.ProxyPool),
+		RandomizeTLSFingerprint: req.RandomizeTLSFingerprint,
 	})
 	if err != nil {
 		s.writeScanError(w, err)
