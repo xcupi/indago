@@ -86,9 +86,13 @@ func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob,
 	// A finding is only ever created from a PLANNED breakout, which always
 	// embeds this injection point's unique marker. A value without it — an
 	// ordinary baseline value such as the observed "hello" — is not a candidate
-	// and must never become one, however it got here.
+	// and must never become one, however it got here. A COMBINED candidate's
+	// marker lives in ValueB (the "breakout" half) rather than Value (the
+	// "closer" half, which deliberately carries no executable reference) —
+	// see internal/detection/combined.go.
 	marker := detection.NewProbe(job.ScanID, job.Target.InjectionPointID).Token
-	if !strings.Contains(cand.Value, marker) {
+	embedsMarker := strings.Contains(cand.Value, marker) || (cand.Combined && strings.Contains(cand.ValueB, marker))
+	if !embedsMarker {
 		e.log.Warn("enqueue verification: candidate does not embed the injection point's marker; no finding created",
 			"job", job.ID, "candidate", cand.DedupKey)
 		return
@@ -287,8 +291,19 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 	tc.Method, tc.URL = string(ep.Method), ep.URL
 
 	note := fmt.Sprintf("browser verification; candidate %s/%s; parameter %s (%s)", vj.Candidate.Source, vj.Candidate.Category, focus.Name, focus.Location)
+	if vj.Candidate.Combined {
+		note = fmt.Sprintf("browser verification; combined candidate %s/%s; parameters %s (%s) + %s (%s)", vj.Candidate.Source, vj.Candidate.Category, focus.Name, focus.Location, vj.Candidate.ParameterB, vj.Candidate.LocationB)
+	}
 	if !e.cfg.AllowStateChanging && !isSafeMethod(ep.Method) {
 		return verifyResult{skipped: true, note: fmt.Sprintf("%s skipped: %s is state-changing and AllowStateChanging is off", note, ep.Method)}
+	}
+
+	// A combined candidate's SECOND parameter, resolved from the
+	// already-loaded endpoint parameter list — see candidate.go's
+	// runCandidate, which resolves it the same way.
+	var focusB *domain.Parameter
+	if vj.Candidate.Combined {
+		focusB = findParamByNameLocation(params, vj.Candidate.ParameterB, vj.Candidate.LocationB)
 	}
 
 	// The whole refresh→build→verify sequence runs inside
@@ -302,7 +317,11 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 	var vres *verification.Result
 	var verifyErr error
 	withDynamicTokenLock(e.tokenMu, params, focus, func() {
-		req, err = buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), &injection{param: focus, value: vj.Candidate.Value})
+		inj := &injection{param: focus, value: vj.Candidate.Value}
+		if focusB != nil {
+			inj.paramB, inj.valueB = focusB, vj.Candidate.ValueB
+		}
+		req, err = buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), inj)
 		if err != nil {
 			return
 		}
@@ -342,12 +361,25 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 		// Header/Cookie candidates don't show up in req.URL or req.Body —
 		// the override must be carried separately so the verifying browser
 		// context applies it BEFORE navigation (see verification.Input and
-		// BrowserVerifier.Verify).
+		// BrowserVerifier.Verify). A combined candidate's SECOND parameter
+		// gets the identical treatment, independently of the first (either
+		// half, or both, can be Header/Cookie).
 		switch focus.Location {
 		case domain.LocationHeader:
 			in.ExtraHeaders = map[string]string{focus.Name: vj.Candidate.Value}
 		case domain.LocationCookie:
 			in.ExtraCookies = []*http.Cookie{{Name: focus.Name, Value: vj.Candidate.Value}}
+		}
+		if focusB != nil {
+			switch focusB.Location {
+			case domain.LocationHeader:
+				if in.ExtraHeaders == nil {
+					in.ExtraHeaders = map[string]string{}
+				}
+				in.ExtraHeaders[focusB.Name] = vj.Candidate.ValueB
+			case domain.LocationCookie:
+				in.ExtraCookies = append(in.ExtraCookies, &http.Cookie{Name: focusB.Name, Value: vj.Candidate.ValueB})
+			}
 		}
 
 		vres, verifyErr = e.verifier.Verify(ctx, in)

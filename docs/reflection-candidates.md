@@ -170,8 +170,9 @@ part of the navigated URL, exactly like Query.
 Everything else about these locations is identical to Query/Form/JSON: the
 same candidate templates, the same profile bounding, the same Confirmed/
 Rejected/Inconclusive verdict lattice, the same Finding correlation. Multi-
-parameter/combined injection (mutating more than one location at once) and
-PoC generation remain out of scope, unchanged by this.
+parameter/combined injection (mutating more than one location at once) is
+now implemented for a bounded, deterministic subset — see below. PoC
+generation remains out of scope, unchanged by this.
 
 `internal/detection/evasion.go` is a second, separate template generator,
 called by the planner ONLY when `PlanOptions.EnableEvasion` is true — itself
@@ -210,3 +211,137 @@ and `TestEvasionCandidatesAreBenignMarkers` (`internal/detection/
 evasion_test.go`) enforce exactly these properties: off unless asked for,
 additive never destructive, and still benign-marker-only — the same
 guarantee `TestPlanCandidatesAreBenignMarkers` holds for the canonical set.
+
+## Combined (multi-parameter) candidates
+
+Every candidate described above mutates exactly ONE parameter per request.
+A real class of reflected XSS needs TWO parameters controlled
+simultaneously in the SAME request to break out — the classic case: one
+parameter's value sits inside a partially-defended HTML attribute and alone
+can't both close the attribute AND add a new one, but a SECOND parameter,
+reflecting afterward in the same response, can supply the rest. This
+section is a small, BOUNDED, deterministic fallback probe for exactly that
+class — never an open-ended combinatorial fuzzer.
+
+### Scope (deliberately narrow)
+
+- **Pair only, never a triple+.** Exactly two parameter slots per combined
+  candidate.
+- **Same classified context only.** Both parameters must have individually
+  REFLECTED during single-parameter candidate testing (reusing the existing
+  per-parameter reflection/context analysis — this never re-detects
+  reflection) AND landed in the SAME classified `Context`: `html_attr_value`
+  or `js_string`. Cross-context pairs (e.g. one `html_attr_value`, one
+  `js_string`) are out of scope — too speculative to reason about safely.
+- **Fallback only, never parallel/always-on.** Combined pairing runs for an
+  endpoint ONLY when that endpoint's single-parameter candidate testing
+  already ran and did NOT produce a `Confirmed` finding there (see
+  `endpointHasConfirmed`, `internal/scan/combined.go`). It never doubles a
+  scan's request volume on an endpoint single-parameter testing already
+  cracked.
+- **Hard ceiling.** At most `maxCombinedPairsPerEndpoint` = **5** pairs are
+  ever tested per endpoint, picked deterministically (sorted by parameter
+  name, then injection point ID — never randomly, never by discovery
+  timestamp order this layer doesn't see). This mirrors the candidate-profile
+  ceiling pattern (`minimal`/`standard`/`thorough`, ceiling 32) as precedent
+  for "bounded by design, not unlimited".
+- **Two context categories only.** `internal/detection/combined.go`'s
+  `PlanCombinedCandidate` returns real templates for exactly `html_attr_value`
+  and `js_string` — every other context returns `(nil, false)`, never a
+  generic/unknown combined template.
+
+### The two templates (each a split of an EXISTING single-parameter template)
+
+| Context | First ("closer") half | Second ("breakout") half | Same idea as |
+|---|---|---|---|
+| `html_attr_value` | its own quote (if any) + `">"` — closes the attribute AND the tag; carries NO executable reference | `<svg onload=M>` — a brand-new element with an onload handler referencing the marker; needs `<`/`>` but no quote of its own | the single-parameter onload template `q+"><svg onload=M>"` (`htmlAttrTemplates`), split at the point where the attribute/tag close ends and the new element begins |
+| `js_string` | its own quote + `;` — closes the JS string and terminates the statement; carries NO executable reference | `M//` — a bare marker reference plus a line comment swallowing whatever static text follows; needs no quote of its own | the single-parameter string-escape template `";M//` / `';M//` (`jsTemplates`), split at the point where the string closes and the breakout code begins |
+
+Both templates are a *natural decomposition* of the matching single-param
+template, not an unrelated new payload shape — see `combinedHTMLAttr`/
+`combinedJSString` in `internal/detection/combined.go` for the exact
+character-level reasoning (which half needs which canary metacharacter).
+`js_string`'s `template_literal` sub-kind has no closing-quote character to
+split on, so it returns `(nil, false)` — only `double_quoted`/`single_quoted`
+are supported.
+
+A realistic "genuinely needs two parameters" site: a WAF/sanitizer blocks
+the recognizable `"`+`<` (or `"`+space) signature at the FIRST parameter
+(defeating its own onload/autofocus/onmouseover templates, which all need a
+quote plus one of those) while leaving a bare quote+`">` through untouched
+(exactly what the combined closer needs and nothing more); a DIFFERENT,
+more lenient filter at the SECOND parameter always strips quotes
+unconditionally (defeating its own templates, which also need a quote) but
+leaves `<`/`>` untouched (exactly what the combined breakout needs and
+nothing more). Neither parameter's own complete single-parameter template
+can get past its own site's filter, but the pair completes the identical
+breakout because neither half needs what the OTHER half's filter blocks.
+`indago-combined-lab.py` (workspace-local, disposable) implements exactly
+this scenario and live-validates it end to end with a real Confirmed
+finding.
+
+### Request building, identity, and presentation
+
+One real HTTP request carries BOTH overrides — the executor's `injection`
+struct (`internal/scan/reflection.go`) gained an optional `paramB`/`valueB`
+pair, and `buildRequest` (`executor.go`) applies whichever of `param`/
+`paramB` matches each parameter, exactly like the single-override path.
+Browser verification is the SAME navigation/request mechanism, unchanged —
+confirmed live, not assumed (see below): `verifyExecutor.run` resolves the
+second parameter from the already-loaded endpoint parameter list (by the
+name+location the combined candidate itself carries) and threads both
+overrides into the one request/navigation, including both
+`ExtraHeaders`/`ExtraCookies` when either half is a Header/Cookie location.
+
+A combined candidate is carried as an ordinary `detection.Candidate` with
+new optional fields — `Combined bool`, `ParameterB`/`LocationB`/
+`InjectionPointBID`/`ValueB` for the second half — rather than a new type,
+so every existing piece of machinery that already knows how to persist,
+serialize, and replay a `Candidate` keeps working unchanged. The planner's
+`enqueueCombinedCandidates` (`internal/scan/combined.go`) is a one-time,
+scan-wide pass triggered the FIRST time a scan's ordinary job queue goes
+quiet (`execution.go`'s `combinedPassDone`/`evaluate`) — any jobs it
+enqueues (there may be none) must themselves drain before the scan is
+allowed to complete, exactly like any other job.
+
+A confirmed combined-pair finding is **NOT** the same `Finding` as either
+single-parameter finding: `findingDedupKey` (`internal/scan/finding.go`)
+keys a combined finding on BOTH injection point IDs plus a `"combined"` tag
+plus category+context, so it can never collide with — or absorb into —
+either single-parameter finding, nor with a DIFFERENT combined pair sharing
+one parameter but pairing it with a different second parameter. Its Title
+says so explicitly: `Reflected XSS candidate in parameters "a" + "b"
+(combined, html_attr_value) at GET /path` (and, once confirmed, `Reflected
+XSS in parameters …` — `confirmedTitle`'s existing string replace keeps
+working unchanged since the combined title still starts with the same
+literal substring). This threads through all five presentation surfaces:
+`report.FindingView`/`CandidateView` (`Combined`/`ParamNameB`/`ParameterB`/
+`ValueB`), markdown and HTML report generators (an explicit "⚠ Combined
+(multi-parameter) finding" line), the web API (`findingListItem`/
+`findingView`'s `combined`/`parameter_b_name` JSON fields), the CLI
+(`finding list`'s title already shows it; `finding show` prints a dedicated
+`Combined` line and both candidate values), and the web UI
+(`internal/web/assets/scans.js`: a warning note in the detail view, the
+parameter column showing `a + b`, and the candidates list rendering both
+halves) — so an operator sees "this is not a single-parameter bug" on every
+surface, not just in the JSON.
+
+### Tests and live validation
+
+`internal/detection/combined_test.go`: the two templates' exact character
+splits, the two-category boundary (every other context returns `false`),
+dedup-key disjointness from the single-parameter planner, determinism (20
+runs byte-identical), and benign-marker-only. `internal/scan/combined_test.go`:
+same-context pairing, cross-context/triple/self-pairing rejection, ceiling
+enforcement, determinism regardless of input order, the "only when
+single-param already failed" gate (`endpointHasConfirmed`), combined
+request building (`buildRequest` with both overrides mutating the SAME
+request), and finding dedup/title/detail correlation.
+
+Live-validated against `indago-combined-lab.py`, a disposable one-route
+Python lab with the asymmetric-filter scenario described above: single-
+parameter candidate testing on the route produces only `Rejected` findings
+for each of the two parameters individually, while the scan's one-time
+combined pass produces a genuine `Confirmed` finding — real browser
+execution (`Uncaught ReferenceError: <marker> is not defined`), not just
+green unit tests.

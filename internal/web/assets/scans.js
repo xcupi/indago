@@ -518,6 +518,9 @@ function findingDetailEl(f) {
   if (f.endpoint) row("Endpoint", f.endpoint.method + " " + f.endpoint.url);
   if (f.parameter) row("Parameter", f.parameter.name + " (" + f.parameter.location + ")");
   else if (pd.parameter_name) row("Parameter", pd.parameter_name);
+  if (pd.combined) {
+    row("⚠ Combined (multi-parameter) finding", "TWO parameters mutated together in the SAME request were required — NOT a single-parameter bug. Second parameter: " + (pd.parameter_b_name || "(unknown)"));
+  }
   if (cands.length && cands[0].context) row("Execution context", cands[0].context + (cands[0].context_sub ? " (" + cands[0].context_sub + ")" : ""));
   // dl is placed here (not at the end) so the compact metadata block reads
   // first; the attempts/candidates/evidence collapsibles that follow are
@@ -557,6 +560,11 @@ function findingDetailEl(f) {
       page.forEach((c) => {
         const li = el("li");
         li.appendChild(el("code", c.value, "wrap"));
+        if (c.combined) {
+          li.appendChild(el("span", " + ", "hint"));
+          li.appendChild(el("code", c.value_b, "wrap"));
+          li.appendChild(el("span", " [combined: param B = " + (c.parameter_b || "?") + "]", "hint"));
+        }
         if (c.technique) li.appendChild(el("span", " [bypass: " + c.technique + "]", "hint"));
         ul.appendChild(li);
       });
@@ -619,11 +627,12 @@ function findingRow(f, scanId, state) {
     const td = el("td"); td.appendChild(cb); tr.appendChild(td);
   }
   const titleTd = cell(f.title || "(untitled)", "clickable c-title");
+  if (f.combined) titleTd.title = "Combined (multi-parameter) finding — second parameter: " + (f.parameter_b_name || "?");
   tr.appendChild(titleTd);
   const vTd = el("td"); vTd.appendChild(pill(f.verdict)); tr.appendChild(vTd);
   const sevTd = el("td"); if (f.severity) sevTd.appendChild(pill(f.severity)); tr.appendChild(sevTd);
   tr.appendChild(cell(endpointLabel(f.endpoint_method, f.endpoint_url), "mono c-endpoint"));
-  tr.appendChild(cell(f.parameter_name || "", "c-ident"));
+  tr.appendChild(cell(f.combined ? (f.parameter_name || "") + " + " + (f.parameter_b_name || "") : (f.parameter_name || ""), "c-ident"));
   tr.appendChild(cell(f.context || "", "c-ident c-words"));
   // Only a confirmed finding has a verified candidate to show.
   const vc = el("td", undefined, "mono verified-cell");

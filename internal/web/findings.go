@@ -51,6 +51,7 @@ func (s *Server) handleListFindings(w http.ResponseWriter, r *http.Request) {
 		item := findingListItem{
 			Finding: f, Section: v.Section, ParameterName: v.ParamName,
 			Verified: v.Verified, AttemptCount: len(v.Attempts), ReviewReasonLabel: v.ReviewReasonLabel,
+			Combined: v.Combined, ParameterBName: v.ParamNameB,
 		}
 		if len(v.Candidates) > 0 {
 			item.Context = v.Candidates[0].Context
@@ -103,6 +104,11 @@ type findingListItem struct {
 	Verified          *report.AttemptView `json:"verified_candidate,omitempty"`
 	AttemptCount      int                 `json:"attempt_count"`
 	ReviewReasonLabel string              `json:"review_reason_label,omitempty"`
+	// Combined/ParameterBName: see report.FindingView — a finding that
+	// required TWO parameters mutated together in the SAME request. Empty/
+	// false for every ordinary single-parameter finding.
+	Combined       bool   `json:"combined,omitempty"`
+	ParameterBName string `json:"parameter_b_name,omitempty"`
 }
 
 // findingCandidate mirrors detection.Candidate's JSON shape (by field name)
@@ -123,6 +129,11 @@ type findingCandidate struct {
 	Rationale        string `json:"rationale,omitempty"`
 	DedupKey         string `json:"dedup_key,omitempty"`
 	InjectionPointID string `json:"injection_point_id,omitempty"`
+	// Combined/ParameterB/ValueB: see detection.Candidate — a COMBINED
+	// (multi-parameter) candidate's SECOND half.
+	Combined   bool   `json:"combined,omitempty"`
+	ParameterB string `json:"parameter_b,omitempty"`
+	ValueB     string `json:"value_b,omitempty"`
 }
 
 // findingDetail mirrors scan.findingDetail's JSON shape (by field name) for
@@ -135,6 +146,9 @@ type findingDetail struct {
 	TestCaseIDs   []domain.ID        `json:"test_case_ids,omitempty"`
 	Candidates    []findingCandidate `json:"candidates,omitempty"`
 	Attempts      []findingAttempt   `json:"attempts,omitempty"`
+	// Combined/ParameterBName: see scan.findingDetail.
+	Combined       bool   `json:"combined,omitempty"`
+	ParameterBName string `json:"parameter_b_name,omitempty"`
 }
 
 // findingAttempt mirrors scan.verificationAttempt (by field name): one

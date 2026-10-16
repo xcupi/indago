@@ -63,6 +63,15 @@ type findingDetail struct {
 	// key from both the real candidate findings and the block diagnostic.
 	CaptchaSuspected bool   `json:"captcha_suspected,omitempty"`
 	CaptchaLabel     string `json:"captcha_label,omitempty"`
+
+	// Combined marks a finding that required TWO parameters mutated
+	// together in the SAME request to produce this candidate — see
+	// docs/reflection-candidates.md "Combined (multi-parameter)
+	// candidates". Never set on an ordinary single-parameter finding.
+	// ParameterBName names the second parameter so a report can show both
+	// without decoding Candidates[0] itself.
+	Combined       bool   `json:"combined,omitempty"`
+	ParameterBName string `json:"parameter_b_name,omitempty"`
 }
 
 // verificationAttempt is one browser-verification attempt correlated into a
@@ -109,7 +118,17 @@ func (d findingDetail) encode() []byte {
 // distinct candidates or attempts confirm it. A different injection point, or
 // the same injection point reflecting into a genuinely different context
 // (e.g. one site in html_text, another in js_string), is a different finding.
+//
+// A COMBINED (multi-parameter) candidate gets its own, disjoint identity:
+// BOTH injection point IDs plus a "combined" tag plus category+context, so a
+// combined finding for (paramX, paramY) can never collide with — or absorb
+// into — either paramX's or paramY's own single-parameter finding, nor with
+// a DIFFERENT combined pair that happens to share paramX and the same
+// category+context but pairs it with a different second parameter.
 func findingDedupKey(injectionPointID domain.ID, cand detection.Candidate) string {
+	if cand.Combined {
+		return string(injectionPointID) + "\x00" + string(cand.InjectionPointBID) + "\x00combined\x00" + string(cand.Category) + "\x00" + string(cand.Context)
+	}
 	return string(injectionPointID) + "\x00" + string(cand.Category) + "\x00" + string(cand.Context)
 }
 
@@ -133,7 +152,17 @@ func severityFor(cand detection.Candidate) domain.Severity {
 // it by candidate category alone made distinct findings indistinguishable —
 // every html_text reflection of "q" on any endpoint shared one title, as did
 // js_string and js_code reflections (both category "javascript").
+//
+// A COMBINED (multi-parameter) candidate names BOTH parameters and says so
+// explicitly ("combined, ...") — an operator must see at a glance that this
+// is not a single-parameter bug, since the fix and the report both differ.
+// The literal substring "Reflected XSS candidate in" is kept at the front
+// either way so confirmedTitle's plain string replace keeps working
+// unchanged for a combined finding too.
 func findingTitle(cand detection.Candidate, focus *domain.Parameter, ep *domain.Endpoint) string {
+	if cand.Combined && cand.ParameterB != "" {
+		return fmt.Sprintf("Reflected XSS candidate in parameters %q + %q (combined, %s) at %s %s", focus.Name, cand.ParameterB, cand.Context, ep.Method, endpointLabel(ep.URL))
+	}
 	return fmt.Sprintf("Reflected XSS candidate in parameter %q (%s) at %s %s", focus.Name, cand.Context, ep.Method, endpointLabel(ep.URL))
 }
 
@@ -229,6 +258,10 @@ func upsertPendingFinding(ctx context.Context, st store.Store, scanID domain.ID,
 	d := findingDetail{
 		Method: ep.Method, ParameterName: focus.Name, DedupKey: key, Occurrences: 1,
 		TestCaseIDs: []domain.ID{candTestCaseID}, Candidates: []detection.Candidate{cand},
+	}
+	if cand.Combined {
+		d.Combined = true
+		d.ParameterBName = cand.ParameterB
 	}
 	f := &domain.Finding{
 		ID: domain.NewID(), ScanID: scanID, ProjectID: sc.ProjectID, VulnClass: domain.VulnReflectedXSS,

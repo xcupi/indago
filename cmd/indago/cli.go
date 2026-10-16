@@ -852,6 +852,11 @@ type findingCandidate struct {
 	Transformation string `json:"transformation"`
 	Rationale      string `json:"rationale"`
 	Priority       int    `json:"priority"`
+	// Combined/ParameterB/ValueB: see detection.Candidate — a COMBINED
+	// (multi-parameter) candidate's SECOND half.
+	Combined   bool   `json:"combined"`
+	ParameterB string `json:"parameter_b"`
+	ValueB     string `json:"value_b"`
 }
 
 type findingDetailOut struct {
@@ -861,6 +866,9 @@ type findingDetailOut struct {
 		ParameterName string             `json:"parameter_name"`
 		Occurrences   int                `json:"occurrences"`
 		Candidates    []findingCandidate `json:"candidates"`
+		// Combined/ParameterBName: see scan.findingDetail.
+		Combined       bool   `json:"combined"`
+		ParameterBName string `json:"parameter_b_name"`
 	} `json:"parsed_detail"`
 	Verified *struct {
 		CandidateValue string `json:"candidate_value"`
@@ -920,6 +928,9 @@ func printFindingDetail(w io.Writer, server string, fd *findingDetailOut) {
 	} else if fd.ParsedDetail.ParameterName != "" {
 		fmt.Fprintf(w, "Parameter  %s\n", fd.ParsedDetail.ParameterName)
 	}
+	if fd.ParsedDetail.Combined {
+		fmt.Fprintf(w, "Combined   ⚠ COMBINED (multi-parameter) finding — TWO parameters mutated together in the SAME request were required; this is NOT a single-parameter bug. Second parameter: %s\n", fd.ParsedDetail.ParameterBName)
+	}
 	if fd.Verified != nil {
 		fmt.Fprintf(w, "Verified   %s\n", fd.Verified.CandidateValue)
 		if fd.Verified.Notes != "" {
@@ -947,6 +958,10 @@ func printFindingDetail(w io.Writer, server string, fd *findingDetailOut) {
 			tech := ""
 			if cand.Technique != "" {
 				tech = " [bypass: " + cand.Technique + "]"
+			}
+			if cand.Combined {
+				fmt.Fprintf(w, "  - [combined: %s/%s]%s param A value=%q + param B %q value=%q — %s\n", cand.Category, cand.Context, tech, cand.Value, cand.ParameterB, cand.ValueB, cand.Rationale)
+				continue
 			}
 			fmt.Fprintf(w, "  - [%s/%s]%s %s — %s\n", cand.Category, cand.Context, tech, cand.Value, cand.Rationale)
 		}

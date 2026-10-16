@@ -96,6 +96,25 @@ func (e *executor) enqueueCandidates(ctx context.Context, parent *domain.TestJob
 func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *domain.Endpoint, params []*domain.Parameter, focus *domain.Parameter, cand detection.Candidate) result {
 	tc.VulnClass = domain.VulnReflectedXSS
 	note := fmt.Sprintf("candidate %s/%s; parameter %s (%s)", cand.Source, cand.Category, focus.Name, focus.Location)
+	if cand.Combined {
+		note = fmt.Sprintf("combined candidate %s/%s; parameters %s (%s) + %s (%s)", cand.Source, cand.Category, focus.Name, focus.Location, cand.ParameterB, cand.LocationB)
+	}
+
+	// A combined candidate needs a SECOND focus parameter, resolved from the
+	// already-loaded endpoint parameter list (the pair was selected from
+	// this same endpoint — see combined.go) by the name+location the
+	// candidate itself carries. Not found (e.g. the parameter disappeared
+	// between the pass that planned this pair and now) is a permanent
+	// error: there is nothing a retry would fix.
+	var focusB *domain.Parameter
+	if cand.Combined {
+		focusB = findParamByNameLocation(params, cand.ParameterB, cand.LocationB)
+		if focusB == nil {
+			return result{outcome: domain.OutcomeError, permanent: true,
+				err:  fmt.Errorf("combined candidate: second parameter %q (%s) not found on this endpoint", cand.ParameterB, cand.LocationB),
+				note: note, vulnClass: domain.VulnReflectedXSS}
+		}
+	}
 
 	// Baseline (shared with the reflection step via the same per-endpoint cache).
 	baseReq, err := buildRequest(ep, params, nil)
@@ -113,8 +132,9 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 		}
 	}
 
-	// Mutated request: the candidate value goes ONLY into the focused parameter;
-	// all other parameters keep their observed values. The whole
+	// Mutated request: the candidate value goes ONLY into the focused parameter
+	// (plus the second one, for a combined candidate); all other parameters
+	// keep their observed values. The whole
 	// refresh→build→send sequence runs inside withDynamicTokenLock so it is
 	// atomic with respect to every other such sequence in the scan (the
 	// reflection step, browser verification) when a dynamic/single-use token
@@ -123,7 +143,11 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 	var resp *httpengine.Response
 	var dur time.Duration
 	withDynamicTokenLock(e.tokenMu, params, focus, func() {
-		mutReq, err = buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), &injection{param: focus, value: cand.Value})
+		inj := &injection{param: focus, value: cand.Value}
+		if focusB != nil {
+			inj.paramB, inj.valueB = focusB, cand.ValueB
+		}
+		mutReq, err = buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), inj)
 		if err != nil {
 			return
 		}

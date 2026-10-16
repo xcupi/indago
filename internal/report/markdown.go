@@ -134,6 +134,9 @@ func writeFinding(b *strings.Builder, n int, f *domain.Finding, v FindingView) {
 	if v.ParamName != "" || v.Method != "" {
 		fmt.Fprintf(b, "- **Parameter:** %s%s\n", v.ParamName, methodSuffix(v.Method))
 	}
+	if v.Combined {
+		fmt.Fprintf(b, "- **⚠ Combined (multi-parameter) finding:** TWO parameters mutated together in the SAME request were required — this is NOT a single-parameter bug. Second parameter: **%s**\n", nonEmpty(v.ParamNameB, "(unknown)"))
+	}
 	if f.Provenance.DiscoverySource != "" {
 		fmt.Fprintf(b, "- **Discovery source:** %s\n", f.Provenance.DiscoverySource)
 	}

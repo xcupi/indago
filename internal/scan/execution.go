@@ -32,6 +32,13 @@ type execution struct {
 	// discFinished is set once discovery completed normally (or was skipped
 	// because it had already completed before a restart).
 	discFinished atomic.Bool
+
+	// combinedPassDone marks that this execution's one-time, bounded
+	// combined (multi-parameter) candidate pass (see combined.go) has
+	// already been enqueued — never run twice in the same execution.
+	// Checked in evaluate() the first time the ordinary job queue goes
+	// quiet, before the scan is allowed to actually complete.
+	combinedPassDone atomic.Bool
 }
 
 // pause routes a scan pause to both the worker pool and discovery.
@@ -351,6 +358,18 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		return false
 	}
 	if q.Pending() > 0 {
+		return false
+	}
+	// Bounded, one-time combined (multi-parameter) candidate fallback pass
+	// (see combined.go): the FIRST time the ordinary job queue goes quiet,
+	// run it instead of completing — any jobs it enqueues (there may be
+	// none) must themselves drain before the scan is allowed to finish, so
+	// this returns false (not done) to let the monitor loop again. The
+	// flag ensures this runs exactly once per execution, even though this
+	// branch is reached on every subsequent quiet tick too.
+	if !ex.combinedPassDone.Load() {
+		ex.combinedPassDone.Store(true)
+		c.enqueueCombinedCandidates(ctx, ex.scanID)
 		return false
 	}
 	return c.finish(ctx, ex, false)

@@ -98,6 +98,19 @@ type Candidate struct {
 	Rationale string `json:"rationale"`
 	// DedupKey collapses identical candidates arising from multiple sites.
 	DedupKey string `json:"dedup_key"`
+
+	// Combined marks a BOUNDED, multi-parameter (two-parameter, never a
+	// triple+) candidate — see docs/reflection-candidates.md "Combined
+	// (multi-parameter) candidates" and combined.go. Everything above
+	// (Parameter, Location, InjectionPointID, Value) describes the FIRST
+	// ("closer") half; these four describe the SECOND ("breakout") half.
+	// Empty/false for every ordinary single-parameter candidate produced by
+	// PlanCandidates — this never changes what any existing field means.
+	Combined          bool                 `json:"combined,omitempty"`
+	ParameterB        string               `json:"parameter_b,omitempty"`
+	LocationB         domain.ParamLocation `json:"location_b,omitempty"`
+	InjectionPointBID domain.ID            `json:"injection_point_b_id,omitempty"`
+	ValueB            string               `json:"value_b,omitempty"`
 }
 
 // CandidatePlan is the ordered, deduplicated candidate set for one reflection

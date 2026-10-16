@@ -58,6 +58,8 @@ type htmlFinding struct {
 	InjPointID      string
 	Location        string
 	Parameter       string
+	Combined        bool
+	ParameterB      string
 	Method          string
 	Discovery       string
 	AIAssisted      bool
@@ -175,6 +177,8 @@ func toHTMLFinding(n int, f *domain.Finding, v FindingView) htmlFinding {
 		InjPointID:      string(f.InjectionPointID),
 		Location:        string(f.Location),
 		Parameter:       v.ParamName,
+		Combined:        v.Combined,
+		ParameterB:      v.ParamNameB,
 		Method:          v.Method,
 		Discovery:       string(f.Provenance.DiscoverySource),
 		AIAssisted:      f.Provenance.AIAssisted,
@@ -325,6 +329,7 @@ const htmlTemplateSrc = `<!doctype html>
     {{if .InjPointID}}<li><strong>Injection point:</strong> <code>{{.InjPointID}}</code></li>{{end}}
     {{if .Location}}<li><strong>Location:</strong> {{.Location}}</li>{{end}}
     {{if or .Parameter .Method}}<li><strong>Parameter:</strong> {{.Parameter}}{{methodSuffix .Method}}</li>{{end}}
+    {{if .Combined}}<li><strong>⚠ Combined (multi-parameter) finding:</strong> TWO parameters mutated together in the SAME request were required — this is NOT a single-parameter bug. Second parameter: <strong>{{.ParameterB}}</strong></li>{{end}}
     {{if .Discovery}}<li><strong>Discovery source:</strong> {{.Discovery}}</li>{{end}}
     {{if .AIAssisted}}<li><strong>AI-assisted:</strong> yes (advisory only; not the verdict authority)</li>{{end}}
     {{if .DetectedAt}}<li><strong>Detected:</strong> {{.DetectedAt}}</li>{{end}}

@@ -16,10 +16,18 @@ import (
 )
 
 // injection selects one parameter to carry a marker value; all other parameters
-// keep their observed values.
+// keep their observed values. paramB/valueB are an OPTIONAL second override
+// for a COMBINED (multi-parameter) candidate — see
+// docs/reflection-candidates.md "Combined (multi-parameter) candidates" and
+// internal/detection/combined.go. Nil/empty for every ordinary
+// single-parameter injection; buildRequest applies both overrides in the
+// SAME request when paramB is set, exactly like param/value.
 type injection struct {
 	param *domain.Parameter
 	value string
+
+	paramB *domain.Parameter
+	valueB string
 }
 
 // maxBaselineBodyKeep caps the baseline body retained for the token-absence

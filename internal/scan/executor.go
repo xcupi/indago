@@ -487,9 +487,14 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 	var cookieOverride []*http.Cookie
 	for _, p := range sorted {
 		val := p.Example
-		injected := inj != nil && p.ID == inj.param.ID
-		if injected {
+		injectedA := inj != nil && inj.param != nil && p.ID == inj.param.ID
+		injectedB := inj != nil && inj.paramB != nil && p.ID == inj.paramB.ID
+		injected := injectedA || injectedB
+		switch {
+		case injectedA:
 			val = inj.value // the marker goes ONLY into the selected injection point
+		case injectedB:
+			val = inj.valueB // the SECOND override, for a combined (multi-parameter) candidate
 		}
 		switch p.Location {
 		case domain.LocationQuery:

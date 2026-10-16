@@ -114,6 +114,13 @@ type CandidateView struct {
 	Technique      string `json:"technique,omitempty"`
 	Transformation string `json:"transformation,omitempty"`
 	Rationale      string `json:"rationale,omitempty"`
+	// Combined/ParameterB/ValueB describe a COMBINED (multi-parameter)
+	// candidate's SECOND half — see docs/reflection-candidates.md "Combined
+	// (multi-parameter) candidates". Empty/false for every ordinary
+	// single-parameter candidate.
+	Combined   bool   `json:"combined,omitempty"`
+	ParameterB string `json:"parameter_b,omitempty"`
+	ValueB     string `json:"value_b,omitempty"`
 }
 
 // AttemptView is one browser-verification attempt: the candidate replayed, that
@@ -149,6 +156,12 @@ type FindingView struct {
 	// ordinary pending/inconclusive needs-review section.
 	ReviewReason      ReviewReason `json:"review_reason,omitempty"`
 	ReviewReasonLabel string       `json:"review_reason_label,omitempty"`
+	// Combined/ParamNameB mark a finding that required TWO parameters
+	// mutated together in the SAME request — see
+	// docs/reflection-candidates.md "Combined (multi-parameter)
+	// candidates". Empty/false for every ordinary single-parameter finding.
+	Combined   bool   `json:"combined,omitempty"`
+	ParamNameB string `json:"parameter_b_name,omitempty"`
 	// Verified is the confirming attempt (nil unless the finding is confirmed).
 	Verified   *AttemptView    `json:"verified_candidate,omitempty"`
 	Candidates []CandidateView `json:"candidates,omitempty"`
@@ -168,7 +181,12 @@ type detailShape struct {
 	BlockDetail      string `json:"block_detail,omitempty"`
 	CaptchaSuspected bool   `json:"captcha_suspected,omitempty"`
 	CaptchaLabel     string `json:"captcha_label,omitempty"`
-	Candidates       []struct {
+	// Combined/ParameterBName mirror scan.findingDetail's fields of the
+	// same name — see docs/reflection-candidates.md "Combined
+	// (multi-parameter) candidates".
+	Combined       bool   `json:"combined,omitempty"`
+	ParameterBName string `json:"parameter_b_name,omitempty"`
+	Candidates     []struct {
 		Source         string `json:"source"`
 		Category       string `json:"category"`
 		Context        string `json:"context"`
@@ -178,6 +196,9 @@ type detailShape struct {
 		Technique      string `json:"technique"`
 		Transformation string `json:"transformation"`
 		Rationale      string `json:"rationale"`
+		Combined       bool   `json:"combined"`
+		ParameterB     string `json:"parameter_b"`
+		ValueB         string `json:"value_b"`
 	} `json:"candidates"`
 	Attempts []struct {
 		CandidateValue   string            `json:"candidate_value"`
@@ -309,7 +330,7 @@ func FindingSection(f *domain.Finding) Section {
 // to their metadata; an ID that does not resolve is skipped, never invented.
 func NewFindingView(f *domain.Finding, evidence map[domain.ID]*domain.Evidence) FindingView {
 	d := decodeDetail(f.Detail)
-	v := FindingView{Section: FindingSection(f), Method: d.Method, ParamName: d.ParameterName}
+	v := FindingView{Section: FindingSection(f), Method: d.Method, ParamName: d.ParameterName, Combined: d.Combined, ParamNameB: d.ParameterBName}
 	if reason, ok := findingReviewReason(f.Verdict, d); ok {
 		v.ReviewReason = reason
 		v.ReviewReasonLabel = reason.Label()
@@ -319,6 +340,7 @@ func NewFindingView(f *domain.Finding, evidence map[domain.ID]*domain.Evidence) 
 		v.Candidates = append(v.Candidates, CandidateView{
 			Source: c.Source, Category: c.Category, Context: c.Context, ContextSub: c.ContextSub,
 			Value: c.Value, Trigger: c.Trigger, Technique: c.Technique, Transformation: c.Transformation, Rationale: c.Rationale,
+			Combined: c.Combined, ParameterB: c.ParameterB, ValueB: c.ValueB,
 		})
 	}
 
