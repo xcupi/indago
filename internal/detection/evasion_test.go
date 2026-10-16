@@ -78,7 +78,9 @@ func TestEvasionCandidatesAreAdditive(t *testing.T) {
 // which bypass shape it uses.
 func TestEvasionCandidatesAreBenignMarkers(t *testing.T) {
 	body := []byte("<p>" + evProbe.Value() + "</p><input value=\"" + evProbe.Value() + "\">" +
-		"<style>" + evProbe.Value() + "</style>")
+		"<style>" + evProbe.Value() + "</style>" +
+		"<a href=\"" + evProbe.Value() + "\">go</a>" +
+		"<script>var x = '" + evProbe.Value() + "';</script>")
 	rep := planWithEvasion(t, body, true)
 	banned := []string{"alert(", "confirm(", "prompt(", "eval(", "fetch(",
 		"document.cookie", ".cookie", "xmlhttprequest", "navigator.", "location=",
@@ -101,5 +103,46 @@ func TestEvasionCandidatesAreBenignMarkers(t *testing.T) {
 	}
 	if !seenEvasion {
 		t.Fatal("no evasion candidate was planned for this body")
+	}
+}
+
+// The javascript: scheme (CatURL) and JS string/comment breakout (CatJS)
+// categories previously got NO evasion variants at all — javascript: is one
+// of the single most commonly filtered constructs in real-world apps, so
+// that was a real gap, not an oversight to leave alone.
+func TestEvasionCandidatesCoverURLScheme(t *testing.T) {
+	body := []byte(`<a href="` + evProbe.Value() + `">go</a>`)
+	off := planWithEvasion(t, body, false)
+	on := planWithEvasion(t, body, true)
+	for _, c := range off.Plan.Candidates {
+		if c.Technique != "" {
+			t.Fatalf("evasion off but got technique-tagged url candidate: %+v", c)
+		}
+	}
+	found := false
+	for _, c := range on.Plan.Candidates {
+		if c.Technique != "" && strings.Contains(strings.ToLower(c.Value), "script:") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("EnableEvasion=true produced no javascript: scheme bypass candidate for a URL-category site")
+	}
+}
+
+func TestEvasionCandidatesCoverJSStringBreakout(t *testing.T) {
+	body := []byte(`<script>var x = '` + evProbe.Value() + `';</script>`)
+	on := planWithEvasion(t, body, true)
+	found := false
+	for _, c := range on.Plan.Candidates {
+		if c.Technique == "escaped_quote_prefix" {
+			found = true
+			if !strings.HasPrefix(c.Value, `\'`) {
+				t.Fatalf("escaped_quote_prefix candidate %q does not lead with a backslash-prefixed quote", c.Value)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("EnableEvasion=true produced no escaped_quote_prefix candidate for a single-quoted JS string site")
 	}
 }
