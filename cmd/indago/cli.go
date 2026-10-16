@@ -777,8 +777,10 @@ func (c *cli) finding(sub string, args []string) error {
 		return c.findingList(args)
 	case "show":
 		return c.findingShow(args)
+	case "poc":
+		return c.findingPoC(args)
 	}
-	return fmt.Errorf("unknown finding subcommand %q (list, show)", sub)
+	return fmt.Errorf("unknown finding subcommand %q (list, show, poc)", sub)
 }
 
 func (c *cli) findingList(args []string) error {
@@ -978,6 +980,40 @@ func printFindingDetail(w io.Writer, server string, fd *findingDetailOut) {
 				ev.ID, ev.Kind, ev.MediaType, ev.Size, ev.SHA256, server, ev.ID)
 		}
 	}
+}
+
+// findingPoC generates a standalone PoC HTML artifact for a Confirmed
+// finding (GET /api/scans/{id}/findings/{fid}/poc, see scan.GeneratePoC)
+// and writes it to -out. The server refuses (HTTP 409) anything that isn't
+// Confirmed — see AGENTS.md's evidence-integrity principle.
+func (c *cli) findingPoC(args []string) error {
+	fs := c.newFlags("finding poc")
+	scanRef := fs.String("scan", "", "scan ID or prefix")
+	out := fs.String("out", "", "write the standalone PoC HTML to this file (required)")
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if *scanRef == "" || len(pos) != 1 || *out == "" {
+		return errors.New("usage: indago finding poc -scan <scan-id|prefix> -out <file.html> <finding-id|prefix>")
+	}
+	scanID, err := c.resolveScanID(*scanRef)
+	if err != nil {
+		return err
+	}
+	findingID, err := c.resolveFindingID(scanID, pos[0])
+	if err != nil {
+		return err
+	}
+	data, err := c.getRaw("/api/scans/" + url.PathEscape(scanID) + "/findings/" + url.PathEscape(findingID) + "/poc")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(*out, data, 0o640); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "wrote standalone PoC to %s (finding %s)\n", *out, findingID)
+	return nil
 }
 
 // --- reports ---

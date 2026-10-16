@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/report"
+	"github.com/indago/indago/internal/scan"
+	"github.com/indago/indago/internal/store"
 )
 
 // --- findings ---
@@ -232,6 +235,49 @@ func (s *Server) handleGetFinding(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// handleGetFindingPoC generates and streams a standalone PoC HTML artifact
+// for a Confirmed finding (see scan.GeneratePoC) — a presentation capability
+// over data the scan already produced, not a new detection/exploitation
+// feature. Always served as an attachment (forced download): the point is
+// for the operator to save the file and open it SEPARATELY, independent of
+// Indago's own origin — unlike evidence/report content, this artifact is
+// meant to actually navigate/auto-submit when opened, which the general
+// evidence sandboxing CSP would defeat.
+func (s *Server) handleGetFindingPoC(w http.ResponseWriter, r *http.Request) {
+	scanID := domain.ID(r.PathValue("id"))
+	if _, err := s.store.Scans().Get(r.Context(), scanID); err != nil {
+		s.writeLookupError(w, err)
+		return
+	}
+	findingID := domain.ID(r.PathValue("fid"))
+	f, err := s.store.Findings().Get(r.Context(), findingID)
+	if err != nil {
+		s.writeLookupError(w, err)
+		return
+	}
+	if f.ScanID != scanID {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	poc, err := scan.GeneratePoC(r.Context(), s.store, findingID)
+	if err != nil {
+		switch {
+		case errors.Is(err, scan.ErrPoCNotConfirmed):
+			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, store.ErrNotFound):
+			writeError(w, http.StatusNotFound, "not found")
+		default:
+			s.writeInternalError(w, "generate poc", err)
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+poc.Filename()+`"`)
+	_, _ = w.Write(poc.HTML)
 }
 
 // evidenceLookup resolves a scan's evidence metadata for its findings. The

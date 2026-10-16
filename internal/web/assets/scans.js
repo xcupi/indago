@@ -478,7 +478,7 @@ function sectionNote(f) {
   }
 }
 
-function findingDetailEl(f) {
+function findingDetailEl(f, scanId) {
   const box = el("div", undefined, "detail");
   const dl = el("dl");
   const row = (k, v) => { if (!v) return; dl.appendChild(el("dt", k)); dl.appendChild(el("dd", v)); };
@@ -508,6 +508,12 @@ function findingDetailEl(f) {
       const ul = el("ul"); own.forEach((e) => ul.appendChild(evidenceLine(e)));
       hero.appendChild(ul);
     }
+    // Standalone PoC: a presentation-only capability over the data already
+    // above (the confirmed candidate/request) — see scan.GeneratePoC. Only
+    // ever reachable for a Confirmed finding, same as this hero block.
+    const pocLink = link("⬇ Download PoC (standalone HTML)", api.scan(scanId) + "/findings/" + encodeURIComponent(f.id) + "/poc", "act poc-link");
+    pocLink.title = "A standalone HTML file that reproduces this exact request when opened in a browser — or, for a header/cookie override a link cannot carry, the exact curl command";
+    hero.appendChild(el("div", undefined, "poc-action")).appendChild(pocLink);
     box.appendChild(hero);
   } else {
     const note = sectionNote(f);
@@ -609,7 +615,7 @@ async function toggleDetail(tr, f, scanId, state, forceOpen) {
   if (state) state.expanded.add(f.id);
   try {
     const full = await getJSON(api.scan(scanId) + "/findings/" + encodeURIComponent(f.id));
-    td.replaceChildren(findingDetailEl(full));
+    td.replaceChildren(findingDetailEl(full, scanId));
   } catch (e) { td.replaceChildren(el("div", "failed to load detail", "err")); }
 }
 

@@ -171,8 +171,9 @@ Everything else about these locations is identical to Query/Form/JSON: the
 same candidate templates, the same profile bounding, the same Confirmed/
 Rejected/Inconclusive verdict lattice, the same Finding correlation. Multi-
 parameter/combined injection (mutating more than one location at once) is
-now implemented for a bounded, deterministic subset — see below. PoC
-generation remains out of scope, unchanged by this.
+now implemented for a bounded, deterministic subset — see below. Standalone
+PoC generation (reusing this same location data) is implemented too — see
+"Standalone PoC generation" below.
 
 `internal/detection/evasion.go` is a second, separate template generator,
 called by the planner ONLY when `PlanOptions.EnableEvasion` is true — itself
@@ -345,3 +346,94 @@ for each of the two parameters individually, while the scan's one-time
 combined pass produces a genuine `Confirmed` finding — real browser
 execution (`Uncaught ReferenceError: <marker> is not defined`), not just
 green unit tests.
+
+## Standalone PoC generation
+
+Every other presentation surface describes a `Confirmed` finding in prose;
+nothing generated a clickable, standalone artifact a bug-bounty triager
+could open to reproduce the bug themselves — busywork the scan already has
+every byte of data needed to automate. `internal/scan/poc.go`'s
+`GeneratePoC(ctx, store, findingID)` closes that gap. It is purely
+presentation over data the scan already produced: it reuses the EXACT
+`buildRequest` call the candidate step and browser verification themselves
+used (never a re-derivation that could silently drift from what was
+actually confirmed), and for a POST+form-encoded finding the SAME
+auto-submitting-hidden-`<form>` technique `browser.Page.NavigateForm`
+itself uses for POST verification (see `docs/browser-verification.md`).
+
+**Evidence integrity (AGENTS.md §2.6) is a hard gate, not a convention**:
+`GeneratePoC` refuses (`ErrPoCNotConfirmed`) for anything whose STORED
+Verdict is not `Confirmed` — a PoC claiming to reproduce an unconfirmed,
+rejected, or inconclusive candidate would fabricate evidence of a
+vulnerability that was never actually observed executing.
+
+### One-click vs. "no one-click PoC is possible"
+
+A generated `PoC.HTML` is one of two honest shapes — never a third,
+silently-wrong one that looks like it works but doesn't:
+
+| Location(s) involved | Artifact | Mechanism |
+|---|---|---|
+| Query and/or Path only (method GET/HEAD) | **True one-click link.** `<meta http-equiv="refresh">` auto-navigates to the exact confirmed URL; a plain `<a>` link is the manual fallback. No JavaScript needed at all. | the override is already part of the URL, exactly like a Query candidate's own verified-attempt URL |
+| Form (method POST) | **True one-click auto-submit form**, mirroring `browser.Page.NavigateForm`'s own `formHTML` (same hidden-input, attribute-value-escaped, `onload="…submit()"` shape) — a real top-level POST navigation, not a payload. | hidden `<input>` fields carry the exact form body the confirmed request sent |
+| Combined, both halves Query/Path/Form | **Still one-click** — both overrides are carried together (both baked into the URL, or the Form half as hidden inputs plus the Query/Path half baked into the form's own `action` URL). | `allLinkable` requires EVERY location involved to be carryable, not just one |
+| Header, Cookie, or JSON involved (either half, for a combined finding) | **No one-click artifact at all** — the page renders an explicit "⚠ No one-click PoC is possible for this finding" explanation (which specific location and why) plus the exact HTTP request and a runnable `curl` command. It deliberately does NOT auto-navigate/auto-submit. | a plain navigation/form submission cannot set an arbitrary request header (browsers only allow a small fixed set on cross-context requests); a static page on an unrelated origin cannot set a cookie for the TARGET's origin (same-origin policy); no HTML form can carry an `application/json` body |
+
+The Header/Cookie/JSON row is not a missing feature to "fix later" — it is
+the structurally correct answer. Precision over polish: an artifact that
+silently failed to carry a header/cookie override while LOOKING like a
+working PoC would be worse than no PoC at all. Every generated artifact
+(one-click or not) also always includes the exact HTTP request and a
+`curl` command, so the header/cookie/JSON case still gives the triager
+everything needed to reproduce the bug by hand.
+
+A POST+JSON override can never actually reach `GeneratePoC` on a real
+Confirmed finding in the first place — see AGENTS.md §3 and
+`docs/browser-verification.md`: browser navigation carries no request
+body, so a POST+JSON candidate can never be browser-verified and so can
+never be `Confirmed`. `GeneratePoC` still handles it defensively (treated
+the same as Header/Cookie: no one-click artifact, explicit explanation,
+curl fallback) rather than assuming the limitation holds instead of
+checking.
+
+### Reachable from all three surfaces
+
+- **CLI**: `indago finding poc -scan <scan-id|prefix> -out <file.html>
+  <finding-id|prefix>` (`cmd/indago/cli.go`'s `findingPoC`).
+- **API**: `GET /api/scans/{id}/findings/{fid}/poc`
+  (`internal/web/findings.go`'s `handleGetFindingPoC`) — `409` for a
+  non-Confirmed finding, `404` for an unknown scan/finding, `200` with
+  `Content-Disposition: attachment` otherwise. Always forced as a download
+  (never served inline): the whole point is for the artifact to
+  navigate/auto-submit when opened on its own, independent of Indago's own
+  origin — the sandboxing CSP the Evidence/Report content endpoints apply
+  would defeat that.
+- **Web UI**: a "⬇ Download PoC (standalone HTML)" link inside a
+  Confirmed finding's "Verified candidate" hero block
+  (`internal/web/assets/scans.js`'s `findingDetailEl`) — only ever rendered
+  when `verified_candidate` is present, i.e. only for a Confirmed finding.
+
+### Tests and live validation
+
+`internal/scan/poc_test.go`: the refuse-if-not-`Confirmed` guard (Pending/
+Rejected/Inconclusive), one-click Query, one-click Path, one-click
+POST+Form (asserts the auto-submit `<form>`/hidden-input shape), not-
+one-click Header (asserts the curl `-H` flag and the explicit explanation),
+not-one-click Cookie (asserts curl `-b` and the same-origin-policy
+explanation), a combined finding with both halves Query (still one-click,
+both overrides present in the URL), and a combined finding with one Query
+half and one Header half (correctly NOT one-click, even though one half
+alone would have been). `cmd/indago/finding_poc_test.go` and
+`internal/web/findings_poc_test.go` exercise the CLI and API surfaces
+end to end against the real HTTP handler.
+
+Live-validated against a disposable one-route Python lab
+(`indago-poc-lab.py`) reflecting `q` unescaped into `html_text`: a real
+scan produced a genuine `Confirmed` finding, `indago finding poc` generated
+a standalone HTML file from it via the real CLI command, and opening that
+file completely independently of Indago's own process (a separate static
+file server, a fresh browser tab with no Indago code involved) reproduced
+the identical execution signal the scan itself observed —
+`Uncaught ReferenceError: <marker> is not defined` — proving the generated
+artifact is a faithful, independently-reproducible PoC, not just a file
+with plausible-looking content.

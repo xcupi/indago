@@ -101,6 +101,7 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER, default http://
   scan config <scan-id|prefix> [-discovery N] [-http N] [-browser N] [-rate N]   (runtime tuning)
   finding list -scan <scan-id|prefix> [-verdict confirmed|pending|inconclusive|rejected|all] [-json]   (default: confirmed; all with -json)
   finding show -scan <scan-id|prefix> <finding-id|prefix> [-json]
+  finding poc -scan <scan-id|prefix> -out <file.html> <finding-id|prefix>   (standalone PoC artifact; Confirmed findings only)
   endpoint list -scan <scan-id|prefix> [-json]   (discovered endpoints + their parameters, for debugging why a scan is Inconclusive)
   auth login -login-url URL [-success-url GLOB]   (standalone interactive-login capture; requires indago serve -browser)
   report create -scan <scan-id|prefix> -format json|markdown|html [-mode all|confirmed|selected] [-finding ID]... [-out FILE]
