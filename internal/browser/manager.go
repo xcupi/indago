@@ -114,7 +114,7 @@ func (m *Manager) NewContext(ctx context.Context, opts ContextOptions) (*Context
 	ch, err := callCtxCreate(ctx, func() (contextHandle, error) {
 		m.createMu.Lock()
 		defer m.createMu.Unlock()
-		return b.NewContext(opts.StorageStatePath, opts.ProxyServer, opts.AllowRequest)
+		return b.NewContext(opts.StorageStatePath, opts.ProxyServer, opts.ExtraHeaders, opts.AllowRequest)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("browser: new context: %w", err)
@@ -281,7 +281,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", nil) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
+	ch, err := b.NewContext("", "", nil, nil) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}
@@ -406,7 +406,7 @@ func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginR
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", nil) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
+	ch, err := b.NewContext("", "", nil, nil) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}

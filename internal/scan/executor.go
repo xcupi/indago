@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/indago/indago/internal/detection"
+	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
@@ -482,6 +483,8 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 	q := u.Query()
 	form := url.Values{}
 	jsonBody := map[string]string{}
+	var headerOverride map[string]string
+	var cookieOverride []*http.Cookie
 	for _, p := range sorted {
 		val := p.Example
 		injected := inj != nil && p.ID == inj.param.ID
@@ -500,11 +503,51 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 			form.Set(p.Name, val)
 		case domain.LocationJSON:
 			jsonBody[p.Name] = val
+		case domain.LocationHeader:
+			// Only the mutated/candidate request overrides a header — the
+			// baseline must never disturb any header the scan relies on
+			// (auth headers, the session cookie header, the engine's own
+			// default User-Agent), so a non-injected Header parameter is a
+			// no-op here.
+			if injected {
+				if headerOverride == nil {
+					headerOverride = make(map[string]string, 1)
+				}
+				headerOverride[p.Name] = val
+			}
+		case domain.LocationCookie:
+			// Same principle as Header: the scan's own session cookies are
+			// already carried by scopedEngine.WithSessionCookies on every
+			// request, so only the injected cookie needs an explicit
+			// override here — appended as its own Cookie, never replacing
+			// or removing any other cookie the request carries.
+			if injected {
+				cookieOverride = append(cookieOverride, &http.Cookie{Name: p.Name, Value: val})
+			}
+		case domain.LocationPath:
+			// The baseline path segment is already correct in ep.URL; only
+			// the injected candidate rewrites that ONE segment.
+			if injected {
+				if idx, ok := discovery.ParsePathSegmentParamName(p.Name); ok {
+					segs := discovery.PathSegments(u.Path)
+					if idx >= 0 && idx < len(segs) {
+						segs[idx] = val
+						u.Path = discovery.JoinPathSegments(segs)
+						u.RawPath = "" // let url.URL re-derive the encoded form
+					}
+				}
+			}
 		}
 	}
 	u.RawQuery = q.Encode()
 
 	req := &httpengine.Request{Method: string(ep.Method), URL: u.String()}
+	if len(headerOverride) > 0 {
+		req.Headers = headerOverride
+	}
+	if len(cookieOverride) > 0 {
+		req.Cookies = cookieOverride
+	}
 	if !hasBody(ep.Method) {
 		return req, nil
 	}

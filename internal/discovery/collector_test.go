@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"testing"
 
 	"github.com/indago/indago/internal/discovery"
@@ -92,6 +93,123 @@ func TestCollectorNeverSkipsUserProvidedSeedEvenIfLogoutLooking(t *testing.T) {
 	}
 }
 
+// --- Header/Cookie/Path injection points ---
+
+// Every endpoint gets the same small, conservative DEFAULT set of Header
+// injection points (User-Agent, Referer, X-Forwarded-For), regardless of the
+// URL.
+func TestCollectorRegistersDefaultHeaderInjectionPoints(t *testing.T) {
+	c, st, _, scanID := newCollector(t, discovery.DefaultConfig())
+	ctx := context.Background()
+
+	if _, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{URL: "http://example.com/plain", Method: domain.MethodGET, Source: domain.SourceCrawler}); err != nil {
+		t.Fatal(err)
+	}
+	params, _ := st.Parameters().ListByScan(ctx, scanID)
+	got := map[string]bool{}
+	for _, p := range params {
+		if p.Location == domain.LocationHeader {
+			got[p.Name] = true
+		}
+	}
+	want := []string{"User-Agent", "Referer", "X-Forwarded-For"}
+	if len(got) != len(want) {
+		t.Fatalf("header injection points = %v, want exactly %v", got, want)
+	}
+	for _, name := range want {
+		if !got[name] {
+			t.Fatalf("missing default header injection point %q: got %v", name, got)
+		}
+	}
+}
+
+// Cookie injection points are registered ONLY from the scan's own session
+// cookies (Config.SessionCookies — the same cookies WithSessionCookies
+// attaches to every request), EXCLUDING whatever looks like the session's
+// own authentication/session cookie, and NEVER fabricated.
+func TestCollectorRegistersCookieInjectionPointsFromSessionExcludingAuthCookie(t *testing.T) {
+	cfg := discovery.DefaultConfig()
+	cfg.SessionCookies = []*http.Cookie{
+		{Name: "PHPSESSID", Value: "abc123"}, // looks like the auth/session cookie: excluded
+		{Name: "pref", Value: "orange"},      // an ordinary, non-auth cookie: registered
+	}
+	c, st, _, scanID := newCollector(t, cfg)
+	ctx := context.Background()
+
+	if _, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{URL: "http://example.com/plain", Method: domain.MethodGET, Source: domain.SourceCrawler}); err != nil {
+		t.Fatal(err)
+	}
+	params, _ := st.Parameters().ListByScan(ctx, scanID)
+	var cookieParams []*domain.Parameter
+	for _, p := range params {
+		if p.Location == domain.LocationCookie {
+			cookieParams = append(cookieParams, p)
+		}
+	}
+	if len(cookieParams) != 1 || cookieParams[0].Name != "pref" || cookieParams[0].Example != "orange" {
+		t.Fatalf("cookie injection points = %+v, want exactly one {pref, orange} (PHPSESSID excluded)", cookieParams)
+	}
+}
+
+// No session (no SessionCookies) registers zero Cookie injection points —
+// never a fabricated one.
+func TestCollectorRegistersNoCookieInjectionPointsWithoutSession(t *testing.T) {
+	c, st, _, scanID := newCollector(t, discovery.DefaultConfig())
+	ctx := context.Background()
+	if _, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{URL: "http://example.com/plain", Method: domain.MethodGET, Source: domain.SourceCrawler}); err != nil {
+		t.Fatal(err)
+	}
+	params, _ := st.Parameters().ListByScan(ctx, scanID)
+	for _, p := range params {
+		if p.Location == domain.LocationCookie {
+			t.Fatalf("expected no Cookie injection points with no session, got %+v", p)
+		}
+	}
+}
+
+// A path segment that looks like a value (numeric, UUID, opaque slug with a
+// digit) becomes a Path injection point; a literal route keyword never does.
+func TestCollectorRegistersPathInjectionPointsHeuristically(t *testing.T) {
+	c, st, _, scanID := newCollector(t, discovery.DefaultConfig())
+	ctx := context.Background()
+
+	if _, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{
+		URL: "http://example.com/api/v1/users/42/edit", Method: domain.MethodGET, Source: domain.SourceCrawler,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	params, _ := st.Parameters().ListByScan(ctx, scanID)
+	var pathParams []*domain.Parameter
+	for _, p := range params {
+		if p.Location == domain.LocationPath {
+			pathParams = append(pathParams, p)
+		}
+	}
+	// Segments: api(0) v1(1) users(2) 42(3) edit(4) — only "42" qualifies.
+	if len(pathParams) != 1 || pathParams[0].Example != "42" {
+		t.Fatalf("path injection points = %+v, want exactly one for the \"42\" segment", pathParams)
+	}
+	if idx, ok := discovery.ParsePathSegmentParamName(pathParams[0].Name); !ok || idx != 3 {
+		t.Fatalf("path injection point name = %q, want to encode segment index 3", pathParams[0].Name)
+	}
+}
+
+// An endpoint whose path has no qualifying segment registers zero Path
+// injection points.
+func TestCollectorRegistersNoPathInjectionPointWithoutQualifyingSegment(t *testing.T) {
+	c, st, _, scanID := newCollector(t, discovery.DefaultConfig())
+	ctx := context.Background()
+	if _, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{URL: "http://example.com/api/v1/admin/login", Method: domain.MethodGET, Source: domain.SourceCrawler}); err != nil {
+		t.Fatal(err)
+	}
+	params, _ := st.Parameters().ListByScan(ctx, scanID)
+	for _, p := range params {
+		if p.Location == domain.LocationPath {
+			t.Fatalf("expected no Path injection points for an all-route-keyword path, got %+v", p)
+		}
+	}
+}
+
 func TestCollectorScopeEnforcement(t *testing.T) {
 	c, st, q, scanID := newCollector(t, discovery.DefaultConfig())
 	ctx := context.Background()
@@ -116,8 +234,10 @@ func TestCollectorScopeEnforcement(t *testing.T) {
 		t.Fatalf("only the in-scope endpoint should persist: %+v", eps)
 	}
 	stats, _ := q.Stats(ctx, scanID)
-	if stats.Queued != 1 { // one endpoint-level job
-		t.Fatalf("expected 1 queued job, got %+v", stats)
+	// one endpoint-level job + 3 default Header injection-point jobs
+	// (User-Agent/Referer/X-Forwarded-For — see registerHeaderInjectionPoints).
+	if stats.Queued != 4 {
+		t.Fatalf("expected 4 queued jobs, got %+v", stats)
 	}
 }
 
@@ -154,17 +274,19 @@ func TestCollectorQueryParamsBecomeInjectionPoints(t *testing.T) {
 	}
 
 	params, _ := st.Parameters().ListByScan(ctx, scanID)
-	if len(params) != 2 {
-		t.Fatalf("expected 2 params, got %d", len(params))
+	// 2 query params ("q", "page") + 3 default Header injection points
+	// (User-Agent/Referer/X-Forwarded-For).
+	if len(params) != 5 {
+		t.Fatalf("expected 5 params, got %d", len(params))
 	}
 	ips, _ := st.InjectionPoints().ListByScan(ctx, scanID)
-	if len(ips) != 2 {
-		t.Fatalf("expected 2 injection points, got %d", len(ips))
+	if len(ips) != 5 {
+		t.Fatalf("expected 5 injection points, got %d", len(ips))
 	}
-	// 1 endpoint job + 2 injection-point jobs.
+	// 1 endpoint job + 2 query injection-point jobs + 3 header injection-point jobs.
 	stats, _ := q.Stats(ctx, scanID)
-	if stats.Queued != 3 {
-		t.Fatalf("expected 3 queued jobs, got %+v", stats)
+	if stats.Queued != 6 {
+		t.Fatalf("expected 6 queued jobs, got %+v", stats)
 	}
 }
 
@@ -187,7 +309,18 @@ func TestCollectorAddParameterAutoCreatesEndpoint(t *testing.T) {
 		t.Fatalf("expected endpoint auto-created, got %d", len(eps))
 	}
 	params, _ := st.Parameters().ListByScan(ctx, scanID)
-	if len(params) != 1 || params[0].Name != "comment" || params[0].Location != domain.LocationForm {
+	// "comment" (form) + 3 default Header injection points registered when
+	// AddParameter auto-created the endpoint.
+	if len(params) != 4 {
+		t.Fatalf("expected 4 params, got %d", len(params))
+	}
+	var comment *domain.Parameter
+	for _, p := range params {
+		if p.Name == "comment" {
+			comment = p
+		}
+	}
+	if comment == nil || comment.Location != domain.LocationForm {
 		t.Fatalf("param not registered correctly: %+v", params)
 	}
 }
@@ -316,8 +449,9 @@ func TestCollectorHydrateEnqueuesJobsLostToInterruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	ips, _ := st.InjectionPoints().ListByScan(ctx, scanID)
-	if len(ips) != 1 {
-		t.Fatalf("setup: want 1 persisted injection point, got %d", len(ips))
+	// 1 query injection point ("q") + 3 default Header injection points.
+	if len(ips) != 4 {
+		t.Fatalf("setup: want 4 persisted injection points, got %d", len(ips))
 	}
 	if st, _ := q.Stats(ctx, scanID); st.Total() != 0 {
 		t.Fatalf("setup: interrupted run must have enqueued nothing, got %+v", st)
@@ -331,9 +465,17 @@ func TestCollectorHydrateEnqueuesJobsLostToInterruption(t *testing.T) {
 	}
 	eps, _ := st.Endpoints().ListByScan(ctx, scanID)
 	got := jobTargets(t, q, scanID)
-	want := map[string]int{"endpoint:" + string(eps[0].ID): 1, string(ips[0].ID): 1}
-	if len(got) != len(want) || got["endpoint:"+string(eps[0].ID)] != 1 || got[string(ips[0].ID)] != 1 {
+	want := map[string]int{"endpoint:" + string(eps[0].ID): 1}
+	for _, ip := range ips {
+		want[string(ip.ID)] = 1
+	}
+	if len(got) != len(want) {
 		t.Fatalf("reconciled jobs = %v, want exactly %v", got, want)
+	}
+	for k, n := range want {
+		if got[k] != n {
+			t.Fatalf("reconciled jobs = %v, want exactly %v", got, want)
+		}
 	}
 }
 
@@ -367,15 +509,31 @@ func TestCollectorHydrateRegistersMissingQueryParams(t *testing.T) {
 	}
 	params, _ := st.Parameters().ListByScan(ctx, scanID)
 	ips, _ := st.InjectionPoints().ListByScan(ctx, scanID)
-	if len(params) != 1 || params[0].Name != "q" || params[0].Example != "1" || params[0].Source != domain.SourceCrawler {
-		t.Fatalf("missing query parameter not registered: %+v", params)
+	// "q" (the missing query param) + 3 default Header injection points,
+	// all registered by the same Hydrate/reconcile pass.
+	if len(params) != 4 {
+		t.Fatalf("expected 4 params after hydrate, got %d: %+v", len(params), params)
 	}
-	if len(ips) != 1 || ips[0].ParameterID != params[0].ID {
-		t.Fatalf("missing injection point not registered: %+v", ips)
+	var q1 *domain.Parameter
+	for _, p := range params {
+		if p.Name == "q" {
+			q1 = p
+		}
+	}
+	if q1 == nil || q1.Example != "1" || q1.Source != domain.SourceCrawler {
+		t.Fatalf("missing query parameter not registered correctly: %+v", params)
+	}
+	if len(ips) != 4 {
+		t.Fatalf("expected 4 injection points after hydrate, got %d", len(ips))
 	}
 	got := jobTargets(t, q, scanID)
-	if got[string(ips[0].ID)] != 1 || got["endpoint:"+string(ep.ID)] != 1 || len(got) != 2 {
-		t.Fatalf("jobs = %v, want one endpoint job and one injection-point job", got)
+	if len(got) != 5 || got["endpoint:"+string(ep.ID)] != 1 { // endpoint job + 4 injection-point jobs
+		t.Fatalf("jobs = %v, want one endpoint job and one job per injection point (5 total)", got)
+	}
+	for _, ip := range ips {
+		if got[string(ip.ID)] != 1 {
+			t.Fatalf("injection point %s has %d jobs, want 1 (jobs=%v)", ip.ID, got[string(ip.ID)], got)
+		}
 	}
 }
 
@@ -406,8 +564,11 @@ func TestCollectorHydrateCreatesMissingInjectionPoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	ips, _ := st.InjectionPoints().ListByScan(ctx, scanID)
-	if len(ips) != 2 {
-		t.Fatalf("want 2 injection points (1 original + 1 reconciled), got %d", len(ips))
+	// "body" (form) + 3 default Header injection points (from the
+	// AddParameter-triggered AddEndpoint auto-create) + 1 reconciled
+	// injection point for the orphaned "extra" param.
+	if len(ips) != 5 {
+		t.Fatalf("want 5 injection points (4 original + 1 reconciled), got %d", len(ips))
 	}
 	got := jobTargets(t, q, scanID)
 	for _, ip := range ips {

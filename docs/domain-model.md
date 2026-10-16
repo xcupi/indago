@@ -75,7 +75,9 @@ guard.
 > `VerdictPending`; only verification promotes it to `confirmed` (or demotes it
 > to `rejected` / `inconclusive`).
 
-Phase 1 requires at minimum `query`, `form`, and `json` parameter locations.
+Phase 1 requires at minimum `query`, `form`, and `json` parameter locations;
+`header`, `cookie`, and `path` are now wired end to end too (see
+`docs/reflection-candidates.md` "Header/Cookie/Path injection points").
 
 ---
 

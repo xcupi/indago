@@ -130,6 +130,13 @@ type ContextOptions struct {
 	// only via infrastructure the operator explicitly supplies and opts into,
 	// never infrastructure Indago invents or manages itself").
 	ProxyServer string
+	// ExtraHeaders, when set, are merged into every request this context
+	// makes (page navigation + subresources), on top of the browser's own
+	// defaults — used to carry a Header-location XSS candidate's override
+	// (User-Agent, Referer, X-Forwarded-For, …) into the verifying browser,
+	// so a header reflection gets the same real-browser confirmation chance
+	// a query/form/JSON reflection already gets. nil/empty changes nothing.
+	ExtraHeaders map[string]string
 }
 
 // NavOptions control a single navigation.

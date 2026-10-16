@@ -142,7 +142,36 @@ and `AGENTS.md` §3); it never simulates clicks/hovers. Obfuscation/evasion
 variants exist only behind the explicit `EnableEvasion` opt-in described
 above — never in the default candidate set. See `AGENTS.md` §2–§3.
 
-## Evasion candidates (opt-in)
+## Header/Cookie/Path injection points
+
+Candidate planning and execution are location-agnostic — the pipeline
+(reflect → context-analyze → candidate-plan → candidate-execute →
+browser-verify → finding-correlate) does not care whether the mutated value
+came from a query string, a form field, a JSON body field, a request
+header, a cookie, or a URL path segment. Discovery registers injection
+points for three additional `domain.ParamLocation` values beyond
+Query/Form/JSON:
+
+| Location | What gets registered | Baseline behavior | Mutated behavior |
+|----------|----------------------|--------------------|-------------------|
+| `header` | A small, conservative DEFAULT set — `User-Agent`, `Referer`, `X-Forwarded-For` — on **every** discovered endpoint (`internal/discovery/extra_locations.go`). Not derived from observed traffic. | The baseline request sends whatever header the HTTP engine would normally send; the parameter's header is left completely untouched. | `buildRequest` (`internal/scan/executor.go`) clones the baseline headers and overrides **exactly the one** header this injection point targets — every other header (auth headers, the session cookie header, the engine's default User-Agent for every *other* header candidate) is left alone. |
+| `cookie` | Only cookies actually present in the scan's own session context — the SAME cookie jar `scopedEngine.WithSessionCookies` attaches to every request (loaded from the scan's auth session material; see `internal/auth`) — EXCLUDING whatever looks like the session's own authentication/session cookie (`isSessionCookieName`: a liberal name-based heuristic matching `sess`/`sid`/`auth`/`token`/`jwt`/`csrf`/`xsrf`, mirroring `dynamic_params.go`'s `isDynamicTokenName`). A scan with no session (or no cookies in it) registers none — never fabricated. | Session cookies are already attached to every request by `scopedEngine`; the baseline adds nothing extra. | `buildRequest` appends the injected cookie's marker value as its own `Cookie`, never replacing or removing any other cookie the request carries. |
+| `path` | Only a URL path **segment** that looks like a variable value — purely numeric, UUID-shaped, or an opaque alphanumeric slug containing a digit (`internal/discovery/path_segments.go`'s `QualifyingPathSegments`) — never a literal route keyword (`api`, `v1`, `admin`, `login`, …; see `routeKeywordSegments`). An endpoint whose path has no qualifying segment registers zero Path injection points. The `Parameter.Name` encodes the segment's position (`path[N]`) so `buildRequest` recomputes the identical split from the endpoint's own URL. | The baseline URL already has the right segment value (it came from the URL itself) — nothing to add. | `buildRequest` rewrites exactly that one path segment with the candidate value; the mutated URL carries the marker directly, the same way a Query candidate does. |
+
+Browser verification carries the SAME override into the verifying browser
+context, before navigation: `verification.Input.ExtraHeaders` /
+`ExtraCookies` (set by `internal/scan/verify.go` from the candidate's
+`Location`) flow into `browser.ContextOptions.ExtraHeaders` (merged into the
+context at creation, Playwright's own `ExtraHttpHeaders`) and
+`browser.Context.SetCookies` respectively — both applied before `Navigate`.
+Path needs no special verification handling: the marker is already literally
+part of the navigated URL, exactly like Query.
+
+Everything else about these locations is identical to Query/Form/JSON: the
+same candidate templates, the same profile bounding, the same Confirmed/
+Rejected/Inconclusive verdict lattice, the same Finding correlation. Multi-
+parameter/combined injection (mutating more than one location at once) and
+PoC generation remain out of scope, unchanged by this.
 
 `internal/detection/evasion.go` is a second, separate template generator,
 called by the planner ONLY when `PlanOptions.EnableEvasion` is true — itself

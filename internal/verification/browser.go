@@ -109,11 +109,31 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 		AllowRequest:     allow,
 		StorageStatePath: in.SessionStatePath,
 		ProxyServer:      in.ProxyServer,
+		ExtraHeaders:     in.ExtraHeaders,
 	})
 	if err != nil {
 		return nil, classifyBrowserErr(ctx, err)
 	}
 	defer bctx.Close()
+
+	// A Cookie-location candidate's override must reach the browser BEFORE
+	// navigation (see Input.ExtraCookies) — appended as its own cookie,
+	// never replacing or removing any cookie the session's own storage
+	// state already seeded this context with.
+	if len(in.ExtraCookies) > 0 {
+		cks := make([]browser.Cookie, 0, len(in.ExtraCookies))
+		for _, ck := range in.ExtraCookies {
+			if ck == nil {
+				continue
+			}
+			cks = append(cks, browser.Cookie{Name: ck.Name, Value: ck.Value, URL: in.URL})
+		}
+		if len(cks) > 0 {
+			if err := bctx.SetCookies(ctx, cks); err != nil {
+				return nil, classifyBrowserErr(ctx, err)
+			}
+		}
+	}
 
 	page, err := bctx.NewPage(ctx)
 	if err != nil {

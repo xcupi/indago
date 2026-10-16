@@ -44,8 +44,10 @@ func TestScanExecutesEveryJobAndPersistsResults(t *testing.T) {
 		t.Fatalf("test cases = %d, want one per job (%d)", len(cases), total)
 	}
 
-	// The POST form endpoint (and its parameter job) is skipped by default; every
-	// other job executed successfully (a 404 such as /secret is still a success).
+	// The POST form endpoint (and its parameter jobs — the form field PLUS
+	// the 3 default Header injection points registered on every endpoint,
+	// including a POST one) is skipped by default; every other job executed
+	// successfully (a 404 such as /secret is still a success).
 	var skipped, success int
 	jobs := map[domain.ID]bool{}
 	for _, tc := range cases {
@@ -81,7 +83,11 @@ func TestScanExecutesEveryJobAndPersistsResults(t *testing.T) {
 			t.Errorf("unexpected result: status=%s outcome=%s err=%q url=%s", tc.Status, tc.Outcome, tc.Error, tc.URL)
 		}
 	}
-	if len(jobs) != total || skipped != 2 || success != total-2 {
+	// 2 original skips (the POST form field's injection point + its own
+	// endpoint-level job) + 3 default Header injection points registered on
+	// that same POST endpoint, also skipped (AllowStateChanging is off).
+	const wantSkipped = 5
+	if len(jobs) != total || skipped != wantSkipped || success != total-wantSkipped {
 		t.Fatalf("jobs=%d skipped=%d success=%d (total %d)", len(jobs), skipped, success, total)
 	}
 	// (Discovery also registers a GET endpoint for the form's action URL; that GET

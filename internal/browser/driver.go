@@ -21,9 +21,11 @@ type browserHandle interface {
 	// seeds it with saved session material (persistent authenticated context).
 	// proxyServer, when non-empty, routes every request this context makes
 	// through that proxy (operator-supplied; see ContextOptions.ProxyServer).
-	// allow, when non-nil, gates every http(s) request: disallowed requests must
-	// be aborted before they are sent.
-	NewContext(storageStatePath, proxyServer string, allow func(url string) bool) (contextHandle, error)
+	// extraHeaders, when non-empty, is merged into every request this context
+	// makes (see ContextOptions.ExtraHeaders). allow, when non-nil, gates
+	// every http(s) request: disallowed requests must be aborted before they
+	// are sent.
+	NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(url string) bool) (contextHandle, error)
 	// Close closes the browser and all its contexts.
 	Close() error
 }

@@ -551,6 +551,66 @@ func TestVerifyPassesScopeAndSession(t *testing.T) {
 	}
 }
 
+// --- Header/Cookie candidate overrides reach verification.Input ---
+
+// A Header-location candidate's override must reach the browser verifier as
+// Input.ExtraHeaders (name -> the candidate's value) so BrowserVerifier.
+// Verify can apply it to the context BEFORE navigation — it never shows up
+// in the navigated URL or body the way Query/Form/Path do.
+func TestVerifyPassesHeaderOverride(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "ok") }))
+	defer srv.Close()
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/s", domain.MethodGET)
+	focus := env.param(ep, "User-Agent", domain.LocationHeader, "")
+	ip := env.injection(ep, focus)
+	f := env.pendingFinding(ep, ip)
+
+	cand := basicCandidate()
+	fv := &fakeVerifier{result: confirmedResult(verification.SignalPageError)}
+	vx := env.verifyExec(fv, openScope(), ExecutorConfig{})
+	job := env.verifyJobFor(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, cand, f.ID)
+	if err := vx.Handle(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+
+	in := fv.lastInput()
+	if len(in.ExtraHeaders) != 1 || in.ExtraHeaders["User-Agent"] != cand.Value {
+		t.Fatalf("ExtraHeaders = %+v, want exactly {User-Agent: %q}", in.ExtraHeaders, cand.Value)
+	}
+	if len(in.ExtraCookies) != 0 {
+		t.Fatalf("a Header candidate must not also set ExtraCookies: %+v", in.ExtraCookies)
+	}
+}
+
+// A Cookie-location candidate's override must reach the browser verifier as
+// Input.ExtraCookies, same rationale as the Header case above.
+func TestVerifyPassesCookieOverride(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "ok") }))
+	defer srv.Close()
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/s", domain.MethodGET)
+	focus := env.param(ep, "pref", domain.LocationCookie, "orange")
+	ip := env.injection(ep, focus)
+	f := env.pendingFinding(ep, ip)
+
+	cand := basicCandidate()
+	fv := &fakeVerifier{result: confirmedResult(verification.SignalPageError)}
+	vx := env.verifyExec(fv, openScope(), ExecutorConfig{})
+	job := env.verifyJobFor(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, cand, f.ID)
+	if err := vx.Handle(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+
+	in := fv.lastInput()
+	if len(in.ExtraCookies) != 1 || in.ExtraCookies[0].Name != "pref" || in.ExtraCookies[0].Value != cand.Value {
+		t.Fatalf("ExtraCookies = %+v, want exactly one {pref %q}", in.ExtraCookies, cand.Value)
+	}
+	if len(in.ExtraHeaders) != 0 {
+		t.Fatalf("a Cookie candidate must not also set ExtraHeaders: %+v", in.ExtraHeaders)
+	}
+}
+
 // --- malformed/missing payload ---
 
 func TestVerifyHandleBadPayload(t *testing.T) {

@@ -65,7 +65,29 @@ func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpen
 	}
 	cur := *req // never mutate the caller's request
 	if len(s.cookies) > 0 {
-		cur.Cookies = append(append([]*http.Cookie(nil), req.Cookies...), s.cookies...)
+		// Request-specific cookies — in particular a Cookie-location
+		// injection's override (see buildRequest in executor.go) — must win
+		// over a session cookie of the SAME name; otherwise the session's
+		// unmodified value would silently shadow the override whenever a
+		// Cookie injection point happens to share a name with one of the
+		// scan's own session cookies (not uncommon: e.g. a "pref"/"lang"
+		// cookie present both at baseline and in the saved session state),
+		// making that injection point untestable at the HTTP level — it
+		// would never actually carry the marker, so reflection analysis
+		// would always (and wrongly) say "not reflected".
+		existing := make(map[string]bool, len(req.Cookies))
+		for _, c := range req.Cookies {
+			if c != nil {
+				existing[c.Name] = true
+			}
+		}
+		sessionExtra := make([]*http.Cookie, 0, len(s.cookies))
+		for _, c := range s.cookies {
+			if c != nil && !existing[c.Name] {
+				sessionExtra = append(sessionExtra, c)
+			}
+		}
+		cur.Cookies = append(append([]*http.Cookie(nil), req.Cookies...), sessionExtra...)
 	}
 	var chain []string
 

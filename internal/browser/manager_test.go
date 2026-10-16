@@ -87,7 +87,7 @@ type fakeBrowser struct {
 	contexts []*fakeContext
 }
 
-func (b *fakeBrowser) NewContext(storageStatePath, proxyServer string, allow func(string) bool) (contextHandle, error) {
+func (b *fakeBrowser) NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(string) bool) (contextHandle, error) {
 	if b.drv.createDelay > 0 {
 		time.Sleep(b.drv.createDelay)
 	}
@@ -96,7 +96,7 @@ func (b *fakeBrowser) NewContext(storageStatePath, proxyServer string, allow fun
 	if b.closed {
 		return nil, errors.New("browser closed")
 	}
-	c := &fakeContext{br: b, gated: allow != nil, storagePath: storageStatePath, proxyServer: proxyServer, cookies: map[string]Cookie{}, gotoDelay: b.drv.gotoDelay}
+	c := &fakeContext{br: b, gated: allow != nil, storagePath: storageStatePath, proxyServer: proxyServer, extraHeaders: extraHeaders, cookies: map[string]Cookie{}, gotoDelay: b.drv.gotoDelay}
 	b.contexts = append(b.contexts, c)
 	return c, nil
 }
@@ -134,16 +134,17 @@ func (b *fakeBrowser) openContexts() int {
 }
 
 type fakeContext struct {
-	gated       bool
-	br          *fakeBrowser
-	storagePath string
-	proxyServer string
-	savedPath   string
-	gotoDelay   time.Duration
-	mu          sync.Mutex
-	closed      bool
-	cookies     map[string]Cookie
-	pages       []*fakePage
+	gated        bool
+	br           *fakeBrowser
+	storagePath  string
+	proxyServer  string
+	extraHeaders map[string]string
+	savedPath    string
+	gotoDelay    time.Duration
+	mu           sync.Mutex
+	closed       bool
+	cookies      map[string]Cookie
+	pages        []*fakePage
 }
 
 func (c *fakeContext) NewPage() (pageHandle, error) {
@@ -533,6 +534,57 @@ func TestPersistentContextSeed(t *testing.T) {
 	}
 	if got := d.browsers[0].contexts[0].storagePath; got != "/tmp/session.json" {
 		t.Fatalf("storage state path not propagated: %q", got)
+	}
+}
+
+// ContextOptions.ExtraHeaders must reach the underlying browser context at
+// creation time — this is how a Header-location candidate's override
+// (User-Agent, Referer, X-Forwarded-For, …) reaches the verifying browser
+// BEFORE navigation (see verification.Input.ExtraHeaders and
+// BrowserVerifier.Verify).
+func TestExtraHeadersPropagateToContext(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+
+	headers := map[string]string{"User-Agent": "candidate-marker"}
+	_, err := m.NewContext(context.Background(), ContextOptions{ExtraHeaders: headers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := d.browsers[0].contexts[0].extraHeaders
+	if len(got) != 1 || got["User-Agent"] != "candidate-marker" {
+		t.Fatalf("extra headers not propagated: %+v", got)
+	}
+}
+
+// Context.SetCookies (used for a Cookie-location candidate's override — see
+// verification.Input.ExtraCookies and BrowserVerifier.Verify) reaches the
+// underlying browser context.
+func TestSetCookiesReachesContext(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+
+	c, err := m.NewContext(context.Background(), ContextOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetCookies(context.Background(), []Cookie{{Name: "pref", Value: "candidate-marker", URL: "http://example.com/s"}}); err != nil {
+		t.Fatal(err)
+	}
+	cks, err := c.Cookies(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, ck := range cks {
+		if ck.Name == "pref" && ck.Value == "candidate-marker" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("cookie override did not reach the context: %+v", cks)
 	}
 }
 

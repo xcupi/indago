@@ -12,6 +12,7 @@ package verification
 import (
 	"context"
 	"errors"
+	"net/http"
 
 	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
@@ -56,6 +57,16 @@ type Input struct {
 	// field holding the candidate's own value) — only consulted when Method is
 	// POST and Location is LocationForm.
 	FormValues map[string]string
+	// ExtraHeaders, when set, carries a Header-location candidate's header
+	// override (name -> the candidate's value) that must reach the
+	// verifying browser context BEFORE navigation — see
+	// browser.ContextOptions.ExtraHeaders. Empty for every other location.
+	ExtraHeaders map[string]string
+	// ExtraCookies, when set, carries a Cookie-location candidate's cookie
+	// override that must reach the verifying browser context BEFORE
+	// navigation (see browser.Context.SetCookies). Empty for every other
+	// location.
+	ExtraCookies []*http.Cookie
 
 	// Scope gates every request the browser makes (navigation, redirects,
 	// subresources) — see browser.ContextOptions.AllowRequest. A zero Scope

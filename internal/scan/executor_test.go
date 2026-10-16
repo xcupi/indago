@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
@@ -161,6 +162,89 @@ func TestBuildRequest(t *testing.T) {
 		r, _ := buildRequest(ep("http://h/x", domain.MethodGET), []*domain.Parameter{p("f", domain.LocationForm, "v")}, nil)
 		if len(r.Body) != 0 || r.URL != "http://h/x" {
 			t.Fatalf("GET got body/params: %s %q", r.URL, r.Body)
+		}
+	})
+
+	// --- Header/Cookie/Path (Reflected XSS injection points beyond
+	// Query/Form/JSON) ---
+
+	t.Run("Header location: baseline leaves headers alone, injection overrides exactly one", func(t *testing.T) {
+		params := []*domain.Parameter{p("User-Agent", domain.LocationHeader, "")}
+		base, err := buildRequest(ep("http://h/s", domain.MethodGET), params, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(base.Headers) != 0 {
+			t.Fatalf("baseline must not set any header override, got %+v", base.Headers)
+		}
+		mut, err := buildRequest(ep("http://h/s", domain.MethodGET), params, &injection{param: params[0], value: "MARKER"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(mut.Headers) != 1 || mut.Headers["User-Agent"] != "MARKER" {
+			t.Fatalf("mutated request headers = %+v, want exactly {User-Agent: MARKER}", mut.Headers)
+		}
+	})
+
+	t.Run("Header location: only the injected header is overridden, never another", func(t *testing.T) {
+		ua := p("User-Agent", domain.LocationHeader, "")
+		ua.ID = domain.ID("ua")
+		ref := p("Referer", domain.LocationHeader, "")
+		ref.ID = domain.ID("ref")
+		params := []*domain.Parameter{ua, ref}
+		mut, err := buildRequest(ep("http://h/s", domain.MethodGET), params, &injection{param: ua, value: "MARKER"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(mut.Headers) != 1 || mut.Headers["User-Agent"] != "MARKER" {
+			t.Fatalf("mutated request headers = %+v, want exactly {User-Agent: MARKER} (Referer untouched)", mut.Headers)
+		}
+	})
+
+	t.Run("Cookie location: baseline adds no cookie, injection adds exactly one", func(t *testing.T) {
+		params := []*domain.Parameter{p("pref", domain.LocationCookie, "orange")}
+		base, err := buildRequest(ep("http://h/s", domain.MethodGET), params, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(base.Cookies) != 0 {
+			t.Fatalf("baseline must not add any cookie override, got %+v", base.Cookies)
+		}
+		mut, err := buildRequest(ep("http://h/s", domain.MethodGET), params, &injection{param: params[0], value: "MARKER"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(mut.Cookies) != 1 || mut.Cookies[0].Name != "pref" || mut.Cookies[0].Value != "MARKER" {
+			t.Fatalf("mutated request cookies = %+v, want exactly one {pref MARKER}", mut.Cookies)
+		}
+	})
+
+	t.Run("Path location: baseline keeps the original segment, injection rewrites exactly one", func(t *testing.T) {
+		params := []*domain.Parameter{p(discovery.PathSegmentParamName(1), domain.LocationPath, "42")}
+		base, err := buildRequest(ep("http://h/users/42/edit", domain.MethodGET), params, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if base.URL != "http://h/users/42/edit" {
+			t.Fatalf("baseline path must stay unchanged, got %s", base.URL)
+		}
+		mut, err := buildRequest(ep("http://h/users/42/edit", domain.MethodGET), params, &injection{param: params[0], value: "MARKER"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mut.URL != "http://h/users/MARKER/edit" {
+			t.Fatalf("mutated path = %s, want http://h/users/MARKER/edit", mut.URL)
+		}
+	})
+
+	t.Run("Path location: out-of-range segment index is a harmless no-op", func(t *testing.T) {
+		params := []*domain.Parameter{p(discovery.PathSegmentParamName(9), domain.LocationPath, "42")}
+		mut, err := buildRequest(ep("http://h/users/42/edit", domain.MethodGET), params, &injection{param: params[0], value: "MARKER"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mut.URL != "http://h/users/42/edit" {
+			t.Fatalf("an out-of-range segment index must not mutate the URL, got %s", mut.URL)
 		}
 	})
 

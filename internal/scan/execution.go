@@ -68,7 +68,8 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 	// (see scanHTTPEngine) — closeHTTP releases it once the scan stops.
 	httpEng, closeHTTP := c.scanHTTPEngine(sc)
 	eng := newScopedEngine(httpEng, scope)
-	if cookies := c.sessionCookiesFor(ctx, sc, target); len(cookies) > 0 {
+	cookies := c.sessionCookiesFor(ctx, sc, target)
+	if len(cookies) > 0 {
 		eng = eng.WithSessionCookies(cookies)
 	}
 
@@ -98,6 +99,11 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 		close(ex.discDone)
 	} else {
 		cfg := c.discoveryConfig(sc)
+		// The scan's own session cookies (if any) — see
+		// discovery.Config.SessionCookies — so discovery can register Cookie
+		// injection points for cookies actually present in the scan's
+		// session context, excluding whatever looks like the auth cookie.
+		cfg.SessionCookies = cookies
 		reg := discovery.NewRealRegistry(eng, c.opts.Browser, cfg)
 		ex.disc = discovery.NewManager(c.store, c.queue, reg, cfg, c.log)
 		seeds := seedsFor(sc, target)

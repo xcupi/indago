@@ -170,6 +170,13 @@ func (c *Collector) reconcile(ctx context.Context, endpoints []*domain.Endpoint,
 		for _, name := range info.ParamNames {
 			c.registerParam(ctx, e.ID, e.Method, info, name, domain.LocationQuery, info.Query.Get(name), e.Source)
 		}
+		// Header/Cookie/Path registration is also reconciled on every Hydrate
+		// pass — registerParam's own dedup makes this a no-op for anything
+		// already persisted, so this only fills in what a prior run (or a
+		// pre-existing endpoint from before this feature existed) is missing.
+		c.registerHeaderInjectionPoints(ctx, e.ID, e.Method, info, e.Source)
+		c.registerCookieInjectionPoints(ctx, e.ID, e.Method, info, e.Source)
+		c.registerPathInjectionPoints(ctx, e.ID, e.Method, info, e.Source)
 	}
 
 	for _, p := range params {
@@ -277,6 +284,11 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 	for _, name := range info.ParamNames {
 		c.registerParam(ctx, id, method, info, name, domain.LocationQuery, info.Query.Get(name), ep.Source)
 	}
+	// Header/Cookie/Path injection points (see extra_locations.go /
+	// path_segments.go) — location-agnostic coverage alongside Query/Form/JSON.
+	c.registerHeaderInjectionPoints(ctx, id, method, info, ep.Source)
+	c.registerCookieInjectionPoints(ctx, id, method, info, ep.Source)
+	c.registerPathInjectionPoints(ctx, id, method, info, ep.Source)
 	return id, nil
 }
 

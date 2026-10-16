@@ -56,13 +56,16 @@ func (d *pwDriver) Stop() error { return d.pw.Stop() }
 
 type pwBrowser struct{ b pw.Browser }
 
-func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, allow func(string) bool) (contextHandle, error) {
+func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(string) bool) (contextHandle, error) {
 	opts := pw.BrowserNewContextOptions{}
 	if storageStatePath != "" {
 		opts.StorageStatePath = pw.String(storageStatePath)
 	}
 	if proxyServer != "" {
 		opts.Proxy = &pw.Proxy{Server: proxyServer}
+	}
+	if len(extraHeaders) > 0 {
+		opts.ExtraHttpHeaders = extraHeaders
 	}
 	c, err := b.b.NewContext(opts)
 	if err != nil {

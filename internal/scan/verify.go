@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -337,6 +338,16 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 				}
 				in.FormValues = fv
 			}
+		}
+		// Header/Cookie candidates don't show up in req.URL or req.Body —
+		// the override must be carried separately so the verifying browser
+		// context applies it BEFORE navigation (see verification.Input and
+		// BrowserVerifier.Verify).
+		switch focus.Location {
+		case domain.LocationHeader:
+			in.ExtraHeaders = map[string]string{focus.Name: vj.Candidate.Value}
+		case domain.LocationCookie:
+			in.ExtraCookies = []*http.Cookie{{Name: focus.Name, Value: vj.Candidate.Value}}
 		}
 
 		vres, verifyErr = e.verifier.Verify(ctx, in)
