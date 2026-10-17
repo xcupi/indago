@@ -182,10 +182,16 @@ func cmdServe(args []string) error {
 	tlsKey := fs.String("tls-key", "", "PEM private key file for -tls-cert (a path; the key is never printed or logged)")
 	allowPlaintextRemote := fs.Bool("allow-plaintext-remote", false,
 		"permit a non-loopback bind WITHOUT TLS: the bearer token then travels unencrypted, and a warning is logged")
+	apiRate := fs.Float64("api-rate", config.DefaultAPIRate,
+		"per-client-IP sustained requests/second on /api/ and /metrics; 0 disables (overrides config.json server.api_rate)")
+	apiBurst := fs.Int("api-burst", config.DefaultAPIBurst,
+		"per-client-IP burst size on /api/ and /metrics (overrides config.json server.api_burst)")
 	aiProvider := fs.String("ai-provider", "", "enable the advisory AI Gateway with this provider (openai|anthropic|openrouter|ollama|vllm); empty keeps AI fully disabled")
 	aiModel := fs.String("ai-model", "", "model name for -ai-provider (required if -ai-provider is set)")
 	aiBaseURL := fs.String("ai-base-url", "", "override the provider's default base URL (required for a non-default ollama/vllm deployment)")
 	_ = fs.Parse(args)
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 
 	log := newLogger(*debug)
 
@@ -200,6 +206,12 @@ func cmdServe(args []string) error {
 	cfg.DataDir = *dataDir
 	if *addr != "" {
 		cfg.Server.Addr = *addr
+	}
+	// The rate-limit values as the config file had them: flags override them
+	// for this run only and are not written back by the save-on-start below.
+	fileRate, fileBurst := cfg.Server.APIRate, cfg.Server.APIBurst
+	if cfg.Server, err = overlayRateLimitFlags(cfg.Server, setFlags, *apiRate, *apiBurst); err != nil {
+		return err
 	}
 	if apiToken != "" {
 		if err := web.ValidateAPIToken(apiToken); err != nil {
@@ -223,7 +235,9 @@ func cmdServe(args []string) error {
 		return err
 	}
 	// Persist config so first run writes a template the operator can edit.
-	if err := cfg.Save(cfg.ConfigPath()); err != nil {
+	saved := cfg
+	saved.Server.APIRate, saved.Server.APIBurst = fileRate, fileBurst
+	if err := saved.Save(cfg.ConfigPath()); err != nil {
 		log.Warn("could not persist config", "err", err)
 	}
 
@@ -320,6 +334,14 @@ func cmdServe(args []string) error {
 
 	srv := web.NewServer(db, ctrl, version, log, evStore, cfg.ReportsDir())
 	srv.SetLoginFunc(loginFn) // nil unless -browser: endpoint then reports unavailable
+	if err := srv.SetRateLimit(cfg.Server.APIRate, cfg.Server.APIBurst); err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+	if cfg.Server.APIRate > 0 {
+		log.Info("api rate limit enabled", "rate_per_s", cfg.Server.APIRate, "burst", cfg.Server.APIBurst)
+	} else {
+		log.Warn("api rate limit DISABLED (-api-rate 0 or api_rate 0)")
+	}
 	if err := srv.SetAPIToken(apiToken); err != nil {
 		return fmt.Errorf("%s: %w", apiTokenEnv, err)
 	}

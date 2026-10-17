@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/indago/indago/internal/ai"
+	"github.com/indago/indago/internal/config"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/scan"
@@ -60,6 +61,13 @@ type Server struct {
 	// apiTokenDigest is SHA-256 of the configured bearer token (see
 	// SetAPIToken). Nil means the control API is unauthenticated.
 	apiTokenDigest []byte
+
+	// limiter is the per-client-IP rate limiter for /api/ and /metrics (see
+	// SetRateLimit). Nil means disabled.
+	limiter *rateLimiter
+
+	// metrics backs GET /metrics. Methods are nil-safe, so a zero Server works.
+	metrics *httpMetrics
 }
 
 // LoginFunc runs an interactive browser login: it opens a visible browser at
@@ -101,7 +109,11 @@ func NewServer(st store.Store, ctrl *scan.Controller, version string, log *slog.
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{store: st, ctrl: ctrl, log: log, version: version, evidence: evStore, reportsDir: reportsDir}
+	s := &Server{store: st, ctrl: ctrl, log: log, version: version, evidence: evStore, reportsDir: reportsDir,
+		metrics: newHTTPMetrics()}
+	// The defaults are valid by construction, so this cannot fail.
+	_ = s.SetRateLimit(config.DefaultAPIRate, config.DefaultAPIBurst)
+	return s
 }
 
 // Handler returns the configured HTTP handler (routes + static UI).
@@ -110,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/version", s.handleVersion)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 
 	mux.HandleFunc("GET /api/projects", s.handleListProjects)
 	mux.HandleFunc("POST /api/projects", s.handleCreateProject)
@@ -152,7 +165,11 @@ func (s *Server) Handler() http.Handler {
 	sub, _ := fs.Sub(assetsFS, "assets")
 	mux.Handle("GET /", http.FileServer(http.FS(sub)))
 
-	return s.withLogging(s.guard(s.requireAPIToken(mux)))
+	// Order matters: instrument sees every outcome (the guard's 403s, the
+	// limiter's 429s, the token check's 401s). The guard runs first, then the
+	// limiter, then the bearer-token check, so unauthenticated floods are
+	// limited too.
+	return s.withLogging(s.instrument(mux, s.guard(s.rateLimit(s.requireAPIToken(mux)))))
 }
 
 // --- handlers ---

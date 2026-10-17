@@ -42,6 +42,64 @@ Rules for the token:
   plain HTTP, which is fine on `127.0.0.1` only. A remote bind **must** use TLS
   (see below); without TLS the token and all API traffic travel in clear text.
 
+### Rate limiting
+
+Every `/api/` request and `GET /metrics` is counted against a **per-client-IP
+token bucket**, on by default:
+
+- Defaults: 50 requests/second sustained, bucket of 200 (`-api-rate`,
+  `-api-burst`, or `server.api_rate` / `server.api_burst` in `config.json`;
+  a flag overrides the config value for that run). `-api-rate 0` disables the
+  limiter. A negative rate, or a burst below 1 with a positive rate, is an
+  error at startup.
+- A refused request gets `429 Too Many Requests` with a `Retry-After` header
+  (whole seconds, at least 1) and the body `{"error":"rate limit exceeded"}`.
+- The client is the TCP peer address (`RemoteAddr`). `X-Forwarded-For` and
+  `X-Real-IP` are **ignored**: any client can send them, so trusting them would
+  let one client pick a fresh bucket on every request.
+- `/healthz` and the static UI are not limited. The limiter runs after the
+  Host/CSRF check and before the token check, so unauthenticated floods are
+  limited too. Idle buckets are evicted after 10 minutes; at most 10,000 clients
+  are tracked, and clients beyond that are refused rather than growing memory.
+- The defaults clear the bundled UI and the CLI. The UI's "1 second" live
+  refresh sends about one request per scan per tick on the Scans view (two per
+  scan on the Dashboard, for scans with confirmed findings). At that setting a
+  project with roughly 25 scans sustains about 50 requests/second. For larger
+  projects use a longer refresh interval or raise `-api-rate`.
+
+**Behind a reverse proxy, every client shares the proxy's address and therefore
+one bucket.** The server cannot tell the clients apart, so one busy client can
+exhaust the budget for all of them. The server will not read forwarded headers
+to fix this. If you need per-client limits behind a proxy, enforce them in the
+proxy, keyed on the client address the proxy itself sees.
+
+### Metrics (`GET /metrics`)
+
+`GET /metrics` serves Prometheus text exposition format 0.0.4 (hand-written, no
+extra dependency). It exposes:
+
+- `indago_http_requests_total{method,route,code}`: `route` is the mux **pattern**
+  (for example `GET /api/scans/{id}`), never the raw path. Requests that match no
+  pattern are `unmatched`. Methods outside the standard set are `OTHER`.
+- `indago_http_request_duration_seconds{route}`: histogram with fixed buckets.
+- `indago_rate_limited_total`: requests refused with `429`.
+- `indago_auth_rejected_total`: requests refused with `401` by the token check.
+- `indago_build_info{version}`: always `1`.
+
+Access follows the token setting:
+
+- **`INDAGO_API_TOKEN` unset:** unauthenticated, the same as `/healthz`. This is
+  acceptable only on loopback, the same rule as the rest of the server.
+- **`INDAGO_API_TOKEN` set:** requires `Authorization: Bearer <token>`, as the
+  API does. A missing or wrong token gets `401`.
+
+`/metrics` is subject to the rate limit above. A scrape interval of 15 seconds or
+more is far inside the default budget.
+
+The output never contains a token, a client IP address, a target URL, finding
+content, or an evidence path. Label values come only from the method, the route
+pattern, and the status code. No per-scan job counter is exported yet.
+
 Without a token, anyone who can reach the API can:
 
 - create projects/scopes/targets and start scans against whatever target they
@@ -170,6 +228,9 @@ Useful flags (`indago serve -h` or `cmd/indago/main.go` for the full list):
 |---|---|
 | `-data DIR` | Data directory (default `./data`) |
 | `-addr HOST:PORT` | Listen address (overrides `config.json`) |
+| `-api-rate N` | Per-client-IP sustained requests/second on `/api/` and `/metrics`. Default `50`; `0` disables. Overrides `server.api_rate`. Flag values apply to this run only; they are not written back to `config.json`. Negative is an error (§1, *Rate limiting*) |
+| `-api-burst N` | Per-client-IP burst size on `/api/` and `/metrics`. Default `200`; must be at least 1 while the rate is above 0. Overrides `server.api_burst` (§1) |
+| `GET /metrics` | Prometheus exposition. Unauthenticated when `INDAGO_API_TOKEN` is unset; needs the bearer token when set (§1, *Metrics*) |
 | `-allow-remote` | Allow binding a non-loopback address; also requires `INDAGO_API_TOKEN` and TLS (§1) |
 | `-tls-cert FILE` / `-tls-key FILE` | Serve HTTPS with this PEM certificate and key. Give both or neither. Required for a remote bind (§1). Paths, not secret values |
 | `-allow-plaintext-remote` | Permit a remote bind without TLS. Off by default; logs a warning that the token travels unencrypted (§1) |
@@ -552,6 +613,8 @@ being graceful.
 
 `GET /healthz` — `{"status":"ok"}` after a live store ping, `503` otherwise.
 `GET /api/version` — `{"version": "...", "name": "indago"}`.
+`GET /metrics` — Prometheus exposition (§1, *Metrics*). Needs the bearer token
+when `INDAGO_API_TOKEN` is set, and is rate limited like the API.
 
 Neither requires the `X-Indago-Client` header (both are GET) and neither
 returns anything beyond those two fields — no internal paths, no config, no

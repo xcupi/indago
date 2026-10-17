@@ -43,18 +43,19 @@ func (s *Server) SetAPIToken(tok string) error {
 	return nil
 }
 
-// requireAPIToken enforces the bearer token on /api/ routes when one is
-// configured. /healthz and the static UI stay open, so the page can load and
-// prompt for the token. The token is accepted only from the Authorization
+// requireAPIToken enforces the bearer token on /api/ routes and /metrics when
+// one is configured. /healthz and the static UI stay open, so the page can load
+// and prompt for the token. The token is accepted only from the Authorization
 // header, never from the query string or a cookie.
 func (s *Server) requireAPIToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.apiTokenDigest == nil || !isAPIPath(r.URL.Path) ||
+		if s.apiTokenDigest == nil || !isGuardedPath(r.URL.Path) ||
 			bearerMatches(r.Header.Get("Authorization"), s.apiTokenDigest) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		s.log.Info("api request rejected: missing or invalid bearer token",
+		s.metrics.incAuthRejected()
+		s.log.Info("request rejected: missing or invalid bearer token",
 			"method", r.Method, "path", r.URL.Path)
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeError(w, http.StatusUnauthorized, "missing or invalid API token")
