@@ -54,3 +54,60 @@ before parsing; no guards or instrumentation wrappers changed.
   No scan was started; target port 9 was only dummy metadata.
 - Owned server exited and port refused connections after SIGTERM.
 
+## UI 429 recovery
+
+Exact policy is documented in `deployment.md`, “UI recovery from throttling.”
+
+- TDD RED/GREEN: first numeric 429 produced no waiting status/recovery; the
+  same controlled-clock test passed after shared cooldown + bounded retries.
+  Subsequent assertion REDs reproduced HTTP-date early retry, raw/non-actionable
+  POST errors, 50 duplicate requests for one URL, stale route retries/results,
+  four simultaneous pending polls, late old-route rendering, project selection
+  cleared on load failure, and initial scan throttling mislabeled as missing.
+  Each was fixed before the next tracer bullet. A regression test caught the
+  Refresh control being shown on ordinary static settings; fallback now applies
+  only to a failed/throttled load, preserving the normal behavior.
+- `TestUICooldownClock` invokes 20 Node built-in tests (no npm dependency)
+  with controllable time: seconds/date/invalid/missing/negative/huge headers,
+  clamp boundaries, GET/HEAD recovery, three-attempt ceiling, POST once plus
+  fail-fast during cooldown, coalescing, navigation during fetch/body-read,
+  unchanged auth/CSRF/body, one 401 token prompt then 429, and no secret echo.
+  This clock suite skips if Node is unavailable; Node v26.7.0 ran it here.
+- Go real-Chromium tests additionally verify poll coalescing, route isolation,
+  throttled initial-load retry controls, normal navigation and token-mode
+  sandboxed evidence. The full web suite is included in `make check`.
+- **Live rebuilt binary + local Chromium** (`/usr/bin/google-chrome`, isolated
+  scratch Python Playwright 1.64.0): `-api-rate 1 -api-burst 1`, dummy bearer
+  mode active. Setup used `/healthz` only before the browser so it did not
+  consume API budget. Actual version 200, projects 429→200, scans 429→200,
+  scan status 429→200. Measured post-429 request gaps were **1.0031, 1.0024,
+  1.0058 seconds** for `Retry-After: 1`. Visible waiting banner recovered
+  automatically to a populated dashboard at approximately 3.06 seconds.
+- Browser-intercepted dummy paths using real UI helpers: numeric header
+  retried after **1.0062s**, HTTP-date after **2.3293s**, invalid header after
+  **2.0050s**, two attempts each. POST 429 sent once, returned a safe actionable
+  error, and did not replay. Clock tests cover persistent 429 exhaustion.
+- On the same live token-mode server, a genuine API-generated HTML report
+  rendered with visible “Indago Scan Report” in `iframe[sandbox=""]`, opaque
+  origin; protected download bytes matched the API exactly. No UI page errors
+  and no token in rendered body. Existing Go evidence-viewer regression passed.
+- Nonsecret evidence retained outside the repo at
+  `/home/udalah/.hermes/cache/scratch/indago-p1-results/`:
+  `ui-results.json`, `ui-429-waiting.png`, `ui-429-recovered.png`,
+  `ui-token-protected-viewer.png`. Final live listener port 42483 closed after
+  the owned server exited. A first harness run put a localStorage init script
+  inside the sandbox; it was corrected to top-frame-only and rerun cleanly.
+
+## Quality gates and limits
+
+Each of the three commits is preceded by
+`INDAGO_CHROMIUM_PATH=/usr/bin/google-chrome make check`: gofmt clean,
+`go vet ./...`, `go test -race -p 1 ./...`, exit 0. Go reused unchanged-package
+cache entries; changed command/web packages ran. No scanners/guards disabled.
+
+Not verified here: cross-browser/multi-tab cooldown coordination, a prolonged
+load/soak test, or new TLS certificate behavior (unchanged; P0 validation covers
+TLS). CI, Docker and systemd remain separate work. Protected `AGENTS.md` was
+not edited. All task dummy data, logs, downloaded report, scripts, binary and
+scratch venv were removed after validation; only the nonsecret results above
+remain.

@@ -823,7 +823,7 @@ function reportsPanel(scanId) {
   const controls = el("div", undefined, "form-actions");
   controls.append(fmt, aiSummaryLabel, gen);
   wrap.append(modeRow, preview, controls, errBox, t);
-  wrap.live = () => { reload(); refreshPreview(); };
+  wrap.live = singleFlight(() => Promise.all([reload(), refreshPreview()]));
   update();
   reload();
   return wrap;
@@ -843,7 +843,9 @@ async function renderScanDetail(params, view) {
   try { st = await getJSON(api.scan(scanId) + "/status"); }
   catch (e) {
     view.appendChild(pageHead("Scan"));
-    view.appendChild(emptyState("Scan not found.", "Back to Scans", () => navigate("#/scans")));
+    view.appendChild(e.status === 429
+      ? emptyState("Scan load throttled. Wait for the cooldown, then use Refresh.", "Retry load", () => route())
+      : emptyState("Scan not found.", "Back to Scans", () => navigate("#/scans")));
     return;
   }
   const s = st.scan;
@@ -872,17 +874,18 @@ async function renderScanDetail(params, view) {
   // that patches in new data instead: rebuilding them every tick used to
   // reset the selection and collapse open rows every couple of seconds.
   const renderTab = (status, isRefresh) => {
+    if (!panel.isConnected) return;
     const cur = SCAN_TABS.includes((location.hash.split("/")[3] || "overview")) ? (location.hash.split("/")[3] || "overview") : "overview";
     if (cur !== tab) return; // tab changed; router will re-render
     const existing = panel.firstChild;
-    if (isRefresh && existing && typeof existing.live === "function") { existing.live(status); return; }
+    if (isRefresh && existing && typeof existing.live === "function") return existing.live(status);
     panel.replaceChildren(scanTabPanel(cur, status, scanId));
   };
   renderTab(st, false);
 
   // Live refresh of the active tab.
   return async () => {
-    try { const fresh = await getJSON(api.scan(scanId) + "/status"); renderTab(fresh, true); } catch (e) { /* keep last */ }
+    try { const fresh = await getJSON(api.scan(scanId) + "/status"); await renderTab(fresh, true); } catch (e) { /* keep last */ }
   };
 }
 
@@ -1047,7 +1050,7 @@ function findingsTabPanel(scanId) {
   }
   const rp = reportsPanel(scanId);
   wrap.append(card("Findings", extra.el, body), card("Generate report", rp));
-  wrap.live = () => { load(); rp.live(); };
+  wrap.live = singleFlight(() => Promise.all([load(), rp.live()]));
   load();
   return wrap;
 }
@@ -1117,7 +1120,7 @@ function evidencePanel(scanId) {
       if (sig === null) body.replaceChildren(el("div", "error loading evidence", "err"));
     }
   }
-  wrap.live = load;
+  wrap.live = singleFlight(load);
   load();
   return wrap;
 }

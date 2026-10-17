@@ -73,6 +73,32 @@ exhaust the budget for all of them. The server will not read forwarded headers
 to fix this. If you need per-client limits behind a proxy, enforce them in the
 proxy, keyed on the client address the proxy itself sees.
 
+### UI recovery from throttling
+
+The console shares one API cooldown per browser tab across JSON loads,
+actions, and protected content fetches. `Retry-After` accepts whole seconds or
+an HTTP-date (IMF-fixdate, GMT). Waits are clamped to **1–60 seconds**;
+missing/invalid/negative/past-date values use a **2-second fallback**. A
+concurrent 429 can extend, never shorten, the current deadline. This is not
+cross-browser-tab coordination and does not change the server's IP bucket.
+
+GET/HEAD retry at most **twice** after the original attempt (three total).
+POST/PUT/PATCH/DELETE are **never replayed after 429**; an action attempted
+during cooldown fails locally without sending, with “Wait for the cooldown,
+then try again. The action was not retried.” Existing 401 token prompting and
+one authentication retry remain unchanged.
+
+A persistent status banner says “API throttled — waiting …s before retrying
+reads.” It clears on the next successful fetch outside cooldown, not on a
+blind timeout. Exhausted reads explain the retry limit and offer Refresh;
+initial scan-load throttling is not labeled “Scan not found.” Live polls skip
+cooldown ticks and drop overlapping refreshes instead of queueing them.
+Same-URL JSON loads within a route share one in-flight result; old-route
+reads stop retrying/discard late results and cannot render into a new route.
+Live polling may initiate a later bounded load after cooldown; with Live off,
+use Refresh after an exhausted initial load. Server-provided 429 error bodies
+are not copied into banners/action errors.
+
 ### Metrics (`GET /metrics`)
 
 `GET /metrics` serves Prometheus text exposition format 0.0.4 (hand-written, no

@@ -195,10 +195,35 @@ function askToken() {
   return tok;
 }
 
-// authedFetch sends a request with the stored token. On a 401 it prompts once
-// (unless a concurrent request already stored a newer token) and retries the
-// original request once. If the operator declines, the 401 response is returned.
-async function authedFetch(url, opts) {
+// One cooldown for all API helpers in this console tab. Read requests retry at
+// most twice; writes are never replayed after a 429.
+let apiCooldownUntil = 0;
+let apiCooldownWait = null;
+function apiCoolingDown() { return Date.now() < apiCooldownUntil; }
+function retryAfterMs(header) {
+  const value = (header || "").trim();
+  let ms = 2000; // conservative fallback for missing/invalid values
+  if (/^\d+$/.test(value)) ms = Number(value) * 1000;
+  else if (/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(value)) {
+    ms = Date.parse(value) - Date.now();
+  }
+  return Number.isFinite(ms) && ms >= 0 ? Math.max(1000, Math.min(60000, ms)) : 2000;
+}
+function noteAPIThrottle(r) {
+  const ms = retryAfterMs(r.headers.get("Retry-After"));
+  apiCooldownUntil = Math.max(apiCooldownUntil, Date.now() + ms);
+  $("apiStatus").textContent = "API throttled — waiting " + Math.ceil(ms / 1000) + "s before retrying reads. Actions are not retried; wait, then try again.";
+}
+async function waitAPICooldown() {
+  while (apiCoolingDown()) {
+    if (!apiCooldownWait) {
+      apiCooldownWait = new Promise((resolve) => setTimeout(resolve, apiCooldownUntil - Date.now()))
+        .finally(() => { apiCooldownWait = null; });
+    }
+    await apiCooldownWait;
+  }
+}
+async function tokenFetch(url, opts) {
   const sent = storedToken();
   const r = await fetch(url, withToken(opts, sent));
   if (r.status !== 401) return r;
@@ -207,13 +232,51 @@ async function authedFetch(url, opts) {
   if (!tok) return r;
   return fetch(url, withToken(opts, tok));
 }
+const API_THROTTLE_ERROR = "API throttled. Wait for the cooldown, then try again. The action was not retried.";
+function throttleResponse(read) {
+  const error = read ? "API throttled. Automatic read retries exhausted; wait, then use Refresh." : API_THROTTLE_ERROR;
+  return new Response(JSON.stringify({ error }), { status: 429, headers: { "Content-Type": "application/json" } });
+}
+async function authedFetch(url, opts) {
+  const read = ["GET", "HEAD"].includes((opts && opts.method || "GET").toUpperCase());
+  const view = currentView;
+  const checkView = () => { if (read && view !== currentView) throw new Error("navigation changed; request discarded"); };
+  if (!read && apiCoolingDown()) return throttleResponse();
+  for (let attempt = 0; ; attempt++) {
+    await waitAPICooldown();
+    checkView();
+    const r = await tokenFetch(url, opts);
+    checkView();
+    if (r.status !== 429) {
+      if (r.ok && !apiCoolingDown()) $("apiStatus").textContent = "";
+      return r;
+    }
+    noteAPIThrottle(r);
+    if (!read || attempt >= 2) {
+      if (read) $("apiStatus").textContent = "API throttled — waiting for cooldown. Automatic retries exhausted; use Refresh or the next live poll.";
+      return throttleResponse(read);
+    }
+  }
+}
 
 // errorText extracts the server's {"error": ...} message from a response.
 async function errorText(r) {
   try { const j = await r.json(); return j && j.error ? String(j.error) : ""; } catch (e) { return ""; }
 }
 
-async function getJSON(url) {
+// Share a decoded GET, not a Response whose body can only be consumed once.
+const pendingJSON = new Map();
+function getJSON(url) {
+  const view = currentView;
+  const existing = pendingJSON.get(url);
+  if (existing && existing.view === view) return existing.promise;
+  const entry = { view, promise: null };
+  entry.promise = loadJSON(url).finally(() => { if (pendingJSON.get(url) === entry) pendingJSON.delete(url); });
+  pendingJSON.set(url, entry);
+  return entry.promise;
+}
+async function loadJSON(url) {
+  const view = currentView;
   const r = await authedFetch(url, { method: "GET" });
   if (!r.ok) {
     const detail = await errorText(r);
@@ -221,7 +284,9 @@ async function getJSON(url) {
     err.status = r.status;
     throw err;
   }
-  return r.json();
+  const data = await r.json();
+  if (view !== currentView) throw new Error("navigation changed; data discarded");
+  return data;
 }
 
 // mutate issues a state-changing request with the CSRF header. It never throws
@@ -387,6 +452,17 @@ function updateLiveCtl() {
   $("refreshNow").classList.toggle("hidden", !currentView.refresh);
 }
 
+// Drop duplicate refresh invocations instead of accumulating awaiters every
+// poll tick. The original invocation owns completion/rendering.
+function singleFlight(fn) {
+  let pending = false;
+  return async (...args) => {
+    if (pending) return;
+    pending = true;
+    try { return await fn(...args); } finally { pending = false; }
+  };
+}
+
 async function refreshNow() {
   const btn = $("refreshNow");
   btn.disabled = true;
@@ -407,7 +483,7 @@ async function loadProjects() {
   try {
     ctx.projects = (await getJSON("/api/projects")) || [];
   } catch (e) {
-    ctx.projects = [];
+    return ctx.projects; // a failed/throttled load is not an empty project list
   }
   if (ctx.projectId && !currentProject()) ctx.projectId = "";
   renderProjectSelect();
@@ -488,8 +564,11 @@ async function route() {
   const section = path.split("/")[1] || "dashboard";
   document.querySelectorAll("#sidebar a").forEach((a) => a.classList.toggle("active", a.dataset.nav === section));
 
-  const view = $("view");
-  view.replaceChildren();
+  // Detach the previous container. Late render/catch continuations may still
+  // update their own nodes, but can never append into the new route.
+  const view = el("div");
+  view.id = "view";
+  $("view").replaceWith(view);
   view.dataset.view = match.name;
   currentView.name = match.name;
   const token = currentView; // a newer navigation replaces currentView
@@ -497,18 +576,22 @@ async function route() {
     const refresh = await match.render(params, view);
     if (token !== currentView) return; // navigated away while rendering
     if (typeof refresh === "function") {
-      currentView.refresh = refresh;
+      currentView.refresh = singleFlight(refresh);
       const ms = refreshMs();
       if (ms > 0) {
         currentView.timer = setInterval(() => {
-          if (token === currentView && $("modal").classList.contains("hidden")) refresh();
+          if (token === currentView && !apiCoolingDown() && $("modal").classList.contains("hidden")) currentView.refresh();
         }, ms);
       }
+    } else if ($("apiStatus").textContent) {
+      currentView.refresh = () => route(); // retry a throttled initial load manually
     }
     updateLiveCtl();
   } catch (e) {
     if (token !== currentView) return;
     view.replaceChildren(card("Error", el("p", "Could not load this view: " + e.message, "err")));
+    currentView.refresh = () => route();
+    updateLiveCtl();
   }
 }
 
