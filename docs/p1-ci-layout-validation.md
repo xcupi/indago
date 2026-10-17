@@ -74,8 +74,41 @@ and both actions; unobstructed desktop retains normal table headings.
 
 ## Remote and image completion
 
-The implementation push's own CI result and corrected-image rebuild will be
-recorded here after actual completion. Historical failed deployment runs
-remain documented in `p1-deployment-validation.md`; local success is not
-substituted for remote success. The old retained Docker image predates this
-asset correction and must not be treated as containing it.
+Implementation commit `73c37ac8f55097c945ab08a7aa7355a9fed4e9a7`:
+[GitHub run 39022613312](https://github.com/xcupi/indago/actions/runs/39022613312)
+completed **success**. Verified with `gh run watch --exit-status`, then an
+independent `gh run view --json headSha,conclusion,status,jobs,url` and full log.
+Both required-runtime preflight (six passes, no skips) and clean-cache full
+`make check` plus `make build` succeeded; web race package took 33.105s.
+This supersedes the earlier deployment report's unsuccessful-GitHub limit,
+without deleting the historical failed runs.
+
+Rebuilt `indago:p1-deployment` **after** that remote success, using the same
+Dockerfile and source revision `73c37ac8f55097c945ab08a7aa7355a9fed4e9a7`:
+
+- Image ID: `sha256:3815b3398c52142eeb39ebd9a2224c6c2b7c270c1087b2e94176fdcfbfcdc584`.
+- Image version command confirms that exact source commit; built
+  `2026-10-17T09:55:51Z`, linux/amd64, user `10001:10001`; actual `id -u` 10001.
+- Read-only rootfs, cap-drop ALL, NNP, own disposable volume and ephemeral
+  loopback TLS port. Dummy one-day SAN certificate and random env-only token.
+  Strict CA verification: health 200; API/metrics 401 without bearer and 200
+  with bearer; container health **healthy**. Missing token/TLS fail closed.
+- Real image Chromium 155.0.8059.79 started and replayed container-loopback lab
+  scans: positive `3413e545-6491-48ab-ac92-9a826972972a` completed, one Confirmed
+  with screenshot/DOM/browser-log metadata and actual unresolved-marker error;
+  escaped control `46a0a302-81da-407d-9b8a-25e2286fd276` completed, one Rejected,
+  zero Confirmed. This is actual browser execution, not only startup flags.
+- Graceful stop/restart preserved the disposable project; both stops exit 0.
+  Logs contained no dummy API token, private key or session content.
+- Own container/volume/lab and dummy cert/key/token/config/database removed;
+  published port verified closed. Independent Docker listings found no own
+  remaining containers/volumes and scratch had no remaining fixture dirs.
+  Safe build/smoke logs and result JSON are in the evidence directory above.
+
+The tag now contains the corrected embedded assets, replacing the old image
+`sha256:f60a258ef43821280986d3cfc2f4b2964999b46c43a5e8d982f281a31d5c9205`.
+No registry push or host service installation. This final documentation update
+changes no embedded source; the image intentionally identifies the tested code
+commit above, not a subsequent docs-only commit. The docs-only push's own
+completed CI URL/SHA is verified and supplied in the delivery summary rather
+than guessed before its commit exists.

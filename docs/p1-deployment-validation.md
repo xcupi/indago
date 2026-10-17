@@ -6,6 +6,12 @@ main-branch changes or PR creation are part of this work.
 
 ## CI
 
+**Follow-up:** [P1 CI layout validation](p1-ci-layout-validation.md) records
+an exact assertion RED, the scoped responsive reports fix, a successful full
+GitHub run on its implementation SHA, and a rebuilt/smoked Docker image with
+the corrected embedded assets. The failures and original-image observations
+below are historical evidence, not the final branch/image status.
+
 - Contract-first RED: `go test ./deploy -run TestCIContract -v` failed because
   `.github/workflows/ci.yml` did not exist. Same test GREEN after implementation.
 - Action commit IDs were resolved with `git ls-remote` from the actual upstream
