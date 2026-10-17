@@ -54,6 +54,10 @@ type Server struct {
 	// ai.Disabled{} (the scanner must work with AI disabled): report
 	// creation then skips AI-drafted summaries, never fails because of it.
 	ai ai.Gateway
+
+	// apiTokenDigest is SHA-256 of the configured bearer token (see
+	// SetAPIToken). Nil means the control API is unauthenticated.
+	apiTokenDigest []byte
 }
 
 // LoginFunc runs an interactive browser login: it opens a visible browser at
@@ -146,7 +150,7 @@ func (s *Server) Handler() http.Handler {
 	sub, _ := fs.Sub(assetsFS, "assets")
 	mux.Handle("GET /", http.FileServer(http.FS(sub)))
 
-	return s.withLogging(s.guard(mux))
+	return s.withLogging(s.guard(s.requireAPIToken(mux)))
 }
 
 // --- handlers ---

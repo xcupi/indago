@@ -9,10 +9,40 @@ this file is operational, not architectural.
 
 ## 1. Network exposure — read this first
 
-**The API has no authentication.** `internal/auth` only implements anonymous
-sessions for the *target* application a scan authenticates against —
-Indago's own control API (`/api/...`) has no login, no token, no per-operator
-identity. Anyone who can reach it can:
+**The control API (`/api/...`) has an optional bearer token and no per-operator
+identity.** Whether it requires a token is decided at `indago serve` startup by
+the `INDAGO_API_TOKEN` environment variable:
+
+- **Unset (default):** the API is open to anyone who can reach the port. This is
+  the single-operator loopback mode and is unchanged from before.
+- **Set:** every `/api/` request must send `Authorization: Bearer <token>`.
+  A missing or wrong token gets `401` with `WWW-Authenticate: Bearer`.
+  `/healthz` and the static UI stay open so the page can load and prompt for
+  the token. The token is accepted only in that header — never in a query
+  string or a cookie.
+
+Rules for the token:
+
+- Use at least 32 characters with no whitespace, e.g.
+  `export INDAGO_API_TOKEN="$(openssl rand -hex 32)"`. A shorter or malformed
+  value makes `serve` refuse to start (the error does not print the value).
+- It is read once, at startup, from the environment. It is never a
+  command-line flag (shell history, `ps`), never written to `config.json`, and
+  never logged or echoed in an error or response.
+- The CLI sends it on every request when `INDAGO_API_TOKEN` is set in its
+  environment. Without it, a token-protected server answers `401` and the CLI
+  says which variable to set.
+- The web UI asks for the token on the first `401` and keeps it in
+  `sessionStorage` — cleared when the tab closes, never in `localStorage` or a
+  cookie. Evidence and report links are fetched with the token too.
+- It is one shared secret. There are no per-operator accounts, roles, audit
+  trail, or rotation without restarting the server.
+- **There is no TLS yet.** Over plain HTTP the token and all API traffic are
+  readable by anyone on the network path. TLS is a separate, later step; until
+  then, use a TLS-terminating reverse proxy, a VPN, or an SSH tunnel for any
+  remote access.
+
+Without a token, anyone who can reach the API can:
 
 - create projects/scopes/targets and start scans against whatever target they
   specify (scope is enforced, but the API lets its caller set the scope)
@@ -24,10 +54,12 @@ identity. Anyone who can reach it can:
   `docs/finding-correlation.md` ("Opening evidence safely").
 - generate and read reports
 
+With a token configured, the same capabilities are available to whoever holds
+the token. Keeping the token secret, and the port reachable only by intended
+clients, is the actual security boundary.
+
 This is an intentional trade-off for a local-first, single-operator tool, not
-an oversight — see `AGENTS.md` §1. It means the deployment boundary that
-actually matters is **who can reach the port**, not anything the API itself
-checks.
+an oversight — see `AGENTS.md` §1.
 
 ### Secure default
 
@@ -40,20 +72,24 @@ workstation or a dedicated scanning host they alone can SSH/console into.
 
 Binding any other address — `0.0.0.0`, a LAN IP, `::`, anything
 `isLoopbackAddr` doesn't recognize as `localhost`/`127.0.0.1`/`::1` — is
-**refused outright** unless you pass `-allow-remote`:
+**refused outright** unless you pass `-allow-remote` **and** set
+`INDAGO_API_TOKEN`:
 
 ```bash
+export INDAGO_API_TOKEN="$(openssl rand -hex 32)"
 indago serve -addr 0.0.0.0:8750 -allow-remote
 ```
 
-Without `-allow-remote` this fails fast with an explanatory error instead of
-starting; the goal is to make the above trade-off a decision you make on
-purpose, not something a log line warns about after the fact. If you do need
+Either one missing fails fast with an explanatory error instead of starting.
+The token is required for remote binds because otherwise any host that can
+reach the port would have full control of the API. The goal is to make both
+decisions deliberate, not something a log line warns about after the fact.
+
+The token does not protect it in transit (no TLS yet — see above). If you need
 remote access (a shared scanning box, a container where `127.0.0.1` isn't
-reachable from the host), put a real access-control layer in front of it —
-a reverse proxy with its own auth, a VPN/SSH tunnel, or a firewall rule
-scoped to specific source IPs/users. Indago itself still won't authenticate
-the request.
+reachable from the host), put a transport- and access-control layer in front:
+a TLS-terminating reverse proxy, a VPN/SSH tunnel, or a firewall rule scoped to
+specific source IPs/users.
 
 Two request-level protections exist regardless of bind address and need no
 configuration:
@@ -66,9 +102,10 @@ configuration:
   alias; a wildcard bind can't enumerate valid hosts in advance; both bind
   modes keep the CSRF checks above.
 
-Neither is a substitute for restricting network reach — they stop a
-malicious web page from driving the API through your browser, not a party
-that can already reach the port directly (`curl` doesn't care about CORS).
+Neither is a substitute for the token or for restricting network reach — they
+stop a malicious web page from driving the API through your browser, not a
+party that can already reach the port directly (`curl` doesn't care about
+CORS).
 
 ---
 
@@ -85,7 +122,8 @@ Useful flags (`indago serve -h` or `cmd/indago/main.go` for the full list):
 |---|---|
 | `-data DIR` | Data directory (default `./data`) |
 | `-addr HOST:PORT` | Listen address (overrides `config.json`) |
-| `-allow-remote` | Required to bind a non-loopback address (§1) |
+| `-allow-remote` | Allow binding a non-loopback address; also requires `INDAGO_API_TOKEN` (§1) |
+| `INDAGO_API_TOKEN` (env) | Bearer token for the control API; unset = no token (§1). Never a flag |
 | `-browser` | Enable browser-based discovery + verification (needs Chromium — §3) |
 | `-chromium PATH` | Chromium binary to use (overrides `$INDAGO_CHROMIUM_PATH` / the Playwright cache) |
 | `-allow-state-changing` | Also execute POST/PUT/PATCH/DELETE test requests against targets (default: GET/HEAD/OPTIONS only) |

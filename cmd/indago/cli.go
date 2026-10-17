@@ -40,6 +40,9 @@ type cli struct {
 	server string
 	out    io.Writer
 	http   *http.Client
+	// token is $INDAGO_API_TOKEN, sent as a bearer token on every request when
+	// set. It is read from the environment only, never from a flag.
+	token string
 }
 
 func newCLI(server string, out io.Writer) *cli {
@@ -47,6 +50,14 @@ func newCLI(server string, out io.Writer) *cli {
 		server: strings.TrimRight(server, "/"),
 		out:    out,
 		http:   &http.Client{Timeout: 30 * time.Second},
+		token:  os.Getenv(apiTokenEnv),
+	}
+}
+
+// authorize adds the bearer token to req when one is configured.
+func (c *cli) authorize(req *http.Request) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 }
 
@@ -57,6 +68,26 @@ type apiError struct {
 }
 
 func (e *apiError) Error() string { return fmt.Sprintf("%s (HTTP %d)", e.Message, e.Status) }
+
+// failure builds the error for a non-2xx response. The token is never part of
+// the message; a 401 gets a hint about the variable the operator must set.
+func (c *cli) failure(status int, data []byte) *apiError {
+	var e struct {
+		Error string `json:"error"`
+	}
+	msg := strings.TrimSpace(string(data))
+	if json.Unmarshal(data, &e) == nil && e.Error != "" {
+		msg = e.Error
+	}
+	if status == http.StatusUnauthorized {
+		if c.token == "" {
+			msg = "the server requires an API token: set " + apiTokenEnv + " to the token the server was started with"
+		} else {
+			msg += "; check " + apiTokenEnv
+		}
+	}
+	return &apiError{Status: status, Message: msg}
+}
 
 // call performs a JSON request. in may be nil; out may be nil.
 func (c *cli) call(method, path string, in, out any) error {
@@ -78,6 +109,7 @@ func (c *cli) call(method, path string, in, out any) error {
 	if method != http.MethodGet {
 		req.Header.Set(web.ClientHeader, "cli")
 	}
+	c.authorize(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("cannot reach the indago server at %s (is `indago serve` running?): %w", c.server, err)
@@ -85,14 +117,7 @@ func (c *cli) call(method, path string, in, out any) error {
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		var e struct {
-			Error string `json:"error"`
-		}
-		msg := strings.TrimSpace(string(data))
-		if json.Unmarshal(data, &e) == nil && e.Error != "" {
-			msg = e.Error
-		}
-		return &apiError{Status: resp.StatusCode, Message: msg}
+		return c.failure(resp.StatusCode, data)
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -109,6 +134,7 @@ func (c *cli) getRaw(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.authorize(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("cannot reach the indago server at %s (is `indago serve` running?): %w", c.server, err)
@@ -116,14 +142,7 @@ func (c *cli) getRaw(path string) ([]byte, error) {
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		var e struct {
-			Error string `json:"error"`
-		}
-		msg := strings.TrimSpace(string(data))
-		if json.Unmarshal(data, &e) == nil && e.Error != "" {
-			msg = e.Error
-		}
-		return nil, &apiError{Status: resp.StatusCode, Message: msg}
+		return nil, c.failure(resp.StatusCode, data)
 	}
 	return data, nil
 }

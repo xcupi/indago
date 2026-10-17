@@ -45,6 +45,10 @@ var (
 	buildDate = "unknown"
 )
 
+// apiTokenEnv names the environment variable holding the control API's bearer
+// token. It is deliberately never a command-line flag (see cmdServe).
+const apiTokenEnv = "INDAGO_API_TOKEN"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -84,9 +88,9 @@ Usage:
 Server:
   version        Print version information
   db init        Create the data directory and initialize the database
-  serve          Run the web UI + API server (flags: -data, -addr, -v)
+  serve          Run the web UI + API server (flags: -data, -addr, -v; env INDAGO_API_TOKEN enables the API bearer token)
 
-Client (talk to a running server; -server URL or $INDAGO_SERVER, default http://127.0.0.1:8750):
+Client (talk to a running server; -server URL or $INDAGO_SERVER, default http://127.0.0.1:8750; $INDAGO_API_TOKEN if the server requires a token):
   project create <name> | project list
   target add -project ID -name NAME -url URL | target list -project ID
   scope set -project ID -include host[,host] [-exclude ..] [-include-path ..] [-exclude-path ..] [-subdomains]
@@ -165,13 +169,17 @@ func cmdServe(args []string) error {
 	useBrowser := fs.Bool("browser", false, "enable browser network-observation discovery AND browser verification of reflected XSS candidates (needs Chromium; requests are scope-gated)")
 	chromium := fs.String("chromium", "", "Chromium executable for -browser (default: $INDAGO_CHROMIUM_PATH or the Playwright cache)")
 	allowRemote := fs.Bool("allow-remote", false,
-		"allow binding a non-loopback address; required because the API has no authentication (see docs/deployment.md)")
+		"allow binding a non-loopback address; requires INDAGO_API_TOKEN (see docs/deployment.md)")
 	aiProvider := fs.String("ai-provider", "", "enable the advisory AI Gateway with this provider (openai|anthropic|openrouter|ollama|vllm); empty keeps AI fully disabled")
 	aiModel := fs.String("ai-model", "", "model name for -ai-provider (required if -ai-provider is set)")
 	aiBaseURL := fs.String("ai-base-url", "", "override the provider's default base URL (required for a non-default ollama/vllm deployment)")
 	_ = fs.Parse(args)
 
 	log := newLogger(*debug)
+
+	// The API bearer token is read once, here, from the environment: never a
+	// flag (shell history, `ps`), never written to config.json, never logged.
+	apiToken := os.Getenv(apiTokenEnv)
 
 	cfg, err := config.Load(cfgPath(*dataDir))
 	if err != nil {
@@ -181,7 +189,12 @@ func cmdServe(args []string) error {
 	if *addr != "" {
 		cfg.Server.Addr = *addr
 	}
-	if err := checkRemoteBindAllowed(cfg.Server.Addr, *allowRemote); err != nil {
+	if apiToken != "" {
+		if err := web.ValidateAPIToken(apiToken); err != nil {
+			return fmt.Errorf("%s: %w", apiTokenEnv, err)
+		}
+	}
+	if err := checkRemoteBindAllowed(cfg.Server.Addr, *allowRemote, apiToken); err != nil {
 		return err
 	}
 	if err := cfg.EnsureDirs(); err != nil {
@@ -273,7 +286,7 @@ func cmdServe(args []string) error {
 		log.Info("restored interrupted scans as paused; resume them with `indago scan resume <id>`", "count", n)
 	}
 	if !isLoopbackAddr(cfg.Server.Addr) {
-		log.Warn("listening on a non-loopback address (-allow-remote): the API has no authentication and can start scans, read evidence, and generate reports; restrict access at the network level (firewall/VPN)", "addr", cfg.Server.Addr)
+		log.Warn("listening on a non-loopback address (-allow-remote): the control API requires the bearer token from "+apiTokenEnv+", has no per-operator identity, and serves no TLS; put a TLS-terminating proxy or VPN/SSH tunnel in front and restrict network access", "addr", cfg.Server.Addr)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -281,6 +294,12 @@ func cmdServe(args []string) error {
 
 	srv := web.NewServer(db, ctrl, version, log, evStore, cfg.ReportsDir())
 	srv.SetLoginFunc(loginFn) // nil unless -browser: endpoint then reports unavailable
+	if err := srv.SetAPIToken(apiToken); err != nil {
+		return fmt.Errorf("%s: %w", apiTokenEnv, err)
+	}
+	if apiToken != "" {
+		log.Info("control API requires a bearer token", "env", apiTokenEnv)
+	}
 	gw, err := ai.New(ai.Settings{
 		Enabled:  *aiProvider != "",
 		Provider: *aiProvider,
@@ -304,19 +323,28 @@ func cmdServe(args []string) error {
 	return err
 }
 
-// checkRemoteBindAllowed refuses a non-loopback bind unless the operator
-// explicitly opted in. The API has no authentication (it's a local control
-// plane — see internal/web/guard.go): anyone who can reach it can start
-// scans, read findings/evidence (which may include captured session
-// cookies), and generate reports. A log warning alone is easy to miss running
-// as a daemon, so this is an outright refusal, not just advice.
-func checkRemoteBindAllowed(addr string, allowRemote bool) error {
-	if isLoopbackAddr(addr) || allowRemote {
+// checkRemoteBindAllowed refuses a non-loopback bind unless the operator opts
+// in with -allow-remote AND configures INDAGO_API_TOKEN. The control API can
+// start scans, read findings/evidence (which may include captured session
+// cookies), and generate reports; a remote bind without the bearer token would
+// expose all of that to anyone who can reach the port. Both are outright
+// refusals, not log warnings, which are easy to miss running as a daemon.
+// The token value never appears in the returned error.
+func checkRemoteBindAllowed(addr string, allowRemote bool, token string) error {
+	if isLoopbackAddr(addr) {
 		return nil
 	}
-	return fmt.Errorf("refusing to bind non-loopback address %q without -allow-remote: "+
-		"the API has no authentication and can start scans, read evidence, and generate reports; "+
-		"see docs/deployment.md before exposing it beyond localhost", addr)
+	if !allowRemote {
+		return fmt.Errorf("refusing to bind non-loopback address %q without -allow-remote; "+
+			"a remote bind also requires %s (the control API can start scans, read evidence, and generate reports); "+
+			"see docs/deployment.md before exposing it beyond localhost", addr, apiTokenEnv)
+	}
+	if token == "" {
+		return fmt.Errorf("refusing to bind non-loopback address %q with -allow-remote and no API token: "+
+			"set %s to a random token of at least %d characters (for example: openssl rand -hex 32); "+
+			"see docs/deployment.md", addr, apiTokenEnv, web.MinAPITokenLen)
+	}
+	return nil
 }
 
 // isLoopbackAddr reports whether addr binds only the loopback interface.

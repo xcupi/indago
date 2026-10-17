@@ -344,8 +344,10 @@ operator visits:
   the `Host`. The bundled UI and the CLI send it.
 - **DNS rebinding**: when bound to a specific address, the `Host` header must be
   loopback or the bound host.
-- The API has **no authentication** (single local user). `indago serve` warns when
-  bound to a non-loopback address; restrict network access in that case.
+- The API has an **optional bearer token** (`INDAGO_API_TOKEN`, see
+  `docs/deployment.md` §1) and no per-operator identity. Without the token it is
+  unauthenticated (single local user); a non-loopback bind requires both
+  `-allow-remote` and the token, and there is no TLS yet.
 
 ## 9. Locking rules (for maintainers)
 
