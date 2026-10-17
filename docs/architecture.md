@@ -4,14 +4,16 @@ Indago is a **local-first, single-user** web application security hunting
 platform. This document describes the system architecture established in
 **Phase 0** (scaffold) and the shape it is designed to grow into.
 
-> Scope reminder: there is **no** exploit payload generation, no LLM-decided
-> verdict, and no DOM/Stored XSS yet. Transport, browser, discovery, scan
-> orchestration, and the full Reflected XSS pipeline (reflect → context → plan →
+> Scope reminder: there is **no** exploit payload generation and no
+> LLM-decided verdict. Transport, browser, discovery, scan orchestration,
+> and the full Reflected XSS pipeline (reflect → context → plan →
 > execute candidates → browser-verify) are real (see
 > [`scan-orchestration.md`](scan-orchestration.md) and
-> [`browser-verification.md`](browser-verification.md)); every OTHER
-> vulnerability class is still an interface with an `ErrNotImplemented` stub.
-> See [`../AGENTS.md`](../AGENTS.md).
+> [`browser-verification.md`](browser-verification.md)); a first, narrow
+> DOM-XSS slice (`location.hash` → innerHTML/outerHTML/document.write) is
+> also real (see [`dom-xss.md`](dom-xss.md)) — every OTHER vulnerability
+> class, and every OTHER DOM-XSS source/sink, is still out of scope. See
+> [`../AGENTS.md`](../AGENTS.md).
 
 ---
 

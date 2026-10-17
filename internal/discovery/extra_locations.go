@@ -50,15 +50,11 @@ func (c *Collector) registerHeaderInjectionPoints(ctx context.Context, endpointI
 }
 
 // registerCookieInjectionPoints registers an injection point for every
-// cookie actually present in the scan's own session context —
-// c.cfg.SessionCookies, the cookies loaded from the scan's auth session
-// material, the SAME ones internal/scan's WithSessionCookies attaches to
-// every request the scan sends (see controller.go's sessionCookiesFor) —
-// EXCLUDING whatever looks like the session's own authentication/session
-// cookie (isSessionCookieName), so testing a cookie value never breaks the
-// scan's own login. Never fabricates a cookie: a scan with no session (so
-// an empty c.cfg.SessionCookies) registers nothing here, exactly as an
-// anonymous scan should.
+// non-authentication cookie present in the scan's saved session context
+// (c.cfg.SessionCookies). scopedEngine retains each cookie's scope and applies
+// it to the mutated request and any redirect, so a cookie from another host or
+// path is not sent just because its name was registered on this endpoint.
+// Never fabricates a cookie: an anonymous scan has no points here.
 func (c *Collector) registerCookieInjectionPoints(ctx context.Context, endpointID domain.ID, method domain.HTTPMethod, info URLInfo, source domain.DiscoverySource) {
 	for _, ck := range c.cfg.SessionCookies {
 		if ck == nil || ck.Name == "" || isSessionCookieName(ck.Name) {

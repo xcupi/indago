@@ -201,11 +201,23 @@ func waitStatus(t *testing.T, c *scan.Controller, id domain.ID, d time.Duration,
 func isCompleted(st *scan.Status) bool { return st.Scan.State == domain.ScanCompleted }
 
 // recordingHandlers records every test job's target URL, then succeeds.
+// domain.JobDOMXSS also needs an entry: the controller's monitor enqueues
+// DOM-XSS probe jobs for every scan's one-time pass (see
+// execution.go/evaluate, domxss.go) independently of which handlers map
+// is in use — a scan built with this simplified recording map would
+// otherwise see those jobs die with "no handler registered" (see
+// worker.Pool.process).
 func recordingHandlers() (map[domain.JobType]worker.Handler, func() []string) {
 	var mu sync.Mutex
 	var urls []string
 	h := map[domain.JobType]worker.Handler{
 		domain.JobTest: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
+			mu.Lock()
+			urls = append(urls, j.Target.URL)
+			mu.Unlock()
+			return nil
+		}),
+		domain.JobDOMXSS: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
 			mu.Lock()
 			urls = append(urls, j.Target.URL)
 			mu.Unlock()
@@ -317,6 +329,13 @@ func TestScanCompletesAfterDiscoveryAndJobs(t *testing.T) {
 		t.Fatalf("persisted discovery state = %q", done.Scan.Discovery)
 	}
 	total := done.Discovery.Endpoints + done.Discovery.InjectionPoints
+	// This test's recordingHandlers() handles domain.JobDOMXSS too (see
+	// its doc comment), so the DOM-XSS engine's own one-time probe pass
+	// (one job per distinct GET/HEAD endpoint URL) succeeds right
+	// alongside the ordinary JobTest jobs this test otherwise counts —
+	// add it to the expected totals rather than treating it as unrelated.
+	eps, _ := st.Endpoints().ListByScan(ctx, sc.ID)
+	total += countDistinctNavigableURLs(eps)
 	if done.Jobs.Total() != total || done.Jobs.Succeeded != total {
 		t.Fatalf("jobs=%+v, want %d succeeded", done.Jobs, total)
 	}

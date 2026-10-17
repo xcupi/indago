@@ -292,7 +292,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 		return nil, fmt.Errorf("browser: login page: %w", err)
 	}
 
-	if _, _, err := gotoWithCtx(ctx, ph, opts.LoginURL, WaitLoad, m.cfg.NavigationTimeout); err != nil {
+	if _, _, err := gotoWithCtx(ctx, ph, opts.LoginURL, "", WaitLoad, m.cfg.NavigationTimeout); err != nil {
 		return nil, fmt.Errorf("browser: open login page: %w", err)
 	}
 
@@ -313,7 +313,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	if err := os.Chmod(opts.StorageStatePath, 0o600); err != nil {
 		return nil, fmt.Errorf("browser: restrict session file permissions: %w", err)
 	}
-	_, finalURL, _ := ph.Goto(opts.LoginURL, WaitCommit, m.cfg.NavigationTimeout) // best-effort current URL
+	_, finalURL, _ := ph.Goto(opts.LoginURL, "", WaitCommit, m.cfg.NavigationTimeout) // best-effort current URL
 	return &LoginResult{StorageStatePath: opts.StorageStatePath, FinalURL: finalURL}, nil
 }
 
@@ -417,7 +417,7 @@ func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginR
 		return nil, fmt.Errorf("browser: login page: %w", err)
 	}
 
-	if _, _, err := gotoWithCtx(ctx, ph, opts.LoginURL, WaitLoad, m.cfg.NavigationTimeout); err != nil {
+	if _, _, err := gotoWithCtx(ctx, ph, opts.LoginURL, "", WaitLoad, m.cfg.NavigationTimeout); err != nil {
 		return nil, fmt.Errorf("browser: open login page: %w", err)
 	}
 
@@ -452,7 +452,7 @@ func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginR
 	if err := os.Chmod(opts.StorageStatePath, 0o600); err != nil {
 		return nil, fmt.Errorf("browser: restrict session file permissions: %w", err)
 	}
-	_, finalURL, _ := ph.Goto(opts.LoginURL, WaitCommit, m.cfg.NavigationTimeout) // best-effort current URL
+	_, finalURL, _ := ph.Goto(opts.LoginURL, "", WaitCommit, m.cfg.NavigationTimeout) // best-effort current URL
 	return &LoginResult{StorageStatePath: opts.StorageStatePath, FinalURL: finalURL}, nil
 }
 
@@ -608,7 +608,7 @@ func (p *Page) Navigate(ctx context.Context, url string, opts NavOptions) (*NavR
 	if err := opts.Limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
-	status, finalURL, err := gotoWithCtx(ctx, p.handle, url, wait, timeout)
+	status, finalURL, err := gotoWithCtx(ctx, p.handle, url, opts.Referer, wait, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("browser: navigate: %w", err)
 	}
@@ -671,6 +671,16 @@ func (p *Page) NavigateForm(ctx context.Context, method, url string, fields map[
 		return nil, fmt.Errorf("browser: navigate form: %w", err)
 	}
 	return &NavResult{Status: r.status, FinalURL: r.finalURL}, nil
+}
+
+// AddInitScript installs script to run in this page BEFORE any of the
+// page's own scripts, on this navigation and every subsequent one this
+// Page makes (Playwright's own init-script mechanism) — MUST be called
+// before Navigate for the hook to be in place before the page's own
+// onload-style handler can run. Used by DOM-XSS reachability/verification
+// probing (internal/scan/domxss.go) to install sink hooks.
+func (p *Page) AddInitScript(ctx context.Context, script string) error {
+	return callCtxErr(ctx, func() error { return p.handle.AddInitScript(script) })
 }
 
 // Evaluate runs a JavaScript expression in the page and returns its result.
@@ -857,13 +867,13 @@ func callCtxCreate[T interface{ Close() error }](ctx context.Context, fn func() 
 	}
 }
 
-func gotoWithCtx(ctx context.Context, ph pageHandle, url, wait string, timeout time.Duration) (int, string, error) {
+func gotoWithCtx(ctx context.Context, ph pageHandle, url, referer, wait string, timeout time.Duration) (int, string, error) {
 	type nav struct {
 		status   int
 		finalURL string
 	}
 	r, err := callCtx(ctx, func() (nav, error) {
-		s, u, err := ph.Goto(url, wait, timeout)
+		s, u, err := ph.Goto(url, referer, wait, timeout)
 		return nav{s, u}, err
 	})
 	return r.status, r.finalURL, err

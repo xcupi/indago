@@ -57,6 +57,35 @@ func TestGetFindingPoCConfirmedServesStandaloneHTML(t *testing.T) {
 	}
 }
 
+func TestGetFindingPoCDynamicTokenDownloadsRedactedTemplate(t *testing.T) {
+	a := newAPI(t, nil)
+	scanID := createTestScan(t, a)
+	f := seedConfirmedFinding(t, a, scanID)
+	stale := "API_STALE_CSRF_VALUE_DO_NOT_RENDER"
+	now := time.Now()
+	if err := a.st.Parameters().Create(a.t.Context(), &domain.Parameter{
+		ID: domain.NewID(), ScanID: scanID, EndpointID: f.EndpointID,
+		Name: "csrf_token", Location: domain.LocationQuery, Example: stale,
+		Source: domain.SourceCrawler, CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := a.do("GET", "/api/scans/"+string(scanID)+"/findings/"+string(f.ID)+"/poc", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"FRESH_csrf_token_VALUE", "refresh current CSRF token", "request template", "POCMARK"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("downloaded PoC missing %q", want)
+		}
+	}
+	if strings.Contains(body, stale) || strings.Contains(body, `http-equiv="refresh"`) {
+		t.Fatal("API artifact must not expose a stale token or auto-navigate")
+	}
+}
+
 // A Pending finding is refused with 409 — the server never generates a PoC
 // for anything short of Confirmed (AGENTS.md evidence integrity).
 func TestGetFindingPoCPendingRefused(t *testing.T) {

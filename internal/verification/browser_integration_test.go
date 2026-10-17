@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -141,7 +142,7 @@ func TestIntegrationVerifyExecutableCandidateIsConfirmed(t *testing.T) {
 		t.Fatalf("verify: %v", err)
 	}
 	if res.Verdict != domain.VerdictConfirmed {
-		t.Fatalf("verdict = %s, want confirmed; report=%+v", res.Verdict, res.Report)
+		t.Fatalf("verdict = %s, want confirmed; report=%+v; browser log=%q", res.Verdict, res.Report, res.Evidence.BrowserLog)
 	}
 	if res.Report.Signal != verification.SignalPageError {
 		t.Fatalf("signal = %s, want page_error", res.Report.Signal)
@@ -244,6 +245,50 @@ func TestIntegrationVerifyURLContextNotExecutedWithoutActivation(t *testing.T) {
 	}
 	if !res.Report.MarkerInDOM {
 		t.Fatal("the marker should still be observed in the DOM (reflected)")
+	}
+}
+
+// --- console.error output containing the marker is not an execution signal ---
+
+func TestIntegrationVerifyConsoleErrorMarkerDoesNotConfirm(t *testing.T) {
+	m := marker(t)
+	value := "<svg onload=" + m + ">"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		// The server safely escapes the reflected candidate. The application's
+		// own script merely logs the raw user-controlled query value; that is
+		// console output, not evidence that the candidate executed as code.
+		fmt.Fprintf(w, `<!doctype html><html><body><p>%s</p>
+<script>console.error(new URLSearchParams(location.search).get("q"));</script>
+</body></html>`, html.EscapeString(r.URL.Query().Get("q")))
+	}))
+	defer srv.Close()
+
+	mgr := newManagerOrSkip(t)
+	defer mgr.Close()
+	v := verification.NewBrowserVerifier(mgr, verification.BrowserVerifierConfig{})
+
+	res, err := v.Verify(context.Background(), verification.Input{
+		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: value},
+		Marker:    m, Method: "GET", URL: queryURL(srv.URL+"/", value), Scope: openScope(),
+	})
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if res.Verdict != domain.VerdictRejected {
+		t.Fatalf("verdict = %s, want rejected (escaped reflection and console.error only); report=%+v, log=%v", res.Verdict, res.Report, res.Evidence.BrowserLog)
+	}
+	if res.Report == nil || res.Report.Signal != verification.SignalNone || !res.Report.MarkerInDOM {
+		t.Fatalf("report = %+v, want marker in DOM and no execution signal", res.Report)
+	}
+	foundConsoleError := false
+	for _, line := range res.Evidence.BrowserLog {
+		if strings.Contains(line, value) {
+			foundConsoleError = true
+		}
+	}
+	if !foundConsoleError {
+		t.Fatalf("expected browser log to contain the application console.error candidate value; log=%v", res.Evidence.BrowserLog)
 	}
 }
 

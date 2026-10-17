@@ -43,7 +43,14 @@ type contextHandle interface {
 // pageHandle is a single page/tab within a context.
 type pageHandle interface {
 	// Goto navigates to url and returns the HTTP status and final URL.
-	Goto(url, waitUntil string, timeout time.Duration) (status int, finalURL string, err error)
+	// referer, when non-empty, overrides the Referer HTTP header sent with
+	// this navigation (Playwright's own PageGotoOptions.Referer) — used by
+	// DOM-XSS's document.referrer source (internal/scan/domxss.go) to
+	// drive a real navigation whose Referer header (and therefore the
+	// target page's own document.referrer) carries the probe's
+	// canary/payload value. "" leaves the browser's normal referer
+	// behavior untouched (no override).
+	Goto(url, referer, waitUntil string, timeout time.Duration) (status int, finalURL string, err error)
 	Content() (string, error)
 	Screenshot(fullPage bool) ([]byte, error)
 	// Evaluate runs a JS expression with an optional argument and returns the
@@ -65,6 +72,14 @@ type pageHandle interface {
 	// WaitForURL blocks until navigation reaches a URL matching glob (used for
 	// interactive login).
 	WaitForURL(glob string, timeout time.Duration) error
+	// AddInitScript installs script to run in this page BEFORE any of the
+	// page's own scripts, on this navigation and every subsequent one in
+	// this page (Playwright's own init-script mechanism). Used by DOM-XSS
+	// probing (internal/scan/domxss.go) to install sink hooks that must be
+	// in place before a page's own onload-style handler can run — a
+	// listener attached via Evaluate AFTER the page has already loaded
+	// would miss a handler that already fired.
+	AddInitScript(script string) error
 	Close() error
 }
 

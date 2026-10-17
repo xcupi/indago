@@ -931,12 +931,12 @@ func (c *Controller) establishSession(ctx context.Context, sc *domain.Scan) erro
 	return nil
 }
 
-// sessionCookiesFor returns the scan's saved browser-session cookies (if any)
-// for target's host, so the HTTP-level executor can reach the same
-// authenticated pages browser verification does. Best-effort: a missing
-// session, no saved state, or a read/parse failure all just yield nil — HTTP
-// testing then proceeds unauthenticated, exactly as it always has.
-func (c *Controller) sessionCookiesFor(ctx context.Context, sc *domain.Scan, target *domain.Target) []*http.Cookie {
+// sessionCookiesFor returns every valid cookie in the scan's saved browser
+// storage state (if any). scopedEngine applies each cookie's host/domain,
+// path, scheme, and expiry rules independently at every request and redirect
+// hop. Best-effort: a missing session, no saved state, or a read/parse failure
+// yields nil; HTTP-level testing then proceeds unauthenticated.
+func (c *Controller) sessionCookiesFor(ctx context.Context, sc *domain.Scan) []*http.Cookie {
 	if sc.SessionID.Empty() {
 		return nil
 	}
@@ -944,11 +944,7 @@ func (c *Controller) sessionCookiesFor(ctx context.Context, sc *domain.Scan, tar
 	if err != nil || sess.StatePath == "" {
 		return nil
 	}
-	u, err := url.Parse(target.BaseURL)
-	if err != nil || u.Hostname() == "" {
-		return nil
-	}
-	return sessionCookies(sess.StatePath, u.Hostname())
+	return sessionCookies(sess.StatePath)
 }
 
 // reauthenticateIfAwaitingAuth re-establishes the scan's session before it
@@ -1034,7 +1030,7 @@ func (c *Controller) poolConfig(sc *domain.Scan) worker.Config {
 		Groups: []worker.GroupSpec{
 			{Name: GroupDiscovery, Types: []domain.JobType{domain.JobDiscovery}, Size: sc.Config.DiscoveryConcurrency},
 			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest}, Size: sc.Config.HTTPConcurrency},
-			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
+			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify, domain.JobDOMXSS}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
 		},
 		LeaseDuration: c.opts.LeaseDuration,
 		Heartbeat:     c.opts.Heartbeat,

@@ -149,6 +149,12 @@ type NavOptions struct {
 	// taken before the request is sent). It is the scan's shared limiter, so
 	// browser navigations count against the same RequestsPerSecond as HTTP.
 	Limiter *ratelimit.Limiter
+	// Referer, when non-empty, overrides the Referer HTTP header sent with
+	// this navigation (threaded to pageHandle.Goto's own referer
+	// parameter). "" leaves the browser's normal referer behavior
+	// unchanged. Used by DOM-XSS's document.referrer source
+	// (internal/scan/domxss.go) — see docs/dom-xss.md.
+	Referer string
 }
 
 // NavResult is the outcome of a navigation.

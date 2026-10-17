@@ -184,9 +184,16 @@ func TestRestartRecoversAndResumesScan(t *testing.T) {
 		t.Fatal("resumed discovery did not reach /after")
 	}
 
-	// No duplicated jobs: exactly one per endpoint and per injection point, and
-	// every one completed (including those requeued by recovery).
+	// No duplicated jobs: exactly one per endpoint and per injection point
+	// (PLUS the DOM-XSS engine's own one-time probe pass — one job per
+	// distinct GET/HEAD endpoint URL, see domxss.go — which this
+	// after-restart controller runs for real since it uses default
+	// handlers; no browser is configured, so each probe is recorded
+	// skipped but the JOB itself still succeeds, same as
+	// verifyExecutor's own "no browser configured" skip), and every one
+	// completed (including those requeued by recovery).
 	want := done.Discovery.Endpoints + done.Discovery.InjectionPoints
+	want += countDistinctNavigableURLs(eps)
 	if done.Jobs.Total() != want || done.Jobs.Succeeded != want {
 		t.Fatalf("jobs=%+v, want %d total and succeeded (no duplicates, none lost)", done.Jobs, want)
 	}

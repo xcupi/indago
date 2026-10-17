@@ -148,14 +148,12 @@ type Config struct {
 	Wordlist            []string // content-discovery words
 	ParamWordlist       []string // parameter-name guesses applied to endpoints
 	EnqueueEndpointJobs bool     // enqueue a test job per endpoint (not just per param)
-	// SessionCookies are the scan's own session cookies — the SAME ones
-	// internal/scan's WithSessionCookies attaches to every request the scan
-	// sends (loaded from the scan's auth session material; see
-	// Controller.sessionCookiesFor). The Collector registers a Cookie
-	// injection point (domain.LocationCookie) for each one NOT recognized
-	// as the session's own authentication cookie (see isSessionCookieName)
-	// — never a fabricated cookie. Empty for an anonymous scan (or one with
-	// no saved session material), which correctly registers none.
+	// SessionCookies are every valid cookie from the scan's saved storage
+	// state. scopedEngine applies each cookie's URL scope on every request and
+	// redirect hop. The Collector registers Cookie injection points for names
+	// not recognized as the session's own auth cookie; the matching override is
+	// still limited by the stored cookie's scope when sent. Empty for an
+	// anonymous scan (or one with no saved session material).
 	SessionCookies []*http.Cookie
 }
 
