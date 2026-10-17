@@ -714,6 +714,8 @@ function findingsTable(findings, scanId, state, emptyText) {
   return wrap;
 }
 
+const REPORT_HEADERS = ["Created", "Format", "Selection", "Findings", "Verdicts", "Open"];
+
 function reportRow(r) {
   const tr = el("tr");
   const s = r.summary || {};
@@ -727,6 +729,7 @@ function reportRow(r) {
   const dl = contentLink("download", "/api/reports/" + encodeURIComponent(r.id) + "/content?download", "act", true); dl.style.marginLeft = "10px";
   openTd.append(view, dl);
   tr.appendChild(openTd);
+  [...tr.children].forEach((td, i) => { td.dataset.label = REPORT_HEADERS[i]; });
   return tr;
 }
 
@@ -805,9 +808,9 @@ function reportsPanel(scanId) {
   onSelectionChange(state, wrap, update);
 
   const tbody = el("tbody"); tbody.id = "reportsBody";
-  const t = el("table");
+  const t = el("table", undefined, "reports-table");
   const thead = el("thead"); const hr = el("tr");
-  ["Created", "Format", "Selection", "Findings", "Verdicts", "Open"].forEach((h) => hr.appendChild(el("th", h)));
+  REPORT_HEADERS.forEach((h) => hr.appendChild(el("th", h)));
   thead.appendChild(hr); t.append(thead, tbody);
   let reportsSig = null;
   async function reload() {
