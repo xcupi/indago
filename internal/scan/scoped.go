@@ -4,13 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/httpengine"
+	"golang.org/x/net/publicsuffix"
 )
 
 // maxScopedRedirects bounds the redirect chain followed by scopedEngine.
@@ -33,9 +37,9 @@ const maxScopedRedirects = 10
 type scopedEngine struct {
 	inner httpengine.Engine
 	scope domain.Scope
-	// cookies are added to every request this engine sends, on top of whatever
-	// the caller set — see WithSessionCookies. nil for most scans (anonymous
-	// auth, or no browser storage state).
+	// cookies are the scan's saved session cookies. cookiesForURL applies each
+	// cookie's scope separately for the current URL/hop; nil for most scans
+	// (anonymous auth, or no browser storage state).
 	cookies []*http.Cookie
 }
 
@@ -45,11 +49,11 @@ func newScopedEngine(inner httpengine.Engine, scope domain.Scope) *scopedEngine 
 	return &scopedEngine{inner: inner, scope: scope}
 }
 
-// WithSessionCookies attaches cookies to every request this engine sends, so
-// the scan's authenticated session (established for browser verification) is
-// ALSO carried by the plain HTTP-level reflection/candidate testing — without
-// it, a cookie-gated endpoint would never even show its reflection to the HTTP
-// executor, and nothing downstream would ever reach verification. Returns the
+// WithSessionCookies gives scopedEngine the saved browser cookies to evaluate
+// independently against each request URL, including every redirect hop. The
+// scan's authenticated session (established for browser verification) is ALSO
+// carried by plain HTTP-level reflection/candidate testing, but only where the
+// cookie's stored domain/host, path, scheme, and expiry permit it. Returns the
 // same engine for chaining. Each scopedEngine instance is scan-scoped (built
 // fresh per launch), so this never leaks one scan's cookies into another's
 // requests even though the underlying transport (c.opts.HTTP) is shared.
@@ -64,37 +68,17 @@ func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpen
 		return nil, fmt.Errorf("%w: nil request", httpengine.ErrInvalidRequest)
 	}
 	cur := *req // never mutate the caller's request
-	if len(s.cookies) > 0 {
-		// Request-specific cookies — in particular a Cookie-location
-		// injection's override (see buildRequest in executor.go) — must win
-		// over a session cookie of the SAME name; otherwise the session's
-		// unmodified value would silently shadow the override whenever a
-		// Cookie injection point happens to share a name with one of the
-		// scan's own session cookies (not uncommon: e.g. a "pref"/"lang"
-		// cookie present both at baseline and in the saved session state),
-		// making that injection point untestable at the HTTP level — it
-		// would never actually carry the marker, so reflection analysis
-		// would always (and wrongly) say "not reflected".
-		existing := make(map[string]bool, len(req.Cookies))
-		for _, c := range req.Cookies {
-			if c != nil {
-				existing[c.Name] = true
-			}
-		}
-		sessionExtra := make([]*http.Cookie, 0, len(s.cookies))
-		for _, c := range s.cookies {
-			if c != nil && !existing[c.Name] {
-				sessionExtra = append(sessionExtra, c)
-			}
-		}
-		cur.Cookies = append(append([]*http.Cookie(nil), req.Cookies...), sessionExtra...)
-	}
+	requestCookies := append([]*http.Cookie(nil), req.Cookies...)
 	var chain []string
 
 	for hop := 0; ; hop++ {
 		if d := s.scope.Permits(cur.URL); !d.Allowed {
 			return nil, fmt.Errorf("%w: %s", ErrOutOfScope, d.Reason)
 		}
+		// Rebuild the cookie list for this URL on every hop. Session cookies
+		// carry storage-state scope metadata; request-specific overrides remain
+		// first so a targeted injection wins over a same-named session cookie.
+		cur.Cookies = s.cookiesForURL(cur.URL, req.URL, requestCookies, hop == 0)
 		resp, err := s.inner.Do(ctx, &cur)
 		if err != nil {
 			return nil, err
@@ -132,6 +116,181 @@ func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpen
 	}
 }
 
+// cookiesForURL combines explicit request cookies with only those saved-session
+// cookies whose browser scope permits rawURL. An explicit request cookie wins
+// over a same-named session cookie. A cookie override without its own scope can
+// follow a redirect only when a same-named stored cookie matched both the
+// original request and the redirected URL; otherwise it is one-hop-only.
+func (s *scopedEngine) cookiesForURL(rawURL, initialURL string, requestCookies []*http.Cookie, firstHop bool) []*http.Cookie {
+	activeRequestCookies := make([]*http.Cookie, 0, len(requestCookies))
+	existing := make(map[string]struct{}, len(requestCookies))
+	for _, requestCookie := range requestCookies {
+		if requestCookie == nil {
+			continue
+		}
+		if requestCookie.Domain != "" && requestCookie.Path != "" {
+			if cookiePermitsURL(requestCookie, rawURL) {
+				activeRequestCookies = append(activeRequestCookies, requestCookie)
+				existing[requestCookie.Name] = struct{}{}
+			}
+			continue
+		}
+
+		matchedStoredScope := false
+		storedNameExists := false
+		for _, storedCookie := range s.cookies {
+			if storedCookie == nil || storedCookie.Name != requestCookie.Name {
+				continue
+			}
+			storedNameExists = true
+			if cookiePermitsURL(storedCookie, initialURL) && cookiePermitsURL(storedCookie, rawURL) {
+				matchedStoredScope = true
+				break
+			}
+		}
+		if matchedStoredScope || (firstHop && !storedNameExists) {
+			activeRequestCookies = append(activeRequestCookies, requestCookie)
+			existing[requestCookie.Name] = struct{}{}
+		}
+	}
+
+	out := append([]*http.Cookie(nil), activeRequestCookies...)
+	for _, c := range s.cookies {
+		if c == nil {
+			continue
+		}
+		if _, overridden := existing[c.Name]; overridden {
+			continue
+		}
+		if cookiePermitsURL(c, rawURL) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// cookiePermitsURL implements the storage-state cookie checks needed by a raw
+// HTTP request. A leading dot in Domain denotes a Domain cookie (and permits
+// subdomains); a domain without a leading dot is host-only, matching the
+// Playwright storage-state serialization observed from Chromium.
+func cookiePermitsURL(c *http.Cookie, rawURL string) bool {
+	if c == nil || c.Valid() != nil || !validCookiePath(c.Path) {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" || u.User != nil {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return false
+	}
+	if c.Secure && scheme != "https" {
+		return false
+	}
+	if !c.Expires.IsZero() && !c.Expires.After(time.Now()) {
+		return false
+	}
+
+	cookieDomain, domainCookie, ok := cookieDomainParts(c.Domain)
+	if !ok {
+		return false
+	}
+	host, ok := normalizedCookieHost(u.Hostname())
+	if !ok {
+		return false
+	}
+	if domainCookie {
+		if host != cookieDomain && !strings.HasSuffix(host, "."+cookieDomain) {
+			return false
+		}
+	} else if host != cookieDomain {
+		return false
+	}
+
+	requestPath := u.EscapedPath()
+	if requestPath == "" {
+		requestPath = "/"
+	}
+	return cookiePathMatches(c.Path, requestPath)
+}
+
+func cookieDomainParts(raw string) (domain string, domainCookie bool, ok bool) {
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return "", false, false
+	}
+	if strings.HasPrefix(raw, ".") {
+		domainCookie = true
+		raw = raw[1:]
+	}
+	if raw == "" || strings.HasPrefix(raw, ".") || strings.HasSuffix(raw, ".") {
+		return "", false, false
+	}
+	domain, ok = normalizedCookieHost(raw)
+	if !ok {
+		return "", false, false
+	}
+	if domainCookie {
+		if net.ParseIP(domain) != nil {
+			return "", false, false
+		}
+		publicSuffix, _ := publicsuffix.PublicSuffix(domain)
+		if publicSuffix == domain {
+			return "", false, false
+		}
+	}
+	return domain, domainCookie, true
+}
+
+func normalizedCookieHost(host string) (string, bool) {
+	if host == "" || strings.TrimSpace(host) != host || strings.ContainsAny(host, "\\\\/%?#@ 	\r\n") {
+		return "", false
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "" || strings.HasSuffix(host, ".") {
+		return "", false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String(), true
+	}
+	if len(host) > 253 || strings.Contains(host, ":") {
+		return "", false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", false
+		}
+		for _, r := range label {
+			if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+				return "", false
+			}
+		}
+	}
+	return host, true
+}
+
+func validCookiePath(path string) bool {
+	if path == "" || !strings.HasPrefix(path, "/") {
+		return false
+	}
+	for _, r := range path {
+		if r < 0x20 || r == 0x7f || r == ';' {
+			return false
+		}
+	}
+	return true
+}
+
+func cookiePathMatches(cookiePath, requestPath string) bool {
+	if cookiePath == requestPath {
+		return true
+	}
+	if !strings.HasPrefix(requestPath, cookiePath) {
+		return false
+	}
+	return strings.HasSuffix(cookiePath, "/") || requestPath[len(cookiePath)] == '/'
+}
+
 func isRedirectStatus(code int) bool {
 	switch code {
 	case 301, 302, 303, 307, 308:
@@ -141,13 +300,11 @@ func isRedirectStatus(code int) bool {
 	}
 }
 
-// sessionCookies reads a browser storage-state file (the JSON format
-// browser.Context.SaveStorageState writes: {"cookies":[...], "origins":[...]})
-// and returns the cookies whose domain matches host, for WithSessionCookies.
-// It never errors — a missing/unreadable/malformed file, or no browser
-// session having been saved at all, simply yields no cookies; HTTP-level
-// testing then proceeds unauthenticated, exactly as it always has.
-func sessionCookies(statePath, host string) []*http.Cookie {
+// sessionCookies reads a browser storage-state file and retains every valid
+// cookie for per-request scoping by scopedEngine. Missing/unreadable/malformed
+// state yields no cookies; a malformed individual cookie is skipped rather
+// than being sent with guessed host/path semantics.
+func sessionCookies(statePath string) []*http.Cookie {
 	if statePath == "" {
 		return nil
 	}
@@ -157,25 +314,66 @@ func sessionCookies(statePath, host string) []*http.Cookie {
 	}
 	var state struct {
 		Cookies []struct {
-			Name   string `json:"name"`
-			Value  string `json:"value"`
-			Domain string `json:"domain"`
+			Name         string   `json:"name"`
+			Value        string   `json:"value"`
+			Domain       string   `json:"domain"`
+			Path         string   `json:"path"`
+			Expires      *float64 `json:"expires"`
+			HTTPOnly     bool     `json:"httpOnly"`
+			Secure       bool     `json:"secure"`
+			SameSite     string   `json:"sameSite"`
+			PartitionKey *string  `json:"partitionKey"`
 		} `json:"cookies"`
 	}
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil
 	}
-	host = strings.ToLower(host)
 	var out []*http.Cookie
-	for _, c := range state.Cookies {
-		// Playwright's storage state does not record whether a cookie was
-		// host-only or had an explicit Domain (no such flag is written), so
-		// every stored cookie is treated as domain-scoped: it applies to its
-		// domain and that domain's subdomains, with or without a leading dot.
-		d := strings.ToLower(strings.TrimPrefix(c.Domain, "."))
-		if d == "" || d == host || strings.HasSuffix(host, "."+d) {
-			out = append(out, &http.Cookie{Name: c.Name, Value: c.Value})
+	for _, stored := range state.Cookies {
+		if stored.PartitionKey != nil {
+			// Raw HTTP requests have no top-level-site partition context; do
+			// not broaden a partitioned browser cookie into an unpartitioned one.
+			continue
 		}
+		if _, _, ok := cookieDomainParts(stored.Domain); !ok || !validCookiePath(stored.Path) {
+			continue
+		}
+		basic := &http.Cookie{Name: stored.Name, Value: stored.Value}
+		if basic.Valid() != nil {
+			continue
+		}
+		cookie := &http.Cookie{
+			Name:     stored.Name,
+			Value:    stored.Value,
+			Domain:   stored.Domain,
+			Path:     stored.Path,
+			HttpOnly: stored.HTTPOnly,
+			Secure:   stored.Secure,
+		}
+		switch stored.SameSite {
+		case "":
+		case "Strict":
+			cookie.SameSite = http.SameSiteStrictMode
+		case "Lax":
+			cookie.SameSite = http.SameSiteLaxMode
+		case "None":
+			cookie.SameSite = http.SameSiteNoneMode
+		default:
+			continue
+		}
+		if stored.Expires != nil {
+			expires := *stored.Expires
+			switch {
+			case expires == -1:
+				// Playwright represents session cookies with expires=-1.
+			case expires < 0 || math.IsNaN(expires) || math.IsInf(expires, 0) || expires >= float64(math.MaxInt64):
+				continue
+			default:
+				sec, fraction := math.Modf(expires)
+				cookie.Expires = time.Unix(int64(sec), int64(math.Round(fraction*float64(time.Second))))
+			}
+		}
+		out = append(out, cookie)
 	}
 	return out
 }

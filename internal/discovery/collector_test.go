@@ -123,10 +123,10 @@ func TestCollectorRegistersDefaultHeaderInjectionPoints(t *testing.T) {
 	}
 }
 
-// Cookie injection points are registered ONLY from the scan's own session
-// cookies (Config.SessionCookies — the same cookies WithSessionCookies
-// attaches to every request), EXCLUDING whatever looks like the session's
-// own authentication/session cookie, and NEVER fabricated.
+// Cookie injection points are registered ONLY from the scan's own saved
+// session cookies (Config.SessionCookies); scopedEngine scopes each one to
+// matching request URLs and redirects. Auth/session cookies are excluded and
+// no cookie values are fabricated.
 func TestCollectorRegistersCookieInjectionPointsFromSessionExcludingAuthCookie(t *testing.T) {
 	cfg := discovery.DefaultConfig()
 	cfg.SessionCookies = []*http.Cookie{

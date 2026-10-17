@@ -81,7 +81,7 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 	// (see scanHTTPEngine) — closeHTTP releases it once the scan stops.
 	httpEng, closeHTTP := c.scanHTTPEngine(sc)
 	eng := newScopedEngine(httpEng, scope)
-	cookies := c.sessionCookiesFor(ctx, sc, target)
+	cookies := c.sessionCookiesFor(ctx, sc)
 	if len(cookies) > 0 {
 		eng = eng.WithSessionCookies(cookies)
 	}
