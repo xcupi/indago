@@ -47,10 +47,8 @@ func TestRandomizeTLSFingerprint_RealHandshake(t *testing.T) {
 	if resp.Status != 200 || string(resp.Body) != "ok" {
 		t.Fatalf("resp = %+v, want 200/\"ok\"", resp)
 	}
-	// Known limitation documented on randomizedTLSDialer: ALPN/h2 is never
-	// surfaced to Transport through a non-stdlib tls.Conn, so this always
-	// negotiates HTTP/1.1 — assert that explicitly so a future uTLS/stdlib
-	// change that silently breaks (or fixes) this doesn't go unnoticed.
+	// Randomized TLS deliberately offers only HTTP/1.1 (or no ALPN): Transport
+	// cannot discover h2 on *utls.UConn. See also the h2-capable server regression.
 	if resp.Proto != "HTTP/1.1" {
 		t.Fatalf("resp.Proto = %q, want HTTP/1.1 (see the documented ALPN limitation)", resp.Proto)
 	}

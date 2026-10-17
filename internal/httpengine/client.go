@@ -196,14 +196,12 @@ func New(cfg Config) (*Client, error) {
 // goes through the SAME rejectLinkLocal SSRF guard as every other connection
 // this Client makes — never bypassed for this path.
 //
-// KNOWN LIMITATION: the returned net.Conn is a *utls.UConn, not a stdlib
-// *tls.Conn, so Go's Transport (see dialConn in net/http/transport.go) never
-// populates persistConn.tlsState from it and therefore never discovers an
-// ALPN-negotiated "h2" — every connection through this dialer is pinned to
-// HTTP/1.1. This does not affect scan correctness (every reflection/
-// candidate/verification request is already a simple, independent exchange),
-// only connection-reuse efficiency; documented here rather than silently
-// accepted.
+// The returned net.Conn is a *utls.UConn, not a stdlib *tls.Conn, so Go's
+// Transport does not discover its negotiated protocol. The randomized spec
+// therefore advertises only HTTP/1.1 (or no ALPN) and no ALPS. Offering h2
+// would let an HTTP/2 server select it while Transport sends HTTP/1.x bytes,
+// breaking real requests. This mode does not support HTTP/2; the normal
+// crypto/tls path and browser verification are unaffected.
 func randomizedTLSDialer(dialer *net.Dialer, insecureSkipVerify bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		rawConn, err := dialer.DialContext(ctx, network, addr)

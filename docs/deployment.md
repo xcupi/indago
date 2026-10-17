@@ -387,6 +387,19 @@ single connection (`SetMaxOpenConns(1)`) deliberately — it's a single-writer,
 single-process design (`AGENTS.md` §1's "single-user"); do not point two
 `indago serve` processes at the same `-data` directory concurrently.
 
+### Outbound scan TLS (not API/listener TLS)
+
+`scan create -randomize-tls-fingerprint` is optional and off by default.
+Its uTLS transport deliberately advertises only HTTP/1.1 (or no ALPN),
+because Go's HTTP/1.x transport cannot switch to h2 on a `*utls.UConn`.
+An HTTPS target supporting both h2 and HTTP/1.1 works; h2-only targets are
+not supported in this mode. The ordinary transport and Chromium's own TLS
+are unchanged. Certificate verification and the existing no-proxy-combination
+rule remain in force. See [randomized TLS validation](randomized-tls-validation.md)
+for the hybrid-key-share/ALPN fixes, real CLI comparisons, and the remaining
+rare handshake-rejection investigation. This setting does not change the
+TLS configuration of `indago serve`.
+
 ---
 
 ## 3. Browser / Playwright requirements

@@ -61,6 +61,9 @@ long-finding/evidence regression is retained unchanged.
 - First uncached full `make check`: web passed (32.044s), but unrelated
   `TestRandomizeTLSFingerprint_RealHandshake` failed with
   `tls: CurvePreferences includes unsupported curve`. No TLS files modified.
+  The later [randomized TLS investigation](randomized-tls-validation.md)
+  identifies and fixes this hybrid-key-share error and the independent h2
+  ALPN mismatch; this line preserves the original failed-run history.
 - Second uncached `INDAGO_CHROMIUM_PATH=/usr/bin/google-chrome make check`:
   exit 0, gofmt/vet clean and every package passed under `-race -p 1`.
 

@@ -18,7 +18,28 @@ func randomizedClientHelloSpec() (utls.ClientHelloSpec, error) {
 		return spec, err
 	}
 	ensureHybridKeyShare(&spec)
+	constrainHTTP1(&spec)
 	return spec, nil
+}
+
+// constrainHTTP1 aligns the hello with the HTTP/1.x transport that consumes
+// UConn. Advertising h2 would let the server select HTTP/2 while net/http
+// sends an HTTP/1.1 request: Transport only detects ALPN on a stdlib *tls.Conn,
+// not a *utls.UConn. Preserve the random presence/order of other extensions,
+// restrict any ALPN to HTTP/1.1, and omit ALPS (HTTP/2 application settings).
+// A spec without ALPN stays without ALPN; servers then default to HTTP/1.1.
+func constrainHTTP1(spec *utls.ClientHelloSpec) {
+	extensions := spec.Extensions[:0]
+	for _, extension := range spec.Extensions {
+		switch e := extension.(type) {
+		case *utls.ALPNExtension:
+			e.AlpnProtocols = []string{"http/1.1"}
+		case *utls.ApplicationSettingsExtension, *utls.ApplicationSettingsExtensionNew:
+			continue
+		}
+		extensions = append(extensions, extension)
+	}
+	spec.Extensions = extensions
 }
 
 // ensureHybridKeyShare makes a TLS 1.3 spec that lists the X25519MLKEM768
