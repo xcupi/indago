@@ -102,12 +102,13 @@ right now** and must remain stubs/interfaces (job handlers are no-ops):
   decision is a pure function of a deterministic browser signal
   (`internal/verification/browser.go:decide`) — AI remains advisory-only
   everywhere, per §2.5.
-- ❌ DOM XSS beyond the Phase-2 slice. The landed slice covers exactly source
-  `location.hash` into sink `innerHTML`/`outerHTML`/`document.write`/`writeln` (see
-  `docs/dom-xss.md`). Every other client-side source (query string read by JS,
-  `postMessage`, `document.referrer`, `window.name`, `localStorage`/
-  `sessionStorage`) and every other sink (`eval`/`Function`, `location`/`src`
-  assignment) remains out of scope until its own explicit slice.
+- ❌ DOM XSS beyond the Phase-2 slice. The landed slice covers exactly sources
+  `location.hash`, query string (`location.search`/`URLSearchParams`),
+  `window.name`, and `postMessage`, all into sink `innerHTML`/`outerHTML`/
+  `document.write`/`writeln` (see `docs/dom-xss.md`). Every other client-side
+  source (`document.referrer`, `localStorage`/`sessionStorage`) and every other
+  sink (`eval`/`Function`, `location`/`src` assignment) remains out of scope
+  until its own explicit slice.
 - ❌ Automated exploitation / weaponized payloads. Candidate execution AND
   verification only ever send the small, canonical, benign-marker breakouts the
   planner chose — no payload obfuscation, no evasion variants, no exploit
@@ -307,19 +308,26 @@ Implemented so far (infrastructure and **discovery**):
   (`finding poc -scan SID -out FILE.html FID`), API
   (`GET /api/scans/{id}/findings/{fid}/poc`), and a "Download PoC" link in
   the web UI's finding detail view.
-- ✅ DOM XSS, Phase-2 first slice (`internal/detection/domxss.go`,
-  `internal/scan/domxss.go`; see `docs/dom-xss.md`): a genuinely different engine
-  from Reflected XSS — navigates the SAME scope-enforcing `browser.Manager`, lets
-  the target's OWN client-side JS run, and observes the live DOM/JS runtime
-  instead of an HTTP response. Two-phase: (1) a benign canary in `location.hash`
-  probes reachability via an init-script hook on `innerHTML`/`outerHTML`/
-  `document.write`/`writeln`, installed before any page script runs; (2) a real
-  `<img src=x onerror=MARKER>`-style payload is navigated and confirmed via the
-  EXACT SAME deterministic browser signal Reflected XSS verification already uses
+- ✅ DOM XSS, Phase-2 (`internal/detection/domxss.go`, `internal/scan/domxss.go`;
+  see `docs/dom-xss.md`): a genuinely different engine from Reflected XSS —
+  navigates the SAME scope-enforcing `browser.Manager`, lets the target's OWN
+  client-side JS run, and observes the live DOM/JS runtime instead of an HTTP
+  response. Two-phase: (1) a benign canary probes reachability via an
+  init-script hook on `innerHTML`/`outerHTML`/`document.write`/`writeln`,
+  installed before any page script runs; (2) a real `<img src=x onerror=MARKER>`-
+  style payload is navigated/delivered and confirmed via the EXACT SAME
+  deterministic browser signal Reflected XSS verification already uses
   (`verification.MatchExecutionSignal`/`Decide`) — no LLM, no new verdict
-  mechanism. Scope is exactly source `location.hash` + the HTML-injection sink
-  category; every other source/sink combination is still a gap (see the ❌ bullet
-  above), not a false claim of completeness.
+  mechanism. Four sources now real: `location.hash`, query string (a client-side
+  check INDEPENDENT of and never collapsed with Reflected XSS's server-side
+  reflection check on the same parameter — both can legitimately fire on the
+  same endpoint), `window.name` (requires navigate-elsewhere → set name →
+  navigate-to-target sequencing, since it persists across same-tab navigation),
+  and `postMessage` (tested via `page.Evaluate` posting directly at the
+  already-loaded target page — faithfully simulates an untrusted frame/popup
+  message without needing a second controlled origin). Still only the
+  HTML-injection sink category; every other source/sink combination is still a
+  gap (see the ❌ bullet above), not a false claim of completeness.
 - ⏳ Stubs: detection engines for non-Reflected-XSS, non-DOM-XSS vulnerability
   classes (Stored XSS), and every DOM-XSS source/sink combination beyond the
   Phase-2 first slice.
