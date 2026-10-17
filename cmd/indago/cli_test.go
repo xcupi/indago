@@ -330,7 +330,7 @@ func TestCheckRemoteBindAllowed(t *testing.T) {
 		{"LAN IP, opted in, token: allowed", "10.0.0.5:8750", true, tok, false},
 	}
 	for _, c := range cases {
-		err := checkRemoteBindAllowed(c.addr, c.allowRemote, c.token)
+		_, err := checkRemoteBindAllowed(c.addr, c.allowRemote, c.token, true, false)
 		if (err != nil) != c.wantErr {
 			t.Errorf("%s: checkRemoteBindAllowed(%q, %v, token?=%v) = %v, wantErr %v",
 				c.name, c.addr, c.allowRemote, c.token != "", err, c.wantErr)
@@ -341,12 +341,12 @@ func TestCheckRemoteBindAllowed(t *testing.T) {
 	}
 	// The refusal for an opted-in remote bind without a token must name the
 	// variable the operator has to set.
-	err := checkRemoteBindAllowed("0.0.0.0:8750", true, "")
+	_, err := checkRemoteBindAllowed("0.0.0.0:8750", true, "", true, false)
 	if err == nil || !strings.Contains(err.Error(), "INDAGO_API_TOKEN") {
 		t.Fatalf("remote bind without token: error should name INDAGO_API_TOKEN, got %v", err)
 	}
 	// Without the opt-in flag, the refusal names -allow-remote.
-	err = checkRemoteBindAllowed("0.0.0.0:8750", false, "")
+	_, err = checkRemoteBindAllowed("0.0.0.0:8750", false, "", true, false)
 	if err == nil || !strings.Contains(err.Error(), "-allow-remote") {
 		t.Fatalf("remote bind without opt-in: error should name -allow-remote, got %v", err)
 	}

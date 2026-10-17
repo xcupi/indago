@@ -347,7 +347,8 @@ operator visits:
 - The API has an **optional bearer token** (`INDAGO_API_TOKEN`, see
   `docs/deployment.md` §1) and no per-operator identity. Without the token it is
   unauthenticated (single local user); a non-loopback bind requires both
-  `-allow-remote` and the token, and there is no TLS yet.
+  `-allow-remote`, the token, and TLS (`-tls-cert`/`-tls-key`, or the explicit
+  `-allow-plaintext-remote` opt-out).
 
 ## 9. Locking rules (for maintainers)
 

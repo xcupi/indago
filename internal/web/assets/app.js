@@ -257,10 +257,16 @@ function contentLink(text, href, cls, asDownload) {
   return a;
 }
 
-// openProtected fetches protected content with the token and hands the bytes
-// to the browser as a blob URL. "Open" in a new tab never renders script-capable
-// types (HTML, SVG, XML) with this console's origin: they are shown as plain
-// text. "Download" saves the original bytes.
+// The CSP the server sends with evidence and report content. The artifact
+// frame repeats it (the iframe csp attribute, where the browser supports it),
+// since a blob URL carries no server headers.
+const ARTIFACT_CSP = "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'";
+
+// openProtected fetches protected content with the token. "Download" saves the
+// original bytes. "Open" depends on the type: HTML, SVG and XML (script-capable)
+// render in a sandboxed frame (see showArtifact), never as this console's own
+// origin and never as text; other types open in a new tab, with JavaScript
+// shown as plain text.
 async function openProtected(href, asDownload) {
   let r;
   try {
@@ -287,12 +293,49 @@ async function openProtected(href, asDownload) {
     setTimeout(() => URL.revokeObjectURL(u), 10000);
     return;
   }
-  const safeType = /html|svg|xml|javascript|ecmascript/i.test(type) ? "text/plain; charset=utf-8" : type;
+  if (/html|svg|xml/i.test(type)) {
+    showArtifact(body, type, name);
+    return;
+  }
+  const safeType = /javascript|ecmascript/i.test(type) ? "text/plain; charset=utf-8" : type;
   const u = URL.createObjectURL(new Blob([body], { type: safeType }));
   const w = window.open(u, "_blank", "noopener,noreferrer");
   if (!w) showError("the browser blocked the new tab; allow pop-ups for this console or use download");
   setTimeout(() => URL.revokeObjectURL(u), 60000);
 }
+
+// showArtifact shows script-capable content (HTML, SVG, XML) in a full-window
+// frame with sandbox="": no scripts, no forms, no same-origin access. The
+// document gets an opaque origin, so the captured markup cannot read this
+// console or drive its API. The frame is the same protection the server gives
+// the same content when it is opened directly (see docs/finding-correlation.md).
+let artifactURL = null;
+function showArtifact(body, type, name) {
+  closeArtifact();
+  artifactURL = URL.createObjectURL(new Blob([body], { type }));
+  const bar = el("div", undefined, "artifact-bar");
+  bar.appendChild(el("span", name, "artifact-name"));
+  const close = button("Close", closeArtifact, "artifact-close");
+  bar.appendChild(close);
+  const frame = document.createElement("iframe");
+  frame.className = "artifact-frame";
+  frame.setAttribute("sandbox", "");
+  frame.setAttribute("csp", ARTIFACT_CSP);
+  frame.setAttribute("referrerpolicy", "no-referrer");
+  frame.title = name;
+  frame.src = artifactURL;
+  const viewer = el("div", undefined, "artifact-viewer");
+  viewer.id = "artifactViewer";
+  viewer.append(bar, frame);
+  document.body.appendChild(viewer);
+  close.focus();
+}
+function closeArtifact() {
+  const v = $("artifactViewer");
+  if (v) v.remove();
+  if (artifactURL) { URL.revokeObjectURL(artifactURL); artifactURL = null; }
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("artifactViewer")) closeArtifact(); });
 
 function errMsg(res, fallback) {
   if (res && res.data && res.data.error) return res.data.error;

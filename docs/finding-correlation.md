@@ -135,7 +135,10 @@ report content response therefore carries
 (no `allow-scripts`: unique opaque origin, scripts/forms/fetches disabled),
 `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, and
 `Referrer-Policy: no-referrer`. HTTP-message evidence (`message/http`) is
-served as `text/plain`. `TestUIFindingsSelectionReportModesAndEvidence`
+served as `text/plain`. When the server requires its API token, the console
+cannot send that header on a plain navigation, so it fetches the content with
+the token and shows HTML/SVG/XML in a full-window frame with `sandbox=""` (no
+scripts, no same-origin access) rather than as text. `TestUIFindingsSelectionReportModesAndEvidence`
 opens a captured DOM containing a title-changing script in real Chromium and
 asserts the script did not run (it does, without these headers).
 

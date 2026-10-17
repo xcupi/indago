@@ -109,7 +109,7 @@ func TestServeAndShutdown(t *testing.T) {
 	h := newServerStruct(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- h.ListenAndServe(ctx, "127.0.0.1:0") }()
+	go func() { done <- h.ListenAndServe(ctx, "127.0.0.1:0", nil) }()
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("serve/shutdown error: %v", err)

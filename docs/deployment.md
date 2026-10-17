@@ -37,10 +37,10 @@ Rules for the token:
   cookie. Evidence and report links are fetched with the token too.
 - It is one shared secret. There are no per-operator accounts, roles, audit
   trail, or rotation without restarting the server.
-- **There is no TLS yet.** Over plain HTTP the token and all API traffic are
-  readable by anyone on the network path. TLS is a separate, later step; until
-  then, use a TLS-terminating reverse proxy, a VPN, or an SSH tunnel for any
-  remote access.
+- **TLS is native but optional on loopback.** `indago serve -tls-cert FILE
+  -tls-key FILE` serves HTTPS (TLS 1.2 minimum). Without them the server speaks
+  plain HTTP, which is fine on `127.0.0.1` only. A remote bind **must** use TLS
+  (see below); without TLS the token and all API traffic travel in clear text.
 
 Without a token, anyone who can reach the API can:
 
@@ -85,11 +85,59 @@ The token is required for remote binds because otherwise any host that can
 reach the port would have full control of the API. The goal is to make both
 decisions deliberate, not something a log line warns about after the fact.
 
-The token does not protect it in transit (no TLS yet — see above). If you need
-remote access (a shared scanning box, a container where `127.0.0.1` isn't
-reachable from the host), put a transport- and access-control layer in front:
-a TLS-terminating reverse proxy, a VPN/SSH tunnel, or a firewall rule scoped to
-specific source IPs/users.
+A remote bind also **requires TLS**: pass `-tls-cert` and `-tls-key` as well.
+Without them `serve` refuses to start, because the token would otherwise travel
+unencrypted:
+
+```bash
+# Throwaway self-signed certificate for a private host. Use a CA-issued
+# certificate where you can. Keep the key file readable only by the service user.
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout /etc/indago/tls.key -out /etc/indago/tls.crt -days 365 \
+  -subj "/CN=indago.internal" \
+  -addext "subjectAltName=DNS:indago.internal,IP:10.0.0.5"
+chmod 600 /etc/indago/tls.key
+
+export INDAGO_API_TOKEN="$(openssl rand -hex 32)"
+indago serve -addr 0.0.0.0:8750 -allow-remote \
+  -tls-cert /etc/indago/tls.crt -tls-key /etc/indago/tls.key
+```
+
+- `-tls-cert` and `-tls-key` are file **paths**, given together. The pair is
+  loaded and checked at startup, so a wrong path or a mismatched key fails
+  immediately. Errors name the files and never print key material. Startup logs
+  the two paths, never their contents.
+- A remote bind without TLS is refused. The escape hatch is
+  `-allow-plaintext-remote`: it is explicit, off by default, and logs a
+  warning that the bearer token travels unencrypted. Prefer TLS.
+- Loopback binds are unchanged: plain HTTP is allowed there, and a
+  TLS-terminating reverse proxy in front works too.
+
+If you cannot use native TLS, a TLS-terminating reverse proxy, a VPN/SSH tunnel,
+or a firewall rule scoped to specific source IPs/users also works. Keep the
+token requirement in either case.
+
+**Using the CLI against an HTTPS server.** The CLI reads these environment
+variables. None of them is a flag, and none of them takes a secret value:
+
+| Variable | Purpose |
+|---|---|
+| `INDAGO_SERVER_URL` | Server base URL, e.g. `https://indago.internal:8750`. Default `http://127.0.0.1:8750`. `INDAGO_SERVER` is the older name and is still honoured. |
+| `INDAGO_CA_CERT` | PEM file of CA certificate(s) to trust in addition to the system roots: a private CA or the self-signed certificate above. The file is read by path, and its contents are never printed. There is no option to skip certificate verification. |
+| `INDAGO_API_TOKEN` | Bearer token, as on the server (§1). |
+
+```bash
+export INDAGO_SERVER_URL=https://indago.internal:8750
+export INDAGO_CA_CERT=/etc/indago/tls.crt
+export INDAGO_API_TOKEN=...   # the same token the server was started with
+indago project list
+```
+
+Without `INDAGO_CA_CERT`, a self-signed server certificate fails verification,
+and the CLI's error says which variable to set.
+
+The web UI runs in the browser, so it trusts whatever the browser trusts. For a
+self-signed certificate, import it into the browser's trust store.
 
 Two request-level protections exist regardless of bind address and need no
 configuration:
@@ -122,7 +170,9 @@ Useful flags (`indago serve -h` or `cmd/indago/main.go` for the full list):
 |---|---|
 | `-data DIR` | Data directory (default `./data`) |
 | `-addr HOST:PORT` | Listen address (overrides `config.json`) |
-| `-allow-remote` | Allow binding a non-loopback address; also requires `INDAGO_API_TOKEN` (§1) |
+| `-allow-remote` | Allow binding a non-loopback address; also requires `INDAGO_API_TOKEN` and TLS (§1) |
+| `-tls-cert FILE` / `-tls-key FILE` | Serve HTTPS with this PEM certificate and key. Give both or neither. Required for a remote bind (§1). Paths, not secret values |
+| `-allow-plaintext-remote` | Permit a remote bind without TLS. Off by default; logs a warning that the token travels unencrypted (§1) |
 | `INDAGO_API_TOKEN` (env) | Bearer token for the control API; unset = no token (§1). Never a flag |
 | `-browser` | Enable browser-based discovery + verification (needs Chromium — §3) |
 | `-chromium PATH` | Chromium binary to use (overrides `$INDAGO_CHROMIUM_PATH` / the Playwright cache) |
