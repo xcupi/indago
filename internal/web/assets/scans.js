@@ -435,9 +435,9 @@ const ROLE_LABELS = {
 // to view; rel=noopener keeps the new tab from reaching back into this one.
 function evidenceLinks(ev) {
   const frag = document.createDocumentFragment();
-  const view = link("open", "/api/evidence/" + encodeURIComponent(ev.id) + "/content", "act");
+  const view = contentLink("open", "/api/evidence/" + encodeURIComponent(ev.id) + "/content", "act");
   view.target = "_blank"; view.rel = "noopener noreferrer";
-  const dl = link("download", "/api/evidence/" + encodeURIComponent(ev.id) + "/content?download", "act");
+  const dl = contentLink("download", "/api/evidence/" + encodeURIComponent(ev.id) + "/content?download", "act", true);
   dl.rel = "noopener noreferrer"; dl.style.marginLeft = "8px";
   frag.append(view, dl);
   return frag;
@@ -511,7 +511,7 @@ function findingDetailEl(f, scanId) {
     // Standalone PoC: a presentation-only capability over the data already
     // above (the confirmed candidate/request) — see scan.GeneratePoC. Only
     // ever reachable for a Confirmed finding, same as this hero block.
-    const pocLink = link("⬇ Download PoC (standalone HTML)", api.scan(scanId) + "/findings/" + encodeURIComponent(f.id) + "/poc", "act poc-link");
+    const pocLink = contentLink("⬇ Download PoC (standalone HTML)", api.scan(scanId) + "/findings/" + encodeURIComponent(f.id) + "/poc", "act poc-link", true);
     pocLink.title = "A standalone HTML file that reproduces this exact request when opened in a browser — or, for a header/cookie override a link cannot carry, the exact curl command";
     hero.appendChild(el("div", undefined, "poc-action")).appendChild(pocLink);
     box.appendChild(hero);
@@ -723,8 +723,8 @@ function reportRow(r) {
   tr.appendChild(cell(String(s.total_findings || 0) + (s.scan_findings ? " of " + s.scan_findings : ""), "c-words"));
   tr.appendChild(cell(verdictBreakdown(s.by_verdict), "c-words"));
   const openTd = el("td");
-  const view = link("view", "/api/reports/" + encodeURIComponent(r.id) + "/content", "act"); view.target = "_blank"; view.rel = "noopener noreferrer";
-  const dl = link("download", "/api/reports/" + encodeURIComponent(r.id) + "/content?download", "act"); dl.style.marginLeft = "10px";
+  const view = contentLink("view", "/api/reports/" + encodeURIComponent(r.id) + "/content", "act"); view.target = "_blank"; view.rel = "noopener noreferrer";
+  const dl = contentLink("download", "/api/reports/" + encodeURIComponent(r.id) + "/content?download", "act", true); dl.style.marginLeft = "10px";
   openTd.append(view, dl);
   tr.appendChild(openTd);
   return tr;

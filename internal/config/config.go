@@ -6,6 +6,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 
@@ -26,6 +27,32 @@ const (
 // ServerConfig configures the web UI / API server.
 type ServerConfig struct {
 	Addr string `json:"addr"`
+	// APIRate is the per-client-IP sustained request rate (requests/second)
+	// allowed on /api/ and /metrics. 0 disables the limiter.
+	APIRate float64 `json:"api_rate"`
+	// APIBurst is the per-client-IP bucket size. Must be >= 1 when APIRate > 0.
+	APIBurst int `json:"api_burst"`
+}
+
+// Default rate-limit values. 50 rps / 200 burst: the bundled UI's "1 second"
+// live refresh issues about one request per scan per tick on the Scans and
+// Dashboard views, so a 20 rps default would throttle the UI with ~20 scans.
+const (
+	DefaultAPIRate  = 50.0
+	DefaultAPIBurst = 200
+)
+
+// Validate reports whether the server section is usable. A negative or
+// non-finite rate is refused; a positive rate needs a burst of at least 1.
+// Rate 0 disables rate limiting (any burst is then ignored).
+func (s ServerConfig) Validate() error {
+	if math.IsNaN(s.APIRate) || math.IsInf(s.APIRate, 0) || s.APIRate < 0 {
+		return fmt.Errorf("config: server api_rate must be a finite number >= 0 (got %v)", s.APIRate)
+	}
+	if s.APIRate > 0 && s.APIBurst < 1 {
+		return fmt.Errorf("config: server api_burst must be >= 1 when api_rate > 0 (got %d)", s.APIBurst)
+	}
+	return nil
 }
 
 // AIConfig configures the optional AI gateway. Disabled by default; even when
@@ -52,7 +79,7 @@ type Config struct {
 func Default() Config {
 	return Config{
 		DataDir:        DefaultDataDir,
-		Server:         ServerConfig{Addr: DefaultServerAddr},
+		Server:         ServerConfig{Addr: DefaultServerAddr, APIRate: DefaultAPIRate, APIBurst: DefaultAPIBurst},
 		DefaultProfile: domain.ProfileBalanced,
 		AI:             AIConfig{Enabled: false},
 	}
@@ -103,6 +130,9 @@ func Load(path string) (Config, error) {
 	}
 	if c.DataDir == "" {
 		c.DataDir = filepath.Dir(path)
+	}
+	if err := c.Server.Validate(); err != nil {
+		return Config{}, err
 	}
 	return c, nil
 }

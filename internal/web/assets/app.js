@@ -164,10 +164,60 @@ function pagedList(items, pageSize, renderPage, emptyText) {
 // ---------------------------------------------------------------------------
 // HTTP
 // ---------------------------------------------------------------------------
+// The control API may require a bearer token (INDAGO_API_TOKEN on the server).
+// The token is kept in sessionStorage only: never localStorage, never a
+// cookie, never rendered into the DOM. It is cleared when the tab closes.
+const TOKEN_KEY = "indago.apiToken";
+let tokenDeclinedAt = 0; // a cancelled prompt is not repeated for a minute
+
+function storedToken() {
+  try { return sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
+}
+function storeToken(tok) {
+  try { if (tok) sessionStorage.setItem(TOKEN_KEY, tok); else sessionStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ }
+}
+
+// withToken returns copy of fetch options carrying the bearer token, if any.
+function withToken(opts, tok) {
+  const o = Object.assign({}, opts, { headers: Object.assign({}, opts.headers || {}) });
+  if (tok) o.headers["Authorization"] = "Bearer " + tok;
+  return o;
+}
+
+// askToken prompts the operator for the API token. It returns the entered
+// token, or "" when cancelled (a cancel is not re-prompted for a minute).
+function askToken() {
+  if (Date.now() - tokenDeclinedAt < 60000) return "";
+  const v = window.prompt("This Indago server requires its API token (INDAGO_API_TOKEN). Enter it to continue; it is kept for this browser tab only.", "");
+  const tok = (v || "").trim();
+  if (!tok) { tokenDeclinedAt = Date.now(); return ""; }
+  storeToken(tok);
+  return tok;
+}
+
+// authedFetch sends a request with the stored token. On a 401 it prompts once
+// (unless a concurrent request already stored a newer token) and retries the
+// original request once. If the operator declines, the 401 response is returned.
+async function authedFetch(url, opts) {
+  const sent = storedToken();
+  const r = await fetch(url, withToken(opts, sent));
+  if (r.status !== 401) return r;
+  let tok = storedToken();
+  if (tok === sent) tok = askToken();
+  if (!tok) return r;
+  return fetch(url, withToken(opts, tok));
+}
+
+// errorText extracts the server's {"error": ...} message from a response.
+async function errorText(r) {
+  try { const j = await r.json(); return j && j.error ? String(j.error) : ""; } catch (e) { return ""; }
+}
+
 async function getJSON(url) {
-  const r = await fetch(url);
+  const r = await authedFetch(url, { method: "GET" });
   if (!r.ok) {
-    const err = new Error(url + " -> " + r.status);
+    const detail = await errorText(r);
+    const err = new Error(url + " -> " + r.status + (detail ? ": " + detail : ""));
     err.status = r.status;
     throw err;
   }
@@ -184,7 +234,7 @@ async function mutate(method, url, body) {
   }
   let r;
   try {
-    r = await fetch(url, opts);
+    r = await authedFetch(url, opts);
   } catch (e) {
     return { ok: false, status: 0, data: { error: "network error: " + e } };
   }
@@ -192,6 +242,100 @@ async function mutate(method, url, body) {
   try { data = await r.json(); } catch (e) { /* no body */ }
   return { ok: r.ok, status: r.status, data };
 }
+
+// contentLink links to protected content (evidence/report bytes, PoC files). A
+// plain navigation cannot carry the Authorization header, so when a token is
+// stored the click is routed through openProtected. Without a token it is an
+// ordinary link.
+function contentLink(text, href, cls, asDownload) {
+  const a = link(text, href, cls);
+  a.addEventListener("click", (e) => {
+    if (!storedToken()) return;
+    e.preventDefault();
+    openProtected(href, asDownload);
+  });
+  return a;
+}
+
+// The CSP the server sends with evidence and report content. The artifact
+// frame repeats it (the iframe csp attribute, where the browser supports it),
+// since a blob URL carries no server headers.
+const ARTIFACT_CSP = "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'";
+
+// openProtected fetches protected content with the token. "Download" saves the
+// original bytes. "Open" depends on the type: HTML, SVG and XML (script-capable)
+// render in a sandboxed frame (see showArtifact), never as this console's own
+// origin and never as text; other types open in a new tab, with JavaScript
+// shown as plain text.
+async function openProtected(href, asDownload) {
+  let r;
+  try {
+    r = await authedFetch(href, { method: "GET" });
+  } catch (e) {
+    showError("network error: " + e);
+    return;
+  }
+  if (!r.ok) {
+    const detail = await errorText(r);
+    showError(href + " -> " + r.status + (detail ? ": " + detail : ""));
+    return;
+  }
+  const type = r.headers.get("Content-Type") || "application/octet-stream";
+  const body = await r.blob();
+  const disp = r.headers.get("Content-Disposition") || "";
+  const m = /filename="([^"]+)"/.exec(disp);
+  const name = m ? m[1] : "download";
+  if (asDownload) {
+    const u = URL.createObjectURL(new Blob([body], { type }));
+    const a = document.createElement("a");
+    a.href = u; a.download = name; a.rel = "noopener noreferrer";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(u), 10000);
+    return;
+  }
+  if (/html|svg|xml/i.test(type)) {
+    showArtifact(body, type, name);
+    return;
+  }
+  const safeType = /javascript|ecmascript/i.test(type) ? "text/plain; charset=utf-8" : type;
+  const u = URL.createObjectURL(new Blob([body], { type: safeType }));
+  const w = window.open(u, "_blank", "noopener,noreferrer");
+  if (!w) showError("the browser blocked the new tab; allow pop-ups for this console or use download");
+  setTimeout(() => URL.revokeObjectURL(u), 60000);
+}
+
+// showArtifact shows script-capable content (HTML, SVG, XML) in a full-window
+// frame with sandbox="": no scripts, no forms, no same-origin access. The
+// document gets an opaque origin, so the captured markup cannot read this
+// console or drive its API. The frame is the same protection the server gives
+// the same content when it is opened directly (see docs/finding-correlation.md).
+let artifactURL = null;
+function showArtifact(body, type, name) {
+  closeArtifact();
+  artifactURL = URL.createObjectURL(new Blob([body], { type }));
+  const bar = el("div", undefined, "artifact-bar");
+  bar.appendChild(el("span", name, "artifact-name"));
+  const close = button("Close", closeArtifact, "artifact-close");
+  bar.appendChild(close);
+  const frame = document.createElement("iframe");
+  frame.className = "artifact-frame";
+  frame.setAttribute("sandbox", "");
+  frame.setAttribute("csp", ARTIFACT_CSP);
+  frame.setAttribute("referrerpolicy", "no-referrer");
+  frame.title = name;
+  frame.src = artifactURL;
+  const viewer = el("div", undefined, "artifact-viewer");
+  viewer.id = "artifactViewer";
+  viewer.append(bar, frame);
+  document.body.appendChild(viewer);
+  close.focus();
+}
+function closeArtifact() {
+  const v = $("artifactViewer");
+  if (v) v.remove();
+  if (artifactURL) { URL.revokeObjectURL(artifactURL); artifactURL = null; }
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("artifactViewer")) closeArtifact(); });
 
 function errMsg(res, fallback) {
   if (res && res.data && res.data.error) return res.data.error;

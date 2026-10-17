@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -77,6 +78,14 @@ type uiHarness struct {
 // newUIHarness builds the full stack with a blocking JobTest handler (so a
 // scan stays running until the test ends) and opens the dashboard.
 func newUIHarness(t *testing.T) *uiHarness {
+	return newUIHarnessWithToken(t, "")
+}
+
+// newUIHarnessWithToken is newUIHarness with the control API's bearer token
+// required when token is non-empty. The token is placed in the tab's
+// sessionStorage before the dashboard loads, the way the dashboard keeps it
+// after the operator enters it, so no prompt is shown.
+func newUIHarnessWithToken(t *testing.T, token string) *uiHarness {
 	if testing.Short() {
 		t.Skip("real-browser UI test skipped in -short mode")
 	}
@@ -119,7 +128,13 @@ func newUIHarness(t *testing.T) *uiHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(web.NewServer(st, ctrl, "test", log, evStore, t.TempDir()).Handler())
+	h := web.NewServer(st, ctrl, "test", log, evStore, t.TempDir())
+	if token != "" {
+		if err := h.SetAPIToken(token); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(h.Handler())
 	t.Cleanup(srv.Close)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -132,6 +147,15 @@ func newUIHarness(t *testing.T) *uiHarness {
 	page, err := bctx.NewPage(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if token != "" {
+		// Store the token for this origin before the dashboard's first request.
+		if _, err := page.Navigate(ctx, srv.URL+"/healthz", browser.NavOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := page.Evaluate(ctx, "sessionStorage.setItem('indago.apiToken', "+strconv.Quote(token)+"), true"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := page.Navigate(ctx, srv.URL, browser.NavOptions{}); err != nil {
 		t.Fatal(err)

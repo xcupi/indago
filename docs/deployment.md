@@ -9,10 +9,98 @@ this file is operational, not architectural.
 
 ## 1. Network exposure — read this first
 
-**The API has no authentication.** `internal/auth` only implements anonymous
-sessions for the *target* application a scan authenticates against —
-Indago's own control API (`/api/...`) has no login, no token, no per-operator
-identity. Anyone who can reach it can:
+**The control API (`/api/...`) has an optional bearer token and no per-operator
+identity.** Whether it requires a token is decided at `indago serve` startup by
+the `INDAGO_API_TOKEN` environment variable:
+
+- **Unset (default):** the API is open to anyone who can reach the port. This is
+  the single-operator loopback mode and is unchanged from before.
+- **Set:** every `/api/` request must send `Authorization: Bearer <token>`.
+  A missing or wrong token gets `401` with `WWW-Authenticate: Bearer`.
+  `/healthz` and the static UI stay open so the page can load and prompt for
+  the token. The token is accepted only in that header — never in a query
+  string or a cookie.
+
+Rules for the token:
+
+- Use at least 32 characters with no whitespace, e.g.
+  `export INDAGO_API_TOKEN="$(openssl rand -hex 32)"`. A shorter or malformed
+  value makes `serve` refuse to start (the error does not print the value).
+- It is read once, at startup, from the environment. It is never a
+  command-line flag (shell history, `ps`), never written to `config.json`, and
+  never logged or echoed in an error or response.
+- The CLI sends it on every request when `INDAGO_API_TOKEN` is set in its
+  environment. Without it, a token-protected server answers `401` and the CLI
+  says which variable to set.
+- The web UI asks for the token on the first `401` and keeps it in
+  `sessionStorage` — cleared when the tab closes, never in `localStorage` or a
+  cookie. Evidence and report links are fetched with the token too.
+- It is one shared secret. There are no per-operator accounts, roles, audit
+  trail, or rotation without restarting the server.
+- **TLS is native but optional on loopback.** `indago serve -tls-cert FILE
+  -tls-key FILE` serves HTTPS (TLS 1.2 minimum). Without them the server speaks
+  plain HTTP, which is fine on `127.0.0.1` only. A remote bind **must** use TLS
+  (see below); without TLS the token and all API traffic travel in clear text.
+
+### Rate limiting
+
+Every `/api/` request and `GET /metrics` is counted against a **per-client-IP
+token bucket**, on by default:
+
+- Defaults: 50 requests/second sustained, bucket of 200 (`-api-rate`,
+  `-api-burst`, or `server.api_rate` / `server.api_burst` in `config.json`;
+  a flag overrides the config value for that run). `-api-rate 0` disables the
+  limiter. A negative rate, or a burst below 1 with a positive rate, is an
+  error at startup.
+- A refused request gets `429 Too Many Requests` with a `Retry-After` header
+  (whole seconds, at least 1) and the body `{"error":"rate limit exceeded"}`.
+- The client is the TCP peer address (`RemoteAddr`). `X-Forwarded-For` and
+  `X-Real-IP` are **ignored**: any client can send them, so trusting them would
+  let one client pick a fresh bucket on every request.
+- `/healthz` and the static UI are not limited. The limiter runs after the
+  Host/CSRF check and before the token check, so unauthenticated floods are
+  limited too. Idle buckets are evicted after 10 minutes; at most 10,000 clients
+  are tracked, and clients beyond that are refused rather than growing memory.
+- The defaults clear the bundled UI and the CLI. The UI's "1 second" live
+  refresh sends about one request per scan per tick on the Scans view (two per
+  scan on the Dashboard, for scans with confirmed findings). At that setting a
+  project with roughly 25 scans sustains about 50 requests/second. For larger
+  projects use a longer refresh interval or raise `-api-rate`.
+
+**Behind a reverse proxy, every client shares the proxy's address and therefore
+one bucket.** The server cannot tell the clients apart, so one busy client can
+exhaust the budget for all of them. The server will not read forwarded headers
+to fix this. If you need per-client limits behind a proxy, enforce them in the
+proxy, keyed on the client address the proxy itself sees.
+
+### Metrics (`GET /metrics`)
+
+`GET /metrics` serves Prometheus text exposition format 0.0.4 (hand-written, no
+extra dependency). It exposes:
+
+- `indago_http_requests_total{method,route,code}`: `route` is the mux **pattern**
+  (for example `GET /api/scans/{id}`), never the raw path. Requests that match no
+  pattern are `unmatched`. Methods outside the standard set are `OTHER`.
+- `indago_http_request_duration_seconds{route}`: histogram with fixed buckets.
+- `indago_rate_limited_total`: requests refused with `429`.
+- `indago_auth_rejected_total`: requests refused with `401` by the token check.
+- `indago_build_info{version}`: always `1`.
+
+Access follows the token setting:
+
+- **`INDAGO_API_TOKEN` unset:** unauthenticated, the same as `/healthz`. This is
+  acceptable only on loopback, the same rule as the rest of the server.
+- **`INDAGO_API_TOKEN` set:** requires `Authorization: Bearer <token>`, as the
+  API does. A missing or wrong token gets `401`.
+
+`/metrics` is subject to the rate limit above. A scrape interval of 15 seconds or
+more is far inside the default budget.
+
+The output never contains a token, a client IP address, a target URL, finding
+content, or an evidence path. Label values come only from the method, the route
+pattern, and the status code. No per-scan job counter is exported yet.
+
+Without a token, anyone who can reach the API can:
 
 - create projects/scopes/targets and start scans against whatever target they
   specify (scope is enforced, but the API lets its caller set the scope)
@@ -24,10 +112,12 @@ identity. Anyone who can reach it can:
   `docs/finding-correlation.md` ("Opening evidence safely").
 - generate and read reports
 
+With a token configured, the same capabilities are available to whoever holds
+the token. Keeping the token secret, and the port reachable only by intended
+clients, is the actual security boundary.
+
 This is an intentional trade-off for a local-first, single-operator tool, not
-an oversight — see `AGENTS.md` §1. It means the deployment boundary that
-actually matters is **who can reach the port**, not anything the API itself
-checks.
+an oversight — see `AGENTS.md` §1.
 
 ### Secure default
 
@@ -40,20 +130,72 @@ workstation or a dedicated scanning host they alone can SSH/console into.
 
 Binding any other address — `0.0.0.0`, a LAN IP, `::`, anything
 `isLoopbackAddr` doesn't recognize as `localhost`/`127.0.0.1`/`::1` — is
-**refused outright** unless you pass `-allow-remote`:
+**refused outright** unless you pass `-allow-remote` **and** set
+`INDAGO_API_TOKEN`:
 
 ```bash
+export INDAGO_API_TOKEN="$(openssl rand -hex 32)"
 indago serve -addr 0.0.0.0:8750 -allow-remote
 ```
 
-Without `-allow-remote` this fails fast with an explanatory error instead of
-starting; the goal is to make the above trade-off a decision you make on
-purpose, not something a log line warns about after the fact. If you do need
-remote access (a shared scanning box, a container where `127.0.0.1` isn't
-reachable from the host), put a real access-control layer in front of it —
-a reverse proxy with its own auth, a VPN/SSH tunnel, or a firewall rule
-scoped to specific source IPs/users. Indago itself still won't authenticate
-the request.
+Either one missing fails fast with an explanatory error instead of starting.
+The token is required for remote binds because otherwise any host that can
+reach the port would have full control of the API. The goal is to make both
+decisions deliberate, not something a log line warns about after the fact.
+
+A remote bind also **requires TLS**: pass `-tls-cert` and `-tls-key` as well.
+Without them `serve` refuses to start, because the token would otherwise travel
+unencrypted:
+
+```bash
+# Throwaway self-signed certificate for a private host. Use a CA-issued
+# certificate where you can. Keep the key file readable only by the service user.
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout /etc/indago/tls.key -out /etc/indago/tls.crt -days 365 \
+  -subj "/CN=indago.internal" \
+  -addext "subjectAltName=DNS:indago.internal,IP:10.0.0.5"
+chmod 600 /etc/indago/tls.key
+
+export INDAGO_API_TOKEN="$(openssl rand -hex 32)"
+indago serve -addr 0.0.0.0:8750 -allow-remote \
+  -tls-cert /etc/indago/tls.crt -tls-key /etc/indago/tls.key
+```
+
+- `-tls-cert` and `-tls-key` are file **paths**, given together. The pair is
+  loaded and checked at startup, so a wrong path or a mismatched key fails
+  immediately. Errors name the files and never print key material. Startup logs
+  the two paths, never their contents.
+- A remote bind without TLS is refused. The escape hatch is
+  `-allow-plaintext-remote`: it is explicit, off by default, and logs a
+  warning that the bearer token travels unencrypted. Prefer TLS.
+- Loopback binds are unchanged: plain HTTP is allowed there, and a
+  TLS-terminating reverse proxy in front works too.
+
+If you cannot use native TLS, a TLS-terminating reverse proxy, a VPN/SSH tunnel,
+or a firewall rule scoped to specific source IPs/users also works. Keep the
+token requirement in either case.
+
+**Using the CLI against an HTTPS server.** The CLI reads these environment
+variables. None of them is a flag, and none of them takes a secret value:
+
+| Variable | Purpose |
+|---|---|
+| `INDAGO_SERVER_URL` | Server base URL, e.g. `https://indago.internal:8750`. Default `http://127.0.0.1:8750`. `INDAGO_SERVER` is the older name and is still honoured. |
+| `INDAGO_CA_CERT` | PEM file of CA certificate(s) to trust in addition to the system roots: a private CA or the self-signed certificate above. The file is read by path, and its contents are never printed. There is no option to skip certificate verification. |
+| `INDAGO_API_TOKEN` | Bearer token, as on the server (§1). |
+
+```bash
+export INDAGO_SERVER_URL=https://indago.internal:8750
+export INDAGO_CA_CERT=/etc/indago/tls.crt
+export INDAGO_API_TOKEN=...   # the same token the server was started with
+indago project list
+```
+
+Without `INDAGO_CA_CERT`, a self-signed server certificate fails verification,
+and the CLI's error says which variable to set.
+
+The web UI runs in the browser, so it trusts whatever the browser trusts. For a
+self-signed certificate, import it into the browser's trust store.
 
 Two request-level protections exist regardless of bind address and need no
 configuration:
@@ -66,9 +208,10 @@ configuration:
   alias; a wildcard bind can't enumerate valid hosts in advance; both bind
   modes keep the CSRF checks above.
 
-Neither is a substitute for restricting network reach — they stop a
-malicious web page from driving the API through your browser, not a party
-that can already reach the port directly (`curl` doesn't care about CORS).
+Neither is a substitute for the token or for restricting network reach — they
+stop a malicious web page from driving the API through your browser, not a
+party that can already reach the port directly (`curl` doesn't care about
+CORS).
 
 ---
 
@@ -85,7 +228,13 @@ Useful flags (`indago serve -h` or `cmd/indago/main.go` for the full list):
 |---|---|
 | `-data DIR` | Data directory (default `./data`) |
 | `-addr HOST:PORT` | Listen address (overrides `config.json`) |
-| `-allow-remote` | Required to bind a non-loopback address (§1) |
+| `-api-rate N` | Per-client-IP sustained requests/second on `/api/` and `/metrics`. Default `50`; `0` disables. Overrides `server.api_rate`. Flag values apply to this run only; they are not written back to `config.json`. Negative is an error (§1, *Rate limiting*) |
+| `-api-burst N` | Per-client-IP burst size on `/api/` and `/metrics`. Default `200`; must be at least 1 while the rate is above 0. Overrides `server.api_burst` (§1) |
+| `GET /metrics` | Prometheus exposition. Unauthenticated when `INDAGO_API_TOKEN` is unset; needs the bearer token when set (§1, *Metrics*) |
+| `-allow-remote` | Allow binding a non-loopback address; also requires `INDAGO_API_TOKEN` and TLS (§1) |
+| `-tls-cert FILE` / `-tls-key FILE` | Serve HTTPS with this PEM certificate and key. Give both or neither. Required for a remote bind (§1). Paths, not secret values |
+| `-allow-plaintext-remote` | Permit a remote bind without TLS. Off by default; logs a warning that the token travels unencrypted (§1) |
+| `INDAGO_API_TOKEN` (env) | Bearer token for the control API; unset = no token (§1). Never a flag |
 | `-browser` | Enable browser-based discovery + verification (needs Chromium — §3) |
 | `-chromium PATH` | Chromium binary to use (overrides `$INDAGO_CHROMIUM_PATH` / the Playwright cache) |
 | `-allow-state-changing` | Also execute POST/PUT/PATCH/DELETE test requests against targets (default: GET/HEAD/OPTIONS only) |
@@ -300,6 +449,113 @@ written atomically (§4). Both are specifically about what happens if the
 process is killed mid-write, not just mid-request — see the hardening
 report for what was verified here.
 
+### Retention: `indago evidence prune`
+
+Evidence is never expired automatically, and request blobs can hold the
+target's session cookies verbatim (§6). `indago evidence prune` bounds how long
+evidence lives. It reads the data directory directly, so the server does not
+need to be stopped.
+
+```bash
+# Dry run (the default): lists what WOULD be deleted, deletes nothing.
+indago evidence prune -data /var/lib/indago -older-than 720h
+
+# Delete it.
+indago evidence prune -data /var/lib/indago -older-than 720h -apply
+```
+
+- **`-older-than` is required**, with no default. It uses Go duration syntax
+  (`h`, `m`, `s`; there is no `d`), and the minimum is `1h`. `720h` is 30 days.
+- **Eligible:** scans in a terminal state (`completed`, `failed`, `canceled`)
+  whose last activity is before `now − older-than`. Last activity is the later
+  of `ended_at` and `updated_at`, so a recently touched scan is never pruned on
+  the strength of an older end time.
+- **Never touched:** evidence of `created`, `running`, `paused`,
+  `awaiting_auth`, and `canceling` scans, however old. A terminal scan with no
+  usable timestamp is skipped and listed in the output (fail closed).
+- **Deleted, per evidence row:** the blob file under `evidence/`, then the
+  metadata row. Only after the blob is confirmed gone is the row removed. A
+  blob that is already missing is reported as `already-gone`, and its row is
+  removed. A row whose path escapes `evidence/`, or that names a symlink or a
+  directory, is `refused`: nothing outside the root is touched, and the row is
+  kept.
+- **Findings are kept.** Their evidence links to deleted rows are removed, and
+  the output reports how many findings lost links. Verdicts and text are not
+  changed.
+- **`-include-sessions`** (off by default) also removes the saved session
+  (storage-state) file that a scan recorded, but only when the file is inside
+  `sessions/` and no non-eligible scan still uses it. Files outside `sessions/`
+  (a login you keep elsewhere, passed with `-auth-state`) are never touched.
+- **`-include-reports`** (off by default) removes the generated report files and
+  their index rows for eligible scans.
+- **`-scan <id>`** restricts the run to one scan.
+- **Not deleted:** scan records, findings, endpoints, parameters, jobs, AI
+  tasks, test-case records, the database itself, and anything in `config.json`.
+
+**Exit status:** `0` when nothing failed, including a dry run. A row refused as
+outside the evidence root is a **warning**: it is listed, the rest of the run
+completes, and the exit status is still `0`. `1` only if an item failed with an
+I/O or store error, or if the command itself errored. Failed items are listed,
+and the rest of the run still completes.
+
+**Audit trail:** one line per scan that had something deleted, on stderr, for
+example `evidence pruned scan_id=... cutoff=... evidence_removed=12 ...`. It
+carries IDs, counts, and the cutoff, never blob content or absolute paths.
+
+**Concurrency with a running server.** The command opens `indago.db` the same
+way the server does (WAL mode and a 5 s busy timeout), and it takes no lock
+file, so it does not refuse to run when `serve` is up. It only deletes evidence
+of terminal scans, and blobs are content-addressed, so a blob re-written by a
+late writer is recreated rather than corrupted. The residual risks are a
+finding in the same project being updated by the server at the same instant
+its evidence links are cut, and a late in-flight write to a canceled scan
+landing just after its row is removed. For the widest margin, run it when no
+scan is active, or stop the server first.
+
+**What this does not do:**
+
+- It does not overwrite file contents before unlinking. On SSD, copy-on-write,
+  or journaling filesystems, deleted cookies can remain recoverable from the
+  disk. Use full-disk encryption if that matters to you.
+- It does not remove copies in backups made under §5. Expire those separately.
+- Test-case records keep the IDs of evidence that was deleted. Content lookups
+  for those IDs return "not found", as §4 already describes for missing blobs.
+- It considers only the most recent session record per scan (the store has no
+  list-all for sessions), and it cannot reach evidence rows whose scan row no
+  longer exists. Both are rare by construction; neither is deleted.
+- There is no in-process schedule and no API endpoint. Use a timer (below).
+
+**Scheduling, systemd example.** Run it daily with a fixed cutoff. Keep the
+cutoff explicit in the unit so the policy is visible in one place.
+
+```ini
+# /etc/systemd/system/indago-evidence-prune.service
+[Unit]
+Description=Indago evidence retention prune
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/indago evidence prune -data /var/lib/indago -older-than 720h -apply
+User=indago
+```
+
+```ini
+# /etc/systemd/system/indago-evidence-prune.timer
+[Unit]
+Description=Daily Indago evidence retention prune
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable it with `systemctl enable --now indago-evidence-prune.timer`. Check a
+run with `journalctl -u indago-evidence-prune.service`. Before enabling `-apply`
+in a unit, run the dry run by hand first and read its output.
+
 ---
 
 ## 6. Secrets and configuration
@@ -327,7 +583,8 @@ report for what was verified here.
 - Evidence request blobs can contain the target's session cookie verbatim
   (that's the point — full request capture for evidence integrity,
   `AGENTS.md` §2.6). Restricting who can read `-data` (§4) is what protects
-  that, not anything in the API.
+  that, not anything in the API. To bound how long those blobs are kept, run
+  `indago evidence prune` (dry run by default; see §5, Retention).
 
 ---
 
@@ -356,6 +613,8 @@ being graceful.
 
 `GET /healthz` — `{"status":"ok"}` after a live store ping, `503` otherwise.
 `GET /api/version` — `{"version": "...", "name": "indago"}`.
+`GET /metrics` — Prometheus exposition (§1, *Metrics*). Needs the bearer token
+when `INDAGO_API_TOKEN` is set, and is rate limited like the API.
 
 Neither requires the `X-Indago-Client` header (both are GET) and neither
 returns anything beyond those two fields — no internal paths, no config, no

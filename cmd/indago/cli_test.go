@@ -311,26 +311,44 @@ func TestIsLoopbackAddr(t *testing.T) {
 }
 
 func TestCheckRemoteBindAllowed(t *testing.T) {
+	const tok = "indago-test-token-9f2c7d41a8e6b305c1d9e2f7a4b8c6d0" // dummy
 	cases := []struct {
+		name        string
 		addr        string
 		allowRemote bool
+		token       string
 		wantErr     bool
 	}{
-		{"127.0.0.1:8750", false, false},
-		{"localhost:8750", false, false},
-		{"0.0.0.0:8750", false, true},  // non-loopback, not opted in: refused
-		{"10.0.0.5:8750", false, true}, // non-loopback, not opted in: refused
-		{"0.0.0.0:8750", true, false},  // non-loopback, explicit opt-in: allowed
-		{"10.0.0.5:8750", true, false}, // non-loopback, explicit opt-in: allowed
+		{"loopback, no token", "127.0.0.1:8750", false, "", false},
+		{"localhost, no token", "localhost:8750", false, "", false},
+		{"loopback with token", "127.0.0.1:8750", false, tok, false},
+		{"wildcard, not opted in, no token", "0.0.0.0:8750", false, "", true},
+		{"LAN IP, not opted in, token", "10.0.0.5:8750", false, tok, true},
+		{"wildcard, opted in, NO token: refused", "0.0.0.0:8750", true, "", true},
+		{"LAN IP, opted in, NO token: refused", "10.0.0.5:8750", true, "", true},
+		{"wildcard, opted in, token: allowed", "0.0.0.0:8750", true, tok, false},
+		{"LAN IP, opted in, token: allowed", "10.0.0.5:8750", true, tok, false},
 	}
 	for _, c := range cases {
-		err := checkRemoteBindAllowed(c.addr, c.allowRemote)
+		_, err := checkRemoteBindAllowed(c.addr, c.allowRemote, c.token, true, false)
 		if (err != nil) != c.wantErr {
-			t.Errorf("checkRemoteBindAllowed(%q, %v) = %v, wantErr %v", c.addr, c.allowRemote, err, c.wantErr)
+			t.Errorf("%s: checkRemoteBindAllowed(%q, %v, token?=%v) = %v, wantErr %v",
+				c.name, c.addr, c.allowRemote, c.token != "", err, c.wantErr)
 		}
-		if err != nil && !strings.Contains(err.Error(), "-allow-remote") {
-			t.Errorf("error should mention -allow-remote: %v", err)
+		if err != nil && strings.Contains(err.Error(), tok) {
+			t.Errorf("%s: error text contains the token", c.name)
 		}
+	}
+	// The refusal for an opted-in remote bind without a token must name the
+	// variable the operator has to set.
+	_, err := checkRemoteBindAllowed("0.0.0.0:8750", true, "", true, false)
+	if err == nil || !strings.Contains(err.Error(), "INDAGO_API_TOKEN") {
+		t.Fatalf("remote bind without token: error should name INDAGO_API_TOKEN, got %v", err)
+	}
+	// Without the opt-in flag, the refusal names -allow-remote.
+	_, err = checkRemoteBindAllowed("0.0.0.0:8750", false, "", true, false)
+	if err == nil || !strings.Contains(err.Error(), "-allow-remote") {
+		t.Fatalf("remote bind without opt-in: error should name -allow-remote, got %v", err)
 	}
 }
 

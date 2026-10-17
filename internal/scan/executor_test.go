@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -571,6 +572,8 @@ func (failingEvidence) Put(domain.ID, domain.EvidenceKind, string, []byte) (evid
 }
 func (failingEvidence) Open(string) (io.ReadCloser, error) { return nil, os.ErrNotExist }
 func (failingEvidence) AbsPath(string) string              { return "" }
+func (failingEvidence) Stat(string) (fs.FileInfo, error)   { return nil, os.ErrNotExist }
+func (failingEvidence) Remove(string) error                { return os.ErrNotExist }
 
 func TestEvidenceFailureKeepsOutcomeAndFlagsIt(t *testing.T) {
 	var hits atomic.Int64
