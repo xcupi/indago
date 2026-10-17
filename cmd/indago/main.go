@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/indago/indago/internal/ai"
 	"github.com/indago/indago/internal/browser"
 	"github.com/indago/indago/internal/config"
 	"github.com/indago/indago/internal/domain"
@@ -59,7 +60,7 @@ func main() {
 		err = cmdDB(args)
 	case "serve":
 		err = cmdServe(args)
-	case "project", "target", "scope", "scan", "finding", "report":
+	case "project", "target", "scope", "scan", "finding", "endpoint", "auth", "report":
 		err = newCLI(defaultServer(), os.Stdout).runClient(cmd, args)
 	case "help", "-h", "--help":
 		usage()
@@ -90,15 +91,20 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER, default http://
   target add -project ID -name NAME -url URL | target list -project ID
   scope set -project ID -include host[,host] [-exclude ..] [-include-path ..] [-exclude-path ..] [-subdomains]
   scope show -project ID
-  scan create -project ID -target ID [-name N] [-profile P] [-seed URL]... [-stop MODE [-stop-n N]]
-              [-quick | -depth N] [-max-pages N] [-max-endpoints N] [-auth existing -auth-state FILE]
+  scan create -project ID -target ID [-name N] [-profile P] [-candidate-profile minimal|standard|thorough] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]]
+              [-quick | -depth N] [-max-pages N] [-max-endpoints N] [-proxy URL]... [-randomize-tls-fingerprint]
+              [-auth anonymous|existing|interactive|mfa|password] [-auth-state FILE] [-login-url URL] [-success-url GLOB]
+              [-login-username-selector SEL] [-login-password-selector SEL] [-login-submit-selector SEL]
   scan list [-json]
   scan status <scan-id|prefix> [-json]
   scan start|pause|resume|cancel <scan-id|prefix>
   scan config <scan-id|prefix> [-discovery N] [-http N] [-browser N] [-rate N]   (runtime tuning)
-  finding list -scan <scan-id|prefix> [-json]
+  finding list -scan <scan-id|prefix> [-verdict confirmed|pending|inconclusive|rejected|all] [-json]   (default: confirmed; all with -json)
   finding show -scan <scan-id|prefix> <finding-id|prefix> [-json]
-  report create -scan <scan-id|prefix> -format json|markdown|html [-finding ID]... [-out FILE]
+  finding poc -scan <scan-id|prefix> -out <file.html> <finding-id|prefix>   (standalone PoC artifact; Confirmed findings only)
+  endpoint list -scan <scan-id|prefix> [-json]   (discovered endpoints + their parameters, for debugging why a scan is Inconclusive)
+  auth login -login-url URL [-success-url GLOB]   (standalone interactive-login capture; requires indago serve -browser)
+  report create -scan <scan-id|prefix> -format json|markdown|html [-mode all|confirmed|selected] [-finding ID]... [-out FILE]
   report list -scan <scan-id|prefix> [-json]
   report show <report-id|prefix> [-out FILE] [-download]
 
@@ -160,6 +166,9 @@ func cmdServe(args []string) error {
 	chromium := fs.String("chromium", "", "Chromium executable for -browser (default: $INDAGO_CHROMIUM_PATH or the Playwright cache)")
 	allowRemote := fs.Bool("allow-remote", false,
 		"allow binding a non-loopback address; required because the API has no authentication (see docs/deployment.md)")
+	aiProvider := fs.String("ai-provider", "", "enable the advisory AI Gateway with this provider (openai|anthropic|openrouter|ollama|vllm); empty keeps AI fully disabled")
+	aiModel := fs.String("ai-model", "", "model name for -ai-provider (required if -ai-provider is set)")
+	aiBaseURL := fs.String("ai-base-url", "", "override the provider's default base URL (required for a non-default ollama/vllm deployment)")
 	_ = fs.Parse(args)
 
 	log := newLogger(*debug)
@@ -213,9 +222,11 @@ func cmdServe(args []string) error {
 	}
 
 	opts := scan.Options{
-		HTTP:     eng,
-		Evidence: evStore,
-		Executor: scan.ExecutorConfig{AllowStateChanging: *allowUnsafe},
+		HTTP:        eng,
+		HTTPConfig:  httpCfg,
+		Evidence:    evStore,
+		Executor:    scan.ExecutorConfig{AllowStateChanging: *allowUnsafe},
+		SessionsDir: cfg.SessionsDir(),
 	}
 	if *allowUnsafe {
 		log.Warn("state-changing methods (POST/PUT/PATCH/DELETE) will be executed against in-scope targets")
@@ -270,6 +281,23 @@ func cmdServe(args []string) error {
 
 	srv := web.NewServer(db, ctrl, version, log, evStore, cfg.ReportsDir())
 	srv.SetLoginFunc(loginFn) // nil unless -browser: endpoint then reports unavailable
+	gw, err := ai.New(ai.Settings{
+		Enabled:  *aiProvider != "",
+		Provider: *aiProvider,
+		Model:    *aiModel,
+		BaseURL:  *aiBaseURL,
+		// Read fresh here, once, at startup — same pattern as
+		// INDAGO_AUTH_USER/PASS for AuthMode password: a secret never
+		// arrives via a CLI flag (shell history, `ps`) or a request body.
+		APIKey: os.Getenv("INDAGO_AI_API_KEY"),
+	})
+	if err != nil {
+		return fmt.Errorf("configure AI gateway (-ai-provider): %w", err)
+	}
+	srv.SetAIGateway(gw)
+	if gw.Enabled() {
+		log.Info("AI gateway enabled (advisory only)", "provider", *aiProvider, "model", *aiModel)
+	}
 	log.Info("indago starting", "version", version, "data", cfg.DataDir)
 	err = srv.ListenAndServe(ctx, cfg.Server.Addr)
 	ctrl.Shutdown()

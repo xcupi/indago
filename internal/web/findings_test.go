@@ -3,6 +3,7 @@ package web_test
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,7 +13,10 @@ import (
 // seedFinding creates an endpoint, parameter, finding, and two evidence rows
 // (one linked to the finding) directly in the store, bypassing discovery and
 // detection — this phase exposes already-correlated data over HTTP, it does
-// not generate it.
+// not generate it. The linked row is attached ONLY through
+// Finding.EvidenceIDs and never carries a finding_id, exactly as the real
+// executors write evidence (rows are created before any finding exists): a
+// seed that set finding_id masked an empty-Evidence-tab bug once already.
 func seedFinding(t *testing.T, a api, scanID domain.ID) (*domain.Finding, *domain.Endpoint, *domain.Evidence) {
 	t.Helper()
 	ctx := context.Background()
@@ -43,7 +47,7 @@ func seedFinding(t *testing.T, a api, scanID domain.ID) (*domain.Finding, *domai
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev := &domain.Evidence{ID: domain.NewID(), ScanID: scanID, FindingID: f.ID, Kind: domain.EvidenceResponse, MediaType: "text/html", BlobPath: ref.BlobPath, Size: ref.Size, SHA256: ref.SHA256, CreatedAt: now}
+	ev := &domain.Evidence{ID: domain.NewID(), ScanID: scanID, Kind: domain.EvidenceResponse, MediaType: "text/html", BlobPath: ref.BlobPath, Size: ref.Size, SHA256: ref.SHA256, CreatedAt: now}
 	if err := a.st.Evidence().Create(ctx, ev); err != nil {
 		t.Fatal(err)
 	}
@@ -175,18 +179,104 @@ func TestEvidenceContentServesBlob(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 	}
-	if ct := rec.Header().Get("Content-Type"); ct != "text/html" {
+	if ct := rec.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 		t.Fatalf("content-type = %q", ct)
 	}
 	if rec.Body.String() != "captured response body" {
 		t.Fatalf("body = %q", rec.Body.String())
 	}
-	if d := rec.Header().Get("Content-Disposition"); d != "" {
-		t.Fatalf("expected no Content-Disposition by default, got %q", d)
+	if d := rec.Header().Get("Content-Disposition"); !strings.HasPrefix(d, "inline") {
+		t.Fatalf("expected inline Content-Disposition by default, got %q", d)
 	}
+	assertSandboxedContent(t, rec.Header())
 
 	rec2 := a.do("GET", "/api/evidence/"+string(ev.ID)+"/content?download", nil)
-	if d := rec2.Header().Get("Content-Disposition"); d == "" {
-		t.Fatal("expected Content-Disposition with ?download")
+	if d := rec2.Header().Get("Content-Disposition"); !strings.HasPrefix(d, "attachment") {
+		t.Fatalf("expected attachment with ?download, got %q", d)
+	}
+	assertSandboxedContent(t, rec2.Header())
+}
+
+// assertSandboxedContent checks the headers that keep captured target markup
+// (a rendered DOM, a response body) from running with the control plane's
+// origin: CSP sandbox without allow-scripts, no fetches, no MIME sniffing.
+func assertSandboxedContent(t *testing.T, h http.Header) {
+	t.Helper()
+	csp := h.Get("Content-Security-Policy")
+	if !strings.HasPrefix(csp, "sandbox") || strings.Contains(csp, "allow-scripts") || strings.Contains(csp, "allow-same-origin") {
+		t.Fatalf("content must be served under a script-less CSP sandbox, got %q", csp)
+	}
+	if !strings.Contains(csp, "default-src 'none'") {
+		t.Fatalf("CSP must block all fetches by default, got %q", csp)
+	}
+	if h.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("missing nosniff, got %q", h.Get("X-Content-Type-Options"))
+	}
+}
+
+// HTTP-message evidence (message/http) is shown as plain text — browsers would
+// otherwise download it, and text/plain can never be parsed as markup.
+func TestEvidenceContentHTTPMessageServedAsPlainText(t *testing.T) {
+	a := newAPI(t, nil)
+	scanID := createTestScan(t, a)
+	ref, err := a.ev.Put(scanID, domain.EvidenceRequest, ".http", []byte("GET /?q=<svg onload=m> HTTP/1.1\r\nHost: x\r\n\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := &domain.Evidence{ID: domain.NewID(), ScanID: scanID, Kind: domain.EvidenceRequest, MediaType: "message/http", BlobPath: ref.BlobPath, Size: ref.Size, SHA256: ref.SHA256, CreatedAt: time.Now()}
+	if err := a.st.Evidence().Create(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	rec := a.do("GET", "/api/evidence/"+string(ev.ID)+"/content", nil)
+	if ct := rec.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+		t.Fatalf("content-type = %q, want text/plain", ct)
+	}
+	assertSandboxedContent(t, rec.Header())
+}
+
+// The scan-level evidence listing groups every finding's evidence (resolved
+// through Finding.EvidenceIDs), excludes unreferenced rows, and never returns
+// blob content.
+func TestListScanEvidenceGroupsByFinding(t *testing.T) {
+	a := newAPI(t, nil)
+	scanID := createTestScan(t, a)
+	f, _, ev := seedFinding(t, a, scanID)
+
+	var groups []struct {
+		FindingID    domain.ID          `json:"finding_id"`
+		FindingTitle string             `json:"finding_title"`
+		Verdict      string             `json:"verdict"`
+		Evidence     []*domain.Evidence `json:"evidence"`
+	}
+	rec := a.do("GET", "/api/scans/"+string(scanID)+"/evidence", nil)
+	a.mustJSON(rec, http.StatusOK, &groups)
+	if len(groups) != 1 || groups[0].FindingID != f.ID || groups[0].FindingTitle != f.Title {
+		t.Fatalf("groups = %+v", groups)
+	}
+	if len(groups[0].Evidence) != 1 || groups[0].Evidence[0].ID != ev.ID {
+		t.Fatalf("evidence = %+v, want exactly the finding's linked row", groups[0].Evidence)
+	}
+	if strings.Contains(rec.Body.String(), "captured response body") {
+		t.Fatal("the evidence listing must never include blob content")
+	}
+}
+
+// A dangling EvidenceIDs entry (row deleted) or one pointing at another scan's
+// evidence is skipped, never fabricated or leaked across scans.
+func TestFindingEvidenceSkipsDanglingAndForeignRows(t *testing.T) {
+	a := newAPI(t, nil)
+	scanID := createTestScan(t, a)
+	other := createTestScan(t, a)
+	f, _, ev := seedFinding(t, a, scanID)
+	_, _, foreign := seedFinding(t, a, other)
+
+	f.EvidenceIDs = append(f.EvidenceIDs, domain.NewID(), foreign.ID)
+	if err := a.st.Findings().Update(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	var got findingDetailResp
+	a.mustJSON(a.do("GET", "/api/scans/"+string(scanID)+"/findings/"+string(f.ID), nil), http.StatusOK, &got)
+	if len(got.Evidence) != 1 || got.Evidence[0].ID != ev.ID {
+		t.Fatalf("evidence = %+v, want only the finding's own resolvable row", got.Evidence)
 	}
 }

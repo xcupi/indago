@@ -16,10 +16,18 @@ import (
 )
 
 // injection selects one parameter to carry a marker value; all other parameters
-// keep their observed values.
+// keep their observed values. paramB/valueB are an OPTIONAL second override
+// for a COMBINED (multi-parameter) candidate — see
+// docs/reflection-candidates.md "Combined (multi-parameter) candidates" and
+// internal/detection/combined.go. Nil/empty for every ordinary
+// single-parameter injection; buildRequest applies both overrides in the
+// SAME request when paramB is set, exactly like param/value.
 type injection struct {
 	param *domain.Parameter
 	value string
+
+	paramB *domain.Parameter
+	valueB string
 }
 
 // maxBaselineBodyKeep caps the baseline body retained for the token-absence
@@ -53,15 +61,27 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 		}
 	}
 
-	// Mutated request: the marker goes only into the focused parameter.
+	// Mutated request: the marker goes only into the focused parameter. The
+	// whole refresh→build→send sequence runs inside withDynamicTokenLock so
+	// it is atomic with respect to every other such sequence in the scan
+	// (candidate testing, browser verification) when a dynamic/single-use
+	// token parameter is involved — see dynamic_params.go.
 	probe := detection.NewProbe(tc.ScanID, tc.InjectionPointID)
-	mutReq, err := buildRequest(ep, params, &injection{param: focus, value: probe.Value()})
-	if err != nil {
+	var mutReq *httpengine.Request
+	var resp *httpengine.Response
+	var dur time.Duration
+	withDynamicTokenLock(e.tokenMu, params, focus, func() {
+		mutReq, err = buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), &injection{param: focus, value: probe.Value()})
+		if err != nil {
+			return
+		}
+		resp, outcome, err, dur = e.send(ctx, mutReq)
+	})
+	if mutReq == nil {
 		return result{outcome: domain.OutcomeError, permanent: true, err: err, note: note, vulnClass: domain.VulnReflectedXSS, sharedEvidence: bl.evidenceIDs()}
 	}
 	tc.URL = mutReq.URL
 
-	resp, outcome, err, dur := e.send(ctx, mutReq)
 	r := result{
 		note:           note,
 		duration:       dur,
@@ -85,6 +105,15 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 	report.Baseline = detection.ResponseSummary{Status: bl.status, BodyLen: bl.bodyLen}
 	report.Mutated = detection.ResponseSummary{Status: resp.Status, BodyLen: len(resp.Body)}
 
+	// CAPTCHA/bot-challenge detection (pure, advisory only — AGENTS.md §2.2:
+	// detect-only, Indago never attempts to solve or bypass a CAPTCHA). Only a
+	// challenge that newly appears for the mutated request (not already on the
+	// baseline page) is a signal; see detection.CaptchaSuspected.
+	if label, ok := detection.CaptchaSuspected(bl.body, resp.Body); ok {
+		r.captchaSuspected = true
+		r.captchaLabel = label
+	}
+
 	// Context analysis (pure): classify every reflection site against the actual
 	// response bytes. Still no verdict.
 	detection.ClassifyContexts(&report, resp.Body, detection.ContextOptions{
@@ -98,6 +127,8 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 	detection.PlanCandidates(&report, detection.PlanOptions{
 		ScanID:           tc.ScanID,
 		InjectionPointID: tc.InjectionPointID,
+		Profile:          e.candidateProfile(ctx, tc.ScanID),
+		EnableEvasion:    e.enableEvasion(ctx, tc.ScanID),
 	})
 
 	r.outcome = domain.OutcomeSuccess
@@ -107,11 +138,51 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 			r.note += fmt.Sprintf("; planned %d candidate(s)", n)
 		}
 	} else {
-		r.note = note + ": not reflected"
+		note2, suspected := possibleBlockNote(bl.status, resp.Status)
+		r.note = note + ": not reflected" + note2
+		if suspected {
+			r.blockSuspected = true
+			r.blockBaselineStatus = bl.status
+			r.blockMutatedStatus = resp.Status
+		}
 	}
 	r.reflection = &report
 	r.baselineReq, r.baselineResp = bl.reqEvidence, bl.respEvidence
 	return r
+}
+
+// candidateProfile resolves the scan's candidate-selection policy. An
+// unreadable scan or an invalid stored value falls back to the standard
+// profile — still BOUNDED — never to the unbounded planner: a failure to read
+// configuration must not turn into more requests against a target.
+func (e *executor) candidateProfile(ctx context.Context, scanID domain.ID) detection.ProfileSpec {
+	var name string
+	var max int
+	if sc, err := e.store.Scans().Get(ctx, scanID); err == nil {
+		name, max = sc.Config.CandidateProfile, sc.Config.MaxCandidates
+	} else {
+		e.log.Warn("load scan for candidate profile; using the standard profile", "scan", scanID, "err", err)
+	}
+	spec, err := detection.ResolveProfile(name, max)
+	if err != nil {
+		e.log.Warn("invalid stored candidate profile; using the standard profile", "scan", scanID, "err", err)
+		spec, _ = detection.ResolveProfile("", 0)
+	}
+	return spec
+}
+
+// enableEvasion reports whether the scan opted into WAF/filter-bypass
+// candidate variants (domain.ScanConfig.EnableEvasion, off by default). An
+// unreadable scan fails closed to false — never silently widening the probe
+// set a failure to read configuration should not turn into more request
+// shapes against a target.
+func (e *executor) enableEvasion(ctx context.Context, scanID domain.ID) bool {
+	sc, err := e.store.Scans().Get(ctx, scanID)
+	if err != nil {
+		e.log.Warn("load scan for evasion flag; defaulting to off", "scan", scanID, "err", err)
+		return false
+	}
+	return sc.Config.EnableEvasion
 }
 
 // contextSummary renders the distinct site contexts, e.g. "context: html_text, js_string".
@@ -247,7 +318,7 @@ func (e *executor) persistBaselineEvidence(ctx context.Context, scanID domain.ID
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 
-	note := "baseline " + req.Method + " " + req.URL
+	note := domain.EvidenceNoteBaselinePrefix + req.Method + " " + req.URL
 	if id, err := e.putEvidence(wctx, scanID, domain.EvidenceRequest, dumpRequest(capturedFrom(req, resp)), note+" request"); err == nil {
 		reqID = id
 	} else {

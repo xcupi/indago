@@ -24,12 +24,17 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/url"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
+	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/verification"
 	"github.com/indago/indago/internal/worker"
@@ -78,6 +83,20 @@ func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob,
 	if e.store == nil {
 		return
 	}
+	// A finding is only ever created from a PLANNED breakout, which always
+	// embeds this injection point's unique marker. A value without it — an
+	// ordinary baseline value such as the observed "hello" — is not a candidate
+	// and must never become one, however it got here. A COMBINED candidate's
+	// marker lives in ValueB (the "breakout" half) rather than Value (the
+	// "closer" half, which deliberately carries no executable reference) —
+	// see internal/detection/combined.go.
+	marker := detection.NewProbe(job.ScanID, job.Target.InjectionPointID).Token
+	embedsMarker := strings.Contains(cand.Value, marker) || (cand.Combined && strings.Contains(cand.ValueB, marker))
+	if !embedsMarker {
+		e.log.Warn("enqueue verification: candidate does not embed the injection point's marker; no finding created",
+			"job", job.ID, "candidate", cand.DedupKey)
+		return
+	}
 	// Serialized: two candidates correlating to the same site can run on
 	// different HTTP workers at the same time, and the correlation lookup
 	// (ListByScan + match by dedup key) is not atomic at the store layer.
@@ -88,13 +107,13 @@ func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob,
 		e.log.Warn("enqueue verification: upsert finding", "job", job.ID, "err", err)
 		return
 	}
-	if e.queue == nil || !isSafeMethod(ep.Method) {
+	if e.queue == nil || !canBrowserVerify(ep.Method, focus.Location) {
 		return
 	}
 
 	now := time.Now()
 	payload, err := json.Marshal(verifyJob{
-		Candidate: cand, Marker: detection.NewProbe(job.ScanID, job.Target.InjectionPointID).Token,
+		Candidate: cand, Marker: marker,
 		FindingID: f.ID, CandidateTestCaseID: candTestCaseID,
 	})
 	if err != nil {
@@ -111,6 +130,44 @@ func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob,
 	}
 }
 
+// recordBlockFinding is enqueueVerification's counterpart for a result that
+// looks blocked rather than reflected (see result.blockSuspected /
+// possibleBlockNote): it records, or bumps the occurrence count of, the
+// diagnostic Finding described in upsertBlockFinding (finding.go). There is
+// no verify-job enqueue here — a block diagnostic is never browser-verified,
+// only recorded, same best-effort-logged-not-fatal contract as
+// enqueueVerification: a failure here never affects the already-persisted
+// TestCase result.
+func (e *executor) recordBlockFinding(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, focus *domain.Parameter, baselineStatus, mutatedStatus int, testCaseID domain.ID) {
+	if e.store == nil {
+		return
+	}
+	e.findingsMu.Lock()
+	_, err := upsertBlockFinding(ctx, e.store, job.ScanID, ep, job.Target.InjectionPointID, focus, baselineStatus, mutatedStatus, testCaseID)
+	e.findingsMu.Unlock()
+	if err != nil {
+		e.log.Warn("record block finding", "job", job.ID, "err", err)
+	}
+}
+
+// recordCaptchaFinding is recordBlockFinding's counterpart for a result
+// where detection.CaptchaSuspected found a CAPTCHA/bot-challenge page newly
+// appearing for the mutated/candidate request (see result.captchaSuspected).
+// Detect-only, same as the status-code block signal: this never attempts to
+// solve or bypass the challenge (AGENTS.md §2.2), it only records the
+// diagnostic Finding described in upsertCaptchaFinding.
+func (e *executor) recordCaptchaFinding(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, focus *domain.Parameter, label string, testCaseID domain.ID) {
+	if e.store == nil {
+		return
+	}
+	e.findingsMu.Lock()
+	_, err := upsertCaptchaFinding(ctx, e.store, job.ScanID, ep, job.Target.InjectionPointID, focus, label, testCaseID)
+	e.findingsMu.Unlock()
+	if err != nil {
+		e.log.Warn("record captcha finding", "job", job.ID, "err", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // verify executor: runs JobVerify jobs
 // ---------------------------------------------------------------------------
@@ -120,6 +177,7 @@ func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob,
 // the outcome, evidence, and the resulting Finding verdict.
 type verifyExecutor struct {
 	store    store.Store
+	engine   httpengine.Engine // scope-enforcing; used only to refresh a dynamic anti-CSRF token right before replaying the candidate — see refreshDynamicParams
 	verifier verification.Verifier
 	evidence evidence.Store // nil: outcomes are recorded without evidence blobs
 	scope    domain.Scope
@@ -128,16 +186,39 @@ type verifyExecutor struct {
 	// findingsMu — see newExecutor's doc comment. MUST be the same mutex given
 	// to this scan's executor for correlation to be race-free.
 	findingsMu *sync.Mutex
+	// tokenMu — see executor's doc comment and withDynamicTokenLock in
+	// dynamic_params.go. MUST be the same mutex given to this scan's
+	// executor, for the same reason findingsMu must be.
+	tokenMu *sync.Mutex
+	// proxyPool is this scan's operator-supplied proxy list (domain.ScanConfig.
+	// ProxyPool); empty means every verification browser context is a direct
+	// connection. proxyNext round-robins through it across concurrent verify
+	// jobs — see nextProxy.
+	proxyPool []string
+	proxyNext atomic.Uint64
 }
 
-func newVerifyExecutor(st store.Store, v verification.Verifier, ev evidence.Store, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex) *verifyExecutor {
+func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Verifier, ev evidence.Store, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, tokenMu *sync.Mutex, proxyPool []string) *verifyExecutor {
 	if v == nil {
 		v = verification.Stub{}
 	}
 	if findingsMu == nil {
 		findingsMu = &sync.Mutex{}
 	}
-	return &verifyExecutor{store: st, verifier: v, evidence: ev, scope: scope, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu}
+	if tokenMu == nil {
+		tokenMu = &sync.Mutex{}
+	}
+	return &verifyExecutor{store: st, engine: eng, verifier: v, evidence: ev, scope: scope, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu, tokenMu: tokenMu, proxyPool: proxyPool}
+}
+
+// nextProxy round-robins through proxyPool ("" when empty: direct connection,
+// the overwhelmingly common case that must stay free of any extra state).
+func (e *verifyExecutor) nextProxy() string {
+	if len(e.proxyPool) == 0 {
+		return ""
+	}
+	i := e.proxyNext.Add(1) - 1
+	return e.proxyPool[i%uint64(len(e.proxyPool))]
 }
 
 var _ worker.Handler = (*verifyExecutor)(nil)
@@ -210,48 +291,117 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 	tc.Method, tc.URL = string(ep.Method), ep.URL
 
 	note := fmt.Sprintf("browser verification; candidate %s/%s; parameter %s (%s)", vj.Candidate.Source, vj.Candidate.Category, focus.Name, focus.Location)
+	if vj.Candidate.Combined {
+		note = fmt.Sprintf("browser verification; combined candidate %s/%s; parameters %s (%s) + %s (%s)", vj.Candidate.Source, vj.Candidate.Category, focus.Name, focus.Location, vj.Candidate.ParameterB, vj.Candidate.LocationB)
+	}
 	if !e.cfg.AllowStateChanging && !isSafeMethod(ep.Method) {
 		return verifyResult{skipped: true, note: fmt.Sprintf("%s skipped: %s is state-changing and AllowStateChanging is off", note, ep.Method)}
 	}
 
-	req, err := buildRequest(ep, params, &injection{param: focus, value: vj.Candidate.Value})
+	// A combined candidate's SECOND parameter, resolved from the
+	// already-loaded endpoint parameter list — see candidate.go's
+	// runCandidate, which resolves it the same way.
+	var focusB *domain.Parameter
+	if vj.Candidate.Combined {
+		focusB = findParamByNameLocation(params, vj.Candidate.ParameterB, vj.Candidate.LocationB)
+	}
+
+	// The whole refresh→build→verify sequence runs inside
+	// withDynamicTokenLock so it is atomic with respect to every other such
+	// sequence in the scan (the reflection step, candidate testing) when a
+	// dynamic/single-use token parameter is involved — see
+	// dynamic_params.go. The browser navigation inside Verify is what
+	// actually spends the token, so the lock must cover it too, not just the
+	// request build.
+	var req *httpengine.Request
+	var vres *verification.Result
+	var verifyErr error
+	withDynamicTokenLock(e.tokenMu, params, focus, func() {
+		inj := &injection{param: focus, value: vj.Candidate.Value}
+		if focusB != nil {
+			inj.paramB, inj.valueB = focusB, vj.Candidate.ValueB
+		}
+		req, err = buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), inj)
+		if err != nil {
+			return
+		}
+		tc.URL = req.URL
+		if !canBrowserVerify(ep.Method, focus.Location) {
+			return
+		}
+
+		var statePath string
+		if sess, serr := e.store.Sessions().GetByScan(ctx, job.ScanID); serr == nil && sess != nil {
+			statePath = sess.StatePath
+		}
+
+		in := verification.Input{
+			ScanID: job.ScanID, VulnClass: domain.VulnReflectedXSS,
+			InjectionPoint:   domain.InjectionPoint{ID: job.Target.InjectionPointID, ScanID: job.ScanID, EndpointID: job.Target.EndpointID},
+			Candidate:        vj.Candidate,
+			Marker:           vj.Marker,
+			Method:           req.Method,
+			URL:              req.URL,
+			Location:         focus.Location,
+			Scope:            e.scope,
+			SessionStatePath: statePath,
+			ProxyServer:      e.nextProxy(),
+		}
+		if req.Method == "POST" && focus.Location == domain.LocationForm {
+			if vals, perr := url.ParseQuery(string(req.Body)); perr == nil {
+				fv := make(map[string]string, len(vals))
+				for k, v := range vals {
+					if len(v) > 0 {
+						fv[k] = v[0]
+					}
+				}
+				in.FormValues = fv
+			}
+		}
+		// Header/Cookie candidates don't show up in req.URL or req.Body —
+		// the override must be carried separately so the verifying browser
+		// context applies it BEFORE navigation (see verification.Input and
+		// BrowserVerifier.Verify). A combined candidate's SECOND parameter
+		// gets the identical treatment, independently of the first (either
+		// half, or both, can be Header/Cookie).
+		switch focus.Location {
+		case domain.LocationHeader:
+			in.ExtraHeaders = map[string]string{focus.Name: vj.Candidate.Value}
+		case domain.LocationCookie:
+			in.ExtraCookies = []*http.Cookie{{Name: focus.Name, Value: vj.Candidate.Value}}
+		}
+		if focusB != nil {
+			switch focusB.Location {
+			case domain.LocationHeader:
+				if in.ExtraHeaders == nil {
+					in.ExtraHeaders = map[string]string{}
+				}
+				in.ExtraHeaders[focusB.Name] = vj.Candidate.ValueB
+			case domain.LocationCookie:
+				in.ExtraCookies = append(in.ExtraCookies, &http.Cookie{Name: focusB.Name, Value: vj.Candidate.ValueB})
+			}
+		}
+
+		vres, verifyErr = e.verifier.Verify(ctx, in)
+	})
 	if err != nil {
 		return verifyResult{outcome: domain.OutcomeError, permanent: true, err: err, note: note}
 	}
-	tc.URL = req.URL
-	if req.Method != "GET" && req.Method != "HEAD" {
-		return verifyResult{skipped: true, note: note + ": browser verification supports GET/HEAD-navigable candidates only in this phase"}
+	if !canBrowserVerify(ep.Method, focus.Location) {
+		return verifyResult{skipped: true, note: note + ": browser verification supports GET/HEAD navigation, or POST with a form-encoded (application/x-www-form-urlencoded) body, only in this phase"}
 	}
-
-	var statePath string
-	if sess, err := e.store.Sessions().GetByScan(ctx, job.ScanID); err == nil && sess != nil {
-		statePath = sess.StatePath
-	}
-
-	in := verification.Input{
-		ScanID: job.ScanID, VulnClass: domain.VulnReflectedXSS,
-		InjectionPoint:   domain.InjectionPoint{ID: job.Target.InjectionPointID, ScanID: job.ScanID, EndpointID: job.Target.EndpointID},
-		Candidate:        vj.Candidate,
-		Marker:           vj.Marker,
-		Method:           req.Method,
-		URL:              req.URL,
-		Scope:            e.scope,
-		SessionStatePath: statePath,
-	}
-
-	vres, err := e.verifier.Verify(ctx, in)
-	if err != nil {
+	if verifyErr != nil {
 		switch {
-		case errors.Is(err, verification.ErrNotImplemented):
+		case errors.Is(verifyErr, verification.ErrNotImplemented):
 			return verifyResult{skipped: true, note: note + ": browser verification unavailable (no browser configured for this scan)"}
-		case errors.Is(err, verification.ErrUnsupportedMethod):
+		case errors.Is(verifyErr, verification.ErrUnsupportedMethod):
 			return verifyResult{skipped: true, note: note + ": browser verification supports GET/HEAD-navigable candidates only"}
 		case ctx.Err() != nil:
 			return verifyResult{outcome: domain.OutcomeCancelled, err: ctx.Err(), note: note}
-		case errors.Is(err, context.DeadlineExceeded) || isNetTimeout(err):
-			return verifyResult{outcome: domain.OutcomeTimeout, err: err, note: note + " (timed out)"}
+		case errors.Is(verifyErr, context.DeadlineExceeded) || isNetTimeout(verifyErr):
+			return verifyResult{outcome: domain.OutcomeTimeout, err: verifyErr, note: note + " (timed out)"}
 		default:
-			return verifyResult{outcome: domain.OutcomeError, err: err, note: note + ": verification failed"}
+			return verifyResult{outcome: domain.OutcomeError, err: verifyErr, note: note + ": verification failed"}
 		}
 	}
 
@@ -316,7 +466,7 @@ func (e *verifyExecutor) finish(ctx context.Context, job *domain.TestJob, tc *do
 	}
 
 	if !vj.FindingID.Empty() && r.result != nil {
-		e.correlateVerification(ctx, vj.FindingID, vj.CandidateTestCaseID, r.result, tc.ID, evidenceIDs)
+		e.correlateVerification(ctx, vj.FindingID, vj.Candidate, vj.CandidateTestCaseID, r.result, tc.ID, evidenceIDs, tc.URL)
 	}
 }
 

@@ -66,8 +66,13 @@ async function openNewScanModal() {
   const cfgR = input("f_cfgR", "number", "", "10"); cfgR.min = 0; cfgR.max = 1000; cfgR.step = "0.1";
   const stop = select("f_stop", [["continue_all", "Continue (test everything)"], ["first_confirmed", "Stop at first confirmed"], ["after_n_confirmed", "Stop after N confirmed"], ["pause_and_ask", "Pause & ask on confirmed"]], "continue_all");
   const stopN = input("f_stopn", "number", "", "1"); stopN.min = 1;
-  const auth = select("f_auth", [["anonymous", "Anonymous (no login)"], ["existing", "Existing session (import saved state)"]], "anonymous");
+  const auth = select("f_auth", [["anonymous", "Anonymous (no login)"], ["existing", "Existing session (import saved state)"], ["interactive", "Interactive login (you log in in a real browser)"], ["mfa", "Interactive login + MFA (same as above, any second factor)"], ["password", "Auto-login (Indago fills the form itself)"]], "anonymous");
   const authState = input("f_authstate", "text", "/data/sessions/login-….json"); authState.className = "mono";
+  const loginURL = input("f_loginurl", "text", "https://target/login"); loginURL.className = "mono";
+  const successURL = input("f_successurl", "text", "https://target/dashboard*"); successURL.className = "mono";
+  const loginUserSel = input("f_loginusersel", "text", "optional, e.g. #email"); loginUserSel.className = "mono";
+  const loginPassSel = input("f_loginpasssel", "text", "optional, e.g. #password"); loginPassSel.className = "mono";
+  const loginSubmitSel = input("f_loginsubmitsel", "text", "optional, e.g. button[type=submit]"); loginSubmitSel.className = "mono";
 
   // scan type
   const typeCrawl = el("input"); typeCrawl.type = "radio"; typeCrawl.name = "f_type"; typeCrawl.value = "crawl"; typeCrawl.checked = true;
@@ -83,11 +88,37 @@ async function openNewScanModal() {
   const stopNWrap = field("N confirmed", stopN); stopNWrap.classList.add("hidden");
   const authWrap = el("div");
   const loginBtn = button("Interactive login…", () => openLoginModal((p) => { authState.value = p; }), "");
-  authWrap.append(field("Session state file (absolute server-side path)", authState),
+  const existingFields = el("div");
+  existingFields.append(field("Session state file (absolute server-side path)", authState),
     el("div", "Capture one with interactive login, or point at a Playwright storage-state file. Its contents are never shown.", "hint"),
     el("div", undefined, "form-actions"));
-  authWrap.querySelector(".form-actions").appendChild(loginBtn);
+  existingFields.querySelector(".form-actions").appendChild(loginBtn);
+  const loginFields = el("div");
+  loginFields.append(field("Login URL", loginURL), field("Success URL (glob, required)", successURL),
+    el("div", "Indago opens this URL in a real browser and waits for navigation to match the success glob before it saves the session. Required — with no UI step watching, Indago needs an objective signal the login actually finished.", "hint"));
+  const passwordFields = el("div");
+  passwordFields.append(rowOf(field("Username selector (optional)", loginUserSel), field("Password selector (optional)", loginPassSel), field("Submit selector (optional)", loginSubmitSel)),
+    el("div", "Credentials are NEVER entered here or sent in this request — set INDAGO_AUTH_USER and INDAGO_AUTH_PASS in the SERVER process's own environment before creating this scan. The selectors above are an escape hatch for a login form Indago's own heuristic can't locate; leave them empty to let it guess (input[type=password], then the nearest username/email field).", "hint"));
+  passwordFields.classList.add("hidden");
+  authWrap.append(existingFields, loginFields, passwordFields);
   authWrap.classList.add("hidden");
+
+  const candProfile = select("f_candprofile", [["standard", "Standard — up to 8 candidates per injection point"], ["minimal", "Minimal — up to 3, load-trigger only"], ["thorough", "Thorough — up to 16"]], "standard");
+  const maxCand = input("f_maxcand", "number", "profile default"); maxCand.min = 0; maxCand.max = 32;
+  const enableEvasion = el("input"); enableEvasion.type = "checkbox"; enableEvasion.id = "f_evasion";
+  const candFs = el("fieldset");
+  candFs.append(legend("XSS candidates"), rowOf(field("Candidate profile", candProfile), field("Max candidates per injection point", maxCand)),
+    el("div", "Selects among the built-in benign-marker candidates by the site's execution context and encoding. Never changes how a finding is confirmed (always a browser-observed execution signal).", "hint"),
+    labelInline(enableEvasion, "Also try WAF/filter-bypass variants (case variation, alternate separators, double URL-encoding)"),
+    el("div", "Off by default. Adds these ON TOP OF the candidates above for an authorized engagement where a bypass is itself the reportable finding — still benign-marker-only and scope-enforced the same as every other request. See AGENTS.md §2 and docs/reflection-candidates.md.", "hint"));
+
+  const proxyPool = textarea("f_proxypool", 2, "one proxy per line, e.g. http://host:port or socks5://user:pass@host:port — empty = direct connection");
+  const randomizeTLS = el("input"); randomizeTLS.type = "checkbox"; randomizeTLS.id = "f_randomize_tls";
+  const advFs = el("fieldset");
+  advFs.append(legend("Proxy pool (opt-in, operator infrastructure)"), field("Proxies", proxyPool),
+    el("div", "Routes this scan's outbound traffic — raw HTTP requests AND browser verification alike — through one of the listed proxies, round-robin. Indago never discovers or manages proxies itself; this is entirely operator-supplied infrastructure. Leave empty for Indago's normal direct connection. See AGENTS.md §2.3.", "hint"),
+    labelInline(randomizeTLS, "Randomize the raw HTTP engine's TLS fingerprint (JA3)"),
+    el("div", "Off by default. Uses uTLS instead of Go's own TLS ClientHello, which otherwise has its own distinct, fingerprintable signature regardless of the User-Agent header. MUTUALLY EXCLUSIVE with the proxy pool above — Go's HTTP transport never consults a custom TLS dialer for a proxied connection, so the server rejects both being set together. Has no effect on browser verification, which already uses a real browser's own TLS stack. See AGENTS.md §2.3.", "hint"));
 
   const typeFs = el("fieldset"); typeFs.append(legend("Scan type & discovery"), typeRow, field("Seed URLs", seeds), crawlLimits);
   const perfFs = el("fieldset"); perfFs.append(legend("Performance profile"), field("Profile", profile), customCfg);
@@ -98,7 +129,10 @@ async function openNewScanModal() {
     crawlLimits.classList.toggle("hidden", typeQuick.checked);
     customCfg.classList.toggle("hidden", profile.value !== "custom");
     stopNWrap.classList.toggle("hidden", stop.value !== "after_n_confirmed");
-    authWrap.classList.toggle("hidden", auth.value !== "existing");
+    authWrap.classList.toggle("hidden", auth.value === "anonymous");
+    existingFields.classList.toggle("hidden", auth.value !== "existing");
+    loginFields.classList.toggle("hidden", !["interactive", "mfa", "password"].includes(auth.value));
+    passwordFields.classList.toggle("hidden", auth.value !== "password");
   };
   [typeCrawl, typeQuick, profile, stop, auth].forEach((x) => x.addEventListener("change", sync));
   sync();
@@ -108,6 +142,10 @@ async function openNewScanModal() {
       project_id: project.id, target_id: target.value, name: name.value.trim(), profile: profile.value,
       seed_urls: lines(seeds), quick_scan: typeQuick.checked,
       max_depth: typeQuick.checked ? 0 : numOrZero(depth), max_pages: numOrZero(maxPages), max_endpoints: numOrZero(maxEndpoints),
+      candidate_profile: candProfile.value, max_candidates: numOrZero(maxCand),
+      enable_evasion: enableEvasion.checked,
+      proxy_pool: lines(proxyPool),
+      randomize_tls_fingerprint: randomizeTLS.checked,
     };
     if (profile.value === "custom") {
       req.config = { discovery_concurrency: numOrZero(cfgD), http_concurrency: numOrZero(cfgH), browser_concurrency: parseInt(cfgB.value, 10) || 0, requests_per_second: parseFloat(cfgR.value) || 0 };
@@ -116,7 +154,16 @@ async function openNewScanModal() {
       req.stop = { mode: stop.value };
       if (stop.value === "after_n_confirmed") req.stop.confirmed_limit = parseInt(stopN.value, 10) || 1;
     }
-    if (auth.value === "existing") { req.auth_mode = "existing"; req.auth_state_path = authState.value.trim(); }
+    if (auth.value === "existing") {
+      req.auth_mode = "existing"; req.auth_state_path = authState.value.trim();
+    } else if (auth.value === "interactive" || auth.value === "mfa") {
+      req.auth_mode = auth.value; req.login_url = loginURL.value.trim(); req.success_url = successURL.value.trim();
+    } else if (auth.value === "password") {
+      req.auth_mode = "password"; req.login_url = loginURL.value.trim(); req.success_url = successURL.value.trim();
+      if (loginUserSel.value.trim()) req.login_username_selector = loginUserSel.value.trim();
+      if (loginPassSel.value.trim()) req.login_password_selector = loginPassSel.value.trim();
+      if (loginSubmitSel.value.trim()) req.login_submit_selector = loginSubmitSel.value.trim();
+    }
     const res = await mutate("POST", "/api/scans", req);
     if (!res.ok) { setMsg(errBox, errMsg(res, "create scan failed")); return; }
     closeModal();
@@ -125,7 +172,7 @@ async function openNewScanModal() {
 
   const actions = el("div", undefined, "form-actions");
   actions.append(create, button("Cancel", closeModal));
-  body.append(rowOf(field("Scan name", name), field("Target", target)), typeFs, perfFs, stopFs, authFs, actions, errBox);
+  body.append(rowOf(field("Scan name", name), field("Target", target)), typeFs, candFs, advFs, perfFs, stopFs, authFs, actions, errBox);
   openModal("New scan", body);
 }
 
@@ -219,125 +266,565 @@ function scanListRow(st, after) {
 // ---------------------------------------------------------------------------
 // Findings & reports renderers (shared)
 // ---------------------------------------------------------------------------
-function decodeDetail(raw) { try { return JSON.parse(atob(raw)); } catch (e) { return {}; } }
 
-function findingDetailEl(f) {
+// Per-scan UI state that must outlive any one render: the scan-detail view's
+// live refresh re-renders tabs, and the operator moves between tabs/routes, but
+// the findings they checked, the detail rows they opened, the findings filter,
+// and the report mode and format they picked must stay put. Lives for the
+// page's lifetime.
+const scanUIState = new Map();
+function uiState(scanId) {
+  let s = scanUIState.get(scanId);
+  if (!s) {
+    s = {
+      selected: new Set(), expanded: new Set(),
+      view: "confirmed",                       // findings filter: confirmed | review | diagnostic | all
+      // Independent of the section filter above: severity (multi-select,
+      // empty = all), context (single-select, "" = all) and a free-text
+      // search over title/endpoint/parameter.
+      filters: { severity: new Set(), context: "", search: "", knownSeverities: [] },
+      mode: "confirmed", modeExplicit: false,  // report mode
+      format: "json", visible: [], listeners: [],
+    };
+    scanUIState.set(scanId, s);
+  }
+  return s;
+}
+// onSelectionChange registers fn for selection/filter changes while node stays
+// in the document; listeners of detached (re-rendered) nodes are dropped lazily.
+function onSelectionChange(state, node, fn) { state.listeners.push({ node, fn }); }
+function notifySelection(state) {
+  // A report mode the operator never chose follows the selection: checking
+  // findings means "report these", clearing them goes back to confirmed-only.
+  if (!state.modeExplicit) state.mode = state.selected.size ? "selected" : "confirmed";
+  state.listeners = state.listeners.filter((l) => l.node.isConnected);
+  state.listeners.forEach((l) => l.fn());
+}
+
+// Which findings each filter shows. "Confirmed" is the default: rejected
+// attempts are diagnostics, not vulnerabilities, and stay out of the main view.
+const FINDING_VIEWS = [
+  ["confirmed", "Confirmed vulnerabilities", (f) => f.section === "confirmed"],
+  ["review", "Needs review", (f) => f.section === "needs_review"],
+  ["diagnostic", "Diagnostics (rejected)", (f) => f.section === "diagnostic"],
+  ["all", "All", () => true],
+];
+function viewPredicate(name) { return (FINDING_VIEWS.find((v) => v[0] === name) || FINDING_VIEWS[0])[2]; }
+function sectionCountsOf(findings) {
+  return { confirmed: findings.filter((f) => f.section === "confirmed").length,
+           review: findings.filter((f) => f.section === "needs_review").length,
+           diagnostic: findings.filter((f) => f.section === "diagnostic").length, all: findings.length };
+}
+
+// filterBar renders the findings filter (segmented buttons with live counts).
+function filterBar(counts, current, onChange) {
+  const bar = el("div", undefined, "filter-bar"); bar.setAttribute("role", "group"); bar.setAttribute("aria-label", "Findings view");
+  FINDING_VIEWS.forEach(([name, label]) => {
+    const b = button(label + " (" + counts[name] + ")", () => onChange(name), name === current ? "seg active" : "seg", "view_" + name);
+    b.setAttribute("aria-pressed", name === current ? "true" : "false");
+    bar.appendChild(b);
+  });
+  return bar;
+}
+
+const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
+
+// buildExtraFilters is the severity/context/search bar — independent of, and
+// below, the section filter above. Its nodes are built ONCE and never
+// replaced: only matchesExtraFilters' callers re-render the findings TABLE on
+// a change, so typing in the search box never loses focus or cursor
+// position (a rebuild-everything re-render, as filterBar above gets on every
+// click, would recreate the <input> on every keystroke).
+function buildExtraFilters(state, onChange) {
+  const wrap = el("div", undefined, "findings-filters");
+  const sevRow = el("div", undefined, "filter-bar");
+  sevRow.setAttribute("role", "group"); sevRow.setAttribute("aria-label", "Severity filter");
+
+  function refreshSevButtons() {
+    sevRow.replaceChildren();
+    state.filters.knownSeverities.forEach((sv) => {
+      const active = state.filters.severity.has(sv);
+      const b = button(sv, () => {
+        if (state.filters.severity.has(sv)) state.filters.severity.delete(sv); else state.filters.severity.add(sv);
+        refreshSevButtons(); onChange();
+      }, (active ? "seg active sev-" : "seg sev-") + sv, "f_sev_" + sv);
+      sevRow.appendChild(b);
+    });
+  }
+
+  const ctxSelect = select("f_ctxfilter", [["", "All contexts"]], "");
+  ctxSelect.addEventListener("change", () => { state.filters.context = ctxSelect.value; onChange(); });
+
+  const searchInput = input("f_search", "search", "Search title, endpoint, parameter…", state.filters.search);
+  searchInput.addEventListener("input", () => { state.filters.search = searchInput.value; onChange(); });
+
+  const clearBtn = button("Clear filters", () => {
+    state.filters.severity.clear(); state.filters.context = ""; state.filters.search = "";
+    ctxSelect.value = ""; searchInput.value = "";
+    refreshSevButtons(); onChange();
+  }, "small", "f_clearfilters");
+
+  wrap.append(field("Severity", sevRow), field("Context", ctxSelect), field("Search", searchInput), clearBtn);
+
+  // refreshOptions re-derives which severities/contexts actually occur in
+  // `findings` and updates the two option lists — called only when new scan
+  // data loads (never on a keystroke), so it cannot steal focus from the
+  // search box (a completely separate node it never touches).
+  function refreshOptions(findings) {
+    state.filters.knownSeverities = [...new Set(findings.map((f) => f.severity).filter(Boolean))]
+      .sort((a, b) => SEVERITY_ORDER.indexOf(a) - SEVERITY_ORDER.indexOf(b));
+    // Severities that vanished (e.g. a re-scoped scan) shouldn't stay "stuck" selected.
+    [...state.filters.severity].forEach((sv) => { if (!state.filters.knownSeverities.includes(sv)) state.filters.severity.delete(sv); });
+    refreshSevButtons();
+    const ctxs = [...new Set(findings.map((f) => f.context).filter(Boolean))].sort();
+    const cur = state.filters.context;
+    ctxSelect.replaceChildren();
+    [["", "All contexts"], ...ctxs.map((c) => [c, c])].forEach(([v, text]) => {
+      const o = el("option", text); o.value = v;
+      if (v === cur) o.selected = true;
+      ctxSelect.appendChild(o);
+    });
+    if (cur && !ctxs.includes(cur)) { state.filters.context = ""; ctxSelect.value = ""; }
+  }
+
+  return { el: wrap, refreshOptions };
+}
+
+// matchesExtraFilters is applied ON TOP of (after) the section filter
+// (viewPredicate) — a finding must pass both to be shown.
+function matchesExtraFilters(f, filters) {
+  if (filters.severity.size && !filters.severity.has(f.severity)) return false;
+  if (filters.context && f.context !== filters.context) return false;
+  const q = (filters.search || "").trim().toLowerCase();
+  if (q) {
+    const hay = ((f.title || "") + " " + (f.endpoint_url || "") + " " + (f.parameter_name || "")).toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+// endpointLabel mirrors the server's finding titles: path plus sorted
+// parameter NAMES, which is how discovery tells endpoints apart.
+function endpointLabel(method, rawURL) {
+  if (!rawURL) return "";
+  try {
+    const u = new URL(rawURL);
+    const names = [...new Set([...u.searchParams.keys()])].sort();
+    return (method ? method + " " : "") + u.pathname + (names.length ? "?" + names.join("&") : "");
+  } catch (e) { return (method ? method + " " : "") + rawURL; }
+}
+
+function findingsSignature(findings) {
+  return findings.map((f) => f.id + ":" + f.verdict + ":" + f.updated_at + ":" + (f.attempt_count || 0)).join("|");
+}
+
+const VERDICT_ORDER = ["confirmed", "inconclusive", "rejected", "pending"];
+function verdictBreakdown(by) {
+  const parts = VERDICT_ORDER.filter((v) => by && by[v] > 0).map((v) => v + " " + by[v]);
+  return parts.length ? parts.join(", ") : "no findings";
+}
+
+const ROLE_LABELS = {
+  browser: "browser verification",
+  candidate: "candidate request/response",
+  baseline: "baseline reference — the unmodified request, not a payload",
+};
+
+// evidenceLinks opens/downloads evidence content. The server serves it under a
+// script-less CSP sandbox (captured markup is the target's), so "open" is safe
+// to view; rel=noopener keeps the new tab from reaching back into this one.
+function evidenceLinks(ev) {
+  const frag = document.createDocumentFragment();
+  const view = link("open", "/api/evidence/" + encodeURIComponent(ev.id) + "/content", "act");
+  view.target = "_blank"; view.rel = "noopener noreferrer";
+  const dl = link("download", "/api/evidence/" + encodeURIComponent(ev.id) + "/content?download", "act");
+  dl.rel = "noopener noreferrer"; dl.style.marginLeft = "8px";
+  frag.append(view, dl);
+  return frag;
+}
+
+function evidenceLine(ev) {
+  const li = el("li", undefined, ev.role === "baseline" ? "baseline" : "");
+  li.appendChild(document.createTextNode((ROLE_LABELS[ev.role] || ev.role) + " · " + ev.kind + " · " + (ev.media_type || "") + " · " + ev.size + " bytes · "));
+  li.appendChild(evidenceLinks(ev));
+  return li;
+}
+
+// payloadBox shows a candidate value verbatim and safely: textContent only,
+// wrapping inside its box however long or unbroken the value is.
+function payloadBox(value) {
+  const pre = el("pre", value, "payload");
+  pre.title = "candidate value";
+  return pre;
+}
+
+function sectionNote(f) {
+  switch (f.section) {
+    case "confirmed": return null;
+    case "diagnostic": return "Not a vulnerability: the candidate(s) reflected, but browser verification observed no execution. Kept as a diagnostic.";
+    default: {
+      // review_reason_label (set by the API when the review is specific — an
+      // interaction-only candidate, or every candidate was filtered) is the
+      // accurate reason; fall back to a generic one only when it's absent
+      // (verdict pending/inconclusive with no specific reason recorded).
+      let note = f.review_reason_label || (f.verdict === "inconclusive"
+        ? "Not yet a confirmed vulnerability: the marker could not be re-observed during browser verification."
+        : "Not yet a confirmed vulnerability: awaiting browser verification (or it cannot be verified, e.g. a POST/body-carrying request).");
+      if (f.review_reason === "interaction_only") {
+        note += " Open the tested URL in the attempts list below yourself and perform the action (hover/click/navigate) — Indago never simulates user interaction (AGENTS.md §3).";
+      }
+      return note;
+    }
+  }
+}
+
+function findingDetailEl(f, scanId) {
   const box = el("div", undefined, "detail");
   const dl = el("dl");
   const row = (k, v) => { if (!v) return; dl.appendChild(el("dt", k)); dl.appendChild(el("dd", v)); };
+  const pd = f.parsed_detail || {};
+  const cands = pd.candidates || [];
+  // candidateByValue finds the PLANNED candidate matching a verification
+  // attempt's value, so a confirmed/attempted candidate can show its
+  // Technique (set only when the scan opted into evasion candidates) even
+  // though AttemptView itself doesn't carry one.
+  const candidateByValue = (value) => cands.find((c) => c.value === value);
+  const techniqueNote = (c) => c && c.technique
+    ? el("div", "Bypass technique: " + c.technique + " — " + (c.rationale || ""), "hint")
+    : null;
+
+  if (f.verified_candidate) {
+    // The candidate whose browser verification produced the deterministic
+    // execution signal: shown first, prominently, with its own evidence.
+    const v = f.verified_candidate;
+    const hero = el("div", undefined, "verified");
+    hero.appendChild(el("div", "Verified candidate — confirmed by browser verification", "verified-title"));
+    hero.appendChild(payloadBox(v.candidate_value));
+    const tn = techniqueNote(candidateByValue(v.candidate_value));
+    if (tn) hero.appendChild(tn);
+    if (v.notes) hero.appendChild(el("div", "Signal: " + v.notes, "hint"));
+    const own = (v.evidence || []).filter((e) => e.role !== "baseline");
+    if (own.length) {
+      const ul = el("ul"); own.forEach((e) => ul.appendChild(evidenceLine(e)));
+      hero.appendChild(ul);
+    }
+    // Standalone PoC: a presentation-only capability over the data already
+    // above (the confirmed candidate/request) — see scan.GeneratePoC. Only
+    // ever reachable for a Confirmed finding, same as this hero block.
+    const pocLink = link("⬇ Download PoC (standalone HTML)", api.scan(scanId) + "/findings/" + encodeURIComponent(f.id) + "/poc", "act poc-link");
+    pocLink.title = "A standalone HTML file that reproduces this exact request when opened in a browser — or, for a header/cookie override a link cannot carry, the exact curl command";
+    hero.appendChild(el("div", undefined, "poc-action")).appendChild(pocLink);
+    box.appendChild(hero);
+  } else {
+    const note = sectionNote(f);
+    if (note) box.appendChild(el("div", note, "section-note"));
+  }
+
   row("Verdict", f.verdict + "   (confidence: " + f.confidence + ")");
   if (f.endpoint) row("Endpoint", f.endpoint.method + " " + f.endpoint.url);
   if (f.parameter) row("Parameter", f.parameter.name + " (" + f.parameter.location + ")");
-  else if (f.parsed_detail && f.parsed_detail.parameter_name) row("Parameter", f.parsed_detail.parameter_name);
-  const cands = (f.parsed_detail && f.parsed_detail.candidates) || [];
-  if (cands.length) {
-    dl.appendChild(el("dt", "Candidates (" + cands.length + ", " + (f.parsed_detail.occurrences || 0) + " occurrence(s))"));
-    const dd = el("dd"); const ul = el("ul");
-    cands.forEach((c) => ul.appendChild(el("li", "[" + c.category + "/" + c.context + "] " + c.value + " — " + c.rationale)));
-    dd.appendChild(ul); dl.appendChild(dd);
+  else if (pd.parameter_name) row("Parameter", pd.parameter_name);
+  if (pd.combined) {
+    row("⚠ Combined (multi-parameter) finding", "TWO parameters mutated together in the SAME request were required — NOT a single-parameter bug. Second parameter: " + (pd.parameter_b_name || "(unknown)"));
   }
+  if (cands.length && cands[0].context) row("Execution context", cands[0].context + (cands[0].context_sub ? " (" + cands[0].context_sub + ")" : ""));
+  // dl is placed here (not at the end) so the compact metadata block reads
+  // first; the attempts/candidates/evidence collapsibles that follow are
+  // appended straight to box and so always render AFTER it, however long
+  // they are — row("Provenance", …) below still lands inside this same dl
+  // (appendChild on an already-placed node still inserts live).
+  box.appendChild(dl);
+
+  const attempts = (f.attempts || []).filter((a) => !(f.verified_candidate && a.verify_test_case_id === f.verified_candidate.verify_test_case_id));
+  if (attempts.length) {
+    const heading = (f.verified_candidate ? "Other attempts" : "Attempts") + " (" + attempts.length + ") — kept as diagnostics";
+    const list = pagedList(attempts, 10, (page) => {
+      const ul = el("ul", undefined, "attempts");
+      page.forEach((a) => {
+        const li = el("li");
+        li.appendChild(pill(a.verdict));
+        li.appendChild(document.createTextNode(" "));
+        li.appendChild(el("code", a.candidate_value, "wrap"));
+        const c = candidateByValue(a.candidate_value);
+        if (c && c.technique) li.appendChild(el("span", " [bypass: " + c.technique + "]", "hint"));
+        if (a.notes) li.appendChild(el("div", a.notes, "hint"));
+        if (a.url) {
+          const urlLine = el("div", undefined, "hint");
+          urlLine.appendChild(document.createTextNode("tested URL: "));
+          urlLine.appendChild(el("code", a.url, "wrap"));
+          li.appendChild(urlLine);
+        }
+        ul.appendChild(li);
+      });
+      return ul;
+    });
+    box.appendChild(collapsible(heading, list, attempts.length <= 6));
+  } else if (!f.verified_candidate && cands.length) {
+    const heading = "Candidates that reflected (" + cands.length + ") — not yet verified";
+    const list = pagedList(cands, 10, (page) => {
+      const ul = el("ul");
+      page.forEach((c) => {
+        const li = el("li");
+        li.appendChild(el("code", c.value, "wrap"));
+        if (c.combined) {
+          li.appendChild(el("span", " + ", "hint"));
+          li.appendChild(el("code", c.value_b, "wrap"));
+          li.appendChild(el("span", " [combined: param B = " + (c.parameter_b || "?") + "]", "hint"));
+        }
+        if (c.technique) li.appendChild(el("span", " [bypass: " + c.technique + "]", "hint"));
+        ul.appendChild(li);
+      });
+      return ul;
+    });
+    box.appendChild(collapsible(heading, list, cands.length <= 6));
+  }
+
   if (f.provenance) {
     let p = f.provenance.engine + ", discovered via " + f.provenance.discovery_source;
     if (f.provenance.ai_assisted) p += " (AI-assisted; advisory only, not the verdict authority)";
     row("Provenance", p);
   }
-  if (f.evidence && f.evidence.length) {
-    dl.appendChild(el("dt", "Evidence (" + f.evidence.length + ") — opening fetches the stored content"));
-    const dd = el("dd"); const ul = el("ul");
-    f.evidence.forEach((ev) => ul.appendChild(evidenceLine(ev)));
-    dd.appendChild(ul); dl.appendChild(dd);
+
+  const evs = f.evidence || [];
+  const evHeading = "Evidence (" + evs.length + ")";
+  if (evs.length) {
+    const list = pagedList(evs, 10, (page) => {
+      const ul = el("ul"); page.forEach((e) => ul.appendChild(evidenceLine(e))); return ul;
+    });
+    box.appendChild(collapsible(evHeading, list, evs.length <= 6));
+  } else {
+    box.appendChild(el("div", evHeading + ": none recorded yet", "hint"));
   }
-  box.appendChild(dl);
   return box;
 }
 
-function evidenceLine(ev) {
-  const li = el("li");
-  li.appendChild(document.createTextNode(ev.kind + " · " + (ev.media_type || "") + " · " + ev.size + " bytes · "));
-  const a = link("open", "/api/evidence/" + encodeURIComponent(ev.id) + "/content");
-  a.target = "_blank"; a.rel = "noopener";
-  li.appendChild(a);
-  return li;
+// toggleDetail opens/closes a finding's detail row under tr. The colspan is
+// taken from the row itself so callers that add columns stay correct.
+async function toggleDetail(tr, f, scanId, state, forceOpen) {
+  const open = tr._detailRow;
+  if (open && !forceOpen) {
+    open.remove(); tr._detailRow = null;
+    if (state) state.expanded.delete(f.id);
+    return;
+  }
+  if (open) return;
+  const detailRow = el("tr", undefined, "detail-row");
+  const td = el("td"); td.colSpan = tr.children.length; td.appendChild(el("div", "loading…", "hint"));
+  detailRow.appendChild(td); tr.after(detailRow);
+  tr._detailRow = detailRow;
+  if (state) state.expanded.add(f.id);
+  try {
+    const full = await getJSON(api.scan(scanId) + "/findings/" + encodeURIComponent(f.id));
+    td.replaceChildren(findingDetailEl(full, scanId));
+  } catch (e) { td.replaceChildren(el("div", "failed to load detail", "err")); }
 }
 
-function findingRow(f, scanId, selectedIds) {
+function findingRow(f, scanId, state) {
   const tr = el("tr");
-  if (selectedIds) {
-    const cb = el("input"); cb.type = "checkbox"; cb.title = "include in next generated report";
-    cb.addEventListener("change", () => { if (cb.checked) selectedIds.add(f.id); else selectedIds.delete(f.id); });
+  tr.dataset.findingId = f.id;
+  if (state) {
+    const cb = el("input"); cb.type = "checkbox"; cb.className = "finding-select";
+    cb.title = "include in a 'Selected findings' report";
+    cb.checked = state.selected.has(f.id);
+    cb.addEventListener("change", () => {
+      if (cb.checked) state.selected.add(f.id); else state.selected.delete(f.id);
+      notifySelection(state);
+    });
     const td = el("td"); td.appendChild(cb); tr.appendChild(td);
   }
-  const titleTd = cell(f.title || "(untitled)", "clickable");
+  const titleTd = cell(f.title || "(untitled)", "clickable c-title");
+  if (f.combined) titleTd.title = "Combined (multi-parameter) finding — second parameter: " + (f.parameter_b_name || "?");
   tr.appendChild(titleTd);
   const vTd = el("td"); vTd.appendChild(pill(f.verdict)); tr.appendChild(vTd);
-  tr.appendChild(cell(f.severity));
-  const detail = decodeDetail(f.detail || "");
-  tr.appendChild(cell(detail.parameter_name || ""));
-  tr.appendChild(cell((detail.candidates || [])[0] ? detail.candidates[0].context : ""));
-  let detailRow = null;
-  const cols = selectedIds ? 6 : 5;
-  titleTd.addEventListener("click", async () => {
-    if (detailRow) { detailRow.remove(); detailRow = null; return; }
-    detailRow = el("tr");
-    const td = el("td"); td.colSpan = cols; td.appendChild(el("div", "loading…", "hint"));
-    detailRow.appendChild(td); tr.after(detailRow);
-    try {
-      const full = await getJSON(api.scan(scanId) + "/findings/" + encodeURIComponent(f.id));
-      td.replaceChildren(findingDetailEl(full));
-    } catch (e) { td.replaceChildren(el("div", "failed to load detail", "err")); }
-  });
+  const sevTd = el("td"); if (f.severity) sevTd.appendChild(pill(f.severity)); tr.appendChild(sevTd);
+  tr.appendChild(cell(endpointLabel(f.endpoint_method, f.endpoint_url), "mono c-endpoint"));
+  tr.appendChild(cell(f.combined ? (f.parameter_name || "") + " + " + (f.parameter_b_name || "") : (f.parameter_name || ""), "c-ident"));
+  tr.appendChild(cell(f.context || "", "c-ident c-words"));
+  // Only a confirmed finding has a verified candidate to show.
+  const vc = el("td", undefined, "mono verified-cell");
+  if (f.verified_candidate) {
+    // Clamped in the table (the full value is the first thing in the detail row).
+    const val = f.verified_candidate.candidate_value;
+    vc.textContent = val.length > 140 ? val.slice(0, 140) + "…" : val;
+    vc.title = val;
+  }
+  tr.appendChild(vc);
+  // Labels for the stacked (phone-width) layout, where the header row is hidden.
+  const cells = Array.from(tr.children).slice(state ? 1 : 0);
+  cells.forEach((td, i) => { td.dataset.label = FINDING_HEADERS[i]; });
+  titleTd.addEventListener("click", () => toggleDetail(tr, f, scanId, state));
   return tr;
 }
 
-function findingsTable(findings, scanId, selectedIds) {
-  const headers = selectedIds ? ["", "Title", "Verdict", "Severity", "Parameter", "Context"] : ["Title", "Verdict", "Severity", "Parameter", "Context"];
-  return table(headers, findings.map((f) => findingRow(f, scanId, selectedIds)), "No findings for this scan yet.", "findingsBody");
+const FINDING_HEADERS = ["Title", "Verdict", "Severity", "Endpoint", "Parameter", "Context", "Verified candidate"];
+
+// findingsTable renders the findings list for a view filter. With a state it
+// adds selection: a header checkbox (checked / indeterminate / clear), Select
+// all and Clear selection actions, and a live "N of M shown selected" count.
+// "Select all" applies to the findings SHOWN (the current filter); Clear
+// selection clears everything, including selections made in other views.
+function findingsTable(findings, scanId, state, emptyText) {
+  emptyText = emptyText || "No findings in this view.";
+  if (!state) {
+    const t = table(FINDING_HEADERS, findings.map((f) => findingRow(f, scanId, null)), emptyText, "findingsBody");
+    t.classList.add("findings-table");
+    return t;
+  }
+
+  state.visible = findings.map((f) => f.id);
+  const wrap = el("div");
+  const toolbar = el("div", undefined, "selection-bar");
+  const count = el("span", undefined, "hint"); count.id = "selectionCount";
+  const all = button("Select all", () => { state.visible.forEach((id) => state.selected.add(id)); notifySelection(state); }, "", "selectAll");
+  const clear = button("Clear selection", () => { state.selected.clear(); notifySelection(state); }, "", "clearSelection");
+  toolbar.append(all, clear, count);
+
+  const t = table(["", ...FINDING_HEADERS], findings.map((f) => findingRow(f, scanId, state)), emptyText, "findingsBody");
+  t.classList.add("findings-table");
+  const headCb = el("input"); headCb.type = "checkbox"; headCb.id = "selectAllBox"; headCb.title = "select / clear all findings shown";
+  t.querySelector("thead th").appendChild(headCb);
+  headCb.addEventListener("change", () => {
+    if (headCb.checked) state.visible.forEach((id) => state.selected.add(id));
+    else state.visible.forEach((id) => state.selected.delete(id));
+    notifySelection(state);
+  });
+
+  const sync = () => {
+    const shown = state.visible.length;
+    const selShown = state.visible.filter((id) => state.selected.has(id)).length;
+    const hiddenSel = state.selected.size - selShown;
+    count.textContent = selShown + " of " + shown + " selected" + (hiddenSel > 0 ? " · " + hiddenSel + " more selected in other views" : "");
+    headCb.checked = shown > 0 && selShown === shown;
+    headCb.indeterminate = selShown > 0 && selShown < shown;
+    headCb.disabled = shown === 0;
+    all.disabled = shown === 0 || selShown === shown;
+    clear.disabled = state.selected.size === 0;
+    t.querySelectorAll("input.finding-select").forEach((cb) => {
+      cb.checked = state.selected.has(cb.closest("tr").dataset.findingId);
+    });
+  };
+  onSelectionChange(state, wrap, sync);
+  wrap.append(toolbar, t);
+  sync();
+  // Re-open rows the operator had expanded before this render.
+  t.querySelectorAll("tbody tr[data-finding-id]").forEach((tr) => {
+    const f = findings.find((x) => x.id === tr.dataset.findingId);
+    if (f && state.expanded.has(f.id)) toggleDetail(tr, f, scanId, state, true);
+  });
+  return wrap;
 }
 
 function reportRow(r) {
   const tr = el("tr");
-  tr.appendChild(cell(fmtTime(r.created_at)));
-  tr.appendChild(cell(r.format));
-  tr.appendChild(cell(String((r.summary && r.summary.total_findings) || 0)));
-  tr.appendChild(cell(String((r.summary && r.summary.confirmed_count) || 0)));
+  const s = r.summary || {};
+  tr.appendChild(cell(fmtTime(r.created_at), "c-words"));
+  tr.appendChild(cell(r.format, "c-words"));
+  tr.appendChild(cell(s.selection || "—", "c-words"));
+  tr.appendChild(cell(String(s.total_findings || 0) + (s.scan_findings ? " of " + s.scan_findings : ""), "c-words"));
+  tr.appendChild(cell(verdictBreakdown(s.by_verdict), "c-words"));
   const openTd = el("td");
-  const view = link("view", "/api/reports/" + encodeURIComponent(r.id) + "/content"); view.target = "_blank"; view.rel = "noopener";
-  const dl = link("download", "/api/reports/" + encodeURIComponent(r.id) + "/content?download"); dl.style.marginLeft = "10px";
+  const view = link("view", "/api/reports/" + encodeURIComponent(r.id) + "/content", "act"); view.target = "_blank"; view.rel = "noopener noreferrer";
+  const dl = link("download", "/api/reports/" + encodeURIComponent(r.id) + "/content?download", "act"); dl.style.marginLeft = "10px";
   openTd.append(view, dl);
   tr.appendChild(openTd);
   return tr;
 }
 
-// reportsPanel renders the report list + generator for a scan. selectedIds (a
-// Set) is optional and, when given, scopes "generate" to the checked findings.
-function reportsPanel(scanId, selectedIds) {
+// reportsPanel renders the report generator and the scan's report list. The
+// mode is explicit — Confirmed only / Selected findings / All findings — and
+// before generating it shows exactly what the server will include (count and
+// verdict breakdown), fetched from the same selection logic generation uses.
+// The selection is the scan's shared one (uiState), so findings checked on the
+// Findings tab carry over here.
+function reportsPanel(scanId) {
+  const state = uiState(scanId);
   const wrap = el("div");
   const errBox = el("div", undefined, "err");
-  const fmt = select("r_fmt", [["json", "JSON"], ["markdown", "Markdown"], ["html", "HTML"]], "json");
+
+  const modes = [["confirmed", "Confirmed only"], ["selected", "Selected findings"], ["all", "All findings (incl. unconfirmed and rejected diagnostics)"]];
+  const modeRow = el("div", undefined, "row report-modes");
+  const radios = {};
+  modes.forEach(([value, label]) => {
+    const r = el("input"); r.type = "radio"; r.name = "r_mode_" + scanId; r.value = value; r.id = "r_mode_" + value;
+    r.addEventListener("change", () => { state.mode = value; state.modeExplicit = true; update(); });
+    radios[value] = r;
+    modeRow.appendChild(labelInline(r, label));
+  });
+  const fmt = select("r_fmt", [["json", "JSON"], ["markdown", "Markdown"], ["html", "HTML"]], state.format);
   fmt.style.width = "auto";
+  fmt.addEventListener("change", () => { state.format = fmt.value; });
+  const aiSummaryChk = el("input"); aiSummaryChk.type = "checkbox"; aiSummaryChk.id = "r_ai_summary";
+  aiSummaryChk.checked = !!state.aiSummary;
+  aiSummaryChk.addEventListener("change", () => { state.aiSummary = aiSummaryChk.checked; });
+  const aiSummaryLabel = labelInline(aiSummaryChk, " AI-generated summary (advisory only; no effect unless the server has -ai-provider configured)");
+  const preview = el("div", undefined, "hint"); preview.id = "reportPreview";
+
+  let previewTotal = null;
+  let previewSeq = 0;
+  async function refreshPreview() {
+    const seq = ++previewSeq;
+    if (state.mode === "selected" && state.selected.size === 0) {
+      previewTotal = 0;
+      preview.textContent = "Select findings on the Findings tab to use this mode.";
+      syncGenerate();
+      return;
+    }
+    let q = "?mode=" + encodeURIComponent(state.mode);
+    if (state.mode === "selected") [...state.selected].sort().forEach((id) => { q += "&finding_id=" + encodeURIComponent(id); });
+    try {
+      const p = await getJSON(api.scan(scanId) + "/reports/preview" + q);
+      if (seq !== previewSeq) return; // a newer request superseded this one
+      previewTotal = p.total_findings;
+      preview.textContent = "Will include " + p.total_findings + " of " + p.scan_findings + " finding(s): " + verdictBreakdown(p.by_verdict) + "."
+        + (p.total_findings === 0 ? " Nothing matches this mode yet." : "");
+    } catch (e) {
+      if (seq === previewSeq) { previewTotal = null; preview.textContent = "Could not compute the report preview."; }
+    }
+    syncGenerate();
+  }
+
+  const gen = button("Generate report", async () => {
+    const body = { format: state.format, mode: state.mode, ai_summary: !!state.aiSummary };
+    if (state.mode === "selected") body.finding_ids = [...state.selected].sort();
+    gen.disabled = true;
+    const res = await mutate("POST", api.scan(scanId) + "/reports", body);
+    syncGenerate();
+    if (!res.ok) { setMsg(errBox, errMsg(res, "generate report failed")); return; }
+    const s = res.data.summary || {};
+    setMsg(errBox, "Report created: " + s.total_findings + " finding(s) (" + verdictBreakdown(s.by_verdict) + ").", true);
+    reload();
+  }, "primary", "generateReport");
+  const syncGenerate = () => { gen.disabled = (state.mode === "selected" && state.selected.size === 0) || previewTotal === 0; };
+
+  const update = () => {
+    radios.selected.parentElement.lastChild.textContent = " Selected findings (" + state.selected.size + ")";
+    Object.entries(radios).forEach(([v, r]) => { r.checked = v === state.mode; });
+    syncGenerate();
+    refreshPreview();
+  };
+  onSelectionChange(state, wrap, update);
+
   const tbody = el("tbody"); tbody.id = "reportsBody";
   const t = el("table");
   const thead = el("thead"); const hr = el("tr");
-  ["Created", "Format", "Findings", "Confirmed", "Open"].forEach((h) => hr.appendChild(el("th", h)));
+  ["Created", "Format", "Selection", "Findings", "Verdicts", "Open"].forEach((h) => hr.appendChild(el("th", h)));
   thead.appendChild(hr); t.append(thead, tbody);
-
+  let reportsSig = null;
   async function reload() {
     try {
       const reports = (await getJSON(api.scan(scanId) + "/reports")) || [];
-      fillBody(tbody, reports.map(reportRow), "No reports yet.", 5);
-    } catch (e) { fillBody(tbody, [], "error loading reports", 5); }
+      const sig = reports.map((r) => r.id).join("|");
+      if (sig === reportsSig) return;
+      reportsSig = sig;
+      fillBody(tbody, reports.map(reportRow), "No reports yet.", 6);
+    } catch (e) { fillBody(tbody, [], "error loading reports", 6); }
   }
-  const gen = button("Generate report", async () => {
-    const body = { format: fmt.value, finding_ids: selectedIds ? Array.from(selectedIds) : [] };
-    const res = await mutate("POST", api.scan(scanId) + "/reports", body);
-    if (!res.ok) { setMsg(errBox, errMsg(res, "generate report failed")); return; }
-    setMsg(errBox, "");
-    reload();
-  }, "primary");
-  const controls = el("p");
-  controls.append(fmt, document.createTextNode(" "), gen);
-  if (selectedIds) wrap.appendChild(el("p", "Check findings above to scope the report, or leave all unchecked to include every finding.", "hint"));
-  wrap.append(controls, errBox, t);
+
+  const controls = el("div", undefined, "form-actions");
+  controls.append(fmt, aiSummaryLabel, gen);
+  wrap.append(modeRow, preview, controls, errBox, t);
+  wrap.live = () => { reload(); refreshPreview(); };
+  update();
   reload();
   return wrap;
 }
@@ -379,16 +866,23 @@ async function renderScanDetail(params, view) {
   const panel = el("div"); panel.id = "tabPanel";
   view.appendChild(panel);
 
-  const renderTab = (status) => {
+  // Status-only tabs (overview/discovery/jobs) are cheap and stateless, so a
+  // refresh rebuilds them. Findings/evidence/reports carry operator state
+  // (selection, open detail rows, chosen report mode) and expose a live()
+  // that patches in new data instead: rebuilding them every tick used to
+  // reset the selection and collapse open rows every couple of seconds.
+  const renderTab = (status, isRefresh) => {
     const cur = SCAN_TABS.includes((location.hash.split("/")[3] || "overview")) ? (location.hash.split("/")[3] || "overview") : "overview";
     if (cur !== tab) return; // tab changed; router will re-render
+    const existing = panel.firstChild;
+    if (isRefresh && existing && typeof existing.live === "function") { existing.live(status); return; }
     panel.replaceChildren(scanTabPanel(cur, status, scanId));
   };
-  renderTab(st);
+  renderTab(st, false);
 
   // Live refresh of the active tab.
   return async () => {
-    try { const fresh = await getJSON(api.scan(scanId) + "/status"); renderTab(fresh); } catch (e) { /* keep last */ }
+    try { const fresh = await getJSON(api.scan(scanId) + "/status"); renderTab(fresh, true); } catch (e) { /* keep last */ }
   };
 }
 
@@ -399,7 +893,12 @@ function scanTabPanel(tab, st, scanId) {
     case "jobs": return jobsPanel(st);
     case "findings": return findingsTabPanel(scanId);
     case "evidence": return evidencePanel(scanId);
-    case "reports": return card("Reports", reportsPanel(scanId, null));
+    case "reports": {
+      const rp = reportsPanel(scanId);
+      const c = card("Reports", rp);
+      c.live = rp.live;
+      return c;
+    }
     default: return el("div");
   }
 }
@@ -413,6 +912,15 @@ function metric(k, v, pillCls, hint) {
   return d;
 }
 
+// accentMetric is metric() with a bigger, coloured figure (dashboard
+// headline numbers) — accent is one of ok/bad/warn/accent, matching the
+// .metric.accent-* CSS classes.
+function accentMetric(k, v, accent, hint) {
+  const m = metric(k, v, undefined, hint);
+  m.classList.add("accent", "accent-" + accent);
+  return m;
+}
+
 function overviewPanel(st, scanId) {
   const s = st.scan, cfg = s.config || {};
   const wrap = el("div");
@@ -422,9 +930,15 @@ function overviewPanel(st, scanId) {
     metric("Profile", s.profile),
     metric("Discovery", st.discovery.state + (st.discovery.paused ? " (paused)" : "")),
     metric("Request rate", cfg.requests_per_second > 0 ? cfg.requests_per_second + " req/s" : "unlimited"),
+    metric("Candidate profile", (cfg.candidate_profile || "standard") + (cfg.max_candidates ? " (max " + cfg.max_candidates + ")" : "")),
     metric("Active workers (d/h/b)", st.workers ? (st.workers.discovery + " / " + st.workers.http + " / " + st.workers.browser) : "—"),
-    metric("Findings", "C " + st.findings.confirmed + "  P " + st.findings.pending + "  R " + st.findings.rejected + "  I " + st.findings.inconclusive),
+    metric("Findings", st.findings.confirmed + " confirmed", undefined,
+      st.findings.pending + " pending · " + st.findings.inconclusive + " inconclusive · " + st.findings.rejected + " rejected"),
   );
+  if (cfg.enable_evasion) {
+    m.appendChild(metric("Evasion candidates", "ON", undefined,
+      "Also tried WAF/filter-bypass variants (case variation, alt separators, double URL-encoding) on top of the canonical candidates — look for a \"bypass: …\" tag on a candidate."));
+  }
   if (st.session) {
     const sess = st.session;
     m.appendChild(metric("Auth / session", sess.mode + " · " + sess.state + (sess.has_state ? " · on file" : ""), sess.state));
@@ -484,40 +998,126 @@ function jobsPanel(st) {
   return wrap;
 }
 
+// findingsTabPanel lists a scan's findings through a filter that defaults to
+// confirmed vulnerabilities. Rejected attempts are diagnostics: reachable via
+// their own filter, never mixed into the default view.
 function findingsTabPanel(scanId) {
+  const state = uiState(scanId);
   const wrap = el("div");
-  const selected = new Set();
   const body = el("div");
   body.appendChild(el("div", "loading…", "hint"));
-  getJSON(api.scan(scanId) + "/findings").then((findings) => {
-    body.replaceChildren(findingsTable(findings || [], scanId, selected));
-  }).catch(() => body.replaceChildren(el("div", "error loading findings", "err")));
-  wrap.appendChild(card("Findings", body));
-  wrap.appendChild(card("Generate report from selection", reportsPanel(scanId, selected)));
+  let all = null, sig = null, shownView = null;
+  const extra = buildExtraFilters(state, () => render());
+
+  function render() {
+    const counts = sectionCountsOf(all);
+    const sectioned = all.filter(viewPredicate(state.view));
+    const shown = sectioned.filter((f) => matchesExtraFilters(f, state.filters));
+    state.visible = shown.map((f) => f.id);
+    const hidden = all.length - counts.confirmed;
+    let empty = "No findings in this view.";
+    if (state.view === "confirmed") {
+      empty = all.length
+        ? "No confirmed vulnerabilities yet. " + hidden + " other finding(s) — unconfirmed or rejected diagnostics — are hidden in this view."
+        : "No findings for this scan yet.";
+    } else if (sectioned.length && !shown.length) {
+      empty = "No findings in this view match the current severity/context/search filters.";
+    }
+    const bar = filterBar(counts, state.view, (name) => { state.view = name; render(); notifySelection(state); });
+    body.replaceChildren(bar, findingsTable(shown, scanId, state, empty));
+    shownView = state.view;
+  }
+  async function load() {
+    try {
+      const findings = (await getJSON(api.scan(scanId) + "/findings")) || [];
+      const next = findingsSignature(findings);
+      if (next === sig && shownView === state.view) return; // nothing changed: keep the DOM (and open rows)
+      sig = next;
+      all = findings;
+      extra.refreshOptions(all);
+      // Drop selections/open rows for findings that no longer exist.
+      const known = new Set(findings.map((f) => f.id));
+      [...state.selected].forEach((id) => { if (!known.has(id)) state.selected.delete(id); });
+      [...state.expanded].forEach((id) => { if (!known.has(id)) state.expanded.delete(id); });
+      render();
+      notifySelection(state); // counts may have changed (pruned/added findings)
+    } catch (e) {
+      if (sig === null) body.replaceChildren(el("div", "error loading findings", "err"));
+    }
+  }
+  const rp = reportsPanel(scanId);
+  wrap.append(card("Findings", extra.el, body), card("Generate report", rp));
+  wrap.live = () => { load(); rp.live(); };
+  load();
   return wrap;
 }
 
+// evidencePanel lists every finding's evidence (metadata only) from one
+// request, grouped by finding with confirmed findings first; each item is
+// labelled by role so the baseline (the unmodified request, e.g. q=hello) is
+// never mistaken for a payload. Content opens sandboxed (see evidenceLinks).
 function evidencePanel(scanId) {
   const wrap = el("div");
-  const body = el("div");
+  const body = el("div"); body.id = "evidenceBody";
   body.appendChild(el("div", "loading…", "hint"));
-  wrap.appendChild(card("Evidence — all stored request/response/browser evidence for this scan's findings", body));
-  getJSON(api.scan(scanId) + "/findings").then(async (findings) => {
-    findings = findings || [];
-    const rows = [];
-    for (const f of findings) {
-      let full;
-      try { full = await getJSON(api.scan(scanId) + "/findings/" + encodeURIComponent(f.id)); } catch (e) { continue; }
-      (full.evidence || []).forEach((ev) => {
-        const tr = el("tr");
-        tr.append(cell(f.title || "(untitled)"), cell(ev.kind), cell(ev.media_type || ""), cell(ev.size + " bytes"));
-        const openTd = el("td");
-        const a = link("open", "/api/evidence/" + encodeURIComponent(ev.id) + "/content"); a.target = "_blank"; a.rel = "noopener";
-        openTd.appendChild(a); tr.appendChild(openTd);
-        rows.push(tr);
+  wrap.appendChild(card("Evidence — request/response and browser evidence linked to this scan's findings", body));
+  let sig = null;
+  async function load() {
+    try {
+      const groups = (await getJSON(api.scan(scanId) + "/evidence")) || [];
+      const next = groups.map((g) => g.finding_id + ":" + g.verdict + ":" + g.evidence.map((e) => e.id).join(",")).join("|");
+      if (next === sig) return;
+      sig = next;
+      const total = groups.reduce((n, g) => n + g.evidence.length, 0);
+      if (!total) {
+        body.replaceChildren(el("div", groups.length
+          ? "These findings have no stored evidence yet — evidence appears as candidates are executed and verified."
+          : "No findings yet — evidence appears once candidates are executed and verified.", "empty"));
+        return;
+      }
+      const nonEmptyGroups = groups.filter((g) => g.evidence.length);
+      // Each finding's own evidence is a separate, collapsible table (open by
+      // default only for a small scan) so a long scan's Evidence tab reads as
+      // a short list of headings instead of one giant flat table; the groups
+      // themselves are paginated too for a scan with many findings.
+      // Paginate at a generous size: a normal-to-large scan's finding count
+      // (seen in practice, and in this project's own test fixtures) stays on
+      // one page; pagination only kicks in for a genuinely huge scan.
+      const groupList = pagedList(nonEmptyGroups, 50, (page) => {
+        const frag = document.createDocumentFragment();
+        page.forEach((g) => {
+          const t = el("table");
+          const thead = el("thead"); const hr = el("tr");
+          ["Finding", "Role", "Kind", "Type", "Size", "SHA-256", "Captured", "Open"].forEach((h) => hr.appendChild(el("th", h)));
+          thead.appendChild(hr); t.appendChild(thead);
+          const tbody = el("tbody");
+          g.evidence.forEach((ev, i) => {
+            const tr = el("tr", undefined, ev.role === "baseline" ? "baseline" : "");
+            const ftd = el("td");
+            if (i === 0) {
+              ftd.append(pill(g.verdict), document.createTextNode(" " + (g.finding_title || "(untitled)")));
+              if (g.verified_candidate) ftd.appendChild(el("div", "verified: " + g.verified_candidate, "hint mono wrap"));
+            }
+            tr.append(ftd, cell(ROLE_LABELS[ev.role] || ev.role, "c-words"), cell(ev.kind, "c-words"), cell(ev.media_type || "", "c-words"),
+              cell(ev.size + " bytes", "c-words"), cell((ev.sha256 || "").slice(0, 12), "mono"), cell(fmtTime(ev.created_at), "c-words"));
+            const openTd = el("td"); openTd.appendChild(evidenceLinks(ev)); tr.appendChild(openTd);
+            tbody.appendChild(tr);
+          });
+          t.appendChild(tbody);
+          const summary = document.createDocumentFragment();
+          summary.append(pill(g.verdict), document.createTextNode(" " + (g.finding_title || "(untitled)")));
+          if (g.verified_candidate) summary.appendChild(el("span", " — verified: " + g.verified_candidate, "hint mono"));
+          frag.appendChild(collapsible(summary, t, nonEmptyGroups.length <= 3, g.evidence.length + " item(s)"));
+        });
+        return frag;
       });
+      body.replaceChildren(el("p", total + " evidence item(s) across " + nonEmptyGroups.length + " finding(s). Content opens sandboxed: scripts in captured pages never run.", "hint"),
+        groupList);
+    } catch (e) {
+      if (sig === null) body.replaceChildren(el("div", "error loading evidence", "err"));
     }
-    body.replaceChildren(table(["Finding", "Kind", "Type", "Size", "Open"], rows, "No evidence yet — evidence appears once candidates are executed and verified."));
-  }).catch(() => body.replaceChildren(el("div", "error loading evidence", "err")));
+  }
+  wrap.live = load;
+  load();
   return wrap;
 }

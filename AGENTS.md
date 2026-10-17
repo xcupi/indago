@@ -28,9 +28,47 @@ and must be preserved by every change:
 1. **Explicit scope is mandatory.** Nothing is ever tested until an operator has
    defined and the system has validated a `Scope`. Scope enforcement lives in
    the domain/scan layers and must fail closed.
-2. **No anti-bot / WAF / detection evasion.** Do not add payload obfuscation for
-   evasion, request-fingerprint spoofing, CAPTCHA solving, or similar. (Context-
-   aware payload *encoding* required purely for correctness is not evasion.)
+2. **WAF/anti-bot evasion is opt-in, scope-gated, and narrowly bounded.**
+   By default Indago sends only its canonical, non-obfuscated candidates (no
+   evasion), through Indago's real network identity: no proxy, no TLS
+   fingerprint spoofing. An operator may explicitly opt into each of the
+   following, independently, per scan — never as a default:
+   - `ScanConfig.EnableEvasion` (CLI `-enable-evasion`): ALSO try a small
+     set of documented payload-shape bypasses (case variation, alternate
+     HTML separators, double URL-encoding — see
+     `internal/detection/evasion.go` and `docs/reflection-candidates.md`
+     "Evasion candidates (opt-in)") for an engagement where a bypass is
+     itself the reportable finding (e.g. a bug bounty program).
+   - `ScanConfig.ProxyPool` (CLI `-proxy`, repeatable): route outbound
+     traffic — raw HTTP requests AND browser verification alike — through
+     operator-supplied proxy infrastructure, round-robin. Indago never
+     discovers, purchases, or manages proxies itself.
+   - `ScanConfig.RandomizeTLSFingerprint` (CLI `-randomize-tls-fingerprint`):
+     perform the raw HTTP engine's TLS handshake with a randomized
+     ClientHello (JA3, via uTLS) instead of Go's own default, which has its
+     own distinct, fingerprintable signature regardless of the UserAgent
+     header. MUTUALLY EXCLUSIVE with `ProxyPool` — Go's `http.Transport`
+     never consults a custom TLS dialer for a proxied connection, so the
+     server rejects the combination outright rather than silently no-op the
+     override (see `internal/httpengine/client.go`). Has no effect on
+     browser verification: a real browser's own TLS stack is already
+     genuine and unspoofed.
+   None of these touch the boundaries below, which stay absolute regardless
+   of what is opted into: every request still goes through the SAME
+   scope-enforcing engine (never widens WHAT may be targeted, only which
+   payload shape, network path, or TLS signature is used against an
+   already-in-scope target); still a benign-marker detection probe, never
+   alert/cookie/exfiltration; still rate/concurrency-bounded by the scan's
+   profile. Two related capabilities remain fully OUT OF SCOPE even with
+   every opt-in above enabled, and need their own explicit operator
+   decision plus an AGENTS.md update before either could ever be added:
+   timing-based evasion (deliberate request jitter to evade rate-based
+   detection), and CAPTCHA SOLVING or bypass of any kind — Indago only
+   DETECTS a CAPTCHA/bot-challenge newly appearing during testing
+   (`internal/detection/captcha.go`, surfaced as its own diagnostic
+   Finding), it never attempts to solve or defeat one.
+   A change that would weaken any of THESE remaining boundaries must still
+   stop and raise it, per point 6 below.
 3. **Conservative by default.** Default profiles use low concurrency and request
    rates. Aggressive behavior is opt-in and operator-configured.
 4. **No DoS / high-volume abuse.** Rate and concurrency controls exist to protect
@@ -187,8 +225,78 @@ Implemented so far (infrastructure and **discovery**):
   tests live in `internal/scan/stress_test.go`. When changing restart, queue,
   or browser lifecycle code, keep `assertScanIntegrity`'s invariants
   passing under `-race -count=20`.
-- ⏳ Stubs: detection engines (non-XSS classes), Password/Interactive/MFA auth
-  modes, AI providers
+- ✅ Finding presentation & candidate profiles (see `docs/finding-correlation.md`,
+  `docs/reflection-candidates.md`): logical findings with per-candidate attempts,
+  confirmed-first default views/reports with the verified candidate shown, and
+  bounded, deterministic `minimal`/`standard`/`thorough` candidate profiles
+  (ceiling 32) that only select from the planner's output. No new vectors, no
+  verdict changes.
+- ✅ AuthMode password/interactive/mfa (`internal/auth`): all 5 `domain.AuthMode`
+  values are real. Interactive/MFA drive `browser.Manager.InteractiveLogin`
+  (operator logs in themselves, visible browser, however many steps/MFA that
+  needs); Password drives `browser.Manager.AutoLogin` (headless, heuristic
+  locates the password field then the nearest username field, CSS-selector
+  overrides are the escape hatch). Password credentials come ONLY from the
+  server process's own `INDAGO_AUTH_USER`/`INDAGO_AUTH_PASS` env vars — never
+  persisted, never accepted over the API/CLI. The login is driven ONCE at
+  scan-create time; every later Start/Resume just validates+imports the
+  already-captured session state, never re-drives the login.
+- ✅ AI Gateway (`internal/ai`): real providers — one OpenAI-Chat-Completions-
+  shaped implementation covers OpenAI/OpenRouter/Ollama/vLLM, plus a separate
+  Anthropic Messages-API implementation. Disabled by default; a hosted
+  provider with no API key fails closed at construction, not on first call.
+  First integration point is AI-assisted report drafting
+  (`report create -ai-summary`, opt-in per report): best-effort, its own
+  shorter timeout, and ANY provider error falls back to a plain report —
+  AI health never blocks report creation. Still advisory-only per §2.5: no
+  AI output ever decides scope or a verdict.
+- ✅ Header/Cookie/Path injection points (`internal/discovery/extra_locations.go`,
+  `path_segments.go`; see `docs/reflection-candidates.md`): `LocationHeader`/
+  `LocationCookie`/`LocationPath` were declared in the domain model but never
+  constructed until now. Reuses the SAME reflect → context → plan → execute →
+  verify → correlate pipeline Query/Form/JSON already go through — only
+  injection-point construction and mutated-request building are
+  location-specific. Header: a small conservative default set (User-Agent,
+  Referer, X-Forwarded-For), one overridden per candidate, others untouched.
+  Cookie: only cookies the scan's own session actually carries, excluding
+  whatever looks like the session/auth cookie itself — no session means
+  nothing to register, never fabricated. Path: only a segment that looks like
+  a variable value (numeric, UUID-shaped, opaque slug with a digit), never a
+  literal route keyword — an endpoint with no qualifying segment correctly
+  gets zero Path injection points. Browser verification threads the exact
+  same header/cookie override into the verifying context before navigation
+  (`verification.Input.ExtraHeaders`/`ExtraCookies`); a real shadowing bug
+  (session cookies were appended after request cookies, so a same-named
+  override silently lost to the session's value) was found and fixed live.
+- ✅ Combined (multi-parameter) candidates (`internal/detection/combined.go`,
+  `internal/scan/combined.go`; see `docs/reflection-candidates.md`): a small,
+  BOUNDED, deterministic fallback probe for reflected XSS that genuinely
+  needs TWO parameters controlled together to break out (one supplies a
+  closing sequence, the other supplies the breakout). Pair-only (never
+  triple+), same-context only (`html_attr_value` or `js_string`), fallback
+  only (runs for an endpoint only after its single-parameter candidate
+  testing already ran and found no Confirmed finding there), hard ceiling
+  of 5 pairs per endpoint, picked deterministically. Still ONE real HTTP
+  request per pair, carrying both overrides — no new verification
+  machinery. A combined finding gets its own disjoint identity (both
+  parameter names + context in the dedup key) so it never collides with
+  either single-parameter finding, and is clearly labeled as combined
+  across every presentation surface.
+- ✅ Standalone PoC generation (`internal/scan/poc.go`; see
+  `docs/reflection-candidates.md`): turns an existing Confirmed finding into
+  a triager-openable artifact — ONLY ever operates on `Verdict=Confirmed`
+  (refuses anything else, never fabricates evidence for an
+  unconfirmed/rejected/inconclusive candidate). True one-click HTML
+  (navigate/auto-submit form) for Query/Path/Form locations and Combined
+  pairs expressible that way; for a location a plain browser artifact
+  genuinely cannot carry (Header/Cookie overrides, POST+JSON), the output
+  says so explicitly and gives the exact curl/HTTP request instead of a
+  misleading fake link. Reachable from all three surfaces: CLI
+  (`finding poc -scan SID -out FILE.html FID`), API
+  (`GET /api/scans/{id}/findings/{fid}/poc`), and a "Download PoC" link in
+  the web UI's finding detail view.
+- ⏳ Stubs: detection engines for non-Reflected-XSS vulnerability classes
+  (Stored XSS, DOM XSS)
 
 **The dividing line:** transport, browser, discovery, orchestration, and the
 full Reflected XSS pipeline (reflect → context → plan → execute candidates →

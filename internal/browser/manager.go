@@ -3,6 +3,7 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -113,7 +114,7 @@ func (m *Manager) NewContext(ctx context.Context, opts ContextOptions) (*Context
 	ch, err := callCtxCreate(ctx, func() (contextHandle, error) {
 		m.createMu.Lock()
 		defer m.createMu.Unlock()
-		return b.NewContext(opts.StorageStatePath, opts.AllowRequest)
+		return b.NewContext(opts.StorageStatePath, opts.ProxyServer, opts.ExtraHeaders, opts.AllowRequest)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("browser: new context: %w", err)
@@ -280,7 +281,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext(opts.StorageStatePath, nil) // operator-driven login: no scope gate
+	ch, err := b.NewContext("", "", nil, nil) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}
@@ -309,6 +310,145 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	// The saved state is the target's own auth cookies/tokens — sensitive
 	// regardless of the process umask or Playwright's own default file mode,
 	// so restrict it explicitly rather than trust either.
+	if err := os.Chmod(opts.StorageStatePath, 0o600); err != nil {
+		return nil, fmt.Errorf("browser: restrict session file permissions: %w", err)
+	}
+	_, finalURL, _ := ph.Goto(opts.LoginURL, WaitCommit, m.cfg.NavigationTimeout) // best-effort current URL
+	return &LoginResult{StorageStatePath: opts.StorageStatePath, FinalURL: finalURL}, nil
+}
+
+// autoLoginScript fills and submits a login form headless, with no operator
+// present. It is intentionally a single self-contained JS function run via
+// pageHandle.Evaluate (the same general escape hatch writeStorage/readStorage
+// use) rather than new Fill/Click driver methods — avoids widening the
+// driver/browserHandle/contextHandle/pageHandle interface (and its real
+// Playwright implementation AND fake test double) for what is, underneath,
+// ordinary DOM manipulation. arg carries username/password and the three
+// optional selector overrides (empty string = "use the heuristic").
+//
+// Heuristic (used only for whichever of username/password/submit has no
+// operator-supplied selector): the password field is `input[type=password]`
+// (first one in the document); the username field is the first of
+// `input[autocomplete=username]`, `input[type=email]`, a name/id containing
+// "user"/"login"/"email", or `input[type=text]`, preferring one inside the
+// SAME <form> as the password field when the password field is inside a
+// form at all; the submit control is `button[type=submit]`/
+// `input[type=submit]` inside that form, falling back to the form's own
+// submit() when no explicit submit control exists. This is necessarily
+// best-effort — an operator-supplied selector is the escape hatch for a
+// form shaped differently than this heuristic expects.
+const autoLoginScript = `(arg) => {
+  function q(root, sel) { try { return root.querySelector(sel); } catch (e) { return null; } }
+  var passInput = arg.passwordSelector ? q(document, arg.passwordSelector) : q(document, 'input[type="password"]');
+  if (!passInput) return { ok: false, reason: 'no password field found' };
+  var form = passInput.closest ? passInput.closest('form') : null;
+  var scope = form || document;
+  var userInput = arg.usernameSelector ? q(document, arg.usernameSelector) : (
+    q(scope, 'input[autocomplete="username"]') ||
+    q(scope, 'input[type="email"]') ||
+    q(scope, 'input[name*="user" i]') || q(scope, 'input[id*="user" i]') ||
+    q(scope, 'input[name*="login" i]') || q(scope, 'input[id*="login" i]') ||
+    q(scope, 'input[name*="email" i]') || q(scope, 'input[id*="email" i]') ||
+    q(scope, 'input[type="text"]')
+  );
+  function setVal(el, val) {
+    el.focus();
+    el.value = val;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  if (userInput) setVal(userInput, arg.username);
+  setVal(passInput, arg.password);
+  var submitEl = arg.submitSelector ? q(document, arg.submitSelector) : (
+    form ? (q(form, 'button[type="submit"]') || q(form, 'input[type="submit"]') || q(form, 'button')) : null
+  );
+  if (submitEl) {
+    submitEl.click();
+  } else if (form) {
+    if (typeof form.requestSubmit === 'function') { form.requestSubmit(); } else { form.submit(); }
+  } else {
+    return { ok: false, reason: 'no form or submit control found for the password field' };
+  }
+  return { ok: true, hadUsernameField: !!userInput };
+}`
+
+// AutoLogin drives a HEADLESS, non-interactive login (AuthMode "password"):
+// fills and submits a login form (see autoLoginScript) with the given
+// credentials, waits for SuccessURLGlob (required — see
+// AutoLoginOptions.SuccessURLGlob), saves the resulting session to
+// StorageStatePath, and tears the browser down. Credentials are used only
+// for this one in-memory JS evaluation call; Indago never logs, persists,
+// or returns them anywhere.
+func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginResult, error) {
+	if opts.LoginURL == "" || opts.StorageStatePath == "" || opts.Username == "" || opts.Password == "" {
+		return nil, fmt.Errorf("browser: auto login requires LoginURL, Username, Password, and StorageStatePath")
+	}
+	if opts.SuccessURLGlob == "" {
+		return nil, fmt.Errorf("browser: auto login requires SuccessURLGlob — with no operator present, Indago needs an objective success signal before it will save a session")
+	}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return nil, ErrClosed
+	}
+
+	// A dedicated, headless browser — no human involved, unlike InteractiveLogin's
+	// visible one.
+	b, err := m.drv.Launch(true)
+	if err != nil {
+		return nil, fmt.Errorf("browser: launch headless: %w", err)
+	}
+	defer b.Close()
+
+	ch, err := b.NewContext("", "", nil, nil) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
+	if err != nil {
+		return nil, fmt.Errorf("browser: login context: %w", err)
+	}
+	defer ch.Close()
+
+	ph, err := ch.NewPage()
+	if err != nil {
+		return nil, fmt.Errorf("browser: login page: %w", err)
+	}
+
+	if _, _, err := gotoWithCtx(ctx, ph, opts.LoginURL, WaitLoad, m.cfg.NavigationTimeout); err != nil {
+		return nil, fmt.Errorf("browser: open login page: %w", err)
+	}
+
+	result, err := callCtx(ctx, func() (any, error) {
+		return ph.Evaluate(autoLoginScript, map[string]any{
+			"username":         opts.Username,
+			"password":         opts.Password,
+			"usernameSelector": opts.UsernameSelector,
+			"passwordSelector": opts.PasswordSelector,
+			"submitSelector":   opts.SubmitSelector,
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("browser: fill/submit login form: %w", err)
+	}
+	if resultMap, ok := result.(map[string]any); ok {
+		if okField, _ := resultMap["ok"].(bool); !okField {
+			reason, _ := resultMap["reason"].(string)
+			return nil, fmt.Errorf("browser: login form not found: %s", reason)
+		}
+	}
+
+	if err := callCtxErr(ctx, func() error {
+		return ph.WaitForURL(opts.SuccessURLGlob, timeout)
+	}); err != nil {
+		return nil, fmt.Errorf("browser: waiting for login success: %w", err)
+	}
+
+	if err := ch.SaveStorageState(opts.StorageStatePath); err != nil {
+		return nil, fmt.Errorf("browser: save session: %w", err)
+	}
 	if err := os.Chmod(opts.StorageStatePath, 0o600); err != nil {
 		return nil, fmt.Errorf("browser: restrict session file permissions: %w", err)
 	}
@@ -477,6 +617,56 @@ func (p *Page) Content(ctx context.Context) (string, error) {
 	return callCtx(ctx, func() (string, error) { return p.handle.Content() })
 }
 
+// formPoster is implemented by drivers that can submit a real, top-level
+// browser POST navigation (needed to verify a POST/form-encoded reflected-XSS
+// candidate — Goto only supports GET-style navigation). It is a separate,
+// OPTIONAL interface rather than a new pageHandle method so a test fake that
+// only implements pageHandle keeps compiling unchanged; NavigateForm reports
+// ErrFormPostUnsupported when the concrete driver does not implement it.
+type formPoster interface {
+	GotoForm(method, url string, fields map[string]string, waitUntil string, timeout time.Duration) (status int, finalURL string, err error)
+}
+
+// ErrFormPostUnsupported is returned by NavigateForm when the underlying
+// driver cannot submit a form POST (e.g. a test fake).
+var ErrFormPostUnsupported = errors.New("browser: this driver cannot submit a form POST")
+
+// NavigateForm submits url as a real, top-level POST navigation: it renders a
+// throwaway auto-submitting <form method=post> whose hidden inputs are fields,
+// and lets the browser submit it — the SAME mechanism an ordinary HTML form
+// uses to send a POST. This exists only so a POST/form-encoded candidate gets
+// the same chance to execute on page load that Navigate already gives a GET
+// candidate; it is not simulated user interaction to force an otherwise-inert
+// payload to fire (AGENTS.md §3) — fields carries the exact body the candidate
+// step already sent (including the parameter holding the candidate's own
+// breakout), nothing new is chosen or clicked.
+func (p *Page) NavigateForm(ctx context.Context, method, url string, fields map[string]string, opts NavOptions) (*NavResult, error) {
+	fp, ok := p.handle.(formPoster)
+	if !ok {
+		return nil, ErrFormPostUnsupported
+	}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = p.ctxp.mgr.cfg.NavigationTimeout
+	}
+	wait := opts.WaitUntil
+	if wait == "" {
+		wait = WaitLoad
+	}
+	type nav struct {
+		status   int
+		finalURL string
+	}
+	r, err := callCtx(ctx, func() (nav, error) {
+		s, u, err := fp.GotoForm(method, url, fields, wait, timeout)
+		return nav{s, u}, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("browser: navigate form: %w", err)
+	}
+	return &NavResult{Status: r.status, FinalURL: r.finalURL}, nil
+}
+
 // Evaluate runs a JavaScript expression in the page and returns its result.
 // It is the general escape hatch for driving and inspecting a loaded page —
 // used by UI/integration tests to click, fill, and read DOM state against the
@@ -535,7 +725,7 @@ func (p *Page) readStorage(ctx context.Context, store string) (map[string]string
 func (p *Page) writeStorage(ctx context.Context, store, key, value string) error {
 	script := fmt.Sprintf(`(kv) => { %s.setItem(kv.k, kv.v); }`, store)
 	return callCtxErr(ctx, func() error {
-		_, err := p.handle.Evaluate(script, map[string]string{"k": key, "v": value})
+		_, err := p.handle.Evaluate(script, map[string]any{"k": key, "v": value})
 		return err
 	})
 }

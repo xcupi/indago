@@ -117,6 +117,50 @@ function card(title, ...children) {
   return c;
 }
 
+// collapsible wraps body in a native <details>: closed content stays in the
+// DOM (so querySelectorAll / Ctrl-F still reach it) but is not painted —
+// exactly "shorten the page, don't throw the data away". summary is prepended
+// with an extra hint span when given, right-aligned (see CSS).
+function collapsible(summaryContent, body, open, hint) {
+  const d = el("details", undefined, "collapsible");
+  if (open) d.open = true;
+  const s = el("summary");
+  if (typeof summaryContent === "string") s.appendChild(el("span", summaryContent));
+  else s.appendChild(summaryContent);
+  if (hint) s.appendChild(el("span", hint, "hint"));
+  const bodyWrap = el("div", undefined, "collapsible-body");
+  bodyWrap.appendChild(body);
+  d.append(s, bodyWrap);
+  return d;
+}
+
+// pagedList renders `items` pageSize at a time: renderPage(pageItems) builds
+// the visible content for the current page. Only the current page's items
+// are ever in the DOM — for a handful of items (the common case) `pages` is 1
+// and no pager controls appear at all.
+function pagedList(items, pageSize, renderPage, emptyText) {
+  const wrap = el("div");
+  const body = el("div");
+  const pager = el("div", undefined, "pager");
+  let page = 0;
+  const pages = Math.max(1, Math.ceil(items.length / pageSize));
+  function show() {
+    const start = page * pageSize;
+    const slice = items.slice(start, start + pageSize);
+    body.replaceChildren(slice.length ? renderPage(slice) : el("div", emptyText || "nothing to show", "empty"));
+    pager.replaceChildren();
+    if (pages > 1) {
+      const prev = button("‹ Prev", () => { page = Math.max(0, page - 1); show(); }, "small");
+      const next = button("Next ›", () => { page = Math.min(pages - 1, page + 1); show(); }, "small");
+      prev.disabled = page === 0; next.disabled = page >= pages - 1;
+      pager.append(prev, el("span", "Page " + (page + 1) + " of " + pages + " (" + items.length + " item(s))", "hint"), next);
+    }
+  }
+  show();
+  wrap.append(body, pager);
+  return wrap;
+}
+
 // ---------------------------------------------------------------------------
 // HTTP
 // ---------------------------------------------------------------------------
@@ -179,9 +223,33 @@ const prefs = {
     try { if (val === null || val === undefined) localStorage.removeItem("indago." + key); else localStorage.setItem("indago." + key, String(val)); } catch (e) { /* ignore */ }
   },
 };
+// refreshMs is the live-refresh interval; 0 means "off" (the operator
+// refreshes by hand with the header's Refresh button).
 function refreshMs() {
-  const v = parseInt(prefs.get("refreshMs", "2000"), 10);
+  const raw = prefs.get("refreshMs", "2000");
+  if (raw === "off") return 0;
+  const v = parseInt(raw, 10);
   return Number.isFinite(v) && v >= 500 ? v : 2000;
+}
+
+// updateLiveCtl reflects the interval and whether the current view is live in
+// the header: "Live · 2s" / "Live off", plus a manual Refresh button whenever
+// the view has something to refresh.
+function updateLiveCtl() {
+  const ms = refreshMs();
+  const state = $("liveState");
+  state.textContent = ms > 0 ? "Live · " + (ms / 1000) + "s" : "Live off";
+  state.classList.toggle("off", ms === 0);
+  $("refreshNow").classList.toggle("hidden", !currentView.refresh);
+}
+
+async function refreshNow() {
+  const btn = $("refreshNow");
+  btn.disabled = true;
+  try {
+    await loadProjects();
+    if (currentView.refresh) await currentView.refresh();
+  } finally { btn.disabled = false; }
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +329,7 @@ async function route() {
   const hash = location.hash || "#/dashboard";
   if (currentView.timer) clearInterval(currentView.timer);
   currentView = { name: "", refresh: null, timer: null };
+  updateLiveCtl();
   closeModal();
 
   const path = hash.replace(/^#/, "");
@@ -285,10 +354,14 @@ async function route() {
     if (token !== currentView) return; // navigated away while rendering
     if (typeof refresh === "function") {
       currentView.refresh = refresh;
-      currentView.timer = setInterval(() => {
-        if (token === currentView && $("modal").classList.contains("hidden")) refresh();
-      }, refreshMs());
+      const ms = refreshMs();
+      if (ms > 0) {
+        currentView.timer = setInterval(() => {
+          if (token === currentView && $("modal").classList.contains("hidden")) refresh();
+        }, ms);
+      }
     }
+    updateLiveCtl();
   } catch (e) {
     if (token !== currentView) return;
     view.replaceChildren(card("Error", el("p", "Could not load this view: " + e.message, "err")));

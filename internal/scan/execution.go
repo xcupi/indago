@@ -8,6 +8,7 @@ import (
 
 	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/worker"
 )
@@ -23,9 +24,21 @@ type execution struct {
 	discDone chan struct{} // closed when the discovery goroutine has exited
 	monDone  chan struct{} // closed when the monitor goroutine has exited
 
+	// closeHTTP releases a scan-dedicated proxied HTTP client's idle
+	// connections (see scanHTTPEngine). Never nil; a no-op for the common
+	// case where the scan shares the controller's own engine.
+	closeHTTP func()
+
 	// discFinished is set once discovery completed normally (or was skipped
 	// because it had already completed before a restart).
 	discFinished atomic.Bool
+
+	// combinedPassDone marks that this execution's one-time, bounded
+	// combined (multi-parameter) candidate pass (see combined.go) has
+	// already been enqueued — never run twice in the same execution.
+	// Checked in evaluate() the first time the ordinary job queue goes
+	// quiet, before the scan is allowed to actually complete.
+	combinedPassDone atomic.Bool
 }
 
 // pause routes a scan pause to both the worker pool and discovery.
@@ -56,27 +69,35 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 	// verification uses), its cookies are carried here too — otherwise a
 	// cookie-gated endpoint would never reflect for the HTTP-level executor, and
 	// nothing downstream would ever reach verification.
-	eng := newScopedEngine(c.opts.HTTP, scope)
-	if cookies := c.sessionCookiesFor(ctx, sc, target); len(cookies) > 0 {
+	//
+	// httpEng is the controller's shared engine UNLESS this scan configured its
+	// own ProxyPool, in which case it's a fresh client dedicated to this scan
+	// (see scanHTTPEngine) — closeHTTP releases it once the scan stops.
+	httpEng, closeHTTP := c.scanHTTPEngine(sc)
+	eng := newScopedEngine(httpEng, scope)
+	cookies := c.sessionCookiesFor(ctx, sc, target)
+	if len(cookies) > 0 {
 		eng = eng.WithSessionCookies(cookies)
 	}
 
 	handlers := c.opts.Handlers
 	if handlers == nil {
-		handlers = c.defaultHandlers(eng, scope)
+		handlers = c.defaultHandlers(eng, scope, sc.Config.ProxyPool)
 	}
 	pool := worker.New(c.queue, handlers, c.poolConfig(sc), c.log)
 	if err := pool.Start(runCtx); err != nil {
 		cancel()
+		closeHTTP()
 		return nil, err
 	}
 
 	ex := &execution{
-		scanID:   sc.ID,
-		pool:     pool,
-		cancel:   cancel,
-		discDone: make(chan struct{}),
-		monDone:  make(chan struct{}),
+		scanID:    sc.ID,
+		pool:      pool,
+		cancel:    cancel,
+		discDone:  make(chan struct{}),
+		monDone:   make(chan struct{}),
+		closeHTTP: closeHTTP,
 	}
 
 	if sc.Discovery == domain.DiscoveryComplete {
@@ -85,6 +106,11 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 		close(ex.discDone)
 	} else {
 		cfg := c.discoveryConfig(sc)
+		// The scan's own session cookies (if any) — see
+		// discovery.Config.SessionCookies — so discovery can register Cookie
+		// injection points for cookies actually present in the scan's
+		// session context, excluding whatever looks like the auth cookie.
+		cfg.SessionCookies = cookies
 		reg := discovery.NewRealRegistry(eng, c.opts.Browser, cfg)
 		ex.disc = discovery.NewManager(c.store, c.queue, reg, cfg, c.log)
 		seeds := seedsFor(sc, target)
@@ -93,6 +119,37 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 
 	go c.monitor(runCtx, ex)
 	return ex, nil
+}
+
+// scanHTTPEngine returns the HTTP engine this scan's discovery and raw
+// candidate/reflection testing should use, plus a closer to release any
+// dedicated resources it holds. Every scan shares the controller's single
+// c.opts.HTTP client by default — closing it would affect every other
+// running scan, so the returned closer is a no-op in that case. A scan that
+// configures its own domain.ScanConfig.ProxyPool instead gets a fresh,
+// scan-scoped *httpengine.Client built from the controller's base
+// HTTPConfig with that pool substituted in. Browser verification already
+// picks up ProxyPool on its own (verifyExecutor.nextProxy, wired in
+// defaultHandlers) — this is the raw-HTTP-side half of the same "every
+// outbound request this scan makes" contract (domain.ScanConfig.ProxyPool).
+func (c *Controller) scanHTTPEngine(sc *domain.Scan) (httpengine.Engine, func()) {
+	if len(sc.Config.ProxyPool) == 0 && !sc.Config.RandomizeTLSFingerprint {
+		return c.opts.HTTP, func() {}
+	}
+	cfg := c.opts.HTTPConfig
+	cfg.ProxyPool = sc.Config.ProxyPool
+	cfg.RandomizeTLSFingerprint = sc.Config.RandomizeTLSFingerprint
+	eng, err := httpengine.New(cfg)
+	if err != nil {
+		// A scan-scoped client failing to build (e.g. a malformed proxy URL
+		// that slipped past CreateScanParams validation) should not block
+		// the scan outright — it just runs unproxied, through the shared
+		// engine, and the reason is logged.
+		c.log.Warn("build scan-scoped proxied HTTP client, falling back to the shared engine (unproxied)",
+			"scan", sc.ID, "err", err)
+		return c.opts.HTTP, func() {}
+	}
+	return eng, eng.Close
 }
 
 // discoveryConfig derives the per-scan discovery config from the controller
@@ -204,6 +261,7 @@ func (c *Controller) stopExecution(ex *execution, waitMonitor bool) {
 	if waitMonitor {
 		<-ex.monDone
 	}
+	ex.closeHTTP()
 }
 
 // monitor periodically evaluates a running scan: it refreshes persisted stats,
@@ -300,6 +358,18 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		return false
 	}
 	if q.Pending() > 0 {
+		return false
+	}
+	// Bounded, one-time combined (multi-parameter) candidate fallback pass
+	// (see combined.go): the FIRST time the ordinary job queue goes quiet,
+	// run it instead of completing — any jobs it enqueues (there may be
+	// none) must themselves drain before the scan is allowed to finish, so
+	// this returns false (not done) to let the monitor loop again. The
+	// flag ensures this runs exactly once per execution, even though this
+	// branch is reached on every subsequent quiet tick too.
+	if !ex.combinedPassDone.Load() {
+		ex.combinedPassDone.Store(true)
+		c.enqueueCombinedCandidates(ctx, ex.scanID)
 		return false
 	}
 	return c.finish(ctx, ex, false)

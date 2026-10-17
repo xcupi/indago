@@ -520,6 +520,7 @@ func TestEnqueueVerificationConcurrentCandidatesDoNotDuplicateFinding(t *testing
 		Target: domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, MaxAttempts: 3}
 
 	ex := env.executor(scopedClient(t, openScope()), ExecutorConfig{})
+	marker := detection.NewProbe(env.scanID, ip.ID).Token // real candidates always embed it
 
 	const n = 20
 	var wg sync.WaitGroup
@@ -528,7 +529,7 @@ func TestEnqueueVerificationConcurrentCandidatesDoNotDuplicateFinding(t *testing
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cand := candAt(detection.CatHTMLText, detection.CtxHTMLText, fmt.Sprintf("<svg data-i=%d onload=m>", i))
+			cand := candAt(detection.CatHTMLText, detection.CtxHTMLText, fmt.Sprintf("<svg data-i=%d onload=%s>", i, marker))
 			ex.enqueueVerification(context.Background(), job, ep, cand, focus, domain.NewID())
 		}()
 	}
@@ -548,4 +549,135 @@ func TestEnqueueVerificationConcurrentCandidatesDoNotDuplicateFinding(t *testing
 	if len(d.Candidates) != n {
 		t.Fatalf("candidates recorded = %d, want %d (no lost updates)", len(d.Candidates), n)
 	}
+}
+
+// --- Finding Correlation UX phase regressions ---
+
+// A rejected attempt after a confirmed one leaves the finding Confirmed AND
+// keeps both per-candidate outcomes, each with its own verdict and evidence —
+// the ratcheted Finding.Verdict never hides that a weaker attempt happened.
+func TestCorrelateVerificationPreservesEveryAttemptResult(t *testing.T) {
+	srv := newOKServer(t)
+	env := newScanEnv(t)
+	ep := env.endpoint(srv, domain.MethodGET)
+	focus := env.param(ep, "q", domain.LocationQuery, "hi")
+	ip := env.injection(ep, focus)
+	target := domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}
+
+	cand1 := candAt(detection.CatHTMLText, detection.CtxHTMLText, "<svg onload=m>")
+	cand2 := candAt(detection.CatHTMLText, detection.CtxHTMLText, "<mx>")
+	req1, req2 := env.evidenceRow(domain.EvidenceRequest), env.evidenceRow(domain.EvidenceRequest)
+	tc1 := env.candidateTestCase(ip, req1)
+	tc2 := env.candidateTestCase(ip, req2)
+	f, _ := upsertPendingFinding(context.Background(), env.st, env.scanID, ep, ip.ID, focus, cand1, tc1.ID)
+	if _, err := upsertPendingFinding(context.Background(), env.st, env.scanID, ep, ip.ID, focus, cand2, tc2.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	vx1 := env.verifyExec(&fakeVerifier{result: confirmedResult(verification.SignalPageError)}, openScope(), ExecutorConfig{})
+	if err := vx1.Handle(context.Background(), buildVerifyJob(t, env.scanID, target, cand1, f.ID, tc1.ID)); err != nil {
+		t.Fatal(err)
+	}
+	vx2 := env.verifyExec(&fakeVerifier{result: rejectedResult()}, openScope(), ExecutorConfig{})
+	if err := vx2.Handle(context.Background(), buildVerifyJob(t, env.scanID, target, cand2, f.ID, tc2.ID)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := env.st.Findings().Get(context.Background(), f.ID)
+	if got.Verdict != domain.VerdictConfirmed {
+		t.Fatalf("verdict = %s, want confirmed (a later rejected attempt must not downgrade it)", got.Verdict)
+	}
+	d := decodeFindingDetail(got.Detail)
+	if len(d.Attempts) != 2 {
+		t.Fatalf("attempts = %+v, want 2 (one per verification)", d.Attempts)
+	}
+	byValue := map[string]verificationAttempt{}
+	for _, a := range d.Attempts {
+		byValue[a.CandidateValue] = a
+	}
+	if a := byValue["<svg onload=m>"]; a.Verdict != domain.VerdictConfirmed || !containsID(a.EvidenceIDs, req1) {
+		t.Fatalf("confirming attempt not preserved with its own verdict/evidence: %+v", a)
+	}
+	if a := byValue["<mx>"]; a.Verdict != domain.VerdictRejected || !containsID(a.EvidenceIDs, req2) {
+		t.Fatalf("rejected attempt not preserved with its own verdict/evidence: %+v", a)
+	}
+	for _, a := range d.Attempts {
+		for _, id := range a.EvidenceIDs {
+			if !containsID(got.EvidenceIDs, id) {
+				t.Fatalf("attempt evidence %s missing from the finding's evidence union", id)
+			}
+		}
+	}
+}
+
+// Redelivering the same verification attempt (same verify TestCase) records it once.
+func TestAppendAttemptDedupsByVerifyTestCase(t *testing.T) {
+	tc := domain.NewID()
+	atts := appendAttempt(nil, verificationAttempt{VerifyTestCaseID: tc, Verdict: domain.VerdictConfirmed})
+	atts = appendAttempt(atts, verificationAttempt{VerifyTestCaseID: tc, Verdict: domain.VerdictRejected})
+	atts = appendAttempt(atts, verificationAttempt{VerifyTestCaseID: domain.NewID(), Verdict: domain.VerdictRejected})
+	if len(atts) != 2 || atts[0].Verdict != domain.VerdictConfirmed {
+		t.Fatalf("attempts = %+v", atts)
+	}
+}
+
+// Two endpoints sharing a path and parameter but differing in their parameter
+// set are distinct endpoints/injection points in discovery: they stay distinct
+// findings, but their titles must tell them apart (previously both read
+// `Reflected XSS candidate (html_text) in parameter "q"`).
+func TestDistinctInjectionPointsStaySeparateWithDistinguishableTitles(t *testing.T) {
+	env := newScanEnv(t)
+	ctx := context.Background()
+	cand := candAt(detection.CatHTMLText, detection.CtxHTMLText, "<svg onload=m>")
+
+	ep1 := env.endpoint("http://x/search?q=a", domain.MethodGET)
+	q1 := env.param(ep1, "q", domain.LocationQuery, "a")
+	ip1 := env.injection(ep1, q1)
+	ep2 := env.endpoint("http://x/search?page=1&q=a", domain.MethodGET)
+	q2 := env.param(ep2, "q", domain.LocationQuery, "a")
+	ip2 := env.injection(ep2, q2)
+
+	f1, err := upsertPendingFinding(ctx, env.st, env.scanID, ep1, ip1.ID, q1, cand, domain.NewID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f2, err := upsertPendingFinding(ctx, env.st, env.scanID, ep2, ip2.ID, q2, cand, domain.NewID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f1.ID == f2.ID {
+		t.Fatal("distinct injection points must not correlate into one finding")
+	}
+	if f1.Title == f2.Title {
+		t.Fatalf("distinct findings share a title: %q", f1.Title)
+	}
+	want1 := `Reflected XSS candidate in parameter "q" (html_text) at GET /search?q`
+	want2 := `Reflected XSS candidate in parameter "q" (html_text) at GET /search?page&q`
+	if f1.Title != want1 || f2.Title != want2 {
+		t.Fatalf("titles = %q / %q, want %q / %q", f1.Title, f2.Title, want1, want2)
+	}
+}
+
+// Contexts that share a candidate category (js_string vs js_code, both
+// "javascript") are distinct findings and must read as distinct.
+func TestDistinctContextsSharingCategoryHaveDistinctTitles(t *testing.T) {
+	env := newScanEnv(t)
+	ctx := context.Background()
+	ep := env.endpoint("http://x/p", domain.MethodGET)
+	q := env.param(ep, "q", domain.LocationQuery, "a")
+	ip := env.injection(ep, q)
+	fs, _ := upsertPendingFinding(ctx, env.st, env.scanID, ep, ip.ID, q, candAt(detection.CatJS, detection.CtxJSString, `";m//`), domain.NewID())
+	fc, _ := upsertPendingFinding(ctx, env.st, env.scanID, ep, ip.ID, q, candAt(detection.CatJS, detection.CtxJSCode, `;m;`), domain.NewID())
+	if fs.ID == fc.ID || fs.Title == fc.Title {
+		t.Fatalf("js_string and js_code must be distinct, distinguishable findings: %q vs %q", fs.Title, fc.Title)
+	}
+}
+
+func containsID(ids []domain.ID, id domain.ID) bool {
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
 }

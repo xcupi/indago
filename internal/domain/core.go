@@ -179,6 +179,60 @@ type ScanConfig struct {
 	MaxPages int `json:"max_pages,omitempty"`
 	// MaxEndpoints caps endpoints discovered (0 = server default).
 	MaxEndpoints int `json:"max_endpoints,omitempty"`
+
+	// CandidateProfile selects how many/which of the planner's candidates are
+	// sent per injection point: "minimal", "standard" (default when empty), or
+	// "thorough" (see internal/detection/profile.go). MaxCandidates, when > 0,
+	// overrides the profile's per-injection-point cap (hard ceiling in
+	// detection.MaxCandidatesCeiling). Like the crawl controls, both are set at
+	// creation and read when a reflection step plans its candidates; they
+	// select among the built-in candidates and never affect verification.
+	CandidateProfile string `json:"candidate_profile,omitempty"`
+	MaxCandidates    int    `json:"max_candidates,omitempty"`
+
+	// EnableEvasion opts into WAF/filter-bypass candidate variants (case
+	// variation, alternate whitespace/separators, HTML-entity/double-URL
+	// encoding of the breakout characters) IN ADDITION TO the canonical
+	// candidates — never instead of them. Off by default (conservative by
+	// design, AGENTS.md §2.3): bypass testing is a deliberate, operator-made
+	// choice for an authorized engagement (e.g. a bug bounty program where a
+	// WAF bypass is itself the reportable finding), not a default behavior.
+	// Every evasion candidate is still a benign-marker detection probe (never
+	// alert/cookie/exfiltration) and is still sent only through the SAME
+	// scope-enforcing engine as every other request — this widens the
+	// candidate SHAPES tried, not what may be targeted. See
+	// docs/reflection-candidates.md "Evasion candidates (opt-in)".
+	EnableEvasion bool `json:"enable_evasion,omitempty"`
+
+	// ProxyPool, when non-empty, routes every outbound request this scan
+	// makes — raw HTTP engine requests AND browser verification navigation
+	// alike — through one of the listed proxies ("http://host:port",
+	// "socks5://host:port", optionally with embedded "user:pass@" creds),
+	// picked round-robin per request/context. Empty (the default) means a
+	// direct connection: no proxy, Indago's real network identity.
+	//
+	// This is entirely operator-supplied infrastructure — Indago never
+	// discovers, purchases, or manages proxies itself, and never silently
+	// rotates through anything the operator did not explicitly list here.
+	// Off by default (AGENTS.md §2.3: aggressive/identity-concealing
+	// behavior is opt-in and operator-configured, never silent). Pairs with
+	// EnableEvasion for an engagement where the target's own anti-automation
+	// defenses (rate limiting, IP-based blocking) are themselves in scope —
+	// it does not widen WHAT may be targeted, only hides WHICH network
+	// identity is doing the targeting.
+	ProxyPool []string `json:"proxy_pool,omitempty"`
+
+	// RandomizeTLSFingerprint: see httpengine.Config.RandomizeTLSFingerprint
+	// for the full mechanism and its one real limitation (HTTP/1.1 only).
+	// Off by default, same AGENTS.md §2.3 contract as ProxyPool/EnableEvasion
+	// above. MUTUALLY EXCLUSIVE with ProxyPool (validated at scan-create
+	// time, see controller.go) — Go's http.Transport only consults a custom
+	// TLS dialer for a DIRECT connection, never a proxied one, so combining
+	// both would silently drop the fingerprint override instead of erroring.
+	// Browser verification is unaffected either way: a real Chromium
+	// context has its own, genuine (unspoofed) TLS stack that this setting
+	// has no way to reach into.
+	RandomizeTLSFingerprint bool `json:"randomize_tls_fingerprint,omitempty"`
 }
 
 // StopMode controls when a scan stops relative to confirmed findings.

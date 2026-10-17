@@ -176,10 +176,20 @@ type createScanReq struct {
 	AuthMode  string `json:"auth_mode"`
 	// AuthStatePath is the absolute, server-side path of saved session
 	// material (Playwright storage state) for auth_mode "existing".
-	AuthStatePath string             `json:"auth_state_path"`
-	SeedURLs      []string           `json:"seed_urls"`
-	Stop          *stopReq           `json:"stop"`
-	Config        *domain.ScanConfig `json:"config"`
+	AuthStatePath string `json:"auth_state_path"`
+	// LoginURL/SuccessURL/Login*Selector drive the login itself for auth_mode
+	// "interactive", "mfa", or "password" — see CreateScanParams.LoginURL
+	// and friends for the full contract (success_url is REQUIRED for all
+	// three; password mode also needs INDAGO_AUTH_USER/INDAGO_AUTH_PASS set
+	// in the SERVER's own environment, never in this request body).
+	LoginURL              string             `json:"login_url"`
+	SuccessURL            string             `json:"success_url"`
+	LoginUsernameSelector string             `json:"login_username_selector"`
+	LoginPasswordSelector string             `json:"login_password_selector"`
+	LoginSubmitSelector   string             `json:"login_submit_selector"`
+	SeedURLs              []string           `json:"seed_urls"`
+	Stop                  *stopReq           `json:"stop"`
+	Config                *domain.ScanConfig `json:"config"`
 
 	// Crawl extent, applied on top of the chosen profile (any profile). Quick
 	// limits discovery to the seeds (no link following); a full "crawl" scan
@@ -189,6 +199,28 @@ type createScanReq struct {
 	MaxDepth     int  `json:"max_depth"`
 	MaxPages     int  `json:"max_pages"`
 	MaxEndpoints int  `json:"max_endpoints"`
+
+	// Candidate selection: "minimal" | "standard" (default) | "thorough", and an
+	// optional per-injection-point cap overriding the profile's. Validated by
+	// the controller (unknown profile / cap above the ceiling → 400).
+	CandidateProfile string `json:"candidate_profile"`
+	MaxCandidates    int    `json:"max_candidates"`
+
+	// EnableEvasion opts this scan into WAF/filter-bypass candidate variants
+	// (see domain.ScanConfig.EnableEvasion). Off by default — an authorized
+	// operator sets this explicitly per scan.
+	EnableEvasion bool `json:"enable_evasion"`
+
+	// ProxyPool, when non-empty, routes this scan's outbound traffic (raw HTTP
+	// and browser verification alike) through one of the listed proxies,
+	// round-robin. See domain.ScanConfig.ProxyPool. Empty (the default) means
+	// a direct connection.
+	ProxyPool []string `json:"proxy_pool"`
+
+	// RandomizeTLSFingerprint — see domain.ScanConfig.RandomizeTLSFingerprint.
+	// Off by default; the server rejects this combined with ProxyPool (see
+	// Controller.CreateScan) rather than silently no-op the override.
+	RandomizeTLSFingerprint bool `json:"randomize_tls_fingerprint"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -237,19 +269,30 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sc, err := s.ctrl.CreateScan(r.Context(), scan.CreateScanParams{
-		ProjectID:     domain.ID(req.ProjectID),
-		TargetID:      domain.ID(req.TargetID),
-		Name:          strings.TrimSpace(req.Name),
-		Profile:       profile,
-		Config:        req.Config,
-		Stop:          stop,
-		AuthMode:      mode,
-		AuthStatePath: req.AuthStatePath,
-		SeedURLs:      req.SeedURLs,
-		QuickScan:     req.QuickScan,
-		MaxDepth:      req.MaxDepth,
-		MaxPages:      req.MaxPages,
-		MaxEndpoints:  req.MaxEndpoints,
+		ProjectID:             domain.ID(req.ProjectID),
+		TargetID:              domain.ID(req.TargetID),
+		Name:                  strings.TrimSpace(req.Name),
+		Profile:               profile,
+		Config:                req.Config,
+		Stop:                  stop,
+		AuthMode:              mode,
+		AuthStatePath:         req.AuthStatePath,
+		LoginURL:              req.LoginURL,
+		SuccessURL:            req.SuccessURL,
+		LoginUsernameSelector: req.LoginUsernameSelector,
+		LoginPasswordSelector: req.LoginPasswordSelector,
+		LoginSubmitSelector:   req.LoginSubmitSelector,
+		SeedURLs:              req.SeedURLs,
+		QuickScan:             req.QuickScan,
+		MaxDepth:              req.MaxDepth,
+		MaxPages:              req.MaxPages,
+		MaxEndpoints:          req.MaxEndpoints,
+
+		CandidateProfile:        req.CandidateProfile,
+		MaxCandidates:           req.MaxCandidates,
+		EnableEvasion:           req.EnableEvasion,
+		ProxyPool:               cleanList(req.ProxyPool),
+		RandomizeTLSFingerprint: req.RandomizeTLSFingerprint,
 	})
 	if err != nil {
 		s.writeScanError(w, err)

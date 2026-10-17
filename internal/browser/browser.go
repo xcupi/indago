@@ -121,6 +121,22 @@ type ContextOptions struct {
 	// material (cookies + localStorage), yielding a persistent authenticated
 	// context.
 	StorageStatePath string
+	// ProxyServer, when set, routes every request this context makes (page
+	// loads, subresources, XHR/fetch) through the given proxy
+	// ("http://host:port", "socks5://host:port", optionally with embedded
+	// credentials). "" (the default) uses no proxy — a direct connection.
+	// Indago never picks or supplies a proxy itself; this is operator-provided
+	// infrastructure (AGENTS.md's "evade target-side identity/rate defenses
+	// only via infrastructure the operator explicitly supplies and opts into,
+	// never infrastructure Indago invents or manages itself").
+	ProxyServer string
+	// ExtraHeaders, when set, are merged into every request this context
+	// makes (page navigation + subresources), on top of the browser's own
+	// defaults — used to carry a Header-location XSS candidate's override
+	// (User-Agent, Referer, X-Forwarded-For, …) into the verifying browser,
+	// so a header reflection gets the same real-browser confirmation chance
+	// a query/form/JSON reflection already gets. nil/empty changes nothing.
+	ExtraHeaders map[string]string
 }
 
 // NavOptions control a single navigation.
@@ -152,6 +168,34 @@ type LoginOptions struct {
 type LoginResult struct {
 	StorageStatePath string
 	FinalURL         string
+}
+
+// AutoLoginOptions configure a non-interactive, auto-filled login (AuthMode
+// "password"): Indago itself submits operator-supplied credentials into a
+// login form, headless, with no human present. This is ordinary browser
+// automation to establish an authenticated session — distinct from, and
+// never in tension with, AGENTS.md's "no simulated user activation"
+// boundary, which is specifically about never faking interaction to force
+// an XSS candidate to execute (see AGENTS.md §2.2).
+type AutoLoginOptions struct {
+	LoginURL string
+	Username string
+	Password string
+	// UsernameSelector/PasswordSelector/SubmitSelector are CSS selectors
+	// that override the built-in heuristic (see autoLoginScript) for a
+	// login form it can't guess correctly. Empty uses the heuristic.
+	UsernameSelector string
+	PasswordSelector string
+	SubmitSelector   string
+	// SuccessURLGlob is REQUIRED (unlike LoginOptions.SuccessURLGlob,
+	// optional for a human-watched interactive login): with no operator
+	// present to judge success, Indago needs an objective, programmatic
+	// signal before it ever saves a session file — a fully silent success
+	// would otherwise save an UNAUTHENTICATED state the moment the form
+	// submits, however long that actually takes.
+	SuccessURLGlob   string
+	StorageStatePath string
+	Timeout          time.Duration // overall wait (0 → 2m; shorter than interactive's 5m since no human step is involved)
 }
 
 // PoolStats is a snapshot of Manager resources.

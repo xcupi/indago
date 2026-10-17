@@ -89,7 +89,8 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	if method == "" {
 		method = "GET"
 	}
-	if method != "GET" && method != "HEAD" {
+	isFormPost := method == "POST" && in.Location == domain.LocationForm && in.FormValues != nil
+	if method != "GET" && method != "HEAD" && !isFormPost {
 		return nil, ErrUnsupportedMethod
 	}
 	if in.URL == "" {
@@ -107,11 +108,32 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	bctx, err := v.manager.NewContext(ctx, browser.ContextOptions{
 		AllowRequest:     allow,
 		StorageStatePath: in.SessionStatePath,
+		ProxyServer:      in.ProxyServer,
+		ExtraHeaders:     in.ExtraHeaders,
 	})
 	if err != nil {
 		return nil, classifyBrowserErr(ctx, err)
 	}
 	defer bctx.Close()
+
+	// A Cookie-location candidate's override must reach the browser BEFORE
+	// navigation (see Input.ExtraCookies) — appended as its own cookie,
+	// never replacing or removing any cookie the session's own storage
+	// state already seeded this context with.
+	if len(in.ExtraCookies) > 0 {
+		cks := make([]browser.Cookie, 0, len(in.ExtraCookies))
+		for _, ck := range in.ExtraCookies {
+			if ck == nil {
+				continue
+			}
+			cks = append(cks, browser.Cookie{Name: ck.Name, Value: ck.Value, URL: in.URL})
+		}
+		if len(cks) > 0 {
+			if err := bctx.SetCookies(ctx, cks); err != nil {
+				return nil, classifyBrowserErr(ctx, err)
+			}
+		}
+	}
 
 	page, err := bctx.NewPage(ctx)
 	if err != nil {
@@ -130,10 +152,18 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	baseDialogs := len(page.DialogMessages())
 
 	navigatedAt := time.Now()
-	nav, err := page.Navigate(ctx, in.URL, browser.NavOptions{
-		WaitUntil: browser.WaitLoad,
-		Timeout:   v.cfg.NavigationTimeout,
-	})
+	var nav *browser.NavResult
+	if isFormPost {
+		nav, err = page.NavigateForm(ctx, method, in.URL, in.FormValues, browser.NavOptions{
+			WaitUntil: browser.WaitLoad,
+			Timeout:   v.cfg.NavigationTimeout,
+		})
+	} else {
+		nav, err = page.Navigate(ctx, in.URL, browser.NavOptions{
+			WaitUntil: browser.WaitLoad,
+			Timeout:   v.cfg.NavigationTimeout,
+		})
+	}
 	if err != nil {
 		return nil, classifyBrowserErr(ctx, err)
 	}

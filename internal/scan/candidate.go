@@ -8,6 +8,7 @@ import (
 
 	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/httpengine"
 )
 
 // This file executes the candidate plan the reflection step produces. After a
@@ -95,6 +96,25 @@ func (e *executor) enqueueCandidates(ctx context.Context, parent *domain.TestJob
 func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *domain.Endpoint, params []*domain.Parameter, focus *domain.Parameter, cand detection.Candidate) result {
 	tc.VulnClass = domain.VulnReflectedXSS
 	note := fmt.Sprintf("candidate %s/%s; parameter %s (%s)", cand.Source, cand.Category, focus.Name, focus.Location)
+	if cand.Combined {
+		note = fmt.Sprintf("combined candidate %s/%s; parameters %s (%s) + %s (%s)", cand.Source, cand.Category, focus.Name, focus.Location, cand.ParameterB, cand.LocationB)
+	}
+
+	// A combined candidate needs a SECOND focus parameter, resolved from the
+	// already-loaded endpoint parameter list (the pair was selected from
+	// this same endpoint — see combined.go) by the name+location the
+	// candidate itself carries. Not found (e.g. the parameter disappeared
+	// between the pass that planned this pair and now) is a permanent
+	// error: there is nothing a retry would fix.
+	var focusB *domain.Parameter
+	if cand.Combined {
+		focusB = findParamByNameLocation(params, cand.ParameterB, cand.LocationB)
+		if focusB == nil {
+			return result{outcome: domain.OutcomeError, permanent: true,
+				err:  fmt.Errorf("combined candidate: second parameter %q (%s) not found on this endpoint", cand.ParameterB, cand.LocationB),
+				note: note, vulnClass: domain.VulnReflectedXSS}
+		}
+	}
 
 	// Baseline (shared with the reflection step via the same per-endpoint cache).
 	baseReq, err := buildRequest(ep, params, nil)
@@ -112,15 +132,32 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 		}
 	}
 
-	// Mutated request: the candidate value goes ONLY into the focused parameter;
-	// all other parameters keep their observed values.
-	mutReq, err := buildRequest(ep, params, &injection{param: focus, value: cand.Value})
-	if err != nil {
+	// Mutated request: the candidate value goes ONLY into the focused parameter
+	// (plus the second one, for a combined candidate); all other parameters
+	// keep their observed values. The whole
+	// refresh→build→send sequence runs inside withDynamicTokenLock so it is
+	// atomic with respect to every other such sequence in the scan (the
+	// reflection step, browser verification) when a dynamic/single-use token
+	// parameter is involved — see dynamic_params.go.
+	var mutReq *httpengine.Request
+	var resp *httpengine.Response
+	var dur time.Duration
+	withDynamicTokenLock(e.tokenMu, params, focus, func() {
+		inj := &injection{param: focus, value: cand.Value}
+		if focusB != nil {
+			inj.paramB, inj.valueB = focusB, cand.ValueB
+		}
+		mutReq, err = buildRequest(ep, refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus), inj)
+		if err != nil {
+			return
+		}
+		resp, outcome, err, dur = e.send(ctx, mutReq)
+	})
+	if mutReq == nil {
 		return result{outcome: domain.OutcomeError, permanent: true, err: err, note: note, vulnClass: domain.VulnReflectedXSS, sharedEvidence: bl.evidenceIDs()}
 	}
 	tc.URL = mutReq.URL
 
-	resp, outcome, err, dur := e.send(ctx, mutReq)
 	r := result{
 		note:           note,
 		duration:       dur,
@@ -146,6 +183,14 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 	report.Baseline = detection.ResponseSummary{Status: bl.status, BodyLen: bl.bodyLen}
 	report.Mutated = detection.ResponseSummary{Status: resp.Status, BodyLen: len(resp.Body)}
 	report.Candidate = &cand // mark this as a candidate re-analysis, not a fresh probe
+
+	// CAPTCHA/bot-challenge detection — see the matching comment in
+	// runReflection; same detect-only contract (AGENTS.md §2.2).
+	if label, ok := detection.CaptchaSuspected(bl.body, resp.Body); ok {
+		r.captchaSuspected = true
+		r.captchaLabel = label
+	}
+
 	detection.ClassifyContexts(&report, resp.Body, detection.ContextOptions{
 		ContentType: resp.Headers.Get("Content-Type"),
 	})
@@ -154,7 +199,13 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 	if report.Reflected {
 		r.note = fmt.Sprintf("%s: reflected at %d location(s); %s", note, report.Count, contextSummary(&report))
 	} else {
-		r.note = note + ": not reflected"
+		note2, suspected := possibleBlockNote(bl.status, resp.Status)
+		r.note = note + ": not reflected" + note2
+		if suspected {
+			r.blockSuspected = true
+			r.blockBaselineStatus = bl.status
+			r.blockMutatedStatus = resp.Status
+		}
 	}
 	r.reflection = &report
 	r.baselineReq, r.baselineResp = bl.reqEvidence, bl.respEvidence

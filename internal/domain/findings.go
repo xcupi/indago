@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Provenance records how and when a finding was discovered and verified, which
 // is essential for reproducibility and audit. AIAssisted notes whether an LLM
@@ -68,4 +71,41 @@ type Evidence struct {
 	Note     string `json:"note,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// EvidenceRole says what an evidence item IS relative to a finding, so a UI or
+// report never has to guess from the kind alone. Two request/response pairs
+// can share a kind and mean opposite things: the BASELINE is the unmodified
+// request (e.g. q=hello) kept for comparison and is never a payload, while the
+// CANDIDATE request carries the breakout that was actually sent.
+type EvidenceRole string
+
+const (
+	// RoleBaseline: the endpoint's unmodified request/response (shared across
+	// that endpoint's injection points and attempts).
+	RoleBaseline EvidenceRole = "baseline"
+	// RoleCandidate: the request/response of a probe or candidate that was sent.
+	RoleCandidate EvidenceRole = "candidate"
+	// RoleBrowser: an artifact of browser verification (screenshot, rendered
+	// DOM, browser log).
+	RoleBrowser EvidenceRole = "browser"
+)
+
+// EvidenceNoteBaselinePrefix starts the Note of every baseline evidence row.
+// The executor writes it (scan.persistBaselineEvidence) and Role reads it, so
+// the convention lives in one place; evidence written before roles existed
+// carries the same note and is classified correctly without a migration.
+const EvidenceNoteBaselinePrefix = "baseline "
+
+// Role classifies the evidence item. Browser artifacts are identified by kind;
+// HTTP request/response pairs by whether they are the shared baseline.
+func (e *Evidence) Role() EvidenceRole {
+	switch e.Kind {
+	case EvidenceScreenshot, EvidenceDOM, EvidenceBrowserLog:
+		return RoleBrowser
+	}
+	if strings.HasPrefix(e.Note, EvidenceNoteBaselinePrefix) {
+		return RoleBaseline
+	}
+	return RoleCandidate
 }

@@ -12,6 +12,7 @@ package verification
 import (
 	"context"
 	"errors"
+	"net/http"
 
 	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
@@ -42,11 +43,30 @@ type Input struct {
 	// value — is what an uncaught-exception message would name, and what is
 	// searched for in the rendered DOM.
 	Marker string
-	// Method and URL are the exact request that produced the reflection. Browser
-	// navigation is GET-only; a non-GET/HEAD/OPTIONS Method yields
+	// Method and URL are the exact request that produced the reflection.
+	// Browser navigation is GET/HEAD, or POST when Location is LocationForm and
+	// FormValues is set (replayed as a real <form> submission — see
+	// browser.Page.NavigateForm); any other Method/Location combination (in
+	// particular POST+JSON, which no HTML form can carry) yields
 	// ErrUnsupportedMethod.
-	Method string
-	URL    string
+	Method   string
+	URL      string
+	Location domain.ParamLocation
+	// FormValues carries the exact application/x-www-form-urlencoded body the
+	// candidate step sent (every observed field, with the injection point's
+	// field holding the candidate's own value) — only consulted when Method is
+	// POST and Location is LocationForm.
+	FormValues map[string]string
+	// ExtraHeaders, when set, carries a Header-location candidate's header
+	// override (name -> the candidate's value) that must reach the
+	// verifying browser context BEFORE navigation — see
+	// browser.ContextOptions.ExtraHeaders. Empty for every other location.
+	ExtraHeaders map[string]string
+	// ExtraCookies, when set, carries a Cookie-location candidate's cookie
+	// override that must reach the verifying browser context BEFORE
+	// navigation (see browser.Context.SetCookies). Empty for every other
+	// location.
+	ExtraCookies []*http.Cookie
 
 	// Scope gates every request the browser makes (navigation, redirects,
 	// subresources) — see browser.ContextOptions.AllowRequest. A zero Scope
@@ -55,6 +75,11 @@ type Input struct {
 	// SessionStatePath, when non-empty, seeds the browser context with the
 	// scan's saved (authenticated) session material.
 	SessionStatePath string
+	// ProxyServer, when non-empty, routes this one verification attempt's
+	// browser context through the given proxy (operator-supplied; see
+	// domain.ScanConfig.ProxyPool and browser.ContextOptions.ProxyServer).
+	// "" (the default) is a direct connection.
+	ProxyServer string
 }
 
 // ResultEvidence carries the raw artifacts a verification attempt produced. The

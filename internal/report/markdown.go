@@ -5,11 +5,14 @@ package report
 // straight from the Finding/Scan/Project the caller supplies. It makes no
 // security decision, computes no verdict, and does not depend on
 // internal/detection or internal/verification — a Finding's Detail (an
-// opaque, engine-specific JSON blob; see domain.Finding) is decoded here only
-// through a small, local, read-only shape, never by importing those packages.
+// opaque, engine-specific JSON blob; see domain.Finding) is read through the
+// shared FindingView (view.go), never by importing those packages.
+//
+// Layout: confirmed vulnerabilities first — each with the candidate whose
+// browser verification succeeded and its evidence — then findings still needing
+// review, then diagnostics (rejected attempts, explicitly NOT vulnerabilities).
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -24,23 +27,14 @@ type MarkdownGenerator struct{}
 // Format implements Generator.
 func (MarkdownGenerator) Format() domain.ReportFormat { return domain.ReportMarkdown }
 
-// markdownDetail is the handful of Finding.Detail fields worth surfacing in a
-// human-readable report. It intentionally mirrors only part of
-// scan.findingDetail's shape (by field name, via JSON) — report stays
-// decoupled from the scan/detection packages that produce Detail.
-type markdownDetail struct {
-	Method        string `json:"method,omitempty"`
-	ParameterName string `json:"parameter_name,omitempty"`
-	Occurrences   int    `json:"occurrences,omitempty"`
-}
-
-// Generate implements Generator. Output is deterministic: findings are sorted
-// by (CreatedAt, ID) (see sortedFindings) and every map-keyed breakdown is
-// rendered in sorted key order, so the same Data always produces byte-
-// identical Markdown.
+// Generate implements Generator. Output is deterministic: findings are ordered
+// by Prioritized, attempts and evidence by their own stable orders, and every
+// map-keyed breakdown is rendered in sorted key order, so the same Data always
+// produces byte-identical Markdown.
 func (MarkdownGenerator) Generate(w io.Writer, data Data) error {
-	findings := sortedFindings(data.Findings)
-	summary := Summarize(data.Scan.ID, findings)
+	findings := Prioritized(data.Findings)
+	idx := EvidenceIndex(data.Evidence)
+	summary := dataSummary(data, findings)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Indago Scan Report\n\n")
@@ -49,24 +43,60 @@ func (MarkdownGenerator) Generate(w io.Writer, data Data) error {
 	fmt.Fprintf(&b, "- **Project:** %s\n", nonEmpty(data.Project.Name, string(data.Project.ID)))
 	fmt.Fprintf(&b, "- **Scan:** %s (`%s`)\n\n", nonEmpty(data.Scan.Name, string(data.Scan.ID)), data.Scan.ID)
 
+	if data.AISummary != "" {
+		b.WriteString("## AI-generated advisory summary (NOT verified — see Findings below for actual evidence)\n\n")
+		b.WriteString(data.AISummary)
+		b.WriteString("\n\n")
+	}
+
 	b.WriteString("## Summary\n\n")
+	if sel := selectionLine(summary); sel != "" {
+		fmt.Fprintf(&b, "- **Selection:** %s\n", sel)
+	}
 	fmt.Fprintf(&b, "- **Total findings:** %d\n", summary.TotalFindings)
-	fmt.Fprintf(&b, "- **Confirmed:** %d\n\n", summary.ConfirmedCount)
+	fmt.Fprintf(&b, "- **Confirmed:** %d\n", summary.ConfirmedCount)
+	counts := sectionCounts(findings)
+	fmt.Fprintf(&b, "- **Needs review:** %d\n", counts[SectionNeedsReview])
+	fmt.Fprintf(&b, "- **Diagnostics (rejected, not vulnerabilities):** %d\n\n", counts[SectionDiagnostic])
 
 	writeCountTable(&b, "By verdict", summary.ByVerdict)
 	writeCountTable(&b, "By severity", summary.BySeverity)
 	writeCountTable(&b, "By vulnerability class", summary.ByVulnClass)
 
-	b.WriteString("## Findings\n\n")
 	if len(findings) == 0 {
-		b.WriteString("_No findings._\n")
+		b.WriteString("## Findings\n\n_No findings._\n")
 	}
-	for i, f := range findings {
-		writeFinding(&b, i+1, f)
+	n := 0
+	for _, sec := range sectionOrder {
+		var inSec []*domain.Finding
+		for _, f := range findings {
+			if FindingSection(f) == sec {
+				inSec = append(inSec, f)
+			}
+		}
+		if len(inSec) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "## %s\n\n", sec.Title())
+		if sec == SectionDiagnostic {
+			b.WriteString("_These candidates reflected but browser verification found no execution. They are kept for diagnosis; they are not vulnerabilities._\n\n")
+		}
+		for _, f := range inSec {
+			n++
+			writeFinding(&b, n, f, NewFindingView(f, idx))
+		}
 	}
 
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+func sectionCounts(findings []*domain.Finding) map[Section]int {
+	m := map[Section]int{}
+	for _, f := range findings {
+		m[FindingSection(f)]++
+	}
+	return m
 }
 
 func writeCountTable[K ~string](b *strings.Builder, heading string, counts map[K]int) {
@@ -86,10 +116,10 @@ func writeCountTable[K ~string](b *strings.Builder, heading string, counts map[K
 	b.WriteString("\n")
 }
 
-func writeFinding(b *strings.Builder, n int, f *domain.Finding) {
+func writeFinding(b *strings.Builder, n int, f *domain.Finding, v FindingView) {
 	fmt.Fprintf(b, "### %d. %s\n\n", n, nonEmpty(f.Title, "(untitled finding)"))
 	fmt.Fprintf(b, "- **Verdict:** %s\n", strings.ToUpper(string(f.Verdict)))
-	fmt.Fprintf(b, "- **Severity:** %s\n", f.Severity)
+	fmt.Fprintf(b, "- **%s:** %s\n", SeverityLabel(f.Verdict), f.Severity)
 	fmt.Fprintf(b, "- **Confidence:** %s\n", f.Confidence)
 	fmt.Fprintf(b, "- **Vulnerability class:** %s\n", f.VulnClass)
 	if f.EndpointID != "" {
@@ -101,8 +131,11 @@ func writeFinding(b *strings.Builder, n int, f *domain.Finding) {
 	if f.Location != "" {
 		fmt.Fprintf(b, "- **Location:** %s\n", f.Location)
 	}
-	if md := decodeMarkdownDetail(f.Detail); md.ParameterName != "" || md.Method != "" {
-		fmt.Fprintf(b, "- **Parameter:** %s%s\n", md.ParameterName, methodSuffix(md.Method))
+	if v.ParamName != "" || v.Method != "" {
+		fmt.Fprintf(b, "- **Parameter:** %s%s\n", v.ParamName, methodSuffix(v.Method))
+	}
+	if v.Combined {
+		fmt.Fprintf(b, "- **⚠ Combined (multi-parameter) finding:** TWO parameters mutated together in the SAME request were required — this is NOT a single-parameter bug. Second parameter: **%s**\n", nonEmpty(v.ParamNameB, "(unknown)"))
 	}
 	if f.Provenance.DiscoverySource != "" {
 		fmt.Fprintf(b, "- **Discovery source:** %s\n", f.Provenance.DiscoverySource)
@@ -114,19 +147,158 @@ func writeFinding(b *strings.Builder, n int, f *domain.Finding) {
 		fmt.Fprintf(b, "- **Detected:** %s\n", f.Provenance.DetectedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	}
 	if f.Provenance.VerifiedAt != nil {
-		fmt.Fprintf(b, "- **Verified:** %s\n", f.Provenance.VerifiedAt.UTC().Format("2006-01-02T15:04:05Z"))
+		fmt.Fprintf(b, "- **%s:** %s\n", VerifiedAtLabel(f.Verdict), f.Provenance.VerifiedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	}
 	if f.Summary != "" {
 		fmt.Fprintf(b, "- **Notes:** %s\n", f.Summary)
 	}
-	if len(f.EvidenceIDs) > 0 {
+	if v.ReviewReasonLabel != "" {
+		fmt.Fprintf(b, "- **Why this needs manual review (not a clean negative):** %s\n", v.ReviewReasonLabel)
+		if v.ReviewReason == ReviewInteractionOnly {
+			b.WriteString("- **How to check it yourself:** open the Tested URL for the attempt(s) below in a real browser and perform the action the candidate needs (hover, click, navigate) — Indago deliberately never simulates this (AGENTS.md §3).\n")
+		}
+	}
+	b.WriteString("\n")
+
+	if v.Verified != nil {
+		b.WriteString("**Verified candidate** (the payload whose browser verification confirmed execution):\n\n")
+		writeFence(b, v.Verified.CandidateValue)
+		if v.Verified.Notes != "" {
+			fmt.Fprintf(b, "- **Verification signal:** %s\n", v.Verified.Notes)
+		}
+		if c := candidateFor(v, v.Verified.CandidateValue); c != nil {
+			fmt.Fprintf(b, "- **Context:** %s\n", c.Context)
+			if c.Technique != "" {
+				fmt.Fprintf(b, "- **Bypass technique:** %s — %s\n", c.Technique, c.Rationale)
+			}
+		}
+		b.WriteString("\n")
+		if len(v.Verified.Evidence) > 0 {
+			b.WriteString("**Evidence for the verified candidate:**\n\n")
+			writeEvidence(b, v.Verified.Evidence)
+		}
+	} else if f.Verdict == domain.VerdictConfirmed && len(v.Candidates) > 0 {
+		b.WriteString("_The confirming attempt was not recorded for this finding (it predates per-attempt tracking). Candidates that reflected:_\n\n")
+		for _, c := range v.Candidates {
+			writeFence(b, c.Value)
+		}
+	}
+
+	if others := otherAttempts(v); len(others) > 0 {
+		heading := "**Other attempts** (kept as diagnostics):"
+		if v.Verified == nil {
+			heading = "**Attempts:**"
+		}
+		b.WriteString(heading + "\n\n| Candidate | Verdict | Tested URL |\n|---|---|---|\n")
+		for _, a := range others {
+			url := "—"
+			if a.URL != "" {
+				url = "`" + a.URL + "`"
+			}
+			fmt.Fprintf(b, "| %s | %s | %s |\n", mdCell(a.CandidateValue), a.Verdict, url)
+		}
+		b.WriteString("\n")
+	}
+
+	if len(v.Evidence) > 0 {
+		fmt.Fprintf(b, "**All evidence (%d):**\n\n", len(v.Evidence))
+		writeEvidence(b, v.Evidence)
+	} else if len(f.EvidenceIDs) > 0 {
 		ids := make([]string, len(f.EvidenceIDs))
 		for i, id := range f.EvidenceIDs {
 			ids[i] = "`" + string(id) + "`"
 		}
-		fmt.Fprintf(b, "- **Evidence (%d):** %s\n", len(f.EvidenceIDs), strings.Join(ids, ", "))
+		fmt.Fprintf(b, "- **Evidence (%d):** %s\n\n", len(f.EvidenceIDs), strings.Join(ids, ", "))
+	}
+}
+
+// otherAttempts are the attempts other than the verified one, in the view's
+// stable order.
+func otherAttempts(v FindingView) []AttemptView {
+	var out []AttemptView
+	skipped := false
+	for _, a := range v.Attempts {
+		if v.Verified != nil && !skipped && a.VerifyTestCaseID == v.Verified.VerifyTestCaseID && a.CandidateValue == v.Verified.CandidateValue {
+			skipped = true
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func candidateFor(v FindingView, value string) *CandidateView {
+	for i := range v.Candidates {
+		if v.Candidates[i].Value == value {
+			return &v.Candidates[i]
+		}
+	}
+	return nil
+}
+
+// roleLabel names an evidence role for a reader. Baseline is spelled out so the
+// ordinary value in it (e.g. q=hello) is never read as a payload.
+func roleLabel(r domain.EvidenceRole) string {
+	switch r {
+	case domain.RoleBrowser:
+		return "browser verification"
+	case domain.RoleCandidate:
+		return "candidate request/response"
+	case domain.RoleBaseline:
+		return "baseline reference (the unmodified request — not a payload)"
+	}
+	return string(r)
+}
+
+func writeEvidence(b *strings.Builder, evs []EvidenceView) {
+	for _, e := range evs {
+		fmt.Fprintf(b, "- `%s` — %s · %s", e.ID, roleLabel(e.Role), e.Kind)
+		if e.MediaType != "" {
+			fmt.Fprintf(b, " · %s", e.MediaType)
+		}
+		fmt.Fprintf(b, " · %d bytes", e.Size)
+		if e.SHA256 != "" {
+			fmt.Fprintf(b, " · sha256:%s", shortHash(e.SHA256))
+		}
+		b.WriteString("\n")
 	}
 	b.WriteString("\n")
+}
+
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
+// writeFence writes s as a fenced code block whose fence is longer than any
+// backtick run inside s, so a candidate value can never break out of the block.
+func writeFence(b *strings.Builder, s string) {
+	longest, run := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			run++
+			if run > longest {
+				longest = run
+			}
+		} else {
+			run = 0
+		}
+	}
+	n := longest + 1
+	if n < 3 {
+		n = 3
+	}
+	fence := strings.Repeat("`", n)
+	fmt.Fprintf(b, "%s\n%s\n%s\n\n", fence, s, fence)
+}
+
+// mdCell renders s inside a table cell: inline code with the pipe and any
+// newline made safe.
+func mdCell(s string) string {
+	s = strings.NewReplacer("|", "\\|", "\n", "\\n", "\r", "").Replace(s)
+	return "`" + strings.ReplaceAll(s, "`", "'") + "`"
 }
 
 func methodSuffix(method string) string {
@@ -134,14 +306,6 @@ func methodSuffix(method string) string {
 		return ""
 	}
 	return " (" + method + ")"
-}
-
-func decodeMarkdownDetail(b []byte) markdownDetail {
-	var d markdownDetail
-	if len(b) > 0 {
-		_ = json.Unmarshal(b, &d)
-	}
-	return d
 }
 
 func nonEmpty(s, fallback string) string {

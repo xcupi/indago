@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/indago/indago/internal/detection"
+	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
@@ -65,22 +66,35 @@ type executor struct {
 	// correlateVerification for the same scan — see newExecutor's doc. Never
 	// nil (the constructor defaults it).
 	findingsMu *sync.Mutex
+	// tokenMu — see withDynamicTokenLock in dynamic_params.go. MUST be the
+	// same mutex given to this scan's verifyExecutor (see defaultHandlers):
+	// a dynamic (rotating/single-use) token is tied to the whole session, not
+	// to this executor alone, so a candidate request here and a verification
+	// navigation in verifyExecutor can race for the same token slot without
+	// a lock shared across both. Never nil (the constructor defaults it).
+	tokenMu *sync.Mutex
 }
 
-// newExecutor builds a test-job executor. findingsMu, when non-nil, MUST be
-// the SAME mutex given to this scan's verifyExecutor (see defaultHandlers):
-// both enqueueVerification (here) and correlateVerification read-then-write
-// Finding rows keyed by a correlation lookup, not a store-level unique
-// constraint, so without a shared lock, two candidates (or a candidate and a
-// verification) racing on the same site can create a duplicate Finding or
-// lose an update. nil defaults to a fresh mutex, which is correct whenever a
-// caller (e.g. a test exercising only this executor) never shares a scan with
-// a separately-constructed verifyExecutor.
-func newExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, q queue.Queue, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex) *executor {
+// newExecutor builds a test-job executor. findingsMu and tokenMu, when
+// non-nil, MUST be the SAME mutexes given to this scan's verifyExecutor (see
+// defaultHandlers): both enqueueVerification (here) and
+// correlateVerification read-then-write Finding rows keyed by a correlation
+// lookup, not a store-level unique constraint, so without a shared
+// findingsMu, two candidates (or a candidate and a verification) racing on
+// the same site can create a duplicate Finding or lose an update; without a
+// shared tokenMu, a candidate request here and a verification navigation
+// there can race for the same single-use session token (see
+// dynamic_params.go). nil defaults to a fresh mutex for each, which is
+// correct whenever a caller (e.g. a test exercising only this executor)
+// never shares a scan with a separately-constructed verifyExecutor.
+func newExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, q queue.Queue, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, tokenMu *sync.Mutex) *executor {
 	if findingsMu == nil {
 		findingsMu = &sync.Mutex{}
 	}
-	return &executor{store: st, engine: eng, evidence: ev, queue: q, cfg: cfg.withDefaults(), log: log, baselines: newBaselineCache(), findingsMu: findingsMu}
+	if tokenMu == nil {
+		tokenMu = &sync.Mutex{}
+	}
+	return &executor{store: st, engine: eng, evidence: ev, queue: q, cfg: cfg.withDefaults(), log: log, baselines: newBaselineCache(), findingsMu: findingsMu, tokenMu: tokenMu}
 }
 
 var _ worker.Handler = (*executor)(nil)
@@ -155,6 +169,25 @@ type result struct {
 	reflection   *detection.ReflectionReport
 	baselineReq  domain.ID
 	baselineResp domain.ID
+
+	// blockSuspected/blockBaselineStatus/blockMutatedStatus: see
+	// possibleBlockNote. Set on a "not reflected" result whose status code
+	// looks like a WAF/rate-limit/maintenance block rather than a clean
+	// negative, so run() can record the diagnostic Finding described in
+	// upsertBlockFinding (finding.go) — this is the ONLY consumer; the note
+	// text alone (always set regardless) stays on the TestCase either way.
+	blockSuspected      bool
+	blockBaselineStatus int
+	blockMutatedStatus  int
+
+	// captchaSuspected/captchaLabel: see detection.CaptchaSuspected. Set when
+	// a CAPTCHA/bot-challenge page newly appears for the mutated/candidate
+	// request (not present on the baseline) — detect-only, never attempted
+	// to solve or bypass (AGENTS.md §2.2). run() calls recordCaptchaFinding
+	// (verify.go) for this, same pattern as blockSuspected above; the two
+	// are independent signals and can both be set on the same result.
+	captchaSuspected bool
+	captchaLabel     string
 }
 
 func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.TestCase) result {
@@ -198,6 +231,11 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		// Pending — see docs/scan-orchestration.md).
 		if res.reflection != nil && res.reflection.Reflected {
 			e.enqueueVerification(ctx, job, ep, cand, focus, tc.ID)
+		} else if res.blockSuspected {
+			e.recordBlockFinding(ctx, job, ep, focus, res.blockBaselineStatus, res.blockMutatedStatus, tc.ID)
+		}
+		if res.captchaSuspected {
+			e.recordCaptchaFinding(ctx, job, ep, focus, res.captchaLabel, tc.ID)
 		}
 		return res
 	case focus != nil:
@@ -207,6 +245,12 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		// re-plan, so this does not recurse.
 		if res.reflection != nil && res.reflection.Plan != nil {
 			e.enqueueCandidates(ctx, job, res.reflection.Plan)
+		}
+		if res.blockSuspected {
+			e.recordBlockFinding(ctx, job, ep, focus, res.blockBaselineStatus, res.blockMutatedStatus, tc.ID)
+		}
+		if res.captchaSuspected {
+			e.recordCaptchaFinding(ctx, job, ep, focus, res.captchaLabel, tc.ID)
 		}
 		return res
 	default:
@@ -439,11 +483,18 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 	q := u.Query()
 	form := url.Values{}
 	jsonBody := map[string]string{}
+	var headerOverride map[string]string
+	var cookieOverride []*http.Cookie
 	for _, p := range sorted {
 		val := p.Example
-		injected := inj != nil && p.ID == inj.param.ID
-		if injected {
+		injectedA := inj != nil && inj.param != nil && p.ID == inj.param.ID
+		injectedB := inj != nil && inj.paramB != nil && p.ID == inj.paramB.ID
+		injected := injectedA || injectedB
+		switch {
+		case injectedA:
 			val = inj.value // the marker goes ONLY into the selected injection point
+		case injectedB:
+			val = inj.valueB // the SECOND override, for a combined (multi-parameter) candidate
 		}
 		switch p.Location {
 		case domain.LocationQuery:
@@ -457,11 +508,51 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 			form.Set(p.Name, val)
 		case domain.LocationJSON:
 			jsonBody[p.Name] = val
+		case domain.LocationHeader:
+			// Only the mutated/candidate request overrides a header — the
+			// baseline must never disturb any header the scan relies on
+			// (auth headers, the session cookie header, the engine's own
+			// default User-Agent), so a non-injected Header parameter is a
+			// no-op here.
+			if injected {
+				if headerOverride == nil {
+					headerOverride = make(map[string]string, 1)
+				}
+				headerOverride[p.Name] = val
+			}
+		case domain.LocationCookie:
+			// Same principle as Header: the scan's own session cookies are
+			// already carried by scopedEngine.WithSessionCookies on every
+			// request, so only the injected cookie needs an explicit
+			// override here — appended as its own Cookie, never replacing
+			// or removing any other cookie the request carries.
+			if injected {
+				cookieOverride = append(cookieOverride, &http.Cookie{Name: p.Name, Value: val})
+			}
+		case domain.LocationPath:
+			// The baseline path segment is already correct in ep.URL; only
+			// the injected candidate rewrites that ONE segment.
+			if injected {
+				if idx, ok := discovery.ParsePathSegmentParamName(p.Name); ok {
+					segs := discovery.PathSegments(u.Path)
+					if idx >= 0 && idx < len(segs) {
+						segs[idx] = val
+						u.Path = discovery.JoinPathSegments(segs)
+						u.RawPath = "" // let url.URL re-derive the encoded form
+					}
+				}
+			}
 		}
 	}
 	u.RawQuery = q.Encode()
 
 	req := &httpengine.Request{Method: string(ep.Method), URL: u.String()}
+	if len(headerOverride) > 0 {
+		req.Headers = headerOverride
+	}
+	if len(cookieOverride) > 0 {
+		req.Cookies = cookieOverride
+	}
 	if !hasBody(ep.Method) {
 		return req, nil
 	}
@@ -489,6 +580,24 @@ func isSafeMethod(m domain.HTTPMethod) bool {
 	}
 }
 
+// canBrowserVerify reports whether method+location is something the browser
+// verifier can replay as a real navigation: ordinary GET/HEAD, or POST with a
+// form-encoded (application/x-www-form-urlencoded) body — replayed as a real
+// <form> submission (see browser.Page.NavigateForm) so a POST/form candidate
+// gets the same chance to execute on page load a GET one already gets.
+// POST+JSON has no browser-navigable form (an HTML form cannot carry
+// application/json) and stays unsupported — that Finding stays Pending.
+func canBrowserVerify(method domain.HTTPMethod, loc domain.ParamLocation) bool {
+	switch method {
+	case domain.MethodGET, domain.MethodHEAD, "":
+		return true
+	case domain.MethodPOST:
+		return loc == domain.LocationForm
+	default:
+		return false
+	}
+}
+
 func hasBody(m domain.HTTPMethod) bool {
 	switch m {
 	case domain.MethodPOST, domain.MethodPUT, domain.MethodPATCH, domain.MethodDELETE:
@@ -496,6 +605,30 @@ func hasBody(m domain.HTTPMethod) bool {
 	default:
 		return false
 	}
+}
+
+// possibleBlockNote flags a suspicious status-code change between the
+// baseline (unmodified) request and a mutated/candidate request that did NOT
+// reflect: if the baseline succeeded (2xx/3xx) but the mutated request came
+// back 403/429/503 — common WAF/rate-limit/maintenance signals — "not
+// reflected" could mean "blocked", not "safe". This is detection only, never
+// evasion (AGENTS.md §2.2: no anti-bot/WAF bypass of any kind is added here;
+// the exact same request is still sent, once): it exists so an operator does
+// not mistake a blocked probe for a clean negative. Returns "" when nothing
+// looks anomalous.
+// The bool return additionally tells the caller whether to record a
+// diagnostic Finding for this (see result.blockSuspected / upsertBlockFinding
+// in finding.go) — before that was wired, this signal only ever reached a raw
+// TestCase note, invisible on every report surface.
+func possibleBlockNote(baselineStatus, mutatedStatus int) (string, bool) {
+	baselineOK := baselineStatus >= 200 && baselineStatus < 400
+	suspicious := mutatedStatus == 403 || mutatedStatus == 429 || mutatedStatus == 503
+	if baselineOK && suspicious && mutatedStatus != baselineStatus {
+		return fmt.Sprintf(" (possible block/filter: status changed %d -> %d from baseline; "+
+			"this may not be a clean negative — Indago does not retry or evade, see AGENTS.md §2.2)",
+			baselineStatus, mutatedStatus), true
+	}
+	return "", false
 }
 
 // ---------------------------------------------------------------------------

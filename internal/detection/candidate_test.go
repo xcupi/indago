@@ -216,11 +216,11 @@ func TestPlanDeduplication(t *testing.T) {
 	body := []byte("<p>" + rawSite + "</p><div>" + encSite + "</div>")
 	rep := planBody(t, body, candHTML)
 
-	if rep.Plan.Generated != 4 {
-		t.Fatalf("Generated = %d, want 4 (2 sites × 2 templates)", rep.Plan.Generated)
+	if rep.Plan.Generated != 12 {
+		t.Fatalf("Generated = %d, want 12 (2 sites × 6 templates)", rep.Plan.Generated)
 	}
-	if len(rep.Plan.Candidates) != 2 {
-		t.Fatalf("after dedup want 2 candidates, got %v", valuesOf(rep.Plan))
+	if len(rep.Plan.Candidates) != 6 {
+		t.Fatalf("after dedup want 6 candidates, got %v", valuesOf(rep.Plan))
 	}
 	seen := map[string]bool{}
 	for _, c := range rep.Plan.Candidates {
@@ -433,5 +433,40 @@ func TestPlannerIsPure(t *testing.T) {
 		if strings.HasPrefix(p, "github.com/") && !strings.HasSuffix(p, "/internal/domain") {
 			t.Errorf("candidate.go imports %q: only the domain model is allowed", p)
 		}
+	}
+}
+
+// A style="" attribute is still an ordinary HTML attribute: closing its quote
+// and the tag reaches markup regardless of whether the CSS before it is
+// valid. This was previously missed entirely (cssTemplates only handled a
+// <style> element's body) — zero candidates were planned for a style
+// attribute reflection, even though the generic attribute-breakout mechanism
+// applies here exactly as it does for any other attribute.
+func TestPlanStyleAttributeBreaksOutDespiteInvalidCSS(t *testing.T) {
+	rep := planDoc(t, `<div style="color:{{M}}">text</div>`, "text/html", func(v string) string { return v })
+	want := `"><svg onload=` + tok() + `>`
+	c := mustFind(t, rep.Plan, want)
+	if c.Category != detection.CatCSS {
+		t.Fatalf("category = %q, want %q", c.Category, detection.CatCSS)
+	}
+	if c.Trigger != detection.TriggerLoad {
+		t.Fatalf("trigger = %q, want %q (must be confirmable by the passive browser verifier)", c.Trigger, detection.TriggerLoad)
+	}
+}
+
+// The same breakout, single-quoted.
+func TestPlanStyleAttributeSingleQuoted(t *testing.T) {
+	rep := planDoc(t, `<div style='color:{{M}}'>text</div>`, "text/html", func(v string) string { return v })
+	mustFind(t, rep.Plan, `'><svg onload=`+tok()+`>`)
+}
+
+// An unquoted style attribute's value ends at the first '>' (or whitespace)
+// just like any other unquoted attribute — no quote character is needed at
+// all, since that single '>' closes both the value and the tag at once.
+func TestPlanStyleAttributeUnquoted(t *testing.T) {
+	rep := planDoc(t, `<div style=color:{{M}}>text</div>`, "text/html", func(v string) string { return v })
+	c := mustFind(t, rep.Plan, `><svg onload=`+tok()+`>`)
+	if c.Category != detection.CatCSS {
+		t.Fatalf("category = %q, want %q", c.Category, detection.CatCSS)
 	}
 }

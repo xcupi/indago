@@ -232,3 +232,32 @@ func TestScopedEngineWithSessionCookiesSendsThem(t *testing.T) {
 		t.Fatalf("session cookie not sent: %q", sawCookie)
 	}
 }
+
+// A request-specific cookie (a Cookie-location injection point's override —
+// see buildRequest in executor.go) must win over a session cookie of the
+// SAME name, never be silently shadowed by it. This is the realistic case
+// for a Cookie injection point: its name came from the scan's own session
+// cookie jar in the first place (see discovery's registerCookieInjectionPoints),
+// so the two names collide by construction on every real request.
+func TestScopedEngineRequestCookieWinsOverSameNameSessionCookie(t *testing.T) {
+	var sawCookies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, c := range r.Cookies() {
+			if c.Name == "pref" {
+				sawCookies = append(sawCookies, c.Value)
+			}
+		}
+	}))
+	defer srv.Close()
+
+	eng := newScopedEngine(noFollowClient(t), domain.Scope{IncludeHosts: []string{"127.0.0.1"}}).
+		WithSessionCookies([]*http.Cookie{{Name: "pref", Value: "blue"}})
+	req := httpengine.GET(srv.URL + "/")
+	req.Cookies = []*http.Cookie{{Name: "pref", Value: "MARKER"}}
+	if _, err := eng.Do(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if len(sawCookies) != 1 || sawCookies[0] != "MARKER" {
+		t.Fatalf("pref cookie values seen = %v, want exactly [MARKER] (the injection override, not the shadowed session value)", sawCookies)
+	}
+}

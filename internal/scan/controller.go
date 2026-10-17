@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -36,6 +37,7 @@ import (
 
 	"github.com/indago/indago/internal/auth"
 	"github.com/indago/indago/internal/browser"
+	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
@@ -93,6 +95,18 @@ type Options struct {
 	// seeds are still registered, nothing is fetched.
 	HTTP httpengine.Engine
 
+	// HTTPConfig is the Config HTTP was built from. It is otherwise unused —
+	// every scan shares HTTP directly — EXCEPT when a scan sets its own
+	// domain.ScanConfig.ProxyPool: scanHTTPEngine then clones HTTPConfig with
+	// that pool substituted in and builds a fresh, scan-scoped client from it,
+	// so a per-scan proxy pool actually changes where that scan's raw
+	// discovery/candidate requests go instead of only affecting browser
+	// verification. Left zero-value when HTTP is a Stub/fake (tests): a scan
+	// configuring ProxyPool without a real HTTPConfig still gets SOME client
+	// (built from the zero Config), just not one tuned the way the real one
+	// would be.
+	HTTPConfig httpengine.Config
+
 	// Browser, when non-nil, enables browser network-observation discovery AND
 	// (when it is the concrete *browser.Manager) browser verification of
 	// reflected candidates. Scope IS enforced for verification (and for
@@ -123,6 +137,15 @@ type Options struct {
 	// Executor tunes the default test-job executor (timeout, state-changing
 	// methods). Ignored when Handlers overrides JobTest.
 	Executor ExecutorConfig
+
+	// SessionsDir is where Controller.resolveAuth writes a captured login's
+	// session state file for AuthMode Interactive/MFA/Password — the same
+	// directory web.LoginFunc's standalone /api/auth/login handler already
+	// writes into (config.Config.SessionsDir()), so a session captured
+	// either way lives in one place. Empty falls back to os.TempDir() (a
+	// test building a Controller without a real data dir still works,
+	// just not with the server's actual layout).
+	SessionsDir string
 }
 
 func (o Options) withDefaults() Options {
@@ -232,6 +255,23 @@ type CreateScanParams struct {
 	// import when AuthMode is AuthExisting — e.g. the file an interactive login
 	// run earlier saved. Ignored for every other mode.
 	AuthStatePath string
+	// LoginURL is the page CreateScan opens to drive the login itself, for
+	// AuthMode Interactive, MFA, or Password. Ignored for Anonymous/Existing
+	// (which never drive a login of their own — see resolveAuth).
+	LoginURL string
+	// SuccessURL is a glob the browser must navigate to before the login is
+	// considered done — REQUIRED for Interactive/MFA/Password (there is no
+	// human in CreateScan's own flow to otherwise judge success, and for
+	// Password there is no human anywhere in the loop at all). See
+	// browser.LoginOptions.SuccessURLGlob / AutoLoginOptions.SuccessURLGlob.
+	SuccessURL string
+	// LoginUsernameSelector/LoginPasswordSelector/LoginSubmitSelector are
+	// CSS-selector overrides for AuthMode Password only, for a login form
+	// browser.AutoLogin's built-in heuristic can't locate correctly. Empty
+	// uses the heuristic. Ignored for every other mode.
+	LoginUsernameSelector string
+	LoginPasswordSelector string
+	LoginSubmitSelector   string
 	// SeedURLs are discovery seeds. Empty means the target's base URL. Every seed
 	// must be in scope; an out-of-scope seed is rejected rather than silently
 	// dropped.
@@ -245,6 +285,20 @@ type CreateScanParams struct {
 	MaxDepth     int
 	MaxPages     int
 	MaxEndpoints int
+
+	// CandidateProfile ("minimal" | "standard" | "thorough"; empty = standard)
+	// and MaxCandidates (> 0 overrides the profile's per-injection-point cap)
+	// bound the candidates sent per injection point. See domain.ScanConfig.
+	CandidateProfile string
+	MaxCandidates    int
+	// EnableEvasion — see domain.ScanConfig.EnableEvasion. Off by default.
+	EnableEvasion bool
+	// ProxyPool — see domain.ScanConfig.ProxyPool. Empty (the default) means a
+	// direct connection for both raw HTTP traffic and browser verification.
+	ProxyPool []string
+	// RandomizeTLSFingerprint — see domain.ScanConfig.RandomizeTLSFingerprint.
+	// Off by default; mutually exclusive with ProxyPool (validated below).
+	RandomizeTLSFingerprint bool
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -319,12 +373,34 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	if err := validateCrawlExtent(cfg); err != nil {
 		return nil, err
 	}
+	// Candidate selection (like the crawl extent) applies whatever the profile
+	// preset. Validated now so a typo fails at creation, not mid-scan.
+	if p.CandidateProfile != "" {
+		cfg.CandidateProfile = p.CandidateProfile
+	}
+	if p.MaxCandidates != 0 { // negative is passed through so ResolveProfile rejects it
+		cfg.MaxCandidates = p.MaxCandidates
+	}
+	if _, err := detection.ResolveProfile(cfg.CandidateProfile, cfg.MaxCandidates); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBadConfig, err)
+	}
+	cfg.EnableEvasion = p.EnableEvasion
+	cfg.ProxyPool = p.ProxyPool
+	if err := validateProxyPool(cfg.ProxyPool); err != nil {
+		return nil, err
+	}
+	cfg.RandomizeTLSFingerprint = p.RandomizeTLSFingerprint
+	if cfg.RandomizeTLSFingerprint && len(cfg.ProxyPool) > 0 {
+		return nil, fmt.Errorf("%w: randomize_tls_fingerprint and proxy_pool cannot both be set — "+
+			"Go's HTTP transport performs TLS internally after any proxy tunnel, never through a "+
+			"custom TLS dialer, so the fingerprint override would silently have no effect through a proxy", ErrBadConfig)
+	}
 
 	mode := p.AuthMode
 	if !mode.IsValid() {
 		mode = domain.AuthAnonymous
 	}
-	statePath, err := validateAuth(mode, p.AuthStatePath)
+	statePath, err := c.resolveAuth(ctx, mode, p)
 	if err != nil {
 		return nil, err
 	}
@@ -657,27 +733,129 @@ func (c *Controller) Shutdown() {
 // helpers
 // ---------------------------------------------------------------------------
 
-// validateAuth checks a scan's authentication configuration at creation, so an
-// unusable one is rejected up front (ErrAuth) instead of failing at Start. It
-// returns the cleaned state path to persist.
-func validateAuth(mode domain.AuthMode, statePath string) (string, error) {
-	if !auth.Implemented(mode) {
-		return "", fmt.Errorf("%w: auth mode %q is not implemented (use %q or %q)", ErrAuth, mode, domain.AuthAnonymous, domain.AuthExisting)
-	}
-	statePath = strings.TrimSpace(statePath)
-	if mode != domain.AuthExisting {
-		if statePath != "" {
-			return "", fmt.Errorf("%w: a session state path is only valid with auth mode %q", ErrAuth, domain.AuthExisting)
+// resolveAuth checks a scan's authentication configuration at creation, so an
+// unusable one is rejected up front (ErrAuth) instead of failing at Start,
+// and — for Interactive, MFA, and Password — actually DRIVES the login
+// (blocking CreateScan until it finishes, times out, or the context is
+// canceled, the same contract web.LoginFunc's standalone /api/auth/login
+// endpoint already has). Returns the state path to persist on the Session.
+func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p CreateScanParams) (string, error) {
+	statePath := strings.TrimSpace(p.AuthStatePath)
+	loginURL := strings.TrimSpace(p.LoginURL)
+	successURL := strings.TrimSpace(p.SuccessURL)
+
+	switch mode {
+	case domain.AuthAnonymous:
+		if statePath != "" || loginURL != "" {
+			return "", fmt.Errorf("%w: auth_state_path/login_url are only valid with auth mode %q, %q, %q, or %q",
+				ErrAuth, domain.AuthExisting, domain.AuthInteractive, domain.AuthMFA, domain.AuthPassword)
 		}
 		return "", nil
+
+	case domain.AuthExisting:
+		if loginURL != "" {
+			return "", fmt.Errorf("%w: login_url is only valid with auth mode %q, %q, or %q — %q imports a session you already captured",
+				ErrAuth, domain.AuthInteractive, domain.AuthMFA, domain.AuthPassword, domain.AuthExisting)
+		}
+		if statePath != "" && filepath.IsAbs(statePath) {
+			statePath = filepath.Clean(statePath)
+		}
+		if err := auth.ValidateStateFile(statePath); err != nil {
+			return "", fmt.Errorf("%w: %w", ErrAuth, err)
+		}
+		return statePath, nil
+
+	case domain.AuthInteractive, domain.AuthMFA:
+		if statePath != "" {
+			return "", fmt.Errorf("%w: auth_state_path is not valid with auth mode %q — Indago captures the session itself; use %q to import one you already have",
+				ErrAuth, mode, domain.AuthExisting)
+		}
+		if loginURL == "" {
+			return "", fmt.Errorf("%w: auth mode %q requires login_url", ErrAuth, mode)
+		}
+		if successURL == "" {
+			return "", fmt.Errorf("%w: auth mode %q requires success_url — CreateScan has no UI to show a waiting state, so it needs an objective signal that the operator's login (and any MFA step) finished before it saves a session", ErrAuth, mode)
+		}
+		mgr, ok := c.opts.Browser.(*browser.Manager)
+		if !ok || mgr == nil {
+			return "", fmt.Errorf("%w: auth mode %q requires a browser (start the server with `indago serve -browser`)", ErrAuth, mode)
+		}
+		path, err := c.newSessionStatePath()
+		if err != nil {
+			return "", fmt.Errorf("%w: build session state path: %w", ErrAuth, err)
+		}
+		res, err := mgr.InteractiveLogin(ctx, browser.LoginOptions{LoginURL: loginURL, SuccessURLGlob: successURL, StorageStatePath: path})
+		if err != nil {
+			return "", fmt.Errorf("%w: interactive login: %w", ErrAuth, err)
+		}
+		return res.StorageStatePath, nil
+
+	case domain.AuthPassword:
+		if statePath != "" {
+			return "", fmt.Errorf("%w: auth_state_path is not valid with auth mode %q — Indago captures the session itself; use %q to import one you already have",
+				ErrAuth, mode, domain.AuthExisting)
+		}
+		if loginURL == "" {
+			return "", fmt.Errorf("%w: auth mode %q requires login_url", ErrAuth, mode)
+		}
+		if successURL == "" {
+			return "", fmt.Errorf("%w: auth mode %q requires success_url — with no human in the loop at all, Indago needs an objective signal that the submitted form actually logged in", ErrAuth, mode)
+		}
+		// Credentials come ONLY from the server process's own environment —
+		// never from the request body, never from a CLI flag that would sit
+		// in shell history or `ps`. Read fresh on every login (not cached at
+		// server startup), matching the operator's own chosen contract.
+		user := strings.TrimSpace(os.Getenv("INDAGO_AUTH_USER"))
+		pass := os.Getenv("INDAGO_AUTH_PASS")
+		if user == "" || pass == "" {
+			return "", fmt.Errorf("%w: auth mode %q requires INDAGO_AUTH_USER and INDAGO_AUTH_PASS set in the SERVER's own environment before this scan is created — never sent over the API/CLI, never persisted", ErrAuth, mode)
+		}
+		mgr, ok := c.opts.Browser.(*browser.Manager)
+		if !ok || mgr == nil {
+			return "", fmt.Errorf("%w: auth mode %q requires a browser (start the server with `indago serve -browser`)", ErrAuth, mode)
+		}
+		path, err := c.newSessionStatePath()
+		if err != nil {
+			return "", fmt.Errorf("%w: build session state path: %w", ErrAuth, err)
+		}
+		res, err := mgr.AutoLogin(ctx, browser.AutoLoginOptions{
+			LoginURL: loginURL, Username: user, Password: pass, SuccessURLGlob: successURL, StorageStatePath: path,
+			UsernameSelector: p.LoginUsernameSelector, PasswordSelector: p.LoginPasswordSelector, SubmitSelector: p.LoginSubmitSelector,
+		})
+		if err != nil {
+			return "", fmt.Errorf("%w: password login: %w", ErrAuth, err)
+		}
+		return res.StorageStatePath, nil
+
+	default:
+		// Unreachable: CreateScan already coerces an invalid mode to
+		// Anonymous before calling resolveAuth. Fails closed regardless, in
+		// case a future AuthMode value is added to the enum before its case
+		// is added here.
+		return "", fmt.Errorf("%w: auth mode %q is not implemented", ErrAuth, mode)
 	}
-	if statePath != "" && filepath.IsAbs(statePath) {
-		statePath = filepath.Clean(statePath)
+}
+
+// sessionsDir is where resolveAuth saves a captured login's session state.
+// See Options.SessionsDir.
+func (c *Controller) sessionsDir() string {
+	if c.opts.SessionsDir != "" {
+		return c.opts.SessionsDir
 	}
-	if err := auth.ValidateStateFile(statePath); err != nil {
-		return "", fmt.Errorf("%w: %w", ErrAuth, err)
-	}
-	return statePath, nil
+	return os.TempDir()
+}
+
+// newSessionStatePath returns a fresh, ABSOLUTE path under sessionsDir for a
+// captured login to save its session material to. Absolute matters:
+// auth.ValidateStateFile (which capturedSession.Establish/Validate run
+// against on every scan start/resume, not just once at capture time) rejects
+// a relative path outright — and Options.SessionsDir/config.Config.DataDir
+// default to a relative "data", so joining them naively produces a path
+// that is only valid while the server's current working directory happens
+// to be the same as when it was captured.
+func (c *Controller) newSessionStatePath() (string, error) {
+	path := filepath.Join(c.sessionsDir(), "login-"+string(domain.NewID())+".json")
+	return filepath.Abs(path)
 }
 
 // validateCrawlExtent bounds the crawl-extent controls so a typo cannot ask the
@@ -690,6 +868,24 @@ func validateCrawlExtent(cfg domain.ScanConfig) error {
 		return fmt.Errorf("%w: max_pages must be between 0 and %d", ErrBadConfig, maxCrawlPages)
 	case cfg.MaxEndpoints < 0 || cfg.MaxEndpoints > maxCrawlEndpoints:
 		return fmt.Errorf("%w: max_endpoints must be between 0 and %d", ErrBadConfig, maxCrawlEndpoints)
+	}
+	return nil
+}
+
+// validateProxyPool rejects an implausible proxy entry up front (not a URL,
+// or a scheme Indago's HTTP transport can't dial) rather than letting a typo
+// surface later as every request in the scan silently failing to connect.
+func validateProxyPool(pool []string) error {
+	for _, p := range pool {
+		u, err := url.Parse(p)
+		if err != nil || u.Host == "" {
+			return fmt.Errorf("%w: proxy_pool entry %q is not a valid proxy URL (want http://host:port, https://host:port, or socks5://host:port)", ErrBadConfig, p)
+		}
+		switch u.Scheme {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return fmt.Errorf("%w: proxy_pool entry %q has unsupported scheme %q (want http, https, socks5, or socks5h)", ErrBadConfig, p, u.Scheme)
+		}
 	}
 	return nil
 }

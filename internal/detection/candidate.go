@@ -41,6 +41,13 @@ const (
 	CatUnknown  CandidateCategory = "unknown_mixed"
 )
 
+// Candidate triggers (see Candidate.Trigger).
+const (
+	TriggerLoad        = "load"
+	TriggerInteraction = "interaction"
+	TriggerNone        = "none"
+)
+
 // Candidate sources.
 const (
 	SourceBuiltin = "builtin"
@@ -71,12 +78,39 @@ type Candidate struct {
 	// candidate depends on: "raw" (survive) or an encoding (html/url/js/stripped/
 	// mixed) that neutralizes them. Derived from the reflection encoding analysis.
 	Transformation string `json:"transformation"`
+	// Trigger is how this breakout could ever produce an execution signal:
+	// TriggerLoad fires on page load (what the passive browser verifier can
+	// observe), TriggerInteraction needs a user action (hover, click,
+	// navigation) the verifier deliberately never simulates, and TriggerNone is
+	// a markup-injection probe that carries no executable reference at all.
+	// Only TriggerLoad candidates can ever be Confirmed by verification; the
+	// others document reflection behaviour and end Rejected/unconfirmed.
+	Trigger string `json:"trigger,omitempty"`
+	// Technique names the WAF/filter-bypass shape this candidate uses (e.g.
+	// "case_variation", "alt_separator", "double_url_encoding"), empty for
+	// every canonical (non-evasion) candidate. Only ever set when the scan
+	// opted in via PlanOptions.EnableEvasion — see evasion.go. Kept distinct
+	// from Rationale so a report can filter/group on it directly.
+	Technique string `json:"technique,omitempty"`
 	// Priority orders execution: higher first. Candidates whose required
 	// characters the site neutralizes are deprioritized, not hidden.
 	Priority  int    `json:"priority"`
 	Rationale string `json:"rationale"`
 	// DedupKey collapses identical candidates arising from multiple sites.
 	DedupKey string `json:"dedup_key"`
+
+	// Combined marks a BOUNDED, multi-parameter (two-parameter, never a
+	// triple+) candidate — see docs/reflection-candidates.md "Combined
+	// (multi-parameter) candidates" and combined.go. Everything above
+	// (Parameter, Location, InjectionPointID, Value) describes the FIRST
+	// ("closer") half; these four describe the SECOND ("breakout") half.
+	// Empty/false for every ordinary single-parameter candidate produced by
+	// PlanCandidates — this never changes what any existing field means.
+	Combined          bool                 `json:"combined,omitempty"`
+	ParameterB        string               `json:"parameter_b,omitempty"`
+	LocationB         domain.ParamLocation `json:"location_b,omitempty"`
+	InjectionPointBID domain.ID            `json:"injection_point_b_id,omitempty"`
+	ValueB            string               `json:"value_b,omitempty"`
 }
 
 // CandidatePlan is the ordered, deduplicated candidate set for one reflection
@@ -86,6 +120,13 @@ type CandidatePlan struct {
 	Marker     string      `json:"marker"`
 	Generated  int         `json:"generated"` // total built before deduplication
 	Candidates []Candidate `json:"candidates,omitempty"`
+	// Profile/Limit/Dropped record the selection policy applied (profile.go):
+	// the profile name, its per-injection-point cap, and how many deduplicated
+	// candidates it left unsent — so a bounded plan is never mistaken for the
+	// complete built-in set.
+	Profile CandidateProfile `json:"profile,omitempty"`
+	Limit   int              `json:"limit,omitempty"`
+	Dropped int              `json:"dropped,omitempty"`
 }
 
 // PlanOptions configures planning.
@@ -96,6 +137,14 @@ type PlanOptions struct {
 	// Provenance stamped onto every candidate.
 	ScanID           domain.ID
 	InjectionPointID domain.ID
+	// Profile selects which of the planned candidates are kept (and how many).
+	// The zero value keeps every candidate, as before profiles existed.
+	Profile ProfileSpec
+	// EnableEvasion additionally plans WAF/filter-bypass variants (see
+	// evasion.go) for the contexts that have them, ON TOP OF the canonical
+	// candidates — it never replaces or hides them. Defaults to false
+	// (conservative by design, AGENTS.md §2.3): an operator opts in per scan.
+	EnableEvasion bool
 }
 
 // PlanCandidates builds the candidate plan for rep and stores it in rep.Plan. It
@@ -118,7 +167,11 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 		if loc.Context == nil {
 			continue
 		}
-		for _, tpl := range templatesFor(*loc.Context, marker) {
+		tpls := templatesFor(*loc.Context, marker)
+		if opts.EnableEvasion {
+			tpls = append(tpls, evasionTemplatesFor(*loc.Context, marker)...)
+		}
+		for _, tpl := range tpls {
 			plan.Generated++
 			c := Candidate{
 				Source:           SourceBuiltin,
@@ -132,6 +185,8 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 				Context:          loc.Context.Context,
 				ContextSub:       loc.Context.Sub,
 				Value:            tpl.value,
+				Trigger:          tpl.trigger,
+				Technique:        tpl.technique,
 				Rationale:        tpl.rationale,
 			}
 			c.Transformation, c.Priority = transform(loc, tpl, &c)
@@ -149,6 +204,10 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 	sort.Slice(plan.Candidates, func(i, j int) bool {
 		return lessCandidate(plan.Candidates[i], plan.Candidates[j])
 	})
+	if opts.Profile != (ProfileSpec{}) {
+		plan.Candidates, plan.Dropped = opts.Profile.Select(plan.Candidates)
+		plan.Profile, plan.Limit = opts.Profile.Name, opts.Profile.MaxPerInjectionPoint
+	}
 	rep.Plan = plan
 	return plan
 }
@@ -208,6 +267,8 @@ type candTemplate struct {
 	needs     string
 	priority  int
 	rationale string
+	trigger   string // TriggerLoad / TriggerInteraction / TriggerNone
+	technique string // "" for every canonical template; see evasion.go
 }
 
 // templatesFor returns the built-in candidates for a site's context.
@@ -228,6 +289,18 @@ func templatesFor(a ContextAnalysis, m string) []candTemplate {
 	}
 }
 
+// Template constructors: the trigger is part of each built-in's definition, so
+// a profile can select on it (see profile.go).
+func onLoad(value, needs string, priority int, why string) candTemplate {
+	return candTemplate{value: value, needs: needs, priority: priority, rationale: why, trigger: TriggerLoad}
+}
+func onInteraction(value, needs string, priority int, why string) candTemplate {
+	return candTemplate{value: value, needs: needs, priority: priority, rationale: why, trigger: TriggerInteraction}
+}
+func markupProbe(value, needs string, priority int, why string) candTemplate {
+	return candTemplate{value: value, needs: needs, priority: priority, rationale: why, trigger: TriggerNone}
+}
+
 func htmlTextTemplates(a ContextAnalysis, m string) []candTemplate {
 	// In RCDATA/RAWTEXT (title/textarea/iframe/xmp/…) or a comment, markup is not
 	// parsed until the construct closes, so the breakout must close it first.
@@ -241,10 +314,40 @@ func htmlTextTemplates(a ContextAnalysis, m string) []candTemplate {
 		}
 	}
 	return []candTemplate{
-		{prefix + "<svg onload=" + m + ">", "<>", 90,
-			prefixReason(prefix, "inject an <svg> element whose onload handler references the benign marker")},
-		{prefix + "<" + m + "x>", "<>", 60,
-			prefixReason(prefix, "inject a marker element to detect raw markup injection without script")},
+		onLoad(prefix+"<svg onload="+m+">", "<>", 90,
+			prefixReason(prefix, "inject an <svg> element whose onload handler references the benign marker")),
+		// img onerror is a second, independent auto-firing vector: a filter
+		// that specifically blocks "svg" (but not "img") still misses this one.
+		// Not evasion — both are standard, unobfuscated constructs; this is
+		// coverage of a second real-world auto-trigger, same as the planner
+		// already tries two shapes elsewhere.
+		onLoad(prefix+"<img src=x onerror="+m+">", "<>", 88,
+			prefixReason(prefix, "inject an <img> with a deliberately-broken src so its onerror handler (fires automatically, no interaction) references the marker")),
+		// <details open ontoggle=> is a third independent auto-firing vector:
+		// the toggle event fires once when the element is parsed with open
+		// already present (no click needed), so a filter that blocks "svg"
+		// and "img" but not "details" still misses this one. Also useful
+		// against filters that specifically pattern-match "on load"/"on
+		// error" strings but not "ontoggle".
+		onLoad(prefix+"<details open ontoggle="+m+">", "<>", 80,
+			prefixReason(prefix, "inject a <details open> element whose ontoggle handler fires as soon as it is parsed (open already set), referencing the marker")),
+		// <body onpageshow=> exploits the HTML parser's own merge behavior: a
+		// second <body> start tag does not open a new element — the parser
+		// copies any attributes not already present onto the page's REAL
+		// <body>, including event-handler attributes, so this works even
+		// deep inside existing body content with no need to open a fresh
+		// element. pageshow fires once after the initial load too, not only
+		// on a back/forward-cache restore.
+		onLoad(prefix+"<body onpageshow="+m+">", "<>", 76,
+			prefixReason(prefix, "inject a body start tag whose onpageshow attribute the parser merges onto the page's existing <body> element, firing on load")),
+		// <svg><animate onbegin=> auto-fires when the animation begins
+		// (default begin="0s", i.e. immediately) — a fourth independent
+		// vector for a filter that blocks onload/onerror/ontoggle/onpageshow
+		// specifically but not onbegin.
+		onLoad(prefix+"<svg><animate onbegin="+m+">", "<>", 72,
+			prefixReason(prefix, "inject an SVG <animate> element whose onbegin handler fires as soon as the (default, immediate) animation begins")),
+		markupProbe(prefix+"<"+m+"x>", "<>", 60,
+			prefixReason(prefix, "inject a marker element to detect raw markup injection without script")),
 	}
 }
 
@@ -263,40 +366,53 @@ func htmlAttrTemplates(a ContextAnalysis, m string) []candTemplate {
 	// delimiter (not <,>), so it survives when < and > are encoded.
 	handler := q + " onmouseover=" + m
 	handlerRationale := "close the attribute and add an onmouseover handler referencing the marker, without needing < or >"
+	// autofocus+onfocus is the LOAD-TRIGGER sibling of onmouseover: a focusable
+	// element with the autofocus attribute fires onfocus automatically when the
+	// page loads — no click/hover needed — so, unlike onmouseover, this one CAN
+	// be Confirmed by the passive verifier. Same shape (new attribute inside the
+	// tag), same character requirement.
+	autofocusHandler := q + " autofocus onfocus=" + m
+	autofocusRationale := "close the attribute and add an autofocus element whose onfocus handler (fires automatically on page load) references the marker, without needing < or >"
 	if q == "" {
 		handler = " onmouseover=" + m + " "
 		handlerRationale = "add a new event-handler attribute (unquoted value ends at whitespace)"
+		autofocusHandler = " autofocus onfocus=" + m + " "
+		autofocusRationale = "add a new autofocus/onfocus attribute pair (fires automatically on page load; unquoted value ends at whitespace)"
 	} else {
 		handler += " x=" + q // swallow the original closing quote
+		autofocusHandler += " x=" + q
 	}
 
 	return []candTemplate{
-		{q + "><svg onload=" + m + ">", needs + "<>", 90,
-			"break out of the attribute and tag, then inject an <svg> element with an onload handler"},
-		{handler, needs, 85, handlerRationale},
+		onLoad(q+"><svg onload="+m+">", needs+"<>", 90,
+			"break out of the attribute and tag, then inject an <svg> element with an onload handler"),
+		onLoad(autofocusHandler, needs, 87, autofocusRationale),
+		// onmouseover needs a hover the passive verifier never simulates, so this
+		// documents attribute injection but cannot itself be Confirmed.
+		onInteraction(handler, needs, 85, handlerRationale),
 	}
 }
 
 func jsTemplates(a ContextAnalysis, m string) []candTemplate {
 	switch {
 	case a.Context == CtxJSString && a.Sub == "single_quoted":
-		return []candTemplate{{"';" + m + "//", "'", 90, "close the single-quoted JS string and start a statement that references the marker"}}
+		return []candTemplate{onLoad("';"+m+"//", "'", 90, "close the single-quoted JS string and start a statement that references the marker")}
 	case a.Context == CtxJSString && a.Sub == "double_quoted":
-		return []candTemplate{{`";` + m + "//", `"`, 90, "close the double-quoted JS string and start a statement that references the marker"}}
+		return []candTemplate{onLoad(`";`+m+"//", `"`, 90, "close the double-quoted JS string and start a statement that references the marker")}
 	case a.Context == CtxJSString && a.Sub == "template_literal":
-		return []candTemplate{{"${" + m + "}", "", 85, "inject a ${} substitution into the template literal"}}
+		return []candTemplate{onLoad("${"+m+"}", "", 85, "inject a ${} substitution into the template literal")}
 	case a.Context == CtxJSComment:
 		// Escaping a comment needs a newline (line) or the close sequence (block).
 		if a.Sub == "block" {
-			return []candTemplate{{"*/" + m + "/*", "", 35, "close the block comment, reference the marker, reopen a comment"}}
+			return []candTemplate{onLoad("*/"+m+"/*", "", 35, "close the block comment, reference the marker, reopen a comment")}
 		}
-		return []candTemplate{{"\n" + m, "", 20, "inside a line comment; a newline is required to escape it and may be stripped"}}
+		return []candTemplate{onLoad("\n"+m, "", 20, "inside a line comment; a newline is required to escape it and may be stripped")}
 	case a.Context == CtxJSRegex:
-		return []candTemplate{{"/;" + m + "//", "", 40, "terminate the regular-expression literal, then reference the marker"}}
+		return []candTemplate{onLoad("/;"+m+"//", "", 40, "terminate the regular-expression literal, then reference the marker")}
 	default: // js_code / template expression
 		return []candTemplate{
-			{m, "", 95, "already a JavaScript code position: the marker is a direct code reference"},
-			{";" + m + ";", "", 70, "introduce the marker as its own statement"},
+			onLoad(m, "", 95, "already a JavaScript code position: the marker is a direct code reference"),
+			onLoad(";"+m+";", "", 70, "introduce the marker as its own statement"),
 		}
 	}
 }
@@ -304,11 +420,12 @@ func jsTemplates(a ContextAnalysis, m string) []candTemplate {
 func urlTemplates(a ContextAnalysis, m string) []candTemplate {
 	switch a.Sub {
 	case "start", "relative_first_segment":
-		return []candTemplate{{"javascript:" + m, "", 90,
-			"inject a javascript: scheme so the marker runs when the link is activated/navigated"}}
+		// Runs only when the link is activated; the verifier never clicks.
+		return []candTemplate{onInteraction("javascript:"+m, "", 90,
+			"inject a javascript: scheme so the marker runs when the link is activated/navigated")}
 	case "data_uri":
-		return []candTemplate{{"data:text/html,<svg onload=" + m + ">", "<>", 55,
-			"a data: URI whose HTML body contains a marker handler (depends on the sink)"}}
+		return []candTemplate{onInteraction("data:text/html,<svg onload="+m+">", "<>", 55,
+			"a data: URI whose HTML body contains a marker handler (depends on the sink)")}
 	default:
 		// query/path/fragment/host: reflection inside a URL component rarely yields
 		// script execution. Plan nothing rather than noise.
@@ -317,19 +434,37 @@ func urlTemplates(a ContextAnalysis, m string) []candTemplate {
 }
 
 func cssTemplates(a ContextAnalysis, m string) []candTemplate {
-	// Modern CSS cannot execute JavaScript; the only route to XSS is breaking out
-	// of a <style> element back into markup. A style="" attribute cannot do that.
-	if a.ConstructKind == "style_body" {
-		return []candTemplate{{"</style><svg onload=" + m + ">", "<>", 80,
-			"break out of the <style> element into HTML and inject a marker handler"}}
+	// Modern CSS cannot execute JavaScript; the only route to XSS is breaking
+	// out of CSS back into HTML markup. There are two distinct ways in: a
+	// <style> element's raw-text body, and — just as validly, and previously
+	// missed entirely — the style="" ATTRIBUTE value, which is still an
+	// ordinary HTML attribute: closing its quote and the tag reaches markup
+	// regardless of whether the CSS before the quote is well-formed. The
+	// browser's HTML parser finds the attribute's end by the quote character
+	// alone; it never validates the CSS inside first.
+	switch a.ConstructKind {
+	case "style_body":
+		return []candTemplate{onLoad("</style><svg onload="+m+">", "<>", 80,
+			"break out of the <style> element into HTML and inject a marker handler")}
+	case "attribute_value":
+		var q, needs string
+		switch a.Quote {
+		case "double":
+			q, needs = `"`, `"`
+		case "single":
+			q, needs = `'`, `'`
+		}
+		return []candTemplate{onLoad(q+"><svg onload="+m+">", needs+"<>", 80,
+			"break out of the style attribute's quote and the tag, then inject a marker element — the CSS content before the quote never needs to be valid")}
+	default:
+		return nil
 	}
-	return nil
 }
 
 func unknownTemplates(m string) []candTemplate {
 	return []candTemplate{
-		{"<svg onload=" + m + ">", "<>", 30, "context could not be determined; generic markup/script probe"},
-		{"<" + m + "x>", "<>", 25, "context could not be determined; generic markup-injection probe"},
+		onLoad("<svg onload="+m+">", "<>", 30, "context could not be determined; generic markup/script probe"),
+		markupProbe("<"+m+"x>", "<>", 25, "context could not be determined; generic markup-injection probe"),
 	}
 }
 

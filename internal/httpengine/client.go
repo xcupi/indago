@@ -10,8 +10,11 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 // DefaultUserAgent identifies Indago honestly. Per project policy the engine does
@@ -30,7 +33,13 @@ type Config struct {
 	// MaxRedirects caps the redirect chain when following (<=0 → 10).
 	MaxRedirects int
 	// ProxyURL routes requests through an http/https/socks5 proxy ("" = direct).
+	// Ignored when ProxyPool is non-empty.
 	ProxyURL string
+	// ProxyPool, when non-empty, routes requests through one of the listed
+	// proxies, picked round-robin per request (operator-supplied
+	// infrastructure; see domain.ScanConfig.ProxyPool for the full
+	// rationale and boundary). Takes priority over ProxyURL.
+	ProxyPool []string
 	// UserAgent is sent unless a request/default header overrides it ("" = none).
 	UserAgent string
 	// MaxBodyBytes caps response body reads. 0 → DefaultMaxBodyBytes; negative →
@@ -45,6 +54,20 @@ type Config struct {
 	CookieJar http.CookieJar
 	// DisableCookies turns off the cookie jar entirely.
 	DisableCookies bool
+	// RandomizeTLSFingerprint, when true, performs the TLS handshake with a
+	// randomized (but realistic) ClientHello via uTLS instead of Go's own
+	// crypto/tls ClientHello — Go's default has its own distinct, easily
+	// fingerprinted TLS signature (JA3), unrelated to the UserAgent header
+	// Indago sends. Operator opt-in only, default false (CLI
+	// -randomize-tls-fingerprint, API randomize_tls_fingerprint) — see
+	// AGENTS.md §2.2. MUTUALLY EXCLUSIVE with ProxyURL/ProxyPool: Go's
+	// http.Transport performs TLS internally, with its own TLSClientConfig,
+	// AFTER establishing any proxy tunnel (CONNECT or SOCKS5) — it never
+	// consults DialTLSContext for a proxied connection (see
+	// net/http/transport.go's dialConn), so this flag would silently have
+	// NO effect whenever a proxy is also configured. New rejects the
+	// combination outright rather than ship a flag that quietly no-ops.
+	RandomizeTLSFingerprint bool
 }
 
 // DefaultConfig returns conservative, sensible defaults.
@@ -102,6 +125,29 @@ func New(cfg Config) (*Client, error) {
 		}
 		tr.Proxy = http.ProxyURL(pu)
 	}
+	if len(cfg.ProxyPool) > 0 {
+		pool := make([]*url.URL, 0, len(cfg.ProxyPool))
+		for _, p := range cfg.ProxyPool {
+			pu, err := url.Parse(p)
+			if err != nil {
+				return nil, fmt.Errorf("httpengine: invalid proxy pool entry %q: %w", p, err)
+			}
+			pool = append(pool, pu)
+		}
+		var next uint64
+		tr.Proxy = func(*http.Request) (*url.URL, error) {
+			i := atomic.AddUint64(&next, 1) - 1
+			return pool[i%uint64(len(pool))], nil
+		}
+	}
+	if cfg.RandomizeTLSFingerprint {
+		if cfg.ProxyURL != "" || len(cfg.ProxyPool) > 0 {
+			return nil, fmt.Errorf("httpengine: RandomizeTLSFingerprint and a proxy (ProxyURL/ProxyPool) cannot both be set: " +
+				"Go's http.Transport performs TLS internally after any proxy tunnel, never through a custom TLS dialer, " +
+				"so the fingerprint override would silently have no effect")
+		}
+		tr.DialTLSContext = randomizedTLSDialer(dialer, cfg.InsecureSkipVerify)
+	}
 	if tr.TLSClientConfig == nil {
 		tr.TLSClientConfig = &tls.Config{}
 	}
@@ -139,6 +185,43 @@ func New(cfg Config) (*Client, error) {
 		userAgent:       cfg.UserAgent,
 		defaultHeaders:  cloneStringMap(cfg.DefaultHeaders),
 	}, nil
+}
+
+// randomizedTLSDialer returns an http.Transport.DialTLSContext implementation
+// that performs the TLS handshake with uTLS's utls.HelloRandomized —
+// randomized-but-internally-consistent cipher suites/extensions within a
+// realistic space, rather than Go's own crypto/tls ClientHello, which has a
+// distinct, easily fingerprinted (JA3) signature of its own regardless of
+// what the UserAgent header claims. dialer is reused as-is so this dial path
+// goes through the SAME rejectLinkLocal SSRF guard as every other connection
+// this Client makes — never bypassed for this path.
+//
+// KNOWN LIMITATION: the returned net.Conn is a *utls.UConn, not a stdlib
+// *tls.Conn, so Go's Transport (see dialConn in net/http/transport.go) never
+// populates persistConn.tlsState from it and therefore never discovers an
+// ALPN-negotiated "h2" — every connection through this dialer is pinned to
+// HTTP/1.1. This does not affect scan correctness (every reflection/
+// candidate/verification request is already a simple, independent exchange),
+// only connection-reuse efficiency; documented here rather than silently
+// accepted.
+func randomizedTLSDialer(dialer *net.Dialer, insecureSkipVerify bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		rawConn, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			rawConn.Close()
+			return nil, fmt.Errorf("httpengine: randomized TLS dial: %w", err)
+		}
+		uConn := utls.UClient(rawConn, &utls.Config{ServerName: host, InsecureSkipVerify: insecureSkipVerify}, utls.HelloRandomized)
+		if err := uConn.HandshakeContext(ctx); err != nil {
+			rawConn.Close()
+			return nil, fmt.Errorf("httpengine: randomized TLS handshake: %w", err)
+		}
+		return uConn, nil
+	}
 }
 
 // rejectLinkLocal is a net.Dialer.Control hook: it runs after DNS resolution

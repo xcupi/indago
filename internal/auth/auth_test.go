@@ -29,14 +29,39 @@ func TestAnonymousEstablishesActiveSession(t *testing.T) {
 	}
 }
 
-func TestUnimplementedModesAreStubs(t *testing.T) {
+func TestCapturedSessionModesEstablishLikeExisting(t *testing.T) {
+	// Password/Interactive/MFA's Establish is identical to Existing's: by
+	// the time it runs, Controller.resolveAuth has already driven the real
+	// login once, at scan-CREATE time, and StatePath already points at the
+	// captured material. Establish here only ever validates+imports it,
+	// the same way Existing does — it must NEVER repeat the login itself.
 	for _, m := range []domain.AuthMode{domain.AuthPassword, domain.AuthInteractive, domain.AuthMFA} {
 		a, err := auth.For(m)
 		if err != nil {
 			t.Fatalf("For(%s): %v", m, err)
 		}
-		if _, err := a.Establish(context.Background(), auth.Input{}); !errors.Is(err, auth.ErrNotImplemented) {
-			t.Errorf("mode %s: expected ErrNotImplemented, got %v", m, err)
+		if a.Mode() != m {
+			t.Fatalf("For(%s).Mode() = %s, want %s", m, a.Mode(), m)
+		}
+		path := filepath.Join(t.TempDir(), "state.json")
+		if err := os.WriteFile(path, []byte(`{"cookies":[],"origins":[]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s, err := a.Establish(context.Background(), auth.Input{ScanID: domain.NewID(), StatePath: path})
+		if err != nil {
+			t.Fatalf("mode %s: establish: %v", m, err)
+		}
+		if s.State != domain.SessionActive || s.Mode != m || s.StatePath != path {
+			t.Fatalf("mode %s: unexpected session: %+v", m, s)
+		}
+		if ok, err := a.Validate(context.Background(), s); err != nil || !ok {
+			t.Fatalf("mode %s: session with its file present should validate: ok=%v err=%v", m, ok, err)
+		}
+		// Without a real, already-captured state path, Establish must fail
+		// closed (ValidateStateFile rejects ""), never silently succeed as
+		// if it were about to drive a fresh login itself.
+		if _, err := a.Establish(context.Background(), auth.Input{ScanID: domain.NewID()}); !errors.Is(err, auth.ErrInvalidState) {
+			t.Errorf("mode %s: establish with no state path = %v, want ErrInvalidState", m, err)
 		}
 	}
 }
@@ -126,10 +151,13 @@ func TestValidateStateFileRejectsUnusableMaterial(t *testing.T) {
 func TestImplementedModes(t *testing.T) {
 	for m, want := range map[domain.AuthMode]bool{
 		domain.AuthAnonymous: true, domain.AuthExisting: true,
-		domain.AuthPassword: false, domain.AuthInteractive: false, domain.AuthMFA: false,
+		domain.AuthPassword: true, domain.AuthInteractive: true, domain.AuthMFA: true,
 	} {
 		if got := auth.Implemented(m); got != want {
 			t.Errorf("Implemented(%s) = %v, want %v", m, got, want)
 		}
+	}
+	if auth.Implemented(domain.AuthMode("bogus")) {
+		t.Error("Implemented(bogus) = true, want false (an unknown mode must fail closed)")
 	}
 }

@@ -192,6 +192,10 @@ func (c *cli) runClient(group string, args []string) error {
 		return c.scan(sub, rest)
 	case "finding":
 		return c.finding(sub, rest)
+	case "endpoint":
+		return c.endpoint(sub, rest)
+	case "auth":
+		return c.auth(sub, rest)
 	case "report":
 		return c.report(sub, rest)
 	}
@@ -343,8 +347,19 @@ func (c *cli) scanCreate(args []string) error {
 	profile := fs.String("profile", "balanced", "conservative | balanced | fast")
 	stop := fs.String("stop", "", "stop policy: continue_all | first_confirmed | after_n_confirmed | pause_and_ask")
 	stopN := fs.Int("stop-n", 0, "confirmed-finding limit for -stop after_n_confirmed")
-	authMode := fs.String("auth", "", "auth mode: anonymous (default) | existing")
+	authMode := fs.String("auth", "", "auth mode: anonymous (default) | existing | interactive | mfa | password")
 	authState := fs.String("auth-state", "", "saved session material (Playwright storage-state JSON) for -auth existing")
+	loginURL := fs.String("login-url", "", "login page to open; REQUIRED for -auth interactive|mfa|password")
+	successURL := fs.String("success-url", "", "URL glob the browser must reach for the login to count as done; REQUIRED for -auth interactive|mfa|password")
+	loginUserSel := fs.String("login-username-selector", "", "CSS selector override for the username/email field; -auth password only, empty = heuristic")
+	loginPassSel := fs.String("login-password-selector", "", "CSS selector override for the password field; -auth password only, empty = heuristic (input[type=password])")
+	loginSubmitSel := fs.String("login-submit-selector", "", "CSS selector override for the submit control; -auth password only, empty = heuristic")
+	candProfile := fs.String("candidate-profile", "", "XSS candidate profile: minimal | standard | thorough (default: server default)")
+	maxCand := fs.Int("max-candidates", 0, "cap on candidates tried per injection point (0 = the profile's own; hard ceiling 32)")
+	enableEvasion := fs.Bool("enable-evasion", false, "opt in to WAF/filter-bypass candidate variants (case variation, alt separators, double URL-encoding) ON TOP OF the canonical set; OFF by default — only for an authorized engagement where a bypass is itself the reportable finding (see AGENTS.md §2.3)")
+	var proxyPool stringList
+	fs.Var(&proxyPool, "proxy", "proxy to route this scan's traffic through — raw HTTP and browser verification alike (repeatable, round-robin; http://host:port, https://host:port, or socks5://host:port, optionally with embedded user:pass@ creds); operator-supplied infrastructure only, off by default (see AGENTS.md §2.3)")
+	randomizeTLS := fs.Bool("randomize-tls-fingerprint", false, "randomize the raw HTTP engine's TLS ClientHello (JA3) via uTLS instead of Go's own default — OFF by default (see AGENTS.md §2.3); MUTUALLY EXCLUSIVE with -proxy (Go's transport never consults a custom TLS dialer for a proxied connection); has no effect on browser verification, which already uses a real browser's own TLS stack")
 	quick := fs.Bool("quick", false, "quick scan: test the seeds only, do not follow links (crawl depth 0)")
 	depth := fs.Int("depth", 0, "crawl depth for a full scan (0 = server default; ignored with -quick)")
 	maxPages := fs.Int("max-pages", 0, "cap on pages fetched by the crawler (0 = server default)")
@@ -355,12 +370,25 @@ func (c *cli) scanCreate(args []string) error {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
 		"profile": *profile, "seed_urls": []string(seeds),
 		"quick_scan": *quick, "max_depth": *depth, "max_pages": *maxPages, "max_endpoints": *maxEndpoints,
+		"enable_evasion": *enableEvasion,
+	}
+	if len(proxyPool) > 0 {
+		req["proxy_pool"] = []string(proxyPool)
+	}
+	if *randomizeTLS {
+		req["randomize_tls_fingerprint"] = true
+	}
+	if *candProfile != "" {
+		req["candidate_profile"] = *candProfile
+	}
+	if *maxCand != 0 {
+		req["max_candidates"] = *maxCand
 	}
 	if *authState != "" && *authMode == "" {
 		*authMode = string(domain.AuthExisting) // the only mode that takes a state file
@@ -376,6 +404,21 @@ func (c *cli) scanCreate(args []string) error {
 			return fmt.Errorf("-auth-state: %w", err)
 		}
 		req["auth_state_path"] = abs
+	}
+	if *loginURL != "" {
+		req["login_url"] = *loginURL
+	}
+	if *successURL != "" {
+		req["success_url"] = *successURL
+	}
+	if *loginUserSel != "" {
+		req["login_username_selector"] = *loginUserSel
+	}
+	if *loginPassSel != "" {
+		req["login_password_selector"] = *loginPassSel
+	}
+	if *loginSubmitSel != "" {
+		req["login_submit_selector"] = *loginSubmitSel
 	}
 	if *stop != "" {
 		req["stop"] = map[string]any{"mode": *stop, "confirmed_limit": *stopN}
@@ -629,6 +672,103 @@ func printStatus(w io.Writer, st *scan.Status) {
 	}
 }
 
+// --- auth ---
+
+// auth dispatches `indago auth login -login-url URL [-success-url GLOB]`,
+// a thin client over the standalone POST /api/auth/login endpoint — for
+// capturing a session ONCE to reuse across several `scan create -auth
+// existing -auth-state FILE` runs, or to test login mechanics before
+// wiring `-auth interactive` directly into `scan create`. Requires the
+// server to have been started with `-browser` (opens a real, visible
+// browser the operator logs into).
+func (c *cli) auth(sub string, args []string) error {
+	switch sub {
+	case "login":
+		return c.authLogin(args)
+	}
+	return fmt.Errorf("unknown auth subcommand %q (login)", sub)
+}
+
+func (c *cli) authLogin(args []string) error {
+	fs := c.newFlags("auth login")
+	loginURL := fs.String("login-url", "", "login page to open in a real, visible browser")
+	successURL := fs.String("success-url", "", "URL glob the browser must reach before the login counts as done (optional, but a login with none saves state IMMEDIATELY with no wait at all)")
+	if _, err := parseInterspersed(fs, args); err != nil {
+		return err
+	}
+	if *loginURL == "" {
+		return errors.New("usage: indago auth login -login-url URL [-success-url GLOB]")
+	}
+	var out struct {
+		StatePath string `json:"state_path"`
+		FinalURL  string `json:"final_url"`
+	}
+	if err := c.call("POST", "/api/auth/login", map[string]string{"login_url": *loginURL, "success_url": *successURL}, &out); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "saved session: %s\n", out.StatePath)
+	fmt.Fprintf(c.out, "final URL: %s\n", out.FinalURL)
+	fmt.Fprintf(c.out, "use it with: scan create ... -auth existing -auth-state %s\n", out.StatePath)
+	return nil
+}
+
+// --- endpoints ---
+
+// endpoint dispatches `indago endpoint list -scan ID`. There is deliberately
+// no "show" — an operator debugging why an authenticated scan went
+// Inconclusive wants the whole discovered surface at a glance (esp. anything
+// that looks like a session-terminating link or a dynamic-token parameter),
+// not one endpoint at a time.
+func (c *cli) endpoint(sub string, args []string) error {
+	switch sub {
+	case "list":
+		return c.endpointList(args)
+	}
+	return fmt.Errorf("unknown endpoint subcommand %q (list)", sub)
+}
+
+// endpointListItem mirrors web.endpointListItem's JSON shape (Endpoint +
+// its Parameters), decoded here the same read-only way findingCandidate
+// mirrors the finding JSON shape above — never by importing internal/web.
+type endpointListItem struct {
+	domain.Endpoint
+	Parameters []domain.Parameter `json:"parameters"`
+}
+
+func (c *cli) endpointList(args []string) error {
+	fs := c.newFlags("endpoint list")
+	scanRef := fs.String("scan", "", "scan ID or prefix")
+	asJSON := fs.Bool("json", false, "print JSON")
+	if _, err := parseInterspersed(fs, args); err != nil {
+		return err
+	}
+	if *scanRef == "" {
+		return errors.New("usage: indago endpoint list -scan <scan-id|prefix> [-json]")
+	}
+	scanID, err := c.resolveScanID(*scanRef)
+	if err != nil {
+		return err
+	}
+	var items []endpointListItem
+	if err := c.call("GET", "/api/scans/"+url.PathEscape(scanID)+"/endpoints", nil, &items); err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(c.out, items)
+	}
+	if len(items) == 0 {
+		fmt.Fprintln(c.out, "no endpoints discovered yet")
+		return nil
+	}
+	for _, ep := range items {
+		fmt.Fprintf(c.out, "%s  %-6s %-10s %s\n", ep.ID, ep.Method, ep.Source, ep.URL)
+		for _, p := range ep.Parameters {
+			fmt.Fprintf(c.out, "    %-10s %-8s %s\n", p.Location, p.Name, p.Example)
+		}
+	}
+	return nil
+}
+
 // --- findings ---
 
 func (c *cli) finding(sub string, args []string) error {
@@ -637,37 +777,66 @@ func (c *cli) finding(sub string, args []string) error {
 		return c.findingList(args)
 	case "show":
 		return c.findingShow(args)
+	case "poc":
+		return c.findingPoC(args)
 	}
-	return fmt.Errorf("unknown finding subcommand %q (list, show)", sub)
+	return fmt.Errorf("unknown finding subcommand %q (list, show, poc)", sub)
 }
 
 func (c *cli) findingList(args []string) error {
 	fs := c.newFlags("finding list")
 	scanRef := fs.String("scan", "", "scan ID or prefix")
 	asJSON := fs.Bool("json", false, "print JSON")
+	verdict := fs.String("verdict", "", "verdicts to list: confirmed | pending | inconclusive | rejected | comma-separated list | all (default: confirmed; all with -json)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *scanRef == "" {
-		return errors.New("usage: indago finding list -scan <scan-id|prefix> [-json]")
+		return errors.New("usage: indago finding list -scan <scan-id|prefix> [-verdict confirmed|all|...] [-json]")
 	}
 	scanID, err := c.resolveScanID(*scanRef)
 	if err != nil {
 		return err
 	}
+	// The human-readable default is confirmed-only; -json defaults to every
+	// finding, so a script consuming the JSON never silently loses the
+	// pending/rejected rows it used to get (it has no place for a hint).
+	if *verdict == "" {
+		*verdict = "confirmed"
+		if *asJSON {
+			*verdict = "all"
+		}
+	}
 	var findings []domain.Finding
-	if err := c.call("GET", "/api/scans/"+url.PathEscape(scanID)+"/findings", nil, &findings); err != nil {
+	if err := c.call("GET", "/api/scans/"+url.PathEscape(scanID)+"/findings?verdict="+url.QueryEscape(*verdict), nil, &findings); err != nil {
 		return err
 	}
 	if *asJSON {
 		return writeJSON(c.out, findings)
 	}
+	// Unless everything was asked for, say how many findings the filter hides:
+	// the default view lists confirmed vulnerabilities only, and silence would
+	// make rejected/pending diagnostics look like they do not exist.
+	hidden := 0
+	if *verdict != "all" {
+		var all []domain.Finding
+		if err := c.call("GET", "/api/scans/"+url.PathEscape(scanID)+"/findings", nil, &all); err != nil {
+			return err
+		}
+		hidden = len(all) - len(findings)
+	}
 	if len(findings) == 0 {
-		fmt.Fprintln(c.out, "no findings")
+		fmt.Fprintf(c.out, "no %s findings\n", strings.TrimSpace(*verdict))
+		if hidden > 0 {
+			fmt.Fprintf(c.out, "%d other finding(s) hidden; list them with -verdict all\n", hidden)
+		}
 		return nil
 	}
 	for _, f := range findings {
 		fmt.Fprintf(c.out, "%s  %-12s %-8s %-14s %s\n", f.ID, f.Verdict, f.Severity, f.VulnClass, f.Title)
+	}
+	if hidden > 0 {
+		fmt.Fprintf(c.out, "(%d other finding(s) hidden; list them with -verdict all)\n", hidden)
 	}
 	return nil
 }
@@ -681,9 +850,15 @@ type findingCandidate struct {
 	Category       string `json:"category"`
 	Context        string `json:"context"`
 	Value          string `json:"value"`
+	Technique      string `json:"technique"`
 	Transformation string `json:"transformation"`
 	Rationale      string `json:"rationale"`
 	Priority       int    `json:"priority"`
+	// Combined/ParameterB/ValueB: see detection.Candidate — a COMBINED
+	// (multi-parameter) candidate's SECOND half.
+	Combined   bool   `json:"combined"`
+	ParameterB string `json:"parameter_b"`
+	ValueB     string `json:"value_b"`
 }
 
 type findingDetailOut struct {
@@ -693,10 +868,24 @@ type findingDetailOut struct {
 		ParameterName string             `json:"parameter_name"`
 		Occurrences   int                `json:"occurrences"`
 		Candidates    []findingCandidate `json:"candidates"`
+		// Combined/ParameterBName: see scan.findingDetail.
+		Combined       bool   `json:"combined"`
+		ParameterBName string `json:"parameter_b_name"`
 	} `json:"parsed_detail"`
-	Endpoint  *domain.Endpoint   `json:"endpoint"`
-	Parameter *domain.Parameter  `json:"parameter"`
-	Evidence  []*domain.Evidence `json:"evidence"`
+	Verified *struct {
+		CandidateValue string `json:"candidate_value"`
+		URL            string `json:"url"`
+		Notes          string `json:"notes"`
+	} `json:"verified_candidate"`
+	Attempts []struct {
+		CandidateValue string `json:"candidate_value"`
+		URL            string `json:"url"`
+		Verdict        string `json:"verdict"`
+	} `json:"attempts"`
+	Endpoint          *domain.Endpoint   `json:"endpoint"`
+	Parameter         *domain.Parameter  `json:"parameter"`
+	Evidence          []*domain.Evidence `json:"evidence"`
+	ReviewReasonLabel string             `json:"review_reason_label"`
 }
 
 func (c *cli) findingShow(args []string) error {
@@ -741,10 +930,42 @@ func printFindingDetail(w io.Writer, server string, fd *findingDetailOut) {
 	} else if fd.ParsedDetail.ParameterName != "" {
 		fmt.Fprintf(w, "Parameter  %s\n", fd.ParsedDetail.ParameterName)
 	}
+	if fd.ParsedDetail.Combined {
+		fmt.Fprintf(w, "Combined   ⚠ COMBINED (multi-parameter) finding — TWO parameters mutated together in the SAME request were required; this is NOT a single-parameter bug. Second parameter: %s\n", fd.ParsedDetail.ParameterBName)
+	}
+	if fd.Verified != nil {
+		fmt.Fprintf(w, "Verified   %s\n", fd.Verified.CandidateValue)
+		if fd.Verified.Notes != "" {
+			fmt.Fprintf(w, "           %s\n", fd.Verified.Notes)
+		}
+	}
+	if len(fd.Attempts) > 0 {
+		fmt.Fprintf(w, "Attempts   %d (kept as diagnostics):\n", len(fd.Attempts))
+		for _, a := range fd.Attempts {
+			fmt.Fprintf(w, "  - %-12s %s\n", a.Verdict, a.CandidateValue)
+			if a.URL != "" {
+				fmt.Fprintf(w, "    %s\n", a.URL)
+			}
+		}
+	}
+	if fd.ReviewReasonLabel != "" {
+		fmt.Fprintf(w, "Review     needs manual review: %s\n", fd.ReviewReasonLabel)
+		if strings.Contains(fd.ReviewReasonLabel, "user action") {
+			fmt.Fprintln(w, "           Open the attempt URL(s) above yourself and perform the action (click/hover/navigate) to actually exercise it — Indago deliberately never simulates this (AGENTS.md \u00a73).")
+		}
+	}
 	if len(fd.ParsedDetail.Candidates) > 0 {
 		fmt.Fprintf(w, "Candidates (%d, %d occurrence(s)):\n", len(fd.ParsedDetail.Candidates), fd.ParsedDetail.Occurrences)
 		for _, cand := range fd.ParsedDetail.Candidates {
-			fmt.Fprintf(w, "  - [%s/%s] %s — %s\n", cand.Category, cand.Context, cand.Value, cand.Rationale)
+			tech := ""
+			if cand.Technique != "" {
+				tech = " [bypass: " + cand.Technique + "]"
+			}
+			if cand.Combined {
+				fmt.Fprintf(w, "  - [combined: %s/%s]%s param A value=%q + param B %q value=%q — %s\n", cand.Category, cand.Context, tech, cand.Value, cand.ParameterB, cand.ValueB, cand.Rationale)
+				continue
+			}
+			fmt.Fprintf(w, "  - [%s/%s]%s %s — %s\n", cand.Category, cand.Context, tech, cand.Value, cand.Rationale)
 		}
 	}
 	fmt.Fprintf(w, "Provenance %s, discovered via %s", fd.Provenance.Engine, fd.Provenance.DiscoverySource)
@@ -759,6 +980,40 @@ func printFindingDetail(w io.Writer, server string, fd *findingDetailOut) {
 				ev.ID, ev.Kind, ev.MediaType, ev.Size, ev.SHA256, server, ev.ID)
 		}
 	}
+}
+
+// findingPoC generates a standalone PoC HTML artifact for a Confirmed
+// finding (GET /api/scans/{id}/findings/{fid}/poc, see scan.GeneratePoC)
+// and writes it to -out. The server refuses (HTTP 409) anything that isn't
+// Confirmed — see AGENTS.md's evidence-integrity principle.
+func (c *cli) findingPoC(args []string) error {
+	fs := c.newFlags("finding poc")
+	scanRef := fs.String("scan", "", "scan ID or prefix")
+	out := fs.String("out", "", "write the standalone PoC HTML to this file (required)")
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if *scanRef == "" || len(pos) != 1 || *out == "" {
+		return errors.New("usage: indago finding poc -scan <scan-id|prefix> -out <file.html> <finding-id|prefix>")
+	}
+	scanID, err := c.resolveScanID(*scanRef)
+	if err != nil {
+		return err
+	}
+	findingID, err := c.resolveFindingID(scanID, pos[0])
+	if err != nil {
+		return err
+	}
+	data, err := c.getRaw("/api/scans/" + url.PathEscape(scanID) + "/findings/" + url.PathEscape(findingID) + "/poc")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(*out, data, 0o640); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "wrote standalone PoC to %s (finding %s)\n", *out, findingID)
+	return nil
 }
 
 // --- reports ---
@@ -780,13 +1035,15 @@ func (c *cli) reportCreate(args []string) error {
 	scanRef := fs.String("scan", "", "scan ID or prefix")
 	format := fs.String("format", "json", "json | markdown | html")
 	out := fs.String("out", "", "also write the rendered report to this file")
+	mode := fs.String("mode", "", "all | confirmed | selected (default: selected when -finding is given, else all)")
+	aiSummary := fs.Bool("ai-summary", false, "ask the AI Gateway (if configured with -ai-provider on `indago serve`) for an advisory executive summary, prepended to the report and clearly labeled; no effect if AI is disabled")
 	var findingIDs stringList
-	fs.Var(&findingIDs, "finding", "finding ID to include (repeatable; default: every finding in the scan)")
+	fs.Var(&findingIDs, "finding", "finding ID to include with -mode selected (repeatable)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *scanRef == "" {
-		return errors.New("usage: indago report create -scan <scan-id|prefix> -format json|markdown|html [-finding ID]... [-out FILE]")
+		return errors.New("usage: indago report create -scan <scan-id|prefix> -format json|markdown|html [-mode all|confirmed|selected] [-finding ID]... [-ai-summary] [-out FILE]")
 	}
 	scanID, err := c.resolveScanID(*scanRef)
 	if err != nil {
@@ -794,14 +1051,31 @@ func (c *cli) reportCreate(args []string) error {
 	}
 	var rpt domain.Report
 	if err := c.call("POST", "/api/scans/"+url.PathEscape(scanID)+"/reports",
-		map[string]any{"format": *format, "finding_ids": []string(findingIDs)}, &rpt); err != nil {
+		map[string]any{"format": *format, "mode": *mode, "finding_ids": []string(findingIDs), "ai_summary": *aiSummary}, &rpt); err != nil {
 		return err
 	}
-	fmt.Fprintf(c.out, "created report %s (%s, %d finding(s))\n", rpt.ID, rpt.Format, rpt.Summary.TotalFindings)
+	fmt.Fprintf(c.out, "created report %s (%s, %d finding(s); selection %s, %d of %d in scan; %s)\n",
+		rpt.ID, rpt.Format, rpt.Summary.TotalFindings, rpt.Summary.Selection,
+		rpt.Summary.TotalFindings, rpt.Summary.ScanFindings, verdictBreakdown(rpt.Summary.ByVerdict))
 	if *out != "" {
 		return c.downloadReport(string(rpt.ID), *out)
 	}
 	return nil
+}
+
+// verdictBreakdown renders verdict counts in a fixed order, e.g.
+// "confirmed 2, rejected 1" (zero counts omitted; "no findings" when empty).
+func verdictBreakdown(by map[domain.Verdict]int) string {
+	var parts []string
+	for _, v := range []domain.Verdict{domain.VerdictConfirmed, domain.VerdictInconclusive, domain.VerdictRejected, domain.VerdictPending} {
+		if n := by[v]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", v, n))
+		}
+	}
+	if len(parts) == 0 {
+		return "no findings"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (c *cli) reportList(args []string) error {

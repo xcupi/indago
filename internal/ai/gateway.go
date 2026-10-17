@@ -11,9 +11,9 @@
 //     this the method is named Advise (not Decide) and every Response is marked
 //     Advisory.
 //
-// Phase 0 implements the gateway plumbing and the Disabled gateway. Concrete
-// providers (OpenAI, Anthropic, OpenRouter, Ollama, vLLM) are stubs returning
-// ErrNotImplemented; wiring real providers is a later phase.
+// Phase 0 implemented the gateway plumbing and the Disabled gateway with
+// provider stubs. All five providers (OpenAI, Anthropic, OpenRouter, Ollama,
+// vLLM) now make real HTTP calls — see openai_compatible.go and anthropic.go.
 package ai
 
 import (
@@ -26,7 +26,9 @@ import (
 // ErrDisabled is returned when an advisory call is made while AI is disabled.
 var ErrDisabled = errors.New("ai: gateway disabled")
 
-// ErrNotImplemented indicates a provider stub with no behavior yet.
+// ErrNotImplemented is kept for compatibility with any caller still matching
+// on it; no provider in this package returns it anymore — all five
+// (OpenAI, Anthropic, OpenRouter, Ollama, vLLM) have real implementations.
 var ErrNotImplemented = errors.New("ai: provider not implemented")
 
 // Request is an advisory request to the gateway.

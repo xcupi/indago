@@ -63,7 +63,13 @@ func reflectingSite(t *testing.T, n int, hits *atomic.Int64, chain bool) *site {
 }
 
 // assertScanIntegrity checks the release invariants for a finished scan.
-func assertScanIntegrity(t *testing.T, st store.Store, ev evidence.Store, q queue.Queue, scanID domain.ID, wantInjectionPoints int) []*domain.Finding {
+// wantInjectionPoints is the total registered (query/form/JSON/header/
+// cookie/path) injection points; wantReflecting is how many of those are
+// expected to actually reflect and so produce a Finding — the default
+// Header injection points this skill's fixtures register are deliberately
+// never reflected by these test sites (none of them echo a header back),
+// so the two counts now differ on purpose.
+func assertScanIntegrity(t *testing.T, st store.Store, ev evidence.Store, q queue.Queue, scanID domain.ID, wantInjectionPoints, wantReflecting int) []*domain.Finding {
 	t.Helper()
 	ctx := context.Background()
 
@@ -133,8 +139,8 @@ func assertScanIntegrity(t *testing.T, st store.Store, ev evidence.Store, q queu
 			}
 		}
 	}
-	if len(byIP) != wantInjectionPoints {
-		t.Fatalf("findings cover %d injection points, want %d (every page reflects)", len(byIP), wantInjectionPoints)
+	if len(byIP) != wantReflecting {
+		t.Fatalf("findings cover %d injection points, want %d", len(byIP), wantReflecting)
 	}
 	// Every test case's evidence must resolve too, not just the findings'.
 	for _, tc := range cases {
@@ -226,7 +232,7 @@ func TestStress_RepeatedCrashRestartRecoversEveryInjectionPoint(t *testing.T) {
 	if crashes < 3 {
 		t.Fatalf("stress setup: only %d crashes landed before completion", crashes)
 	}
-	findings := assertScanIntegrity(t, db, ev, q, sc.ID, pages)
+	findings := assertScanIntegrity(t, db, ev, q, sc.ID, 4*pages+3, pages) // only the pages' own query params reflect; the default Header IPs never do
 	t.Logf("crashes=%d findings=%d jobs=%+v tests=%+v", crashes, len(findings), done.Jobs, done.Tests)
 }
 
@@ -300,7 +306,7 @@ func TestStress_ConcurrentScansPauseResumeCancelChurn(t *testing.T) {
 			continue
 		}
 		waitStatus(t, ctrl, id, 30*time.Second, isCompleted)
-		assertScanIntegrity(t, st, ev, q, id, pages)
+		assertScanIntegrity(t, st, ev, q, id, 4*pages+3, pages) // only the pages' own query params reflect; the default Header IPs never do
 	}
 	// A canceled scan never comes back to life.
 	for i, id := range ids {
@@ -410,5 +416,5 @@ func TestStress_SessionExpiryReauthCycles(t *testing.T) {
 	if total.Load() != authed.Load() {
 		t.Fatalf("%d of %d requests were sent without the session", total.Load()-authed.Load(), total.Load())
 	}
-	assertScanIntegrity(t, st, nil, q, sc.ID, pages)
+	assertScanIntegrity(t, st, nil, q, sc.ID, 4*pages+3, pages) // only the pages' own query params reflect; the default Header IPs never do ("sid" is excluded as the session's own auth cookie)
 }

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
 	"time"
 
 	"github.com/indago/indago/internal/domain"
@@ -19,27 +18,51 @@ type Data struct {
 	Findings    []*domain.Finding
 	GeneratedAt time.Time
 	ToolVersion string
+	// Evidence is the metadata (never content) of the evidence the findings
+	// reference. Optional: without it a report lists evidence IDs only and
+	// cannot label roles or the verified candidate's artifacts.
+	Evidence []*domain.Evidence
+	// Selection and ScanFindings describe how Findings was chosen from the
+	// scan (zero values: unspecified — older callers). Every generator states
+	// them, so a "confirmed only" report can never be mistaken for the whole
+	// scan.
+	Selection    domain.ReportSelection
+	ScanFindings int
+	// AISummary, when non-empty, is an advisory executive summary drafted
+	// by the AI Gateway (domain.AIDraftReport) — rendered prominently
+	// labeled as AI-generated and unverified, NEVER as part of the
+	// findings themselves. Empty (the default: AI disabled, not
+	// requested, or the advisory call failed) renders no AI section at
+	// all — see AGENTS.md §2.5: the scanner must work identically with AI
+	// disabled, and AI output is never authoritative.
+	AISummary string
+}
+
+// dataSummary is Summarize plus the report's own selection metadata.
+func dataSummary(data Data, findings []*domain.Finding) domain.ReportSummary {
+	s := Summarize(data.Scan.ID, findings)
+	s.Selection = data.Selection
+	s.ScanFindings = data.ScanFindings
+	return s
+}
+
+// selectionLine renders a report's selection for humans, or "" when unset.
+func selectionLine(s domain.ReportSummary) string {
+	label := map[domain.ReportSelection]string{
+		domain.ReportSelectAll:       "all findings",
+		domain.ReportSelectConfirmed: "confirmed findings only",
+		domain.ReportSelectSelected:  "selected findings",
+	}[s.Selection]
+	if label == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s (%d of %d findings in the scan)", label, s.TotalFindings, s.ScanFindings)
 }
 
 // Generator renders a report in a specific format.
 type Generator interface {
 	Format() domain.ReportFormat
 	Generate(w io.Writer, data Data) error
-}
-
-// sortedFindings returns a copy of findings sorted by (CreatedAt, ID) so every
-// generator's output is deterministic regardless of the order the caller
-// supplies findings in (store list order is not guaranteed stable across
-// calls: it is "ORDER BY created_at" with no tiebreaker).
-func sortedFindings(findings []*domain.Finding) []*domain.Finding {
-	out := append([]*domain.Finding(nil), findings...)
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].CreatedAt.Before(out[j].CreatedAt)
-		}
-		return out[i].ID < out[j].ID
-	})
-	return out
 }
 
 // Summarize computes an aggregate summary over a set of findings.
@@ -75,14 +98,26 @@ type jsonReport struct {
 	Project     domain.Project       `json:"project"`
 	Scan        domain.Scan          `json:"scan"`
 	Summary     domain.ReportSummary `json:"summary"`
-	Findings    []*domain.Finding    `json:"findings"`
+	Findings    []jsonFinding        `json:"findings"`
 }
 
-// Generate implements Generator. Output is deterministic: see sortedFindings.
+// jsonFinding is the stored finding plus its presentation: section, the
+// verified candidate (confirmed findings), every attempt as a child
+// diagnostic, and role-labelled evidence metadata.
+type jsonFinding struct {
+	*domain.Finding
+	FindingView
+}
+
+// Generate implements Generator. Output is deterministic: findings are ordered
+// by Prioritized (confirmed first), so the same Data always yields identical
+// output.
 func (JSONGenerator) Generate(w io.Writer, data Data) error {
-	findings := sortedFindings(data.Findings)
-	if findings == nil {
-		findings = []*domain.Finding{}
+	findings := Prioritized(data.Findings)
+	idx := EvidenceIndex(data.Evidence)
+	out := make([]jsonFinding, 0, len(findings))
+	for _, f := range findings {
+		out = append(out, jsonFinding{Finding: f, FindingView: NewFindingView(f, idx)})
 	}
 	rep := jsonReport{
 		Tool:        "indago",
@@ -90,8 +125,8 @@ func (JSONGenerator) Generate(w io.Writer, data Data) error {
 		GeneratedAt: data.GeneratedAt,
 		Project:     data.Project,
 		Scan:        data.Scan,
-		Summary:     Summarize(data.Scan.ID, findings),
-		Findings:    findings,
+		Summary:     dataSummary(data, findings),
+		Findings:    out,
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

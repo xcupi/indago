@@ -19,9 +19,13 @@ type driver interface {
 type browserHandle interface {
 	// NewContext creates an isolated context. storageStatePath, when non-empty,
 	// seeds it with saved session material (persistent authenticated context).
-	// allow, when non-nil, gates every http(s) request: disallowed requests must
-	// be aborted before they are sent.
-	NewContext(storageStatePath string, allow func(url string) bool) (contextHandle, error)
+	// proxyServer, when non-empty, routes every request this context makes
+	// through that proxy (operator-supplied; see ContextOptions.ProxyServer).
+	// extraHeaders, when non-empty, is merged into every request this context
+	// makes (see ContextOptions.ExtraHeaders). allow, when non-nil, gates
+	// every http(s) request: disallowed requests must be aborted before they
+	// are sent.
+	NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(url string) bool) (contextHandle, error)
 	// Close closes the browser and all its contexts.
 	Close() error
 }

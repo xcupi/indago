@@ -385,10 +385,11 @@ func TestE2E_FullPipelineAgainstCorpus(t *testing.T) {
 
 // With the operator's explicit opt-in, POST form and POST JSON candidates are
 // actually sent and reflected (unlike the main test above, which exercises the
-// DEFAULT — off — behavior where they are skipped entirely). Browser
-// navigation still has no request body, though, so these can never progress
-// past a Pending finding — AllowStateChanging controls whether the HTTP-level
-// candidate is sent, not whether browser verification becomes possible.
+// DEFAULT — off — behavior where they are skipped entirely). The POST+FORM
+// candidate now also gets real browser verification (replayed as a <form>
+// submission, see browser.Page.NavigateForm) — the SAME chance at Confirmed a
+// GET candidate already gets. POST+JSON still cannot: no HTML form carries an
+// application/json body, so that finding can only ever reach Pending.
 func TestE2E_StateChangingAllowedSendsPostCandidates(t *testing.T) {
 	ctx := context.Background()
 	c := newCorpus(t)
@@ -411,10 +412,6 @@ func TestE2E_StateChangingAllowedSendsPostCandidates(t *testing.T) {
 	done := waitStatus(t, ctrl, sc.ID, 60*time.Second, isCompleted)
 	t.Logf("findings: breakdown=%+v", done.Findings)
 
-	// The opt-in means POST candidates are now sent and reflected (unlike the
-	// main test, where they are skipped entirely) — but browser navigation has
-	// no request body, so verification never runs for them regardless: these
-	// findings can only ever reach Pending, never Confirmed/Rejected.
 	findings, err := st.Findings().ListByScan(ctx, sc.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -425,16 +422,30 @@ func TestE2E_StateChangingAllowedSendsPostCandidates(t *testing.T) {
 			byPath[urlPath(ep.URL)] = append(byPath[urlPath(ep.URL)], f.Verdict)
 		}
 	}
-	for _, path := range []string{"/form", "/json"} {
-		vs, ok := byPath[path]
-		if !ok {
-			t.Errorf("%s: no finding, want a Pending one now that POST is allowed to be sent", path)
-			continue
+	// /form is FORM-encoded and reflects unescaped (see newCorpus): it now gets
+	// real browser verification and should reach Confirmed, just like /confirmed.
+	formVs, ok := byPath["/form"]
+	if !ok {
+		t.Error("/form: no finding, want a Confirmed one (POST+form is now browser-verified)")
+	}
+	foundConfirmed := false
+	for _, v := range formVs {
+		if v == domain.VerdictConfirmed {
+			foundConfirmed = true
 		}
-		for _, v := range vs {
-			if v != domain.VerdictPending {
-				t.Errorf("%s: verdict = %s, want pending (POST candidates can never be browser-verified)", path, v)
-			}
+	}
+	if !foundConfirmed {
+		t.Errorf("/form: verdicts = %v, want at least one Confirmed", formVs)
+	}
+	// /json has no browser-navigable form (application/json) and can only ever
+	// stay Pending.
+	jsonVs, ok := byPath["/json"]
+	if !ok {
+		t.Error("/json: no finding, want a Pending one now that POST is allowed to be sent")
+	}
+	for _, v := range jsonVs {
+		if v != domain.VerdictPending {
+			t.Errorf("/json: verdict = %s, want pending (POST+JSON can never be browser-verified)", v)
 		}
 	}
 	if st, _ := q.Stats(ctx, sc.ID); st.Dead+st.Succeeded == 0 {

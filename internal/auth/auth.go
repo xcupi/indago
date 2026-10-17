@@ -4,9 +4,17 @@
 // operator is asked to re-authenticate.
 //
 // Anonymous (no credentials) and Existing (importing session material saved
-// by a prior interactive login) are implemented. Password, interactive-
-// browser, and MFA — modes that themselves need to drive a real login flow —
-// remain stubs that return ErrNotImplemented.
+// by a prior interactive login) drive no login flow of their own. Interactive
+// and MFA drive a real, visible browser (browser.Manager.InteractiveLogin)
+// that the operator logs into themselves (however many steps that needs,
+// including any second factor) — Indago never sees or stores credentials
+// for these. Password drives a HEADLESS, non-interactive login
+// (browser.Manager.AutoLogin) that fills and submits a login form itself,
+// using credentials from the SERVER process's own environment
+// (INDAGO_AUTH_USER/INDAGO_AUTH_PASS, read fresh at login time, never
+// accepted over the API/CLI, never persisted) — see
+// Controller.resolveAuth in internal/scan/controller.go for where each mode
+// is actually driven.
 package auth
 
 import (
@@ -22,7 +30,9 @@ import (
 	"github.com/indago/indago/internal/domain"
 )
 
-// ErrNotImplemented indicates a Phase 0 stub with no behavior yet.
+// ErrNotImplemented is kept for compatibility with any caller still matching
+// on it; no Authenticator in this package returns it anymore (Password,
+// Interactive, and MFA all have real behavior now — see capturedSession).
 var ErrNotImplemented = errors.New("auth: not implemented in Phase 0")
 
 // ErrInvalidState reports unusable session material for AuthExisting: a
@@ -33,11 +43,13 @@ var ErrInvalidState = errors.New("auth: invalid session state")
 // a few KB; anything far larger is not one, and is not read into memory.
 const maxStateFileSize = 10 << 20
 
-// Implemented reports whether mode has a working authenticator (as opposed to
-// a stub whose operations return ErrNotImplemented), so callers can reject an
-// unusable mode when a scan is created rather than when it starts.
+// Implemented reports whether mode has a working authenticator. All five
+// domain.AuthMode values are implemented (see the package doc comment for
+// which mechanism drives each one) — kept as its own function, rather than
+// inlining domain.AuthMode.IsValid() at call sites, so a FUTURE mode added to
+// the enum before its authenticator exists still fails closed here.
 func Implemented(mode domain.AuthMode) bool {
-	return mode == domain.AuthAnonymous || mode == domain.AuthExisting
+	return mode.IsValid()
 }
 
 // ValidateStateFile checks that path names session material AuthExisting can
@@ -172,21 +184,54 @@ func (Existing) Validate(_ context.Context, s *domain.Session) (bool, error) {
 
 var _ Authenticator = Existing{}
 
-// stubAuth is a placeholder for a mode that itself needs an unimplemented
-// interactive/credentialed login flow.
-type stubAuth struct{ mode domain.AuthMode }
+// capturedSession is the Establish/Validate half of Password, Interactive,
+// and MFA: identical to Existing's behavior (validate the state file is
+// present, point the Session at it — no network or browser activity here)
+// because by the time ANY of this runs, the actual login already happened
+// ONCE, up front, in Controller.resolveAuth at scan-CREATE time (driving a
+// real browser login or auto-filling a form) — Establish must never repeat
+// that on every scan Start/Resume: for Interactive/MFA that would mean
+// blocking a resume on a human being present again; for Password it would
+// mean a fresh login (and a fresh, possibly-rotated session) every resume
+// for no reason. Only Mode() differs per instance, purely for display/
+// provenance — an operator should still see "password", not "existing", on
+// a scan whose session happened to be captured that way.
+type capturedSession struct{ mode domain.AuthMode }
 
-func (s stubAuth) Mode() domain.AuthMode { return s.mode }
-func (s stubAuth) Establish(context.Context, Input) (*domain.Session, error) {
-	return nil, fmt.Errorf("%w: auth mode %q", ErrNotImplemented, s.mode)
-}
-func (s stubAuth) Validate(context.Context, *domain.Session) (bool, error) {
-	return false, fmt.Errorf("%w: auth mode %q", ErrNotImplemented, s.mode)
+func (c capturedSession) Mode() domain.AuthMode { return c.mode }
+
+func (c capturedSession) Establish(_ context.Context, in Input) (*domain.Session, error) {
+	if err := ValidateStateFile(in.StatePath); err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	return &domain.Session{
+		ID:        domain.NewID(),
+		ScanID:    in.ScanID,
+		Mode:      c.mode,
+		State:     domain.SessionActive,
+		StatePath: in.StatePath,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, nil
 }
 
-// For returns the authenticator for a given mode. Anonymous and Existing are
-// implemented; Password/Interactive/MFA return a stub whose operations report
-// ErrNotImplemented.
+func (c capturedSession) Validate(_ context.Context, s *domain.Session) (bool, error) {
+	if s.StatePath == "" {
+		return false, nil
+	}
+	_, err := os.Stat(s.StatePath)
+	return err == nil, nil
+}
+
+var _ Authenticator = capturedSession{}
+
+// For returns the authenticator for a given mode. Anonymous and Existing
+// establish/validate directly; Password, Interactive, and MFA use
+// capturedSession — see its doc comment for why Establish there does NOT
+// repeat the actual login (that already happened once, in
+// Controller.resolveAuth, before the Session this operates on ever carries
+// a real StatePath).
 func For(mode domain.AuthMode) (Authenticator, error) {
 	switch mode {
 	case domain.AuthAnonymous:
@@ -194,7 +239,7 @@ func For(mode domain.AuthMode) (Authenticator, error) {
 	case domain.AuthExisting:
 		return Existing{}, nil
 	case domain.AuthPassword, domain.AuthInteractive, domain.AuthMFA:
-		return stubAuth{mode: mode}, nil
+		return capturedSession{mode: mode}, nil
 	default:
 		return nil, fmt.Errorf("auth: unknown mode %q", mode)
 	}

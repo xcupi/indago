@@ -209,7 +209,7 @@ func TestE2E_RepeatedCrashRestartDuringVerification(t *testing.T) {
 	defer mgr.Close()
 	waitStatus(t, ctrl, sc.ID, 30*time.Second, isCompleted)
 
-	findings := assertScanIntegrity(t, db, ev, q, sc.ID, 1)
+	findings := assertScanIntegrity(t, db, ev, q, sc.ID, 7, 1) // root "/" (3 default Header IPs, none reflecting) + "/confirmed" (1 reflecting query "q" + 3 default Header IPs, none reflecting)
 	if len(findings) != 1 || findings[0].Verdict != domain.VerdictConfirmed || findings[0].Provenance.VerifiedAt == nil {
 		t.Fatalf("want one confirmed, verified finding after %d crashes, got %+v", crashes, findings)
 	}

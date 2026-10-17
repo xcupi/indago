@@ -11,8 +11,9 @@ async function renderDashboard(_params, view) {
   view.appendChild(pageHead("Dashboard", [button("New scan", openNewScanModal, "primary")]));
 
   const summary = card("Summary", el("div", "loading…", "hint"));
+  const sevCard = card("Confirmed findings by severity", el("div", "loading…", "hint"));
   const active = card("Active scans", el("div", "loading…", "hint"));
-  view.append(summary, active);
+  view.append(summary, sevCard, active);
 
   async function refresh() {
     let statuses;
@@ -28,10 +29,44 @@ async function renderDashboard(_params, view) {
     m.append(
       metric("Projects", ctx.projects.length),
       metric("Scans", statuses.length, null, currentProject() ? "in " + currentProject().name : "all projects"),
-      metric("Running", agg.running), metric("Paused / awaiting auth", agg.paused + agg.awaiting_auth),
-      metric("Confirmed findings", agg.confirmed), metric("Pending findings", agg.pending),
+      accentMetric("Running", agg.running, "accent"),
+      accentMetric("Paused / awaiting auth", agg.paused + agg.awaiting_auth, "warn"),
+      accentMetric("Confirmed findings", agg.confirmed, "bad"),
+      accentMetric("Pending findings", agg.pending, "warn"),
     );
     summary.replaceChildren(el("h2", "Summary"), m);
+
+    // Severity breakdown across every scan's CONFIRMED findings (same scope as
+    // the rest of the dashboard: current project, or all if none selected).
+    // Bounded by how many scans are in view, same as the Findings page already
+    // does per project — acceptable here too since it's one fetch per scan,
+    // in parallel, not per finding.
+    const sevCounts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+    await Promise.all(statuses.map(async (st) => {
+      if (!st.findings.confirmed) return;
+      try {
+        const findings = (await getJSON(api.scan(st.scan.id) + "/findings")) || [];
+        findings.forEach((f) => { if (f.section === "confirmed" && sevCounts[f.severity] !== undefined) sevCounts[f.severity]++; });
+      } catch (e) { /* one scan's fetch failing shouldn't blank the whole bar */ }
+    }));
+    const sevTotal = Object.values(sevCounts).reduce((a, b) => a + b, 0);
+    if (!sevTotal) {
+      sevCard.replaceChildren(el("h2", "Confirmed findings by severity"), el("div", "No confirmed findings yet.", "hint"));
+    } else {
+      const bar = el("div", undefined, "sev-bar");
+      const legend = el("div", undefined, "sev-legend");
+      const sevColorVar = { critical: "--sev-critical", high: "--bad", medium: "--warn", low: "--sev-low" };
+      ["critical", "high", "medium", "low"].forEach((sv) => {
+        if (!sevCounts[sv]) return;
+        const pct = (sevCounts[sv] / sevTotal * 100).toFixed(1);
+        const seg = el("div", undefined, sv); seg.style.width = pct + "%"; seg.title = sv + ": " + sevCounts[sv] + " (" + pct + "%)";
+        bar.appendChild(seg);
+        const dot = el("span", undefined, "dot"); dot.style.background = "var(" + sevColorVar[sv] + ")";
+        const item = el("span"); item.append(dot, document.createTextNode(sv + " " + sevCounts[sv]));
+        legend.appendChild(item);
+      });
+      sevCard.replaceChildren(el("h2", "Confirmed findings by severity"), bar, legend);
+    }
 
     const activeStatuses = statuses.filter((st) => ["running", "paused", "awaiting_auth", "canceling"].includes(st.scan.state));
     const rows = activeStatuses.map((st) => scanListRow(st, refresh));
@@ -230,26 +265,46 @@ async function renderScansList(_params, view) {
 // ---------------------------------------------------------------------------
 // Findings (project-level, aggregated across the project's scans)
 // ---------------------------------------------------------------------------
+// Project-level findings filter (confirmed by default, like a scan's Findings
+// tab: rejected attempts are diagnostics, not vulnerabilities).
+let projectFindingsView = "confirmed";
+
 async function renderFindings(_params, view) {
   if (!currentProject()) { needProject(view, "Findings"); return; }
   view.appendChild(pageHead("Findings — " + currentProject().name));
+  const extraFilters = { severity: new Set(), context: "", search: "", knownSeverities: [] };
+  const extra = buildExtraFilters({ filters: extraFilters }, () => render());
   const body = card(null, el("div", "loading…", "hint"));
+  view.appendChild(extra.el);
   view.appendChild(body);
 
   const scans = await projectScans();
-  const rows = [];
+  const all = [];
   for (const s of scans) {
     let findings = [];
     try { findings = (await getJSON(api.scan(s.id) + "/findings")) || []; } catch (e) { continue; }
-    findings.forEach((f) => {
-      const tr = findingRow(f, s.id, null);
-      const scanCell = el("td"); scanCell.appendChild(link(s.name || "(unnamed)", "#/scans/" + encodeURIComponent(s.id) + "/findings"));
-      tr.insertBefore(scanCell, tr.firstChild);
-      rows.push(tr);
-    });
+    findings.forEach((f) => all.push({ f, scan: s }));
   }
-  body.replaceChildren(table(["Scan", "Title", "Verdict", "Severity", "Parameter", "Context"], rows,
-    "No findings in this project yet.", null));
+  extra.refreshOptions(all.map((x) => x.f));
+  const render = () => {
+    const counts = sectionCountsOf(all.map((x) => x.f));
+    const pred = viewPredicate(projectFindingsView);
+    const sectioned = all.filter((x) => pred(x.f));
+    const rows = sectioned.filter((x) => matchesExtraFilters(x.f, extraFilters)).map(({ f, scan }) => {
+      const tr = findingRow(f, scan.id, null);
+      const scanCell = el("td"); scanCell.appendChild(link(scan.name || "(unnamed)", "#/scans/" + encodeURIComponent(scan.id) + "/findings"));
+      tr.insertBefore(scanCell, tr.firstChild);
+      return tr;
+    });
+    let empty = projectFindingsView === "confirmed" && all.length
+      ? "No confirmed vulnerabilities in this project yet. " + (all.length - counts.confirmed) + " other finding(s) are hidden in this view."
+      : "No findings in this view.";
+    if (sectioned.length && !rows.length) empty = "No findings in this view match the current severity/context/search filters.";
+    body.replaceChildren(
+      filterBar(counts, projectFindingsView, (name) => { projectFindingsView = name; render(); }),
+      table(["Scan", ...FINDING_HEADERS], rows, empty, null));
+  };
+  render();
 }
 
 // ---------------------------------------------------------------------------
@@ -274,7 +329,7 @@ async function renderReports(_params, view) {
       rows.push(tr);
     });
   }
-  body.replaceChildren(table(["Scan", "Created", "Format", "Findings", "Confirmed", "Open"], rows, "No reports in this project yet.", null));
+  body.replaceChildren(table(["Scan", "Created", "Format", "Selection", "Findings", "Verdicts", "Open"], rows, "No reports in this project yet.", null));
 }
 
 // ---------------------------------------------------------------------------
@@ -283,11 +338,11 @@ async function renderReports(_params, view) {
 async function renderSettings(_params, view) {
   view.appendChild(pageHead("Settings"));
 
-  const interval = select("set_refresh", [["1000", "1 second"], ["2000", "2 seconds"], ["5000", "5 seconds"], ["10000", "10 seconds"]], prefs.get("refreshMs", "2000"));
+  const interval = select("set_refresh", [["off", "Off (refresh manually)"], ["1000", "1 second"], ["2000", "2 seconds"], ["5000", "5 seconds"], ["10000", "10 seconds"]], prefs.get("refreshMs", "2000"));
   interval.style.width = "200px";
   interval.addEventListener("change", () => { prefs.set("refreshMs", interval.value); route(); });
   view.appendChild(card("Live refresh interval", field("How often live views poll for updates", interval),
-    el("p", "A per-browser preference only; it changes nothing on the server.", "hint")));
+    el("p", "Off stops all background polling; use \u21bb Refresh in the header to update a view. A per-browser preference only; it changes nothing on the server.", "hint")));
 
   let login = "unknown";
   try {
@@ -325,12 +380,14 @@ async function init() {
   try { const v = await getJSON("/api/version"); $("version").textContent = "v" + (v.version || "dev"); } catch (e) { /* ignore */ }
   $("projectSelect").addEventListener("change", (e) => setProject(e.target.value));
   $("modalClose").addEventListener("click", closeModal);
+  $("refreshNow").addEventListener("click", refreshNow);
   $("modal").addEventListener("click", (e) => { if (e.target === $("modal")) closeModal(); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
   window.addEventListener("hashchange", route);
   await loadProjects();
   route();
   // Keep the project list fresh for the header without disturbing the view.
-  setInterval(loadProjects, 10000);
+  // Respects "Live off": no background polling at all then.
+  setInterval(() => { if (refreshMs() > 0) loadProjects(); }, 10000);
 }
 init();
