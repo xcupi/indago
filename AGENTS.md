@@ -102,13 +102,14 @@ right now** and must remain stubs/interfaces (job handlers are no-ops):
   decision is a pure function of a deterministic browser signal
   (`internal/verification/browser.go:decide`) — AI remains advisory-only
   everywhere, per §2.5.
-- ❌ DOM XSS beyond the Phase-2 slice. The landed slice covers exactly sources
-  `location.hash`, query string (`location.search`/`URLSearchParams`),
-  `window.name`, and `postMessage`, all into sink `innerHTML`/`outerHTML`/
-  `document.write`/`writeln` (see `docs/dom-xss.md`). Every other client-side
-  source (`document.referrer`, `localStorage`/`sessionStorage`) and every other
-  sink (`eval`/`Function`, `location`/`src` assignment) remains out of scope
-  until its own explicit slice.
+- ❌ DOM XSS beyond the implemented Phase-2 source/sink coverage. The seven
+  implemented source types are `location.hash`, query string
+  (`location.search`/`URLSearchParams`), `window.name`, `postMessage`,
+  `document.referrer`, `localStorage`, and `sessionStorage`, tested against
+  `innerHTML`/`outerHTML`/`document.write`/`writeln` (see `docs/dom-xss.md`
+  for source-specific testing limitations). This is not exhaustive DOM-XSS
+  coverage. Other sink categories (`eval`/`Function`, `location`/`src`
+  assignment) remain out of scope until their own explicit slice.
 - ❌ Automated exploitation / weaponized payloads. Candidate execution AND
   verification only ever send the small, canonical, benign-marker breakouts the
   planner chose — no payload obfuscation, no evasion variants, no exploit
@@ -318,16 +319,19 @@ Implemented so far (infrastructure and **discovery**):
   style payload is navigated/delivered and confirmed via the EXACT SAME
   deterministic browser signal Reflected XSS verification already uses
   (`verification.MatchExecutionSignal`/`Decide`) — no LLM, no new verdict
-  mechanism. Four sources now real: `location.hash`, query string (a client-side
-  check INDEPENDENT of and never collapsed with Reflected XSS's server-side
-  reflection check on the same parameter — both can legitimately fire on the
-  same endpoint), `window.name` (requires navigate-elsewhere → set name →
-  navigate-to-target sequencing, since it persists across same-tab navigation),
-  and `postMessage` (tested via `page.Evaluate` posting directly at the
-  already-loaded target page — faithfully simulates an untrusted frame/popup
-  message without needing a second controlled origin). Still only the
-  HTML-injection sink category; every other source/sink combination is still a
-  gap (see the ❌ bullet above), not a false claim of completeness.
+  mechanism. All SEVEN client-side sources now real against this sink category:
+  `location.hash`, query string (a client-side check INDEPENDENT of and never
+  collapsed with Reflected XSS's server-side reflection check on the same
+  parameter — both can legitimately fire on the same endpoint), `window.name`
+  (navigate-elsewhere → set name → navigate-to-target, since it persists across
+  same-tab navigation), `postMessage` (tested via `page.Evaluate` posting
+  directly at the already-loaded target page), `document.referrer` (a synthetic
+  absolute-URL Referer override threaded through `browser.NavOptions` — Chromium
+  silently ignores a non-absolute Referer, a real gotcha found live), and
+  `localStorage`/`sessionStorage` (origin-scoped: navigate same-origin first →
+  write storage via `page.Evaluate` → reload the target). Still only the
+  HTML-injection sink category; every other sink category is still a gap (see
+  the ❌ bullet above), not a false claim of completeness.
 - ⏳ Stubs: detection engines for non-Reflected-XSS, non-DOM-XSS vulnerability
   classes (Stored XSS), and every DOM-XSS source/sink combination beyond the
   Phase-2 first slice.
