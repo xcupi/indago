@@ -3,10 +3,11 @@ package verification
 import "strings"
 
 // This file is the deterministic, pure core of browser verification: given the
-// raw observations a page load produced, does the EXACT marker token appear
-// where the browser's own JavaScript engine reports an uncaught exception or a
-// console error? It makes no network/browser calls itself and performs no
-// payload generation — it only matches strings the caller already collected.
+// raw observations a page load produced, does the browser report the candidate
+// marker as an unresolved JavaScript identifier? It makes no network/browser
+// calls itself and performs no payload generation — it only matches strings the
+// caller already collected, and accepts only the marker-specific ReferenceError
+// signature rather than arbitrary messages that happen to contain the marker.
 //
 // Why this is a sound, deterministic signal (not a timing heuristic): every
 // built-in candidate (internal/detection/candidate.go) is, at the position it
@@ -25,34 +26,59 @@ import "strings"
 type Signal string
 
 const (
-	SignalNone         Signal = "none"          // no channel named the marker token
-	SignalPageError    Signal = "page_error"    // an uncaught exception named it
-	SignalConsoleError Signal = "console_error" // a console.error message named it
+	SignalNone         Signal = "none"          // no channel reported the marker as an unresolved identifier
+	SignalPageError    Signal = "page_error"    // an uncaught ReferenceError named the marker as undefined
+	SignalConsoleError Signal = "console_error" // a runtime-shaped console error named the marker as undefined
 )
 
 // matchExecutionSignal scans pageErrors then consoleErrors (in that priority:
-// an uncaught exception is the more direct signal) for the exact marker token.
-// It returns the first match's channel and text, or (SignalNone, "", false).
+// an uncaught exception is the more direct signal) for the exact
+// marker-specific ReferenceError signature. Generic application messages,
+// including console.error output that merely contains the marker, are not
+// execution evidence. It returns the first match's channel and text, or
+// (SignalNone, "", false).
 func matchExecutionSignal(token string, pageErrors, consoleErrors []string) (Signal, string, bool) {
 	if token == "" {
 		return SignalNone, "", false
 	}
-	if text, ok := firstContaining(token, pageErrors); ok {
+	if text, ok := firstMarkerReferenceError(token, pageErrors, true); ok {
 		return SignalPageError, text, true
 	}
-	if text, ok := firstContaining(token, consoleErrors); ok {
+	if text, ok := firstMarkerReferenceError(token, consoleErrors, false); ok {
 		return SignalConsoleError, text, true
 	}
 	return SignalNone, "", false
 }
 
-func firstContaining(token string, messages []string) (string, bool) {
-	for _, m := range messages {
-		if strings.Contains(m, token) {
-			return m, true
+// firstMarkerReferenceError returns the first message that starts with the
+// browser's bare-unresolved-identifier signature for token. Playwright's
+// page-error channel omits the JavaScript error name and reports the observed
+// Chromium form as "playwright: TOKEN is not defined"; that fallback is only
+// accepted on pageErrors, never on console.error messages. Browser runtimes may
+// append stack frames, so only newline-separated stack text is permitted after
+// the exact signature; arbitrary suffix text is not.
+func firstMarkerReferenceError(token string, messages []string, allowPlaywrightPrefix bool) (string, bool) {
+	for _, message := range messages {
+		if isMarkerReferenceError(token, message, allowPlaywrightPrefix) {
+			return message, true
 		}
 	}
 	return "", false
+}
+
+func isMarkerReferenceError(token, message string, allowPlaywrightPrefix bool) bool {
+	message = strings.TrimSpace(message)
+	prefixes := []string{"ReferenceError: ", "Uncaught ReferenceError: "}
+	if allowPlaywrightPrefix {
+		prefixes = append(prefixes, "playwright: ")
+	}
+	for _, prefix := range prefixes {
+		signature := prefix + token + " is not defined"
+		if message == signature || strings.HasPrefix(message, signature+"\n") {
+			return true
+		}
+	}
+	return false
 }
 
 // MatchExecutionSignal is matchExecutionSignal's exported form, reused by
