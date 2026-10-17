@@ -111,23 +111,25 @@ var DOMXSSSources = []DOMXSSSource{
 }
 
 // DOMXSSSink identifies an HTML-injection sink this engine hooks. Exactly
-// these three for this first slice (document.writeln shares
+// these HTML sinks are implemented (document.writeln shares
 // document.write's hook and is reported under the same sink name) — see
 // docs/dom-xss.md for what is deliberately NOT implemented yet
 // (eval/Function, location/src assignment sinks).
 type DOMXSSSink string
 
 const (
-	DOMSinkInnerHTML     DOMXSSSink = "innerHTML"
-	DOMSinkOuterHTML     DOMXSSSink = "outerHTML"
-	DOMSinkDocumentWrite DOMXSSSink = "document.write"
+	DOMSinkInnerHTML                DOMXSSSink = "innerHTML"
+	DOMSinkOuterHTML                DOMXSSSink = "outerHTML"
+	DOMSinkDocumentWrite            DOMXSSSink = "document.write"
+	DOMSinkInsertAdjacentHTML       DOMXSSSink = "insertAdjacentHTML"
+	DOMSinkCreateContextualFragment DOMXSSSink = "Range.createContextualFragment"
 )
 
-// IsValid reports whether sink is one of this slice's three implemented
+// IsValid reports whether sink is one of this slice's implemented
 // HTML-injection sinks.
 func (s DOMXSSSink) IsValid() bool {
 	switch s {
-	case DOMSinkInnerHTML, DOMSinkOuterHTML, DOMSinkDocumentWrite:
+	case DOMSinkInnerHTML, DOMSinkOuterHTML, DOMSinkDocumentWrite, DOMSinkInsertAdjacentHTML, DOMSinkCreateContextualFragment:
 		return true
 	default:
 		return false
@@ -217,6 +219,9 @@ func domXSSRationale(source DOMXSSSource, sink DOMXSSSink) string {
 		storageControlCaveat = "; this reachability does not establish that an attacker can write or poison the key—manual exploitability review is required unless an attacker-relevant application flow demonstrates that control"
 	default: // DOMSourceHash
 		how = "the location.hash value"
+	}
+	if sink == DOMSinkCreateContextualFragment {
+		return how + " is parsed by " + string(sink) + "; confirmation additionally requires observed target insertion of a returned node and the marker-specific browser runtime signal; Indago never inserts the fragment" + storageControlCaveat
 	}
 	return how + " is assigned wholesale to " + string(sink) +
 		"; an <img> with a deliberately-broken src fires its onerror handler the moment the browser parses the injected markup, referencing the benign marker" + storageControlCaveat

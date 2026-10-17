@@ -21,7 +21,8 @@ package scan
 //     present in target-origin storage or requested by the page's getItem calls
 //     (capped at 32 per backend/endpoint).
 //   - exactly ONE sink category: HTML injection (innerHTML/outerHTML/
-//     document.write/writeln) — see detection.DOMXSSSink.
+//     document.write/writeln, insertAdjacentHTML, createContextualFragment)
+//     — see detection.DOMXSSSink.
 //   - at most one reachable sink is verified per endpoint/source/selector
 //     pass: if a page reaches more than one hooked sink, only the first (by
 //     whichever the page happened to call first) is tested.
@@ -175,8 +176,9 @@ const domXSSConsolePrefix = "__INDAGO_DOMXSS__"
 // domXSSConsolePrefix) each time a value containing the marker reaches a
 // hooked sink.
 type domXSSSinkReport struct {
-	Sink  string `json:"sink"`
-	Value string `json:"value"`
+	Sink      string `json:"sink"`
+	Value     string `json:"value"`
+	Connected bool   `json:"connected,omitempty"`
 }
 
 // parseDOMXSSReachability scans console messages the init-script harness
@@ -214,6 +216,22 @@ func parseDOMXSSReachability(msgs []browser.ConsoleMessage, marker string) []det
 	return out
 }
 
+// hasConnectedDOMXSSFragment requires observational evidence that the target
+// inserted a node returned by createContextualFragment. Detached image errors
+// alone do not satisfy this sink's insertion requirement.
+func hasConnectedDOMXSSFragment(messages []browser.ConsoleMessage, marker string) bool {
+	for _, message := range messages {
+		if !strings.HasPrefix(message.Text, domXSSConsolePrefix) {
+			continue
+		}
+		var report domXSSSinkReport
+		if json.Unmarshal([]byte(strings.TrimPrefix(message.Text, domXSSConsolePrefix)), &report) == nil && report.Sink == string(detection.DOMSinkCreateContextualFragment) && report.Connected && strings.Contains(report.Value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // goQuoteJS renders s as a JS double-quoted string literal. Go's %q
 // produces backslash escapes JS also accepts for every byte that can
 // appear in marker/domXSSConsolePrefix (both are plain ASCII
@@ -222,7 +240,7 @@ func parseDOMXSSReachability(msgs []browser.ConsoleMessage, marker string) []det
 func goQuoteJS(s string) string { return fmt.Sprintf("%q", s) }
 
 // domXSSHarnessScript builds the init-script harness: monkey-patches
-// Element.prototype.innerHTML/outerHTML and document.write/writeln to
+// the implemented HTML sinks (see detection.DOMXSSSink) to
 // report (via a uniquely-prefixed console.log) whenever a value
 // CONTAINING marker reaches one of them. Installed via
 // browser.Page.AddInitScript, BEFORE any page script runs: attaching a
@@ -235,11 +253,11 @@ func domXSSHarnessScript(marker string) string {
 const domXSSHarnessTemplate = `(() => {
   const MARKER = %s;
   const PREFIX = %s;
-  function report(sink, value) {
+  function report(sink, value, connected) {
     try {
       var v = String(value);
       if (v.indexOf(MARKER) === -1) return;
-      console.log(PREFIX + JSON.stringify({ sink: sink, value: v.slice(0, 500) }));
+      console.log(PREFIX + JSON.stringify({ sink: sink, value: v.slice(0, 500), connected: connected === true }));
     } catch (e) {}
   }
   function hookProp(proto, prop) {
@@ -260,6 +278,52 @@ const domXSSHarnessTemplate = `(() => {
   }
   hookProp(Element.prototype, 'innerHTML');
   hookProp(Element.prototype, 'outerHTML');
+  // Call native first with the original receiver and every argument. Observe
+  // only primitive strings: logging must not repeat Web IDL object coercion.
+  try {
+    const desc = Object.getOwnPropertyDescriptor(Element.prototype, 'insertAdjacentHTML');
+    const native = desc.value;
+    Object.defineProperty(Element.prototype, 'insertAdjacentHTML', {
+      ...desc,
+      value: function () {
+        const result = native.apply(this, arguments);
+        if (typeof arguments[1] === 'string') report('insertAdjacentHTML', arguments[1]);
+        return result;
+      }
+    });
+  } catch (_) {}
+  try {
+    const desc = Object.getOwnPropertyDescriptor(Range.prototype, 'createContextualFragment');
+    const native = desc.value;
+    Object.defineProperty(Range.prototype, 'createContextualFragment', {
+      ...desc,
+      value: function () {
+        const result = native.apply(this, arguments);
+        if (typeof arguments[0] === 'string') {
+          const value = arguments[0];
+          report('Range.createContextualFragment', value);
+          // Chromium may fire image errors in detached fragments. Confirm only
+          // after observing the target attach a returned node; never insert it.
+          try {
+            if (value.indexOf(MARKER) !== -1) {
+              // Track the actual canonical marker handler, not an innocent sibling
+              // text node that the target might insert while leaving the image detached.
+              const nodes = Array.from(result.querySelectorAll('[onerror]')).filter(
+                node => node.getAttribute('onerror') === MARKER);
+              const observer = new MutationObserver(() => {
+                if (nodes.some(node => node.isConnected && node.ownerDocument === document)) {
+                  report('Range.createContextualFragment', value, true);
+                  observer.disconnect();
+                }
+              });
+              observer.observe(document, {childList: true, subtree: true});
+            }
+          } catch (_) {}
+        }
+        return result; // Observation only: never insert the returned fragment.
+      }
+    });
+  } catch (_) {}
   try {
     var origWrite = document.write.bind(document);
     document.write = function () {
@@ -756,9 +820,18 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 			consoleErrs = append(consoleErrs, cm.Text)
 		}
 	}
-	_, sigText, matched := verification.MatchExecutionSignal(marker, pageErrs2, consoleErrs)
+	// Console output is evidence only: even a runtime-shaped application log
+	// cannot confirm DOM execution without the browser's page-error channel.
+	_, sigText, matched := verification.MatchExecutionSignal(marker, pageErrs2, nil)
+	fragmentNotInserted := sink == detection.DOMSinkCreateContextualFragment && !hasConnectedDOMXSSFragment(console2, marker)
+	if fragmentNotInserted {
+		matched = false
+	}
 	markerInDOM := strings.Contains(html2, marker)
 	verdict, confidence, notes := verification.Decide(matched, markerInDOM)
+	if fragmentNotInserted {
+		notes += "; target insertion of the parsed fragment was not observed; detached-fragment runtime errors alone do not confirm this sink"
+	}
 	if matched && sigText != "" {
 		notes = notes + " (" + sigText + ")"
 	}
@@ -769,6 +842,13 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	var evidenceIDs []domain.ID
 	if e.evidence != nil {
 		logLines := append(append([]string(nil), consoleErrs...), pageErrs2...)
+		if sink == detection.DOMSinkCreateContextualFragment {
+			for _, message := range console2 {
+				if strings.HasPrefix(message.Text, domXSSConsolePrefix) {
+					logLines = append(logLines, message.Text)
+				}
+			}
+		}
 		evidenceIDs = e.persistDOMXSSEvidence(ctx, job.ScanID, verifyTC.ID, screenshot2, html2, logLines)
 	}
 	verifyTC.EvidenceIDs = evidenceIDs

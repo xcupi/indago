@@ -1,4 +1,78 @@
-# Indago — DOM XSS (third slice: document.referrer, localStorage, sessionStorage)
+# Indago — bounded DOM-XSS HTML sink coverage
+
+## P2.1: exactly two additional HTML sink methods
+
+Current HTML sinks: `innerHTML`, `outerHTML`, `document.write`/`writeln`,
+**`Element.prototype.insertAdjacentHTML`** and
+**`Range.prototype.createContextualFragment`**. No source was added in P2.1.
+Seven source types are implemented, with the query/storage bounds below;
+implementation inventory does not imply every source/sink pair was validated.
+
+The two new wrappers call the original native method **first**, with the
+original receiver and **all arguments**, then return the identical native
+result. Native errors propagate unchanged. Successful calls are observed only
+when the HTML argument is a **primitive string** (argument 2 for
+`insertAdjacentHTML`, argument 1 for `createContextualFragment`). Object,
+TrustedHTML, boxed-string and other non-string arguments are passed unchanged
+to native code but are **not logged for reachability**: coercing them again to
+look for a marker could change application behavior. Failed native calls do not
+produce reachability reports. The older setter/document-write hooks are not
+redesigned by this bounded change.
+
+The existing inert-canary → benign `<img src=x onerror=MARKER>` phases and
+strict marker-specific runtime matcher are retained. DOM confirmation requires
+the browser page-error channel; console output is stored as evidence only.
+Logging a canary/payload or even a forged `ReferenceError: MARKER is not defined`
+via `console.error` cannot confirm DOM execution.
+
+**Fragment creation is not insertion.** Indago never inserts returned
+fragments. Chromium can raise an image `onerror` ReferenceError even while an
+image remains in a detached fragment (reproduced with native code and no
+scanner harness). Therefore this sink additionally requires a MutationObserver
+to observe the returned canonical marker-handler element connected to the target
+document (not merely an innocent sibling text node), as well as the
+marker-specific runtime signal. Browser-log evidence retains both the runtime
+error and the connection report. Without observed insertion the result remains
+non-Confirmed, with an explicit note. A node appended and removed before the
+observer callback, attachment only inside an unobserved shadow tree, delayed
+insertion after the observation window, and markup transformed into unrelated
+new nodes may be missed. These are conservative coverage limits, not clean
+negatives. An escaped text node being connected is not sufficient: the runtime
+signal is still mandatory. Partial insertion of a harmless text sibling while
+the payload image remains detached is also a tested non-Confirmed control.
+
+### Prerequisite integration policy
+
+This feature branch explicitly integrates the DOM prerequisite branch with P1;
+neither feature is merged into main by this work. Raw HTTP redirect hops retain
+both per-hop pacing and cookie scope re-evaluation. Browser navigations for
+all DOM source mechanisms **and storage-key observation** take the scan's same
+limiter; DOM contexts use the scan proxy pool, session storage state and existing
+request-scope gate. Pacing remains one permit per explicit browser navigation,
+not per browser-generated subresource or redirect hop. Scope enforcement still
+covers browser subresources and redirects. No proxy-stack redesign, default
+scope change, TLS weakening or sandbox change was made.
+
+### P2.1 behavioral validation
+
+Real Chromium tests independently exercise both new sinks with hash **and query**
+sources, inserted markup, text/escaped controls, console-only marker output,
+and a Range-created-but-never-inserted fragment. Native contract tests compare
+receiver/argument forwarding (including extra arguments), return identity,
+coercion count, exact propagated errors, invalid receivers and missing arguments.
+The new sink assertions were run RED before each sink was implemented, then
+GREEN sequentially. Integration policy tests cover limiter cancellation across
+the seven navigation mechanisms plus storage observation, and real proxy/session/
+referrer/scope/evidence behavior. This is **not** a claim that all seven sources
+were positively exercised against both new sinks. See
+`docs/p21-html-sinks-validation.md` for actual CLI routes/results and gates.
+
+## Source slices: design and prior validation
+
+The following sections describe the prerequisite source slices. Historical
+appendix inventories are not the current capability map; P2.1 above adds only
+the two named methods to their HTML category.
+
 
 This document describes DOM-XSS detection's THIRD slice — see `AGENTS.md`
 §3 and `docs/dom-xss.md`'s own "Out of scope" sections (both updated below)
@@ -40,8 +114,8 @@ all three slices add, not a tweak to the existing Reflected XSS pipeline.
 SOURCE dimension against the HTML-injection sink category is now
 complete, but entirely new SINK categories (`eval`/`Function`,
 `location`/`src` assignment, `setTimeout`/`setInterval` with a string
-argument, `insertAdjacentHTML`, `Range.createContextualFragment`) are
-real, deliberate, separate future work. See "Out of scope" below.
+argument) are real, deliberate, separate future work. The two HTML method
+sinks added by P2.1 are described at the top of this document. See "Out of scope" below.
 
 ---
 
@@ -50,7 +124,7 @@ real, deliberate, separate future work. See "Out of scope" below.
 | Axis | Implemented |
 |---|---|
 | Sources | SEVEN (all client-side sources identified so far): `location.hash` (piece 1); `location.search`/`URLSearchParams`, `window.name`, `postMessage` (piece 2); `document.referrer`, `localStorage`, `sessionStorage` (piece 3 — `detection.DOMXSSSources`) |
-| Sink category | Still exactly ONE, HTML injection: `Element.prototype.innerHTML` / `outerHTML` setters, `document.write` / `document.writeln` (`detection.DOMXSSSink`) — UNCHANGED from pieces 1/2, reused as-is |
+| Sink category | Still exactly ONE, HTML injection: `Element.prototype.innerHTML` / `outerHTML` setters, `document.write` / `document.writeln`, `Element.prototype.insertAdjacentHTML`, `Range.prototype.createContextualFragment` (`detection.DOMXSSSink`; P2.1 methods have the primitive-string and insertion limits above) |
 | Pairs tested per endpoint/source/selector | At most ONE — the first reachable sink (by the page's own script call order) for each query parameter or storage key; non-selector sources have one pass — see "Two-phase design" below |
 | Methods probed | GET/HEAD-navigable endpoints only — UNCHANGED from piece 1 |
 | Query source coverage | Every distinct discovered `Location=Query` parameter name, sorted lexicographically for deterministic ordering — each name gets an independent canary/payload pass and finding identity. If no query parameter was discovered, a skipped `TestCase` says the source was not tested (not a clean negative) |
@@ -443,13 +517,11 @@ deliberate exclusions for future, separate pieces of work:
   document.referrer, localStorage, sessionStorage — see
   `detection.DOMXSSSources`). A genuinely new source not yet identified
   would still be new work, but nothing on the current list remains.
-- **Sinks**: still only the three HTML-injection sinks from piece 1
-  (innerHTML/outerHTML/document.write/writeln). `eval`/`Function`,
-  `location`/`src` assignment sinks (e.g. `location.href = ...`, `<script
-  src>` assignment), `setTimeout`/`setInterval` with a string argument,
-  `insertAdjacentHTML`, `Range.createContextualFragment` are all still
-  real, deliberate exclusions for a future, separate piece — THIS is now
-  the only remaining axis of DOM-XSS coverage, not sources.
+- **Sinks**: HTML injection only: innerHTML/outerHTML/document.write/writeln
+  plus the two P2.1 methods above. `eval`/`Function`, `location`/`src`
+  assignment (including script-src), and string timers remain excluded.
+  Other HTML methods are not implicitly covered. Source-specific limits and
+  the first-reachable-sink bound still apply; this is not exhaustive DOM XSS.
 - **More than one reachable pair per endpoint/source/selector per probe
   pass**: if a page reaches TWO or more hooked sinks from the SAME selector,
   only the first (deterministic, by call order) is tested — unchanged

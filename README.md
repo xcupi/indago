@@ -21,12 +21,13 @@ and conservative, operator-controlled behavior.
 | Transport | HTTP engine, browser manager | done |
 | Discovery | Crawl, forms, sitemap/robots, wordlists, params; scan controller integration | **current** |
 | Phase 1 | Reflected XSS detection & verification | done |
-| DOM XSS (first slice) | `location.hash` → innerHTML/outerHTML/document.write — see [`docs/dom-xss.md`](docs/dom-xss.md) | **current** |
+| DOM XSS (bounded HTML sinks) | Seven implemented source types → innerHTML/outerHTML/document.write/writeln/insertAdjacentHTML/Range.createContextualFragment; source-specific limits in [`docs/dom-xss.md`](docs/dom-xss.md) | **current** |
 | Later | Stored XSS, more DOM-XSS sources/sinks, more engines | designed-for |
 
-**There is no vulnerability detection, payload generation, or exploitation yet.**
-A scan currently performs scope-enforced *discovery* (real requests to in-scope
-targets only) and drains its test jobs through no-op handlers. See
+Scans perform scope-enforced discovery, benign-marker Reflected-XSS testing,
+and browser-backed DOM-XSS probing for the bounded source/sink coverage above.
+Confirmation requires a marker-specific browser runtime signal, not reachability
+or console text alone. Stored XSS and other DOM sink categories are not built. See
 [`AGENTS.md`](AGENTS.md) for the exact boundary and
 [`docs/scan-orchestration.md`](docs/scan-orchestration.md) for how a scan runs.
 
@@ -57,7 +58,7 @@ Full design docs live in [`docs/`](docs/):
 - [`interfaces.md`](docs/interfaces.md) — service boundaries & contracts
 - [`repository-structure.md`](docs/repository-structure.md) — layout rationale
 - [`testing-strategy.md`](docs/testing-strategy.md) — how we test
-- [`dom-xss.md`](docs/dom-xss.md) — DOM XSS engine, first slice (`location.hash` → innerHTML/outerHTML/document.write)
+- [`dom-xss.md`](docs/dom-xss.md) — DOM XSS source/sink coverage, two-phase design, and validation limits
 
 ---
 
