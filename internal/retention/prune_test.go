@@ -308,8 +308,13 @@ func TestPruneRefusesPathTraversalRows(t *testing.T) {
 	if got := sum.Count(retention.StatusRefused); got != len(rows) {
 		t.Fatalf("refused count = %d, want %d", got, len(rows))
 	}
-	if sum.Failures != len(rows) {
-		t.Fatalf("failures = %d, want %d", sum.Failures, len(rows))
+	// A containment refusal is a warning, not a failure: the run is still clean
+	// (exit 0) and the operator is told which rows were left alone.
+	if sum.Warnings != len(rows) {
+		t.Fatalf("warnings = %d, want %d", sum.Warnings, len(rows))
+	}
+	if sum.Failures != 0 {
+		t.Fatalf("failures = %d, want 0 (refusals are warnings)", sum.Failures)
 	}
 }
 

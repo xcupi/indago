@@ -431,9 +431,11 @@ indago evidence prune -data /var/lib/indago -older-than 720h -apply
 - **Not deleted:** scan records, findings, endpoints, parameters, jobs, AI
   tasks, test-case records, the database itself, and anything in `config.json`.
 
-**Exit status:** `0` when the run is clean, including a dry run. `1` if any
-item was refused or failed, or if the command itself errored. Failed items are
-listed, and the rest of the run still completes.
+**Exit status:** `0` when nothing failed, including a dry run. A row refused as
+outside the evidence root is a **warning**: it is listed, the rest of the run
+completes, and the exit status is still `0`. `1` only if an item failed with an
+I/O or store error, or if the command itself errored. Failed items are listed,
+and the rest of the run still completes.
 
 **Audit trail:** one line per scan that had something deleted, on stderr, for
 example `evidence pruned scan_id=... cutoff=... evidence_removed=12 ...`. It

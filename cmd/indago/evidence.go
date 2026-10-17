@@ -98,8 +98,11 @@ func runEvidencePrune(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if sum.Warnings > 0 {
+		fmt.Fprintf(stderr, "indago: warning: %d row(s) refused as outside the evidence root and left alone (listed above); this does not fail the run\n", sum.Warnings)
+	}
 	if sum.Failures > 0 {
-		return fmt.Errorf("%d item(s) refused or failed (listed above); the rest was processed", sum.Failures)
+		return fmt.Errorf("%d item(s) failed (listed above); the rest was processed", sum.Failures)
 	}
 	return nil
 }

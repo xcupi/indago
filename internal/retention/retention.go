@@ -128,7 +128,12 @@ type Summary struct {
 	SkippedNoTimestamp []domain.ID // terminal scans with no usable timestamp
 
 	FindingsAffected int // distinct findings that lost at least one evidence link
-	Failures         int // refused + failed items (non-zero means the run is not clean)
+	// Warnings counts containment refusals: rows whose path escapes the root
+	// are left alone and reported, but do not make the run fail.
+	Warnings int
+	// Failures counts I/O and store errors. Non-zero means the run is not clean
+	// and the command exits 1.
+	Failures int
 }
 
 // Count returns how many items across all categories have the given status.
@@ -257,7 +262,10 @@ func Prune(ctx context.Context, opt Options) (*Summary, error) {
 	for _, sc := range sum.Scans {
 		for _, group := range [][]Item{sc.Evidence, sc.Sessions, sc.Reports} {
 			for _, it := range group {
-				if it.Status == StatusRefused || it.Status == StatusFailed {
+				switch it.Status {
+				case StatusRefused:
+					sum.Warnings++
+				case StatusFailed:
 					sum.Failures++
 				}
 			}
