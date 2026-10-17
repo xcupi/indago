@@ -282,6 +282,19 @@ Implemented so far (infrastructure and **discovery**):
   parameter names + context in the dedup key) so it never collides with
   either single-parameter finding, and is clearly labeled as combined
   across every presentation surface.
+- ✅ Standalone PoC generation (`internal/scan/poc.go`; see
+  `docs/reflection-candidates.md`): turns an existing Confirmed finding into
+  a triager-openable artifact — ONLY ever operates on `Verdict=Confirmed`
+  (refuses anything else, never fabricates evidence for an
+  unconfirmed/rejected/inconclusive candidate). True one-click HTML
+  (navigate/auto-submit form) for Query/Path/Form locations and Combined
+  pairs expressible that way; for a location a plain browser artifact
+  genuinely cannot carry (Header/Cookie overrides, POST+JSON), the output
+  says so explicitly and gives the exact curl/HTTP request instead of a
+  misleading fake link. Reachable from all three surfaces: CLI
+  (`finding poc -scan SID -out FILE.html FID`), API
+  (`GET /api/scans/{id}/findings/{fid}/poc`), and a "Download PoC" link in
+  the web UI's finding detail view.
 - ⏳ Stubs: detection engines for non-Reflected-XSS vulnerability classes
   (Stored XSS, DOM XSS)
 
