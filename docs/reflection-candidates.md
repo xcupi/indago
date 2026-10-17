@@ -353,13 +353,14 @@ Every other presentation surface describes a `Confirmed` finding in prose;
 nothing generated a clickable, standalone artifact a bug-bounty triager
 could open to reproduce the bug themselves — busywork the scan already has
 every byte of data needed to automate. `internal/scan/poc.go`'s
-`GeneratePoC(ctx, store, findingID)` closes that gap. It is purely
-presentation over data the scan already produced: it reuses the EXACT
-`buildRequest` call the candidate step and browser verification themselves
-used (never a re-derivation that could silently drift from what was
-actually confirmed), and for a POST+form-encoded finding the SAME
-auto-submitting-hidden-`<form>` technique `browser.Page.NavigateForm`
-itself uses for POST verification (see `docs/browser-verification.md`).
+`GeneratePoC(ctx, store, findingID)` closes that gap. It is presentation over
+persisted scan data and reuses `buildRequest` to reconstruct the confirmed
+candidate, but it no longer treats captured auth/CSRF material as replayable:
+it checks the scan's session metadata without opening the state file, detects
+non-focus token-like parameters with the same `isDynamicTokenName` heuristic
+used by refresh logic, and replaces their observed values with fresh-token
+placeholders. It performs no target I/O. The focused candidate payload remains
+intact so the confirmed XSS input is still visible.
 
 **Evidence integrity (AGENTS.md §2.6) is a hard gate, not a convention**:
 `GeneratePoC` refuses (`ErrPoCNotConfirmed`) for anything whose STORED
@@ -369,32 +370,33 @@ vulnerability that was never actually observed executing.
 
 ### One-click vs. "no one-click PoC is possible"
 
-A generated `PoC.HTML` is one of two honest shapes — never a third,
-silently-wrong one that looks like it works but doesn't:
+A generated `PoC.HTML` is either a true one-click reproduction or an inert
+request template/manual request. One-click is permitted only when every
+carrier constraint passes AND the scan had no non-anonymous auth session AND
+no non-focus request parameter matches the existing `isDynamicTokenName`
+heuristic (`token`, `csrf`, `xsrf`, or `nonce`, case-insensitive).
 
-| Location(s) involved | Artifact | Mechanism |
+| Conditions | Artifact | Mechanism / operator work |
 |---|---|---|
-| Query and/or Path only (method GET/HEAD) | **True one-click link.** `<meta http-equiv="refresh">` auto-navigates to the exact confirmed URL; a plain `<a>` link is the manual fallback. No JavaScript needed at all. | the override is already part of the URL, exactly like a Query candidate's own verified-attempt URL |
-| Form (method POST) | **True one-click auto-submit form**, mirroring `browser.Page.NavigateForm`'s own `formHTML` (same hidden-input, attribute-value-escaped, `onload="…submit()"` shape) — a real top-level POST navigation, not a payload. | hidden `<input>` fields carry the exact form body the confirmed request sent |
-| Combined, both halves Query/Path/Form | **Still one-click** — both overrides are carried together (both baked into the URL, or the Form half as hidden inputs plus the Query/Path half baked into the form's own `action` URL). | `allLinkable` requires EVERY location involved to be carryable, not just one |
-| Header, Cookie, or JSON involved (either half, for a combined finding) | **No one-click artifact at all** — the page renders an explicit "⚠ No one-click PoC is possible for this finding" explanation (which specific location and why) plus the exact HTTP request and a runnable `curl` command. It deliberately does NOT auto-navigate/auto-submit. | a plain navigation/form submission cannot set an arbitrary request header (browsers only allow a small fixed set on cross-context requests); a static page on an unrelated origin cannot set a cookie for the TARGET's origin (same-origin policy); no HTML form can carry an `application/json` body |
+| Query and/or Path only (method GET/HEAD), no auth/refresh dependency | **True one-click link.** `<meta http-equiv="refresh">` navigates to the confirmed URL; a plain `<a>` is the manual fallback. | Candidate override is in the URL; no captured auth or dynamic-token dependency is present. |
+| Form (method POST), no auth/refresh dependency | **True one-click auto-submit form**, mirroring `browser.Page.NavigateForm`'s `formHTML` (hidden inputs with attribute-value escaping and `onload="…submit()"`). | Hidden fields carry the exact static form body confirmed by the scan. |
+| Query/Path/Form combined, no auth/refresh dependency | **Still one-click** only if all combined locations pass the carrier constraints. | `allLinkable` requires EVERY location to be carryable. |
+| Any non-anonymous auth session OR any non-focus dynamic-looking token parameter | **Not one-click and not an exact runnable request.** The HTML is inert and says “request template—replace fresh CSRF/session placeholders.” Saved session cookies/state paths are never embedded; the curl command uses `-b "$INDAGO_COOKIE_JAR"` for an operator-supplied jar on authenticated scans. | Values of non-focus token-like parameters are replaced in URL/form/JSON/header/cookie renderings with `FRESH_<name>_VALUE` (escaped for that context). Candidate payload(s) remain intact. The operator must use their own authorized authenticated session, obtain current CSRF token(s) from the token-issuing page, and replace placeholders manually. PoC generation does not contact the target or automatically refresh tokens. |
+| Header, Cookie, or JSON involved (either half, for a combined finding), absent auth/refresh dependency | **No one-click artifact.** It gives an explicit explanation plus the exact request details and curl command, but deliberately does not auto-navigate/auto-submit. | A browser link/form cannot carry arbitrary headers, target-origin cookies, or an `application/json` body. |
 
-The Header/Cookie/JSON row is not a missing feature to "fix later" — it is
+The Header/Cookie/JSON row is not a missing feature to “fix later” — it is
 the structurally correct answer. Precision over polish: an artifact that
 silently failed to carry a header/cookie override while LOOKING like a
-working PoC would be worse than no PoC at all. Every generated artifact
-(one-click or not) also always includes the exact HTTP request and a
-`curl` command, so the header/cookie/JSON case still gives the triager
-everything needed to reproduce the bug by hand.
+working PoC would be worse than no PoC at all. For public static requests,
+the displayed details/curl are exact; if auth or refresh dependencies exist,
+the heading changes to “Request template” and the stale values are redacted.
 
 A POST+JSON override can never actually reach `GeneratePoC` on a real
 Confirmed finding in the first place — see AGENTS.md §3 and
 `docs/browser-verification.md`: browser navigation carries no request
 body, so a POST+JSON candidate can never be browser-verified and so can
-never be `Confirmed`. `GeneratePoC` still handles it defensively (treated
-the same as Header/Cookie: no one-click artifact, explicit explanation,
-curl fallback) rather than assuming the limitation holds instead of
-checking.
+never be `Confirmed`. `GeneratePoC` still handles it defensively (no
+one-click artifact, explicit explanation, curl fallback).
 
 ### Reachable from all three surfaces
 
@@ -416,16 +418,13 @@ checking.
 ### Tests and live validation
 
 `internal/scan/poc_test.go`: the refuse-if-not-`Confirmed` guard (Pending/
-Rejected/Inconclusive), one-click Query, one-click Path, one-click
-POST+Form (asserts the auto-submit `<form>`/hidden-input shape), not-
-one-click Header (asserts the curl `-H` flag and the explicit explanation),
-not-one-click Cookie (asserts curl `-b` and the same-origin-policy
-explanation), a combined finding with both halves Query (still one-click,
-both overrides present in the URL), and a combined finding with one Query
-half and one Header half (correctly NOT one-click, even though one half
-alone would have been). `cmd/indago/finding_poc_test.go` and
-`internal/web/findings_poc_test.go` exercise the CLI and API surfaces
-end to end against the real HTTP handler.
+Rejected/Inconclusive), public static one-click Query/Path/POST+Form cases,
+not-one-click Header/Cookie constraints, combined cases, authenticated
+session redaction/cookie-jar guidance, dynamic CSRF placeholder redaction,
+focus-payload preservation, and no auto-submit for dynamic-token POST forms.
+`cmd/indago/finding_poc_test.go` and `internal/web/findings_poc_test.go`
+also verify the authenticated CLI artifact and the downloaded API template,
+including that stale token/session values do not appear at those surfaces.
 
 Live-validated against a disposable one-route Python lab
 (`indago-poc-lab.py`) reflecting `q` unescaped into `html_text`: a real

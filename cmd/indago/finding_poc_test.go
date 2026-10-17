@@ -77,6 +77,58 @@ func TestCLIFindingPoCConfirmedWritesStandaloneHTML(t *testing.T) {
 	}
 }
 
+func TestCLIFindingPoCAuthenticatedArtifactUsesCookieJarPlaceholder(t *testing.T) {
+	c, _, st, ev := newTestServerAndStore(t)
+	scanID, findingID := seedConfirmedFinding(t, c, st, ev)
+	statePath := t.TempDir() + "/storage-state.json"
+	secret := "cli-test-session-cookie-not-real"
+	if err := os.WriteFile(statePath, []byte(`{"cookies":[{"name":"sid","value":"`+secret+`"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	scan, err := st.Scans().Get(context.Background(), scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := domain.NewID()
+	scan.SessionID = sessionID
+	if err := st.Scans().Update(context.Background(), scan); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Sessions().Create(context.Background(), &domain.Session{
+		ID: sessionID, ScanID: scanID, Mode: domain.AuthExisting,
+		State: domain.SessionActive, StatePath: statePath, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	storedSession, err := st.Sessions().Get(context.Background(), sessionID)
+	if err != nil || storedSession.Mode != domain.AuthExisting || storedSession.ScanID != scanID {
+		t.Fatalf("session metadata lookup failed: mode=%q scan_matches=%t err=%v", storedSession.Mode, storedSession.ScanID == scanID, err)
+	}
+
+	path := t.TempDir() + "/poc.html"
+	var out strings.Builder
+	cc := newCLI(c.server, &out)
+	if err := cc.runClient("finding", []string{"poc", "-scan", string(scanID), "-out", path, string(findingID)}); err != nil {
+		t.Fatalf("finding poc: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read generated PoC: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{"own authorized authenticated session", "session cookies are not embedded", "-b", "INDAGO_COOKIE_JAR", "INDAGOPOCMARKER"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("CLI PoC missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{secret, statePath, `http-equiv="refresh"`} {
+		if strings.Contains(html, forbidden) {
+			t.Fatal("CLI PoC exposed session material or claimed one-click navigation")
+		}
+	}
+}
+
 // A non-Confirmed finding must be refused (server returns 409) — the CLI
 // surfaces that as an error, never writing a fabricated PoC file.
 func TestCLIFindingPoCRefusesNonConfirmed(t *testing.T) {
