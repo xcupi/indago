@@ -832,35 +832,22 @@ func setWindowNameScript(value string) string {
 	return "window.name = " + goQuoteJS(value) + ";"
 }
 
-// navigateWithPostMessage implements the postMessage source's testing
-// methodology (see detection.DOMSourcePostMessage's doc comment and
-// docs/dom-xss.md's "postMessage testing methodology" section — this is
-// the least obvious of the four sources).
+// navigateWithPostMessage implements the postMessage source using an
+// opaque-origin sandboxed frame as the sender. It first navigates the page
+// to the in-scope target (the ordinary browser.Manager AllowRequest route
+// gates this request and every target subresource), then creates a local
+// srcdoc iframe with sandbox="allow-scripts" but without
+// "allow-same-origin". That sender has the opaque serialized origin
+// "null"; it sends to its parent, so the target observes event.origin ===
+// "null" and event.source !== window. No attacker host or other network
+// URL is navigated.
 //
-// The realistic vulnerable pattern is a page with its OWN
-// `window.addEventListener('message', ...)` handler that uses event.data
-// in a dangerous sink WITHOUT validating event.origin/event.source — in
-// the real world this is exploitable by ANY other page/frame/popup that
-// holds a reference to this window (an <iframe> embed, a window.open()
-// popup, or a malicious page the victim visits that opens this one in a
-// new tab). Reproducing that exactly would need a second, attacker-
-// controlled origin; this engine instead does the mechanically equivalent
-// thing without one: navigate to the ALREADY-LOADED target page (same
-// browser context, same mechanism every other source already uses), then
-// use Evaluate to run `window.postMessage(value, '*')` directly AGAINST
-// THAT SAME PAGE. This faithfully simulates an untrusted message
-// arriving: the page's own listener has no way to tell a message
-// delivered this way apart from one delivered by a real third-party
-// frame — what the listener inspects is event.origin/event.source/
-// event.data, and none of those differ based on how postMessage was
-// invoked. Since the vulnerability being tested is precisely "the
-// listener does not validate the sender", nothing needs to be faked on
-// the sender side to test it validly.
-//
-// The Evaluate script returns a short-lived Promise so the call waits for
-// the message handler's own (synchronous or microtask-queued) reaction
-// before this function reads back console/page-error state — postMessage
-// delivery and the page's listener callback are asynchronous.
+// AddInitScript installs the sink harness before the target's own scripts.
+// The srcdoc sender posts only after it loads, and a short Promise delay
+// lets the target's asynchronous message handler finish before observations
+// are read back. Since the target itself remains the top-level document,
+// existing Page console/error/hook observations and DOM evidence still
+// describe the target page directly.
 func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, err error) {
 	page, err := bctx.NewPage(ctx)
 	if err != nil {
@@ -881,18 +868,15 @@ func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *brow
 	return page.ConsoleMessages(), page.PageErrors(), html, shot, nil
 }
 
-// postMessageScript builds the Evaluate script that fires
-// window.postMessage(value, '*') against the page it runs in, waiting
-// (via a short setTimeout wrapped in a Promise, which Evaluate awaits)
-// for the target's own message listener to react before returning. '*'
-// (no targetOrigin restriction) is this engine's own sender-side choice,
-// not a statement about the TARGET's validation — it exists so the
-// message is delivered regardless of the target's current origin, mirrors
-// how trivially an attacker can do the same, and the whole point of this
-// probe is to observe whether the LISTENER validates anything, not to
-// pre-filter on its behalf.
+// postMessageScript creates an opaque-origin sandboxed srcdoc sender and
+// posts value to its parent (the already-loaded target page). Omitting
+// allow-same-origin is essential: it gives the frame an opaque origin that
+// serializes as "null". The parent receives the event from another Window,
+// never from its own window object. No network request is made by this
+// local sender document.
 func postMessageScript(value string) string {
-	return "(() => new Promise((resolve) => { window.postMessage(" + goQuoteJS(value) + ", '*'); setTimeout(resolve, 300); }))();"
+	srcdoc := "<!doctype html><script>parent.postMessage(" + goQuoteJS(value) + ", '*');</script>"
+	return "(() => new Promise((resolve) => { const sender = document.createElement('iframe'); sender.setAttribute('sandbox', 'allow-scripts'); sender.onload = () => setTimeout(resolve, 300); sender.srcdoc = " + goQuoteJS(srcdoc) + "; document.body.appendChild(sender); }))();"
 }
 
 // domXSSStorageKey is the single, fixed localStorage/sessionStorage key

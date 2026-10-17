@@ -60,11 +60,10 @@ const (
 	// DOMSourcePostMessage is the message payload a page's own
 	// `window.addEventListener('message', ...)` handler receives. The
 	// realistic vulnerable pattern is a listener that uses event.data in a
-	// dangerous sink without validating event.origin/event.source — which
-	// means ANY other page/frame/popup that holds a reference to this
-	// window can reach it. See docs/dom-xss.md's "postMessage testing
-	// methodology" section for how this is probed without a second
-	// controlled origin.
+	// dangerous sink without validating event.origin/event.source. The
+	// browser probe sends from an allow-scripts sandboxed srcdoc iframe
+	// (opaque origin, serialized as "null"), not from the target window
+	// itself; see docs/dom-xss.md's "postMessage testing methodology".
 	DOMSourcePostMessage DOMXSSSource = "postMessage"
 
 	// DOMSourceReferrer is document.referrer, the HTTP Referer header

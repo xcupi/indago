@@ -218,13 +218,16 @@ func TestSetWindowNameScriptEmbedsValueAsJSStringLiteral(t *testing.T) {
 	}
 }
 
-func TestPostMessageScriptFiresPostMessageAndWaits(t *testing.T) {
+func TestPostMessageScriptCreatesOpaqueSandboxedSender(t *testing.T) {
 	value := "<img src=x onerror=MARKER>"
 	script := postMessageScript(value)
-	for _, want := range []string{"window.postMessage", "MARKER", "'*'", "setTimeout"} {
+	for _, want := range []string{"createElement('iframe')", "setAttribute('sandbox', 'allow-scripts')", "srcdoc", "parent.postMessage", "MARKER", "'*'", "sender.onload", "setTimeout"} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q: %q", want, script)
 		}
+	}
+	if strings.Contains(script, "allow-same-origin") || strings.Contains(script, "window.postMessage") {
+		t.Fatalf("sender must have an opaque origin and post to the parent, not self-post: %q", script)
 	}
 }
 

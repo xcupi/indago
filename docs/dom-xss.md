@@ -119,37 +119,53 @@ victim page (a link, `window.location = victimURL`, or a form submission
 all work identically in the real world — only the mechanical "how do we
 set window.name before the target loads" matters for this probe).
 
-## `postMessage` — testing methodology (one of the least obvious sources)
+## `postMessage` — testing methodology (opaque sender, no attacker host)
 
 The realistic vulnerable pattern is a page with its own
 `window.addEventListener('message', ...)` handler that uses `event.data`
-in a dangerous sink **without validating** `event.origin`/`event.source`
-— in the real world this is exploitable by ANY other page/frame/popup that
-holds a reference to this window (an `<iframe>` embed, a `window.open()`
-popup, or a malicious page the victim visits that opens this one in a new
-tab/window). Reproducing that exactly would need a second,
-attacker-controlled origin actually hosting a page and getting the victim
-to visit it or embed the target.
+in a dangerous sink **without validating** `event.origin`/`event.source`.
+An attacker can reach such a listener from another frame, popup, or page
+that holds a reference to the target window. Indago must not simulate this
+by calling `window.postMessage` from inside the target itself: that produces
+the target's own origin and `event.source === window`, so same-origin/self-
+only validation falsely appears vulnerable.
 
-`navigateWithPostMessage` does the **mechanically equivalent thing without
-a second origin**: navigate to the ALREADY-LOADED target page (same
-browser context, same sink-hook harness every other source already uses),
-then use `page.Evaluate` to run `window.postMessage(value, '*')` **directly
-against that same, already-loaded page**. This faithfully simulates an
-untrusted message arriving: the page's own listener has **no way to tell**
-a message delivered this way apart from one delivered by a real
-third-party frame — what the listener inspects is `event.origin`/
-`event.source`/`event.data`, and none of those differ based on how
-`postMessage` was invoked. Since the vulnerability being tested is
-precisely "the listener does not validate the sender", nothing needs to be
-faked on the sender side to test it validly; `'*'` as the `targetOrigin`
-argument is this engine's own sender-side choice (delivers regardless of
-the target's current origin, mirroring how trivially an attacker can do
-the same) and says nothing about the target's own validation — that is
-exactly what is being probed. The `Evaluate` call wraps the `postMessage`
-in a short (300ms) `Promise`/`setTimeout`, which `page.Evaluate` awaits,
-so the probe waits for the listener's own asynchronous reaction before
-reading back console/page-error state.
+`navigateWithPostMessage` now uses a local sandboxed `srcdoc` iframe as the
+sender:
+
+1. Install the sink-hook harness via `AddInitScript`, then navigate the same
+   page directly to the in-scope target. Its initial load and every
+   subresource remain gated by the browser context's `AllowRequest` check.
+2. Create an iframe with `sandbox="allow-scripts"` and deliberately omit
+   `allow-same-origin`. Its `srcdoc` script sends `parent.postMessage(value,
+   '*')` after the target has loaded and registered its listener.
+3. The sender's sandboxed document has a unique opaque origin, serialized
+   as `"null"`; the target receives `event.origin === "null"` and
+   `event.source` equal to the sender iframe's WindowProxy, not its own
+   `window`. This exercises origin/source guards rather than bypassing them.
+4. Wait briefly for asynchronous `message` handling, then read the target
+   page's normal console, uncaught-error, sink-hook, DOM, and screenshot
+   observations. The target stays in the top-level frame, so the existing
+   page abstraction captures the relevant signals directly; no interface
+   extension is needed.
+
+The sender is a local `srcdoc` document and makes no network request. No
+attacker host is navigated. An earlier attempt to use a `data:` top-level
+parent with the in-scope target in a child iframe was not reliable in the
+installed Chromium against the local lab: the iframe did not reach the
+server even though direct in-scope navigation did. That approach is not used;
+the sandboxed `srcdoc` sender avoids that browser behavior while preserving
+opaque-origin semantics. If a target's own policy prevents the sender frame
+from running, the probe fails closed (no canary reachability and therefore
+no Confirmed finding).
+
+The real-browser integration tests cover both sides: a handler that assigns
+`event.data` to `innerHTML` reaches the canary and emits the same deterministic
+ReferenceError signal used for confirmation; a handler that returns when
+`event.origin !== location.origin || event.source !== window` does not reach
+the sink and emits no Confirmed-capable signal. A separate control proves
+that self-posting to the same handler would satisfy both checks and reproduce
+the old false positive.
 
 ## `document.referrer` — the Referer-override mechanism, and a real browser gotcha
 
@@ -285,7 +301,7 @@ canary/payload value reaches the browser before each navigation
 | `location.hash` | encode into the URL fragment | `domXSSHashURL` (piece 1) |
 | `location.search` | encode into a URL query parameter (an EXISTING discovered parameter name — see below) | `domXSSQueryURL` (piece 2) |
 | `window.name` | `Evaluate` on a neutral page, then navigate same page to target | `navigateWithWindowName`/`setWindowNameScript` (piece 2) |
-| `postMessage` | navigate to target, then `Evaluate` a `postMessage` call against it | `navigateWithPostMessage`/`postMessageScript` (piece 2) |
+| `postMessage` | navigate to target, then create an opaque-origin sandboxed `srcdoc` sender frame that posts to the target | `navigateWithPostMessage`/`postMessageScript` (piece 2; corrected to preserve untrusted sender origin/source semantics) |
 | `document.referrer` | wrap in a synthetic absolute URL, pass as the navigation's Referer override | `navigateWithReferrer`/`domXSSRefererURL` (piece 3) |
 | `localStorage` / `sessionStorage` | navigate to the target's own origin root, `Evaluate`-write via `Page.SetLocalStorage`/`SetSessionStorage`, THEN navigate to target | `navigateWithStorage`/`domXSSOriginURL` (piece 3) |
 
