@@ -396,9 +396,10 @@ An HTTPS target supporting both h2 and HTTP/1.1 works; h2-only targets are
 not supported in this mode. The ordinary transport and Chromium's own TLS
 are unchanged. Certificate verification and the existing no-proxy-combination
 rule remain in force. See [randomized TLS validation](randomized-tls-validation.md)
-for the hybrid-key-share/ALPN fixes, real CLI comparisons, and the remaining
-rare handshake-rejection investigation. This setting does not change the
-TLS configuration of `indago serve`.
+for the hybrid-key-share, ALPN and certificate-family cipher fixes and real
+CLI comparisons. The rare no-common-cipher handshake rejection is resolved;
+this is not a guarantee of compatibility with every server TLS policy. This
+setting does not change the TLS configuration of `indago serve`.
 
 ---
 

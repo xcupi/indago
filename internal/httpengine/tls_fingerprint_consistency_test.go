@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -84,7 +83,7 @@ func TestEnsureHybridKeyShareLeavesOtherSpecsAlone(t *testing.T) {
 func TestRandomizedClientHelloSpecIsInternallyConsistent(t *testing.T) {
 	inconsistent := 0
 	for i := 0; i < 1000; i++ {
-		spec, err := randomizedClientHelloSpec()
+		spec, err := randomizedClientHelloSpec(utls.HelloRandomized)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -101,46 +100,21 @@ func TestRandomizedClientHelloSpecIsInternallyConsistent(t *testing.T) {
 	}
 }
 
-// The failure was probabilistic (about one handshake in eight), so a single
-// real handshake proves little. Repeat enough that a regression cannot hide.
-//
-// The assertion is precise about the bug fixed here: no handshake may fail with
-// the hybrid-group retry error. A randomized hello is also rejected by a server
-// very rarely for unrelated reasons (observed about once in 16,000 handshakes,
-// as "remote error: tls: handshake failure", root cause not established), so a
-// handful of other rejections is tolerated and logged rather than failing the
-// suite. Before the fix 57 of 400 handshakes failed, all with the retry error.
+// A single random handshake can hide rare cipher/curve gaps. Every handshake
+// must now succeed: deterministic seed replays cover the former rare cipher
+// rejection, so there is no tolerance for "unrelated" handshake failures.
 func TestRandomizedTLSDialerHandshakeNeverFailsAgainstHybridPreferringServer(t *testing.T) {
-	const attempts, otherTolerance = 400, 4
+	const attempts = 400
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer srv.Close()
 	dial := randomizedTLSDialer(&net.Dialer{Timeout: 5 * time.Second}, true)
-	var retryErrs, otherErrs int
-	var firstRetry, firstOther error
 	for i := 0; i < attempts; i++ {
-		conn, err := dial(context.Background(), "tcp", srv.Listener.Addr().String())
-		switch {
-		case err == nil:
-			conn.Close()
-		case strings.Contains(err.Error(), "CurvePreferences includes unsupported curve"):
-			retryErrs++
-			if firstRetry == nil {
-				firstRetry = err
-			}
-		default:
-			otherErrs++
-			if firstOther == nil {
-				firstOther = err
-			}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, err := dial(ctx, "tcp", srv.Listener.Addr().String())
+		cancel()
+		if err != nil {
+			t.Fatalf("randomized handshake %d of %d failed (zero tolerance): %v", i+1, attempts, err)
 		}
-	}
-	if retryErrs > 0 {
-		t.Fatalf("%d of %d randomized handshakes failed with the hybrid-group retry error; first: %v", retryErrs, attempts, firstRetry)
-	}
-	if otherErrs > 0 {
-		t.Logf("%d of %d handshakes rejected for another reason (tolerated up to %d); first: %v", otherErrs, attempts, otherTolerance, firstOther)
-	}
-	if otherErrs > otherTolerance {
-		t.Fatalf("%d of %d randomized handshakes failed (more than the %d tolerated); first: %v", otherErrs, attempts, otherTolerance, firstOther)
+		conn.Close()
 	}
 }

@@ -213,7 +213,7 @@ func randomizedTLSDialer(dialer *net.Dialer, insecureSkipVerify bool) func(ctx c
 			rawConn.Close()
 			return nil, fmt.Errorf("httpengine: randomized TLS dial: %w", err)
 		}
-		spec, err := randomizedClientHelloSpec()
+		spec, err := randomizedClientHelloSpec(utls.HelloRandomized)
 		if err != nil {
 			rawConn.Close()
 			return nil, fmt.Errorf("httpengine: randomized TLS spec: %w", err)

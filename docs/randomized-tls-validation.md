@@ -1,4 +1,4 @@
-# Randomized outbound TLS: hybrid key share and ALPN fixes
+# Randomized outbound TLS: key share, ALPN and cipher compatibility
 
 These fixes affect only scans that explicitly opt into
 `-randomize-tls-fingerprint`. API/listener TLS, scope checks, scan pacing,
@@ -103,17 +103,108 @@ and databases) was removed after verifying owned process exit and closed
 ports. Safe RED logs remain under `indago-tls-evidence/` in the same scratch
 parent, outside the removed fixture. No dummy material is committed.
 
-## Limits and remaining investigation
+## 4. Rare handshake alert: certificate-family cipher gap (resolved)
 
-An earlier strict stress run observed one different
-`remote error: tls: handshake failure` in roughly 16,000 handshakes; a
-subsequent 60,000-handshake probe did not reproduce it. Its cause is not
-established, and neither this ALPN fix nor a successful CI run proves it
-fixed. The hybrid-retry regression has zero tolerance for the precise
-unsupported-curve error, but explicitly logs/tolerates at most four other
-rejections in 400 attempts. The h2 round-trip tests remain strict and do
-not retry or ignore request failures. This distinction is intentional and
-must not be described as universal TLS compatibility or zero flakiness.
+The earlier stress run observed `remote error: tls: handshake failure` once
+in roughly 16,000 handshakes; a later 60,000-handshake probe saw none. At
+that point the cause was unknown and the hybrid regression temporarily
+allowed four unrelated rejections per 400 attempts. **That tolerance has now
+been removed.** A successful random run was not the proof of resolution;
+deterministic seed replays identified the following failure.
 
-No dependency upgrade, TLS-version downgrade, certificate bypass, new
-network path or Chromium sandbox change was introduced. No PR was merged.
+### Root cause and deterministic RED
+
+uTLS randomly removes cipher suites without guaranteeing overlap for both
+certificate families. Rare TLS1.2-only hellos lose every ECDHE-RSA suite
+accepted by a default modern Go server; other seeds do the same to ECDSA.
+The remaining legacy RSA key exchange / disabled suites and wrong-family
+ECDHE suites do not help. The server reports
+`tls: no cipher suite supported by both client and server`; the client only
+receives the generic handshake-failure alert.
+
+Enumerating SHA256 seeds of `indago-tls-investigation-N` found RSA failures
+at N=57744, 126896, 128509, and ECDSA failures at N=118781, 253463. These
+public PRNG seeds (not cryptographic keys) are fixed regression fixtures in
+`tls_cipher_test.go`. The first RSA seed reproduced the precise client
+alert and server rejection **5/5 times**. Before the fix all five seed-based
+HTTP round trips failed, including two ECDSA certificate cases. No races,
+network loss or signature-algorithm guesses were needed to reproduce it.
+
+### Fix and strict tests
+
+`ensureTLS12AEADCiphers` retains at least one TLS1.2 ECDHE+AEAD suite for
+RSA and one for ECDSA. It recognizes AES-128-GCM, AES-256-GCM and ChaCha20
+for each family, and appends AES-128-GCM only when a family has no such
+suite. Existing order and choices are retained; already compatible hellos
+remain unchanged. The floor applies to TLS1.3-capable hellos too because
+they may connect to a TLS1.2 server. TLS1.3-only specs are unchanged.
+
+No legacy RSA key exchange, CBC, SHA-1 or 3DES suite is added; no protocol
+version, trust policy, scope, pacing or proxy behavior is changed. There is
+no retry/fallback on rejection. Production still creates a fresh PRNG seed
+per connection. The internal spec function accepts a ClientHelloID solely
+to let tests replay seeds without changing globals or exposing a user flag.
+
+- All five known-bad seed replays now pass with trusted-CA verification
+  enabled, including actual request/response delivery and h2-enabled servers.
+- Unit controls preserve existing AES-256/ChaCha choices, suite order,
+  idempotence and TLS versions, including TLS1.3-only specs.
+- The 400-handshake randomized regression now fails on **any** handshake
+  error, without tolerance or an ignored error category.
+- `go test ./internal/httpengine -count=100 -json`: exit 0, 4,600 passing
+  test events, zero failed events. Parsed test events verify 40,000 strict
+  direct handshakes, 20,000 h2-server HTTP round trips and 500 deterministic
+  bad-seed round trips in that run. No cache-only inference.
+- Full `INDAGO_CHROMIUM_PATH=/usr/bin/google-chrome make check` passed.
+
+### Real CLI validation (RSA and ECDSA)
+
+Separate loopback targets used RSA-2048 and P-256 ECDSA IP-SAN certificates
+and default server cipher policy, with TLS1.2 minimum and maximum to keep
+the case discriminative. HTTP/1.1 responses closed the connection to force
+fresh handshakes. All scans enabled randomized TLS, used fast profile,
+minimal candidates and depth 2; server trust came from `SSL_CERT_FILE`,
+never an insecure-skip option. Data directories were scratch-only.
+
+For reproducibility, **test-only Go build overlays** made the CLI use one
+known-bad seed per family. The baseline overlay omitted just the cipher-floor
+call; the fixed overlay kept it. Neither overlay edited repository source,
+and these are explicitly not historical/release binaries. Two additional
+scans used the normal, unmodified/unseeded production build.
+
+| Certificate / build | Served requests | No-common-cipher rejections | Succeeded / dead jobs | Completed / failed / skipped tests |
+|---|---:|---:|---:|---:|
+| RSA, seeded baseline | 0 | 18 | 0 / 5 | 0 / 15 / 0 |
+| RSA, seeded fixed | 46 | 0 | 28 / 0 | 24 / 0 / 4 |
+| RSA, normal unseeded fixed | 46 | 0 | 28 / 0 | 24 / 0 / 4 |
+| ECDSA, seeded baseline | 0 | 18 | 0 / 5 | 0 / 15 / 0 |
+| ECDSA, seeded fixed | 46 | 0 | 28 / 0 | 24 / 0 / 4 |
+| ECDSA, normal unseeded fixed | 46 | 0 | 28 / 0 | 24 / 0 / 4 |
+
+The five dead jobs in each baseline recorded the exact remote handshake
+alert. Every fixed run had zero handshake errors, zero failed test cases
+and four discovered endpoints. Independent read-only queries of the exact
+scratch databases verified the stored job and test-case totals. All owned
+Indago processes exited 0 and the lab/API listener ports closed.
+
+Each clean scan had four Pending findings/four skipped verifications
+because browser verification was off. The target HTML-escaped reflection
+and generated no Confirmed findings. This is transport coverage, not a new
+browser/XSS accuracy claim. Safe results and stress logs are retained as
+`indago-tls-residual-live.json`, `indago-tls-residual-stress.jsonl` and
+`indago-tls-residual-stress-counts.json` under `$HOME/.hermes/cache/scratch/`.
+The exact `tlsres` fixture directory (overlay builds, scripts, dummy keys,
+certificates and databases) was removed after process shutdown; a separate
+readback confirmed the directory absent and all 12 recorded listener ports
+closed. No fixture/private-key material is committed.
+
+## Remaining limits
+
+`remote error: tls: handshake failure` is a generic peer alert, not a unique
+bug identifier. This fix closes the reproducible randomized cipher-family
+gap; it cannot make incompatible server policies, missing client certificates,
+unsupported protocols or genuine remote rejections disappear. A new alert
+must still be diagnosed rather than blindly retried. Randomized mode remains
+HTTP/1.1-only. No dependency upgrade, TLS-version downgrade, certificate
+bypass, new network path or Chromium sandbox change was introduced; no PR
+was merged.

@@ -6,20 +6,53 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-// randomizedClientHelloSpec returns a freshly randomized ClientHello spec
-// (a new PRNG seed on every call), corrected so that it is internally
-// consistent. See ensureHybridKeyShare for why the correction is needed.
+// randomizedClientHelloSpec returns a randomized ClientHello spec, corrected
+// for transport compatibility. Production passes HelloRandomized with no seed,
+// so uTLS uses a fresh PRNG seed for each connection; tests can replay an ID
+// with a fixed seed without changing global state or production flags.
 //
 // The spec is applied to a utls.HelloCustom connection with ApplyPreset, which
 // fills in the SNI from the connection's config and generates the key shares.
-func randomizedClientHelloSpec() (utls.ClientHelloSpec, error) {
-	spec, err := utls.UTLSIdToSpec(utls.HelloRandomized)
+func randomizedClientHelloSpec(id utls.ClientHelloID) (utls.ClientHelloSpec, error) {
+	spec, err := utls.UTLSIdToSpec(id)
 	if err != nil {
 		return spec, err
 	}
 	ensureHybridKeyShare(&spec)
+	ensureTLS12AEADCiphers(&spec)
 	constrainHTTP1(&spec)
 	return spec, nil
+}
+
+// ensureTLS12AEADCiphers keeps at least one modern TLS 1.2 ECDHE+AEAD suite
+// for each common certificate family. uTLS randomly removes suites without
+// preserving certificate compatibility: rarely every usable RSA (or ECDSA)
+// suite disappears. A TLS1.2-only hello then fails against an ordinary server
+// with that certificate, even though both endpoints support modern ciphers.
+// The same floor is needed when a TLS1.3-capable hello meets a TLS1.2 server.
+//
+// Preserve existing suite order/variety, appending AES-128-GCM only for a
+// missing family. Never add legacy RSA key exchange, CBC, SHA-1 or 3DES,
+// change protocol versions, or retry a rejected handshake.
+func ensureTLS12AEADCiphers(spec *utls.ClientHelloSpec) {
+	if spec.TLSVersMin > utls.VersionTLS12 {
+		return
+	}
+	var rsa, ecdsa bool
+	for _, cipher := range spec.CipherSuites {
+		switch cipher {
+		case utls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, utls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, utls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:
+			rsa = true
+		case utls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, utls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, utls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:
+			ecdsa = true
+		}
+	}
+	if !rsa {
+		spec.CipherSuites = append(spec.CipherSuites, utls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)
+	}
+	if !ecdsa {
+		spec.CipherSuites = append(spec.CipherSuites, utls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)
+	}
 }
 
 // constrainHTTP1 aligns the hello with the HTTP/1.x transport that consumes

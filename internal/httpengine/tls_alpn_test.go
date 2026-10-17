@@ -19,7 +19,7 @@ import (
 func TestRandomizedClientHelloAdvertisesOnlyHTTP1(t *testing.T) {
 	withALPN := 0
 	for i := 0; i < 1000; i++ {
-		spec, err := randomizedClientHelloSpec()
+		spec, err := randomizedClientHelloSpec(utls.HelloRandomized)
 		if err != nil {
 			t.Fatal(err)
 		}
