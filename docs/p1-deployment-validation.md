@@ -29,8 +29,29 @@ main-branch changes or PR creation are part of this work.
   Scan package 62.873s, web 33.695s, verification 10.276s (not cached).
 - `make build`: exit 0; binary built with Makefile version/commit/date metadata.
 
-GitHub execution is **not yet verified** in this checkpoint. A local pass is
-not a GitHub Actions pass. A subsequent section records remote availability.
+### GitHub execution (real remote evidence)
+
+`gh workflow run ci.yml --ref feat/p1-hardening` was accepted; no default-branch
+changes/settings/PR workaround was used. Initial push run **39019834015** was
+canceled by dispatch concurrency. Dispatch **39019841937**, attempt 1, actually
+ran the Node/browser preflight successfully but failed the full gate on
+`TestUILayoutFooterStaysAfterTallContentAndLongTextWraps` (420px findings tab:
+reports-table `<TH> Open` / `<TD> No reports yet.` overflow). A rerun was
+subsequently canceled by the next authorized branch push.
+
+Push run **39020623974** on Docker commit `1a23918` completed **failure**, same
+existing UI layout assertion. URL:
+https://github.com/xcupi/indago/actions/runs/39020623974
+
+Its dependency/runtime step passed (all six required real-runtime tests),
+fmt/vet and other packages passed; web failed, so the workflow correctly
+refused to build after the failed gate and uploaded its failure log. This is
+**not a successful GitHub CI validation**. No tests were disabled, weakened or
+retried into a green claim. The layout issue is outside these deployment-only
+changes and remains an explicit follow-up. Locally the complete uncached gate
+passed as recorded above. The final systemd push will schedule another run;
+its handle/result, if observed, is in the delivery summary rather than guessed
+in this pre-commit report.
 
 ## Docker
 
@@ -86,4 +107,60 @@ digest-reproducible apt builds are not.
 
 ## systemd
 
-Pending the separate systemd deliverable.
+- RED: `go test ./deploy -run TestSystemdContract -v` failed on the absent unit.
+  GREEN with service, safe empty environment example and optional browser
+  drop-in. All three deployment contracts pass together.
+- `systemd-analyze verify deploy/systemd/indago.service` on the untouched host
+  returned **1** because `/usr/local/bin/indago` is not installed. Separate
+  environment warning (not an Indago unit error):
+  `/etc/systemd/system/anydesk.service:9: PIDFile= references a path below legacy
+  directory /var/run/, updating /var/run/anydesk.pid → /run/anydesk.pid; please
+  update the unit file accordingly.` No host service was changed.
+- Staged a copy of the real built executable in a scratch `bin/`, substituted
+  only its executable path into a scratch copy of `indago.service`, then ran:
+  `SYSTEMD_UNIT_PATH="$stage:/usr/lib/systemd/system" systemd-analyze verify
+  --man=no "$stage/indago.service"`. **Exit 0, stdout/stderr empty**. Repeated
+  with staged `indago.service.d/browser.conf` (same executable substitution):
+  **exit 0, stdout/stderr empty**. The explicit search path avoids loading the
+  unrelated host `/etc` units; it does not suppress Indago diagnostics.
+- Actual process smoke for both base arguments and `-browser`: staged binary,
+  disposable data/cache, random environment-only token, loopback ephemeral port,
+  current non-root UID **1000**, umask 0027 and `setpriv --no-new-privs`.
+  `/proc/<pid>/status` verified **NoNewPrivs: 1** and non-root UID. In both modes,
+  healthz 200, API 401 without / 200 with token, SIGTERM **exit 0**. Browser mode
+  logged actual manager start/close with copied driver 1.62.1, installed Node
+  v26.7.0 and Google Chrome 155.0.8059.39.
+- An initial scratch harness used an overly long TMPDIR and Chrome refused its
+  Unix-domain SingletonSocket path; retry shortened the scratch-only temp path.
+  The real service has a normal private `/tmp`; no scanner/unit weakening was
+  introduced. Both harness runs cleaned their own resources.
+- Docs now link real files, cover non-root account/install/ownership/0600 env
+  provision, local TLS proxy, browser setup and explicit offline retention.
+  Removed the unsafe uncoordinated live prune/timer example. No timer installed.
+- `INDAGO_CHROMIUM_PATH=/usr/bin/google-chrome make check`: exit 0 after these
+  files, gofmt/vet clean, every race-test package passed. A final clean-cache
+  rerun also passed all packages: scan 61.667s, web 29.880s, verification
+  13.856s, deployment 1.012s. Final actionlint and `git diff --check` passed.
+- Removed staged units, executable/driver copies, dummy DB/cache/logs, transient
+  token material; verified both smoke ports closed. No `/etc` writes, account
+  creation, daemon reload, service enable/start or changes to running services.
+
+## Limits / NOT VERIFIED
+
+- **Successful GitHub Actions full gate:** remote run above failed on the
+  pre-existing responsive-layout test; local success is not substituted for it.
+- **Installed/running systemd service or effective full systemd sandbox:** only
+  syntax/dependency staging plus actual non-root/NoNewPrivileges process smoke
+  were authorized. ProtectSystem/ProtectHome/PrivateTmp were not runtime-tested
+  by a real manager; user/group/env-file loading and restart policy await an
+  operator-approved install. Browser launch under NNP works, not a claim that
+  every host's systemd/browser restrictions are compatible.
+- Other CPU/OS/container platforms, host TLS proxy installation, a Chromium
+  sandbox, automatic retention coordination and digest-reproducible apt builds.
+- No authenticated-session scan was needed here; only anonymous lab scan and
+  bearer-protected control API were exercised. No production data was accessed.
+
+Safe scratch evidence: `indago-p1-docker-results.json`,
+`indago-p1-systemd-results.json` and safe harness output. Disposable server/lab/
+Chrome processes and own Docker resources were checked absent after validation.
+The useful documented `indago:p1-deployment` image remains; no registry release.

@@ -44,3 +44,19 @@ func TestDockerContract(t *testing.T) {
 	requireText(t, ".dockerignore", "data/", ".git", ".env", "sessions/", "*.key", "bin/", "*.log")
 	requireText(t, "deploy/docker/healthcheck.sh", "--cacert", "INDAGO_HEALTH_CA", "https://127.0.0.1:8750/healthz")
 }
+
+func TestSystemdContract(t *testing.T) {
+	s := requireText(t, "deploy/systemd/indago.service", "User=indago", "Group=indago", "StateDirectory=indago", "WorkingDirectory=/var/lib/indago", "CacheDirectory=indago", "RuntimeDirectory=indago", "EnvironmentFile=/etc/indago/indago.env", "Restart=on-failure", "TimeoutStopSec=60", "KillSignal=SIGTERM", "NoNewPrivileges=yes", "ProtectSystem=strict", "-addr 127.0.0.1:8750")
+	for _, forbidden := range []string{"allow-remote", "allow-plaintext", "User=root", "MemoryDenyWriteExecute=yes", "RestrictNamespaces=yes"} {
+		if strings.Contains(s, forbidden) {
+			t.Errorf("unsafe/unvalidated default unit option %q", forbidden)
+		}
+	}
+	env := requireText(t, "deploy/systemd/indago.env.example", "INDAGO_API_TOKEN=", "600")
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "INDAGO_API_TOKEN=") && line != "INDAGO_API_TOKEN=" {
+			t.Error("environment example must contain no live/dummy secret")
+		}
+	}
+	requireText(t, "deploy/systemd/browser.conf", "ExecStart=\n", "-browser", "PLAYWRIGHT_DRIVER_PATH", "INDAGO_CHROMIUM_PATH")
+}
