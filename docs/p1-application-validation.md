@@ -107,7 +107,7 @@ cache entries; changed command/web packages ran. No scanners/guards disabled.
 
 Not verified here: cross-browser/multi-tab cooldown coordination, a prolonged
 load/soak test, or new TLS certificate behavior (unchanged; P0 validation covers
-TLS). CI, Docker and systemd remain separate work. Protected `AGENTS.md` was
+TLS). CI and Docker were separate work. Protected `AGENTS.md` was
 not edited. All task dummy data, logs, downloaded report, scripts, binary and
 scratch venv were removed after validation; only the nonsecret results above
 remain.

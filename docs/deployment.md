@@ -361,87 +361,24 @@ Useful flags (`indago serve -h` or `cmd/indago/main.go` for the full list):
 secrets to it (session cookies, API keys, and the like are kept out of log
 lines by design — see the hardening report delivered alongside this phase).
 
-### Running as a service
+### Running as a long-lived service
 
-The bundled unit is [`deploy/systemd/indago.service`](../deploy/systemd/indago.service),
-with [`indago.env.example`](../deploy/systemd/indago.env.example) and optional
-[`browser.conf`](../deploy/systemd/browser.conf). It uses dedicated non-root
-`indago:indago`, `StateDirectory=indago` (`/var/lib/indago`, also working dir),
-cache/runtime directories, 0750 directory modes, a strict read-only system
-filesystem, hidden home directories, private temporary directory and
-NoNewPrivileges. Only state/cache/runtime/private temp are writable. It binds
-**127.0.0.1:8750**, does not enable remote/plaintext exceptions, restarts only
-on failure, and allows 60 seconds for graceful SIGTERM. Local native TLS is
-optional: terminate TLS in a local reverse proxy if remote access is needed,
-require the environment token, and remember all proxied clients share one
-rate-limit bucket (§1).
+Indago ships no service-manager unit. The supported long-running deployment is
+the Docker image (see **Docker** above), which runs as a non-root user with
+TLS and the API token supplied from outside the image. If you prefer to run
+the binary directly under your own supervisor (systemd, runit, launchd, ...),
+write that unit for your host. Keep these requirements:
 
-**Operator install instructions** (not run by deployment validation):
+- run as a dedicated non-root account, never as root;
+- supply `INDAGO_API_TOKEN` from a root-owned, mode 0600 environment file or
+  secret manager, never as a flag or in `config.json`;
+- bind loopback (default) and terminate TLS in a local proxy, or follow §1 for
+  a remote bind (`-allow-remote`, token, and `-tls-cert`/`-tls-key`);
+- send SIGTERM and allow time for graceful shutdown (§7);
+- for `-browser`, see §3. Do not add blanket syscall or namespace restrictions
+  that you have not tested against Chromium.
 
-```bash
-# Debian/Ubuntu example; do not reuse an interactive user's account.
-sudo useradd --system --user-group --home-dir /var/lib/indago \
-  --no-create-home --shell /usr/sbin/nologin indago
-sudo install -o root -g root -m 0755 bin/indago /usr/local/bin/indago
-sudo install -d -o root -g root -m 0750 /etc/indago
-sudo install -o root -g root -m 0600 deploy/systemd/indago.env.example /etc/indago/indago.env
-# Provision INDAGO_API_TOKEN in that file using your secret manager/editor.
-# No dummy secret is supplied. Blank deliberately leaves loopback unauthenticated.
-sudoedit /etc/indago/indago.env
-sudo install -o root -g root -m 0644 deploy/systemd/indago.service /etc/systemd/system/indago.service
-sudo systemd-analyze verify /etc/systemd/system/indago.service
-# Only after reviewing paths, credentials and exposure:
-sudo systemctl daemon-reload
-sudo systemctl enable --now indago.service
-sudo systemctl status indago.service
-```
-
-`EnvironmentFile` is required, not optional; systemd reads the root-owned 0600
-file before dropping process privileges. Secrets never appear in `ExecStart`
-or config.json. `serve` initializes/migrates the database; no root-run `db init`
-is necessary. systemd creates/owns the state/cache/runtime directories. If
-restoring an existing data directory, stop the service and explicitly restore
-ownership to `indago:indago` before restart. Never recursively change ownership
-of an unreviewed host path. Unit files and binary remain root-owned/non-writable
-by the scanner account. Check logs with `journalctl -u indago.service`.
-
-**Optional browser mode.** Provision system Chromium and Node **>=20** (Node 24
-recommended), including OS browser libraries/fonts, first; distribution Node 18
-is too old for this driver. Browser/Node executables must be under system paths,
-not hidden user homes. Install the matching driver as the service user using
-the same §3 driver-only procedure and the drop-in's exact cache path:
-
-```bash
-sudo install -d -o indago -g indago -m 0750 /var/cache/indago
-# Requires a provisioned Go toolchain for this one-time driver installation.
-sudo -u indago env HOME=/var/cache/indago XDG_CACHE_HOME=/var/cache/indago \
-  PLAYWRIGHT_DRIVER_PATH=/var/cache/indago/playwright \
-  PLAYWRIGHT_NODEJS_PATH=/usr/bin/node \
-  go run github.com/mxschmitt/playwright-go/cmd/playwright@v0.6201.1 --version
-sudo install -d -o root -g root -m 0755 /etc/systemd/system/indago.service.d
-sudo install -o root -g root -m 0644 deploy/systemd/browser.conf \
-  /etc/systemd/system/indago.service.d/browser.conf
-# Adjust executable paths in the drop-in if the distro uses different ones.
-sudo systemd-analyze verify /etc/systemd/system/indago.service
-sudo systemctl daemon-reload
-sudo systemctl restart indago.service
-```
-
-Re-provision the driver after any go.mod Playwright update. The override adds
-`-browser`, replaces ExecStart rather than appending another, and leaves hardening
-intact. No blanket namespace restriction, syscall allowlist or
-MemoryDenyWriteExecute is used: those can break Chromium/JIT. The existing
-Playwright launch uses `--no-sandbox`; see the Docker isolation caveat above,
-which also applies to this service account. ProtectHome and filesystem
-restrictions limit access but do not make browser contexts an OS security
-boundary. Keep authenticated-session files under the service's state directory,
-not a home directory the service cannot access.
-
-Validation uses **scratch staged units/executable only** when the production
-binary is not installed. `systemd-analyze verify` validates syntax/dependencies,
-not a running service's effective sandbox. Neither install commands above nor
-host daemon reload, enable/start, user creation or `/etc` changes were authorized
-or performed by the P1 validation; see the validation report for exact limits.
+No unit was validated by this project, so none is provided.
 
 ### Process model
 
@@ -678,7 +615,7 @@ carries IDs, counts, and the cutoff, never blob content or absolute paths.
 refuse to open a live data directory (WAL mode and a busy timeout are not an
 application-level maintenance lock). Terminal scan eligibility and atomic blob
 writes do not prove safe concurrent finding-link/session/report updates.
-**Stop `indago.service`, dry-run, review, prune offline, then restart.** Do not
+**Stop the server, dry-run, review, prune offline, then restart.** Do not
 share the data directory with another server or maintenance writer.
 
 **What this does not do:**
@@ -696,21 +633,21 @@ share the data directory with another server or maintenance writer.
   requires explicit service coordination (below).
 
 **Optional scheduled retention: coordinate offline maintenance.** No timer is
-installed by this repository. The former always-on prune/timer example was
-unsafe to present as validated. Manual operator maintenance is:
+installed by this repository. An always-on prune/timer example was removed
+because it was not safe to present as validated. Manual operator maintenance is:
 
 ```bash
-sudo systemctl stop indago.service
-# Verify stopped before opening the data directory. Dry run and inspect first.
-sudo -u indago /usr/local/bin/indago evidence prune -data /var/lib/indago -older-than 720h
-# Only after review:
-sudo -u indago /usr/local/bin/indago evidence prune -data /var/lib/indago -older-than 720h -apply
-sudo systemctl start indago.service
+# 1. Stop the server (however you run it) and verify nothing has the data dir open.
+# 2. Dry run and inspect first.
+indago evidence prune -data /var/lib/indago -older-than 720h
+# 3. Only after review:
+indago evidence prune -data /var/lib/indago -older-than 720h -apply
+# 4. Start the server again.
 ```
 
 If you add an optional timer, it must use an explicit maintenance coordinator
 that stops and verifies the server is stopped, runs the fixed cutoff under the
-non-root service user, and restarts the server afterward with a visible failure
+same non-root account that owns the data directory, and restarts the server afterward with a visible failure
 policy. A separate daily oneshot that just opens the live DB is **not** safe
 coordination. Do not enable a timer until that workflow and dry-run output have
 been reviewed for your installation.
