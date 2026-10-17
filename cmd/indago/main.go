@@ -204,12 +204,11 @@ func cmdServe(args []string) error {
 		return err
 	}
 	cfg.DataDir = *dataDir
+	// Capture the template before applying any transient serve overlays.
+	stored := cfg
 	if *addr != "" {
 		cfg.Server.Addr = *addr
 	}
-	// The rate-limit values as the config file had them: flags override them
-	// for this run only and are not written back by the save-on-start below.
-	fileRate, fileBurst := cfg.Server.APIRate, cfg.Server.APIBurst
 	if cfg.Server, err = overlayRateLimitFlags(cfg.Server, setFlags, *apiRate, *apiBurst); err != nil {
 		return err
 	}
@@ -234,11 +233,12 @@ func cmdServe(args []string) error {
 	if err := cfg.EnsureDirs(); err != nil {
 		return err
 	}
-	// Persist config so first run writes a template the operator can edit.
-	saved := cfg
-	saved.Server.APIRate, saved.Server.APIBurst = fileRate, fileBurst
-	if err := saved.Save(cfg.ConfigPath()); err != nil {
-		log.Warn("could not persist config", "err", err)
+	// Only initialize a missing template. Never rewrite an operator's config
+	// (including formatting and fields unknown to this binary) at startup.
+	if _, err := os.Stat(cfg.ConfigPath()); os.IsNotExist(err) {
+		if err := stored.Save(cfg.ConfigPath()); err != nil {
+			log.Warn("could not persist config", "err", err)
+		}
 	}
 
 	db, err := sqlite.Open(cfg.DBPath())
