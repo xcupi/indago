@@ -25,9 +25,9 @@ package detection
 // has between detection (pure) and verification (browser-backed).
 
 // DOMXSSSource identifies a client-side-only input this engine reads as a
-// candidate DOM-XSS source. Four as of this second slice — see
-// docs/dom-xss.md "out of scope" for what is deliberately STILL NOT
-// implemented (document.referrer, localStorage/sessionStorage).
+// candidate DOM-XSS source. Seven sources are implemented; see
+// docs/dom-xss.md for the exact query/storage selector coverage and the
+// sink categories deliberately left out of scope.
 type DOMXSSSource string
 
 const (
@@ -171,9 +171,11 @@ func DOMXSSCanary(marker string) string {
 // position, as it does for Reflected XSS); ContextSub carries the SOURCE
 // name — this is how an operator tells a hash-sourced finding apart from
 // a query/window.name/postMessage-sourced one on every existing
-// presentation surface, with no new fields. Location/Parameter/
-// InjectionPointID are left at their zero values — a DOM-XSS candidate
-// has no server-side parameter or injection point at all.
+// presentation surface, with no new fields. For query and storage sources,
+// scan code fills Candidate.Parameter with the tested query name or storage
+// key (and query candidates set LocationQuery); storage backend remains the
+// source in ContextSub. Other sources leave Location/Parameter/
+// InjectionPointID at zero values because they have no named selector.
 func DOMXSSPayloadFor(source DOMXSSSource, sink DOMXSSSink, marker string) (Candidate, bool) {
 	if !sink.IsValid() || !source.IsValid() || marker == "" {
 		return Candidate{}, false
@@ -197,6 +199,7 @@ func DOMXSSPayloadFor(source DOMXSSSource, sink DOMXSSSink, marker string) (Cand
 // generic sentence.
 func domXSSRationale(source DOMXSSSource, sink DOMXSSSink) string {
 	var how string
+	storageControlCaveat := ""
 	switch source {
 	case DOMSourceQuery:
 		how = "the location.search (query string) value, read via URLSearchParams or location.search itself,"
@@ -207,12 +210,14 @@ func domXSSRationale(source DOMXSSSource, sink DOMXSSSink) string {
 	case DOMSourceReferrer:
 		how = "the document.referrer value (the HTTP Referer header of the navigation that loaded this page)"
 	case DOMSourceLocalStorage:
-		how = "a localStorage value (origin-scoped; read by this page's own client-side JavaScript)"
+		how = "the localStorage key read by this page's own client-side JavaScript (the candidate is written only in Indago's isolated browser context)"
+		storageControlCaveat = "; this reachability does not establish that an attacker can write or poison the key—manual exploitability review is required unless an attacker-relevant application flow demonstrates that control"
 	case DOMSourceSessionStorage:
-		how = "a sessionStorage value (origin-scoped; read by this page's own client-side JavaScript)"
+		how = "the sessionStorage key read by this page's own client-side JavaScript (the candidate is written only in Indago's isolated browser context)"
+		storageControlCaveat = "; this reachability does not establish that an attacker can write or poison the key—manual exploitability review is required unless an attacker-relevant application flow demonstrates that control"
 	default: // DOMSourceHash
 		how = "the location.hash value"
 	}
 	return how + " is assigned wholesale to " + string(sink) +
-		"; an <img> with a deliberately-broken src fires its onerror handler the moment the browser parses the injected markup, referencing the benign marker"
+		"; an <img> with a deliberately-broken src fires its onerror handler the moment the browser parses the injected markup, referencing the benign marker" + storageControlCaveat
 }

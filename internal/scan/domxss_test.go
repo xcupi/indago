@@ -297,19 +297,7 @@ func TestDomXSSRefererURLPercentEncodesMarkup(t *testing.T) {
 	}
 }
 
-// domXSSStorageKey is a fixed, documented convention (there is no
-// server-side parameter to derive a key from for this source, same
-// boundary Hash/WindowName/PostMessage/Referrer already have) — this test
-// exists mainly to pin the exact key name so a future change to it is a
-// deliberate, reviewed decision rather than an accidental rename that
-// silently breaks every live-lab route tuned to read it.
-func TestDomXSSStorageKeyIsStable(t *testing.T) {
-	if domXSSStorageKey != "indago_domxss_probe" {
-		t.Fatalf("domXSSStorageKey = %q, want the documented stable key name", domXSSStorageKey)
-	}
-}
-
-// --- domXSSJob now carries a Source; firstQueryParamName ---
+// --- domXSSJob now carries a Source; queryParamNames ---
 
 func TestParseDOMXSSJobRequiresValidSource(t *testing.T) {
 	payload, _ := json.Marshal(domXSSJob{EndpointID: domain.NewID(), Source: detection.DOMSourceHash})
@@ -530,9 +518,9 @@ func TestCorrelateDOMXSSVerificationPromotesAndStaysConfirmed(t *testing.T) {
 
 func TestDomXSSFindingDedupKeyDistinctPerEndpointSourceSink(t *testing.T) {
 	epA, epB := domain.NewID(), domain.NewID()
-	a := domXSSFindingDedupKey(epA, detection.DOMSourceHash, detection.DOMSinkInnerHTML)
-	b := domXSSFindingDedupKey(epB, detection.DOMSourceHash, detection.DOMSinkInnerHTML)
-	c := domXSSFindingDedupKey(epA, detection.DOMSourceHash, detection.DOMSinkOuterHTML)
+	a := domXSSFindingDedupKey(epA, detection.DOMSourceHash, detection.DOMSinkInnerHTML, "")
+	b := domXSSFindingDedupKey(epB, detection.DOMSourceHash, detection.DOMSinkInnerHTML, "")
+	c := domXSSFindingDedupKey(epA, detection.DOMSourceHash, detection.DOMSinkOuterHTML, "")
 	if a == b || a == c || b == c {
 		t.Fatalf("dedup keys must differ by endpoint and by sink: %q %q %q", a, b, c)
 	}
@@ -541,9 +529,46 @@ func TestDomXSSFindingDedupKeyDistinctPerEndpointSourceSink(t *testing.T) {
 func TestDomXSSFindingDedupKeyNeverCollidesWithReflectedXSS(t *testing.T) {
 	ip := domain.NewID()
 	reflectedKey := findingDedupKey(ip, candAt(detection.CatHTMLText, detection.CtxHTMLText, "<svg onload=m>"))
-	domXSSKey := domXSSFindingDedupKey(ip, detection.DOMSourceHash, detection.DOMSinkInnerHTML)
+	domXSSKey := domXSSFindingDedupKey(ip, detection.DOMSourceHash, detection.DOMSinkInnerHTML, "")
 	if reflectedKey == domXSSKey {
 		t.Fatal("a reflected-xss and a dom-xss dedup key must never collide, even sharing the same raw ID")
+	}
+}
+
+func TestDOMXSSQueryFindingDedupIncludesParameterName(t *testing.T) {
+	env := newScanEnv(t)
+	ctx := context.Background()
+	ep := domXSSTestEndpoint(t, env, "http://x/search?first=unused&x=unused")
+	marker := "indqueryparamdedup"
+	var findings []*domain.Finding
+	for _, name := range []string{"first", "x"} {
+		cand, ok := detection.DOMXSSPayloadFor(detection.DOMSourceQuery, detection.DOMSinkInnerHTML, marker)
+		if !ok {
+			t.Fatal("expected a query candidate")
+		}
+		cand.Parameter = name
+		cand.Location = domain.LocationQuery
+		f, err := upsertDOMXSSFinding(ctx, env.st, env.scanID, ep, cand, detection.DOMXSSCanary(marker), domain.NewID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		findings = append(findings, f)
+	}
+	if findings[0].ID == findings[1].ID {
+		t.Fatal("different query parameters at the same endpoint/source/sink must not collapse into one finding")
+	}
+	all, err := env.st.Findings().ListByScan(ctx, env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("query parameter findings = %d, want two", len(all))
+	}
+	for i, name := range []string{"first", "x"} {
+		detail := decodeFindingDetail(findings[i].Detail)
+		if !strings.Contains(findings[i].Title, `parameter "`+name+`"`) || detail.ParameterName != name || len(detail.Candidates) != 1 || detail.Candidates[0].Parameter != name {
+			t.Fatalf("finding for %q not identified consistently: title=%q detail=%+v", name, findings[i].Title, detail)
+		}
 	}
 }
 
@@ -581,6 +606,8 @@ func TestQueryStringDOMXSSFindingDoesNotCollideWithReflectedXSSOnSameParameter(t
 	if !ok {
 		t.Fatal("expected a candidate")
 	}
+	domCand.Parameter = param.Name
+	domCand.Location = domain.LocationQuery
 	canary := detection.DOMXSSCanary(marker)
 	domFinding, err := upsertDOMXSSFinding(ctx, env.st, env.scanID, ep, domCand, canary, domain.NewID())
 	if err != nil {
@@ -604,8 +631,9 @@ func TestQueryStringDOMXSSFindingDoesNotCollideWithReflectedXSSOnSameParameter(t
 			sawReflected = true
 		case domain.VulnDOMXSS:
 			sawDOMXSS = true
-			if f.Summary == "" && detection.DOMXSSSource(decodeFindingDetail(f.Detail).ParameterName) != detection.DOMSourceQuery {
-				t.Fatalf("dom-xss finding should be labeled with the query source, detail=%+v", decodeFindingDetail(f.Detail))
+			detail := decodeFindingDetail(f.Detail)
+			if detail.ParameterName != "q" || len(detail.Candidates) != 1 || detail.Candidates[0].Parameter != "q" || !strings.Contains(f.Title, `parameter "q"`) {
+				t.Fatalf("dom-xss finding should identify query parameter q without colliding with reflected XSS: title=%q detail=%+v", f.Title, detail)
 			}
 		}
 	}

@@ -1,53 +1,43 @@
 package scan
 
-// This file implements the FIRST slice of a DOM-XSS detection engine — see
+// This file implements the browser-backed DOM-XSS detection engine — see
 // docs/dom-xss.md for the full design and its explicit scope boundary.
-// Reflected XSS only ever inspects the SERVER's HTTP response body for a
-// marker reflection; location.hash (the URL fragment, after "#") is NEVER
-// sent to the server by the browser, so that whole pipeline is
-// structurally blind to a page's OWN client-side JavaScript doing
-// something like
-//
-//	document.getElementById('x').innerHTML = location.hash.substring(1)
+// Reflected XSS only inspects the SERVER's HTTP response body; a page's OWN
+// client-side JavaScript can instead read sources such as location.hash,
+// location.search, window.name, postMessage, document.referrer, or web storage
+// and feed them to a dangerous sink. That browser-only data flow is outside
+// the response-based pipeline.
 //
 // This engine actually renders the page in a real browser, lets its OWN
-// JavaScript run, and observes the live DOM/JS runtime — the fundamentally
-// new capability. Every navigation it performs goes through the SAME
-// scope-enforcing browser.Manager the rest of the product already uses
-// (AllowRequest is checked on every request, exactly like discovery and
-// Reflected XSS verification).
+// JavaScript run, and observes the live DOM/JS runtime. Every navigation it
+// performs goes through the SAME scope-enforcing browser.Manager the rest of
+// the product already uses (AllowRequest is checked on every request, exactly
+// like discovery and Reflected XSS verification).
 //
-// Scope for this slice (deliberately narrow — see docs/dom-xss.md):
-//   - exactly ONE source: location.hash.
+// Implemented scope (deliberately narrow — see docs/dom-xss.md):
+//   - seven sources: hash, query, window.name, postMessage, document.referrer,
+//     localStorage, and sessionStorage.
+//   - query probes each distinct discovered query name; storage probes keys
+//     present in target-origin storage or requested by the page's getItem calls
+//     (capped at 32 per backend/endpoint).
 //   - exactly ONE sink category: HTML injection (innerHTML/outerHTML/
 //     document.write/writeln) — see detection.DOMXSSSink.
-//   - ONE (source, sink) pair tested per endpoint per probe pass: if a
-//     page's own script reaches more than one hooked sink, only the
-//     first (by whichever the page happened to call first) is tested —
-//     documented, not silently incomplete.
+//   - at most one reachable sink is verified per endpoint/source/selector
+//     pass: if a page reaches more than one hooked sink, only the first (by
+//     whichever the page happened to call first) is tested.
 //
 // Two-phase design, mirroring Reflected XSS's reflect-then-verify split:
-//  1. REACHABILITY (canary): navigate with a benign, inert canary value
-//     (detection.DOMXSSCanary) in location.hash, with an init-script
-//     harness (installed via browser.Page.AddInitScript, so it is in
-//     place BEFORE the page's own scripts run — see domXSSHarnessScript)
-//     that monkey-patches the three sink setters/functions to report (via
-//     a uniquely-prefixed console.log, scraped by
-//     parseDOMXSSReachability) whenever a value CONTAINING the canary
-//     reaches one of them. A canary reaching a hooked sink is a
-//     REACHABILITY signal only, not yet a confirmed vulnerability — the
-//     canary itself is inert (no "<"/">" at all).
-//  2. VERIFICATION (real payload): once a reachable pair is found,
-//     construct a real deterministic candidate (detection.DOMXSSPayloadFor
-//     — a bare "<img src=x onerror=MARKER>", the SAME markup-breakout
-//     idea candidate.go's html_text templates use, adapted for a value
-//     assigned WHOLESALE to a sink rather than reflected into existing
-//     markup) and navigate again with it in location.hash. Confirmed only
-//     when the browser throws "Uncaught ReferenceError: MARKER is not
-//     defined" — the EXACT SAME deterministic bare-marker signal
-//     Reflected XSS verification already uses (verification.
-//     MatchExecutionSignal / verification.Decide), attributed strictly to
-//     this navigation.
+//  1. REACHABILITY (canary): inject a benign, inert canary through the selected
+//     source using its source-specific navigation mechanism, with an init-script
+//     harness installed before the page's own scripts run. The harness reports
+//     via a uniquely-prefixed console.log whenever a canary-containing value
+//     reaches a hooked sink. Reachability is not itself a confirmed finding.
+//  2. VERIFICATION (real payload): after a reachable pair is found, build the
+//     deterministic candidate (a bare <img src=x onerror=MARKER>) and repeat
+//     the source-specific navigation. Confirm only on the exact same
+//     deterministic browser signal Reflected XSS verification uses
+//     (verification.MatchExecutionSignal / verification.Decide), attributed
+//     strictly to this navigation.
 
 import (
 	"context"
@@ -56,6 +46,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -131,11 +122,11 @@ func selectDOMXSSEndpoints(endpoints []*domain.Endpoint) []*domain.Endpoint {
 // execution.go's domXSSPassDone/evaluate — the SAME "run once when the
 // ordinary job queue goes quiet" shape combined.go's
 // enqueueCombinedCandidates uses): one JobDOMXSS per distinct discovered
-// GET/HEAD-navigable Endpoint URL (see selectDOMXSSEndpoints) PER
-// IMPLEMENTED SOURCE (detection.DOMXSSSources — hash, query, window.name,
-// postMessage as of this second slice). It reuses the scan's existing
-// Endpoint registry — never a parallel discovery mechanism. Best-effort
-// throughout: a failure here is logged, never fatal.
+// GET/HEAD-navigable Endpoint URL (see selectDOMXSSEndpoints) per implemented
+// source. Each source job performs its own query-parameter or storage-key
+// selection inside Handle. It reuses the scan's existing Endpoint registry —
+// never a parallel discovery mechanism. Best-effort throughout: a failure
+// here is logged, never fatal.
 func (c *Controller) enqueueDOMXSSProbes(ctx context.Context, scanID domain.ID) {
 	endpoints, err := c.store.Endpoints().ListByScan(ctx, scanID)
 	if err != nil {
@@ -389,15 +380,26 @@ func jsEncodeURIComponent(s string) string {
 // ---------------------------------------------------------------------------
 
 // domXSSFindingDedupKey distinguishes a DOM-XSS finding from a Reflected
-// XSS one (disjoint tag) and from a different sink or endpoint — the
-// three things that together identify "the same underlying DOM-XSS site"
-// for this slice's one source.
-func domXSSFindingDedupKey(endpointID domain.ID, source detection.DOMXSSSource, sink detection.DOMXSSSink) string {
-	return string(endpointID) + "\x00dom_xss\x00" + string(source) + "\x00" + string(sink)
+// XSS one (disjoint tag), a different sink or endpoint, and (for query and
+// storage sources) a different parameter/key. The source backend remains
+// part of the identity, so localStorage and sessionStorage never collide.
+func domXSSFindingDedupKey(endpointID domain.ID, source detection.DOMXSSSource, sink detection.DOMXSSSink, parameter string) string {
+	key := string(endpointID) + "\x00dom_xss\x00" + string(source) + "\x00" + string(sink)
+	if source == detection.DOMSourceQuery || source == detection.DOMSourceLocalStorage || source == detection.DOMSourceSessionStorage {
+		key += fmt.Sprintf("\x00parameter:%d:%s", len(parameter), parameter)
+	}
+	return key
 }
 
-func domXSSFindingTitle(ep *domain.Endpoint, source detection.DOMXSSSource, sink detection.DOMXSSSink) string {
-	return fmt.Sprintf("DOM XSS candidate: %s reaches %s at %s %s", source, sink, ep.Method, endpointLabel(ep.URL))
+func domXSSFindingTitle(ep *domain.Endpoint, source detection.DOMXSSSource, sink detection.DOMXSSSink, parameter string) string {
+	switch source {
+	case detection.DOMSourceQuery:
+		return fmt.Sprintf("DOM XSS candidate: %s parameter %q reaches %s at %s %s", source, parameter, sink, ep.Method, endpointLabel(ep.URL))
+	case detection.DOMSourceLocalStorage, detection.DOMSourceSessionStorage:
+		return fmt.Sprintf("DOM XSS candidate: %s key %q reaches %s at %s %s", source, parameter, sink, ep.Method, endpointLabel(ep.URL))
+	default:
+		return fmt.Sprintf("DOM XSS candidate: %s reaches %s at %s %s", source, sink, ep.Method, endpointLabel(ep.URL))
+	}
 }
 
 // confirmedDOMXSSTitle drops "candidate" once verification has confirmed
@@ -414,13 +416,17 @@ func confirmedDOMXSSTitle(title string) string {
 // promote it. The caller MUST hold findingsMu (mirrors upsertPendingFinding,
 // which is also unlocked itself and relies on its caller to serialize it).
 // source is derived from cand.ContextSub (see detection.DOMXSSPayloadFor's
-// field-repurposing doc comment) — NOT hardcoded to any one source, so
-// every one of the four implemented sources produces its own distinct,
-// correctly-labeled Finding via the exact same function.
+// field-repurposing doc comment) — NOT hardcoded to any one source, so all
+// seven implemented sources produce distinct, correctly labeled findings;
+// query/storage selectors are also part of their finding identity.
 func upsertDOMXSSFinding(ctx context.Context, st store.Store, scanID domain.ID, ep *domain.Endpoint, cand detection.Candidate, canaryValue string, reachTestCaseID domain.ID) (*domain.Finding, error) {
 	source := detection.DOMXSSSource(cand.ContextSub)
 	sink := detection.DOMXSSSink(cand.Context)
-	key := domXSSFindingDedupKey(ep.ID, source, sink)
+	key := domXSSFindingDedupKey(ep.ID, source, sink, cand.Parameter)
+	parameterName := cand.Parameter
+	if source != detection.DOMSourceQuery && source != detection.DOMSourceLocalStorage && source != detection.DOMSourceSessionStorage {
+		parameterName = string(source)
+	}
 	now := time.Now()
 	reachAttempt := verificationAttempt{
 		CandidateValue:   canaryValue,
@@ -460,13 +466,13 @@ func upsertDOMXSSFinding(ctx context.Context, st store.Store, scanID domain.ID, 
 		return nil, fmt.Errorf("load scan: %w", err)
 	}
 	d := findingDetail{
-		Method: ep.Method, ParameterName: string(source), DedupKey: key, Occurrences: 1,
+		Method: ep.Method, ParameterName: parameterName, DedupKey: key, Occurrences: 1,
 		TestCaseIDs: []domain.ID{reachTestCaseID}, Candidates: []detection.Candidate{cand}, Attempts: []verificationAttempt{reachAttempt},
 	}
 	f := &domain.Finding{
 		ID: domain.NewID(), ScanID: scanID, ProjectID: sc.ProjectID, VulnClass: domain.VulnDOMXSS,
 		Verdict: domain.VerdictPending, Severity: domain.SeverityHigh, Confidence: domain.ConfidenceLow,
-		Title:      domXSSFindingTitle(ep, source, sink),
+		Title:      domXSSFindingTitle(ep, source, sink, cand.Parameter),
 		Summary:    cand.Rationale,
 		EndpointID: ep.ID,
 		Provenance: domain.Provenance{Engine: "dom-xss", DiscoverySource: ep.Source, DetectedAt: now, AIAssisted: false},
@@ -525,10 +531,10 @@ func (e *domXSSExecutor) correlateDOMXSSVerification(ctx context.Context, findin
 // domXSSExecutor: runs JobDOMXSS jobs
 // ---------------------------------------------------------------------------
 
-// domXSSExecutor runs JobDOMXSS jobs: it probes ONE discovered Endpoint
-// for the one source/sink-category combination this slice implements,
-// through the SAME scope-enforcing browser.Manager the rest of the
-// product already uses.
+// domXSSExecutor runs JobDOMXSS jobs: it probes one discovered Endpoint
+// for one source, iterating every query name or bounded storage key when the
+// source has selectors, through the SAME scope-enforcing browser.Manager the
+// rest of the product already uses.
 type domXSSExecutor struct {
 	store    store.Store
 	browser  *browser.Manager // nil: jobs are recorded skipped, never failed (no browser configured for this scan — mirrors verifyExecutor's Stub behavior)
@@ -578,27 +584,8 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	}
 
 	source := dj.Source
-	var queryParam string
-	if source == detection.DOMSourceQuery {
-		queryParam, err = e.firstQueryParamName(ctx, ep.ID)
-		if err != nil {
-			e.log.Warn("dom-xss: list parameters for query-string source", "job", job.ID, "err", err)
-		}
-		if queryParam == "" {
-			// No discovered query parameter to target — a documented
-			// boundary (mirrors domXSSNavigable's GET/HEAD-only
-			// boundary), not a failure: this source has nothing to set
-			// without knowing a parameter name the page's own JS might
-			// read. See docs/dom-xss.md.
-			tc := e.newTestCase(ctx, job, ep.URL)
-			e.finishTestCase(ctx, tc, nil, "query-string DOM-XSS source skipped: no discovered query parameter on this endpoint")
-			return nil
-		}
-	}
-
 	marker := detection.NewProbe(job.ScanID, ep.ID).Token
 	sessionStatePath := e.sessionStatePathFor(ctx, job.ScanID)
-
 	bctx, err := e.browser.NewContext(ctx, browser.ContextOptions{AllowRequest: allow, StorageStatePath: sessionStatePath})
 	if err != nil {
 		tc := e.newTestCase(ctx, job, ep.URL)
@@ -610,12 +597,109 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	}
 	defer bctx.Close()
 
-	// --- Phase 1: reachability ---
+	var selectors []string
+	switch source {
+	case detection.DOMSourceQuery:
+		selectors, err = e.queryParamNames(ctx, ep.ID)
+		if err != nil {
+			tc := e.newTestCase(ctx, job, ep.URL)
+			e.finishTestCase(ctx, tc, err, "query-string DOM-XSS parameter discovery")
+			return err
+		}
+		if len(selectors) == 0 {
+			tc := e.newTestCase(ctx, job, ep.URL)
+			tc.Status = domain.TestCaseSkipped
+			e.finishTestCase(ctx, tc, nil, "query-string DOM-XSS source not tested: no discovered query parameter on this endpoint")
+			return nil
+		}
+	case detection.DOMSourceLocalStorage, detection.DOMSourceSessionStorage:
+		selectors, err = e.discoverStorageKeys(ctx, bctx, source, ep.URL)
+		if err != nil {
+			tc := e.newTestCase(ctx, job, ep.URL)
+			e.finishTestCase(ctx, tc, err, "storage key discovery")
+			return err
+		}
+		discoveryTC := e.newTestCase(ctx, job, ep.URL)
+		if len(selectors) == 0 {
+			discoveryTC.Status = domain.TestCaseSkipped
+			e.finishTestCase(ctx, discoveryTC, nil, fmt.Sprintf("%s source not tested: no storage key was present and no getItem key was observed", source))
+			return nil
+		}
+		skipped := 0
+		if len(selectors) > domXSSStorageKeyLimit {
+			skipped = len(selectors) - domXSSStorageKeyLimit
+			selectors = selectors[:domXSSStorageKeyLimit]
+		}
+		discoveryNote := fmt.Sprintf("%s key discovery observed %d distinct key(s); deterministic ceiling=%d, testing %d", source, len(selectors)+skipped, domXSSStorageKeyLimit, len(selectors))
+		if skipped > 0 {
+			discoveryNote += fmt.Sprintf("; skipped %d additional key(s)", skipped)
+		}
+		e.finishTestCase(ctx, discoveryTC, nil, discoveryNote)
+	default:
+		selectors = []string{""}
+	}
+
+	for _, selector := range selectors {
+		if err := e.probeDOMXSSCandidate(ctx, bctx, job, ep, source, selector, marker); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// queryParamNames returns every distinct discovered LocationQuery parameter
+// for endpointID in lexicographic name order. Sorting makes probe ordering
+// deterministic even when a store implementation does not preserve row order.
+func (e *domXSSExecutor) queryParamNames(ctx context.Context, endpointID domain.ID) ([]string, error) {
+	params, err := e.store.Parameters().ListByEndpoint(ctx, endpointID)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	var names []string
+	for _, p := range params {
+		if p == nil || p.Location != domain.LocationQuery || p.Name == "" || seen[p.Name] {
+			continue
+		}
+		seen[p.Name] = true
+		names = append(names, p.Name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func domXSSSelectorLabel(source detection.DOMXSSSource, selector string) string {
+	switch source {
+	case detection.DOMSourceQuery:
+		return fmt.Sprintf("%s parameter %q", source, selector)
+	case detection.DOMSourceLocalStorage, detection.DOMSourceSessionStorage:
+		return fmt.Sprintf("%s key %q", source, selector)
+	default:
+		return string(source)
+	}
+}
+
+func domXSSCandidateForSelector(cand detection.Candidate, source detection.DOMXSSSource, selector string) detection.Candidate {
+	if source != detection.DOMSourceQuery && source != detection.DOMSourceLocalStorage && source != detection.DOMSourceSessionStorage {
+		return cand
+	}
+	cand.Parameter = selector
+	if source == detection.DOMSourceQuery {
+		cand.Location = domain.LocationQuery
+	}
+	cand.DedupKey += fmt.Sprintf("\x00selector:%d:%s", len(selector), selector)
+	return cand
+}
+
+func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, marker string) error {
+	label := domXSSSelectorLabel(source, selector)
 	canary := detection.DOMXSSCanary(marker)
-	console, _, _, _, canaryNavURL, navErr := e.navigateSource(ctx, bctx, source, ep, queryParam, marker, canary)
+
+	// --- Phase 1: reachability ---
+	console, _, _, _, canaryNavURL, navErr := e.navigateSource(ctx, bctx, source, ep, selector, marker, canary)
 	reachTC := e.newTestCase(ctx, job, canaryNavURL)
 	if navErr != nil {
-		e.finishTestCase(ctx, reachTC, navErr, "reachability probe")
+		e.finishTestCase(ctx, reachTC, navErr, "reachability probe for "+label)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -623,20 +707,19 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	}
 	reachable := parseDOMXSSReachability(console, marker)
 	if len(reachable) == 0 {
-		e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("no HTML-injection sink reachable from %s (negative result)", source))
+		e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("no HTML-injection sink reachable from %s (negative result)", label))
 		return nil
 	}
 	// Bounded to the FIRST reachable sink (deterministic: whichever the
-	// page's own script used first) — see this file's header comment:
-	// this slice tests one pair per endpoint per source, not every
-	// reachable sink.
+	// page's own script used first) — see this file's header comment.
 	sink := reachable[0]
-	e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("reachable sink: %s (canary observed in the hooked setter/call)", sink))
+	e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("reachable sink: %s from %s (canary observed in the hooked setter/call)", sink, label))
 
 	cand, ok := detection.DOMXSSPayloadFor(source, sink, marker)
 	if !ok {
 		return nil
 	}
+	cand = domXSSCandidateForSelector(cand, source, selector)
 
 	e.findingsMu.Lock()
 	finding, err := upsertDOMXSSFinding(ctx, e.store, job.ScanID, ep, cand, canary, reachTC.ID)
@@ -648,10 +731,10 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 
 	// --- Phase 2: verification (the EXACT SAME deterministic bare-marker
 	// signal Reflected XSS verification already uses) ---
-	console2, pageErrs2, html2, screenshot2, payloadNavURL, verr := e.navigateSource(ctx, bctx, source, ep, queryParam, marker, cand.Value)
+	console2, pageErrs2, html2, screenshot2, payloadNavURL, verr := e.navigateSource(ctx, bctx, source, ep, selector, marker, cand.Value)
 	verifyTC := e.newTestCase(ctx, job, payloadNavURL)
 	if verr != nil {
-		e.finishTestCase(ctx, verifyTC, verr, "verification navigation")
+		e.finishTestCase(ctx, verifyTC, verr, "verification navigation for "+label)
 		return nil // the finding stays Pending; a later retry can still verify it
 	}
 
@@ -667,6 +750,9 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	if matched && sigText != "" {
 		notes = notes + " (" + sigText + ")"
 	}
+	if source == detection.DOMSourceLocalStorage || source == detection.DOMSourceSessionStorage {
+		notes += "; attacker-relevant ability to write or poison this storage key is not established by this isolated probe and requires manual exploitability review unless the target flow demonstrates it"
+	}
 
 	var evidenceIDs []domain.ID
 	if e.evidence != nil {
@@ -678,27 +764,6 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 
 	e.correlateDOMXSSVerification(ctx, finding.ID, cand, verdict, confidence, notes, verifyTC.ID, evidenceIDs, payloadNavURL)
 	return nil
-}
-
-// firstQueryParamName returns the name of the first discovered Location-
-// Query parameter for endpointID (stable, by store order), or "" if none
-// have been discovered. Reuses the SAME Parameter registry Reflected
-// XSS's own query-injection-point testing already reads — see
-// detection.DOMSourceQuery's doc comment: this engine deliberately tests
-// the SAME parameter NAME a page's own client-side JS might read from
-// location.search, independent of (and never deduplicated against) the
-// server-side reflection pipeline.
-func (e *domXSSExecutor) firstQueryParamName(ctx context.Context, endpointID domain.ID) (string, error) {
-	params, err := e.store.Parameters().ListByEndpoint(ctx, endpointID)
-	if err != nil {
-		return "", err
-	}
-	for _, p := range params {
-		if p != nil && p.Location == domain.LocationQuery && p.Name != "" {
-			return p.Name, nil
-		}
-	}
-	return "", nil
 }
 
 // navigateSource performs ONE phase's navigation for source, injecting
@@ -736,7 +801,7 @@ func (e *domXSSExecutor) navigateSource(ctx context.Context, bctx *browser.Conte
 		return console, pageErrs, html, screenshot, navURL, err
 	case detection.DOMSourceLocalStorage, detection.DOMSourceSessionStorage:
 		navURL = ep.URL
-		console, pageErrs, html, screenshot, err = e.navigateWithStorage(ctx, bctx, source, navURL, marker, value)
+		console, pageErrs, html, screenshot, err = e.navigateWithStorage(ctx, bctx, source, navURL, queryParam, marker, value)
 		return console, pageErrs, html, screenshot, navURL, err
 	default: // detection.DOMSourceHash
 		navURL = domXSSHashURL(ep.URL, value)
@@ -879,14 +944,138 @@ func postMessageScript(value string) string {
 	return "(() => new Promise((resolve) => { const sender = document.createElement('iframe'); sender.setAttribute('sandbox', 'allow-scripts'); sender.onload = () => setTimeout(resolve, 300); sender.srcdoc = " + goQuoteJS(srcdoc) + "; document.body.appendChild(sender); }))();"
 }
 
-// domXSSStorageKey is the single, fixed localStorage/sessionStorage key
-// name this engine writes the canary/payload under for BOTH storage
-// backends — there is no server-side parameter to key off of for this
-// source (same boundary Hash/WindowName/PostMessage/Referrer already
-// have), so a documented, fixed convention is used instead of a
-// discovered name. A page's own vulnerable JS is expected to read this
-// exact key via getItem (see docs/dom-xss.md's live-lab routes).
-const domXSSStorageKey = "indago_domxss_probe"
+const domXSSStorageObserverPrefix = "__INDAGO_DOMXSS_STORAGE__"
+
+// domXSSStorageKeyLimit bounds candidate attempts separately for each
+// storage backend at an endpoint. The discovery TestCase records the
+// observed count and any keys skipped beyond this ceiling.
+const domXSSStorageKeyLimit = 32
+
+func domXSSStorageObserverScript() string {
+	return fmt.Sprintf(`(() => {
+  const PREFIX = %s;
+  try {
+    const proto = Storage.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'getItem');
+    if (!desc || typeof desc.value !== 'function') return;
+    const nativeGetItem = desc.value;
+    Object.defineProperty(proto, 'getItem', {
+      configurable: desc.configurable,
+      enumerable: desc.enumerable,
+      writable: desc.writable,
+      value: function (key) {
+        let backend = '';
+        try {
+          if (this === window.localStorage) backend = 'localStorage';
+          else if (this === window.sessionStorage) backend = 'sessionStorage';
+        } catch (_) {}
+        if (!backend || typeof key === 'symbol') return nativeGetItem.apply(this, arguments);
+        const keyName = String(key);
+        const value = nativeGetItem.call(this, keyName);
+        try {
+          console.log(PREFIX + JSON.stringify({backend: backend, key: keyName}));
+        } catch (_) {}
+        return value;
+      }
+    });
+  } catch (_) {}
+})();`, goQuoteJS(domXSSStorageObserverPrefix))
+}
+
+type domXSSStorageRead struct {
+	Backend string `json:"backend"`
+	Key     string `json:"key"`
+}
+
+func parseDOMXSSStorageReads(messages []browser.ConsoleMessage, source detection.DOMXSSSource) []string {
+	seen := make(map[string]bool)
+	var keys []string
+	for _, message := range messages {
+		if !strings.HasPrefix(message.Text, domXSSStorageObserverPrefix) {
+			continue
+		}
+		var read domXSSStorageRead
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(message.Text, domXSSStorageObserverPrefix)), &read); err != nil || read.Backend != string(source) || seen[read.Key] {
+			continue
+		}
+		seen[read.Key] = true
+		keys = append(keys, read.Key)
+	}
+	return keys
+}
+
+func domXSSStorageKeysScript(source detection.DOMXSSSource) (string, error) {
+	storageName := ""
+	switch source {
+	case detection.DOMSourceLocalStorage:
+		storageName = "localStorage"
+	case detection.DOMSourceSessionStorage:
+		storageName = "sessionStorage"
+	default:
+		return "", fmt.Errorf("%s is not a storage backend", source)
+	}
+	return `(() => { const s = ` + storageName + `; const keys = []; for (let i=0; i<s.length; i++) { const key=s.key(i); if (key !== null) keys.push(key); } return JSON.stringify(keys); })()`, nil
+}
+
+func readDOMXSSStorageKeys(ctx context.Context, page *browser.Page, source detection.DOMXSSSource) ([]string, error) {
+	script, err := domXSSStorageKeysScript(source)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := page.Evaluate(ctx, script)
+	if err != nil {
+		return nil, fmt.Errorf("enumerate %s keys: %w", source, err)
+	}
+	encoded, ok := raw.(string)
+	if !ok {
+		return nil, fmt.Errorf("enumerate %s keys: unexpected browser result %T", source, raw)
+	}
+	var keys []string
+	if err := json.Unmarshal([]byte(encoded), &keys); err != nil {
+		return nil, fmt.Errorf("parse %s keys: %w", source, err)
+	}
+	return keys, nil
+}
+
+func uniqueSortedStorageKeys(keys []string) []string {
+	seen := make(map[string]bool)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// discoverStorageKeys performs an observation-only navigation to the real
+// target in the scan's isolated context. It enumerates existing keys (which
+// includes localStorage seeded by storage state) and records getItem names
+// requested by the page's own scripts. The observer preserves string
+// conversion, returns the native method's result unchanged, and writes no
+// candidate value during discovery.
+func (e *domXSSExecutor) discoverStorageKeys(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, targetURL string) ([]string, error) {
+	page, err := bctx.NewPage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer page.Close()
+	if err := page.AddInitScript(ctx, domXSSStorageObserverScript()); err != nil {
+		return nil, err
+	}
+	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{WaitUntil: browser.WaitLoad}); err != nil {
+		return nil, err
+	}
+	present, err := readDOMXSSStorageKeys(ctx, page, source)
+	if err != nil {
+		return nil, err
+	}
+	observed := parseDOMXSSStorageReads(page.ConsoleMessages(), source)
+	return uniqueSortedStorageKeys(append(present, observed...)), nil
+}
 
 // domXSSRefererURL builds a synthetic, well-formed absolute URL carrying
 // fragmentValue (percent-encoded by jsEncodeURIComponent) as its path —
@@ -964,12 +1153,12 @@ func (e *domXSSExecutor) navigateWithReferrer(ctx context.Context, bctx *browser
 //     the target's own origin ROOT (domXSSOriginURL(targetURL)), which is
 //     guaranteed same-origin by construction and needs no extra
 //     discovery;
-//  3. set localStorage/sessionStorage (browser.Page's existing
-//     SetLocalStorage/SetSessionStorage — no new browser primitive
-//     needed, both already existed) under the fixed domXSSStorageKey key;
+//  3. set localStorage/sessionStorage with browser.Page's existing
+//     SetLocalStorage/SetSessionStorage methods (no new browser primitive
+//     needed) under this exact, previously discovered key;
 //  4. THEN navigate (same page) to targetURL — the write from step 3 is
 //     now visible since both navigations share the same origin.
-func (e *domXSSExecutor) navigateWithStorage(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, targetURL, marker, value string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, err error) {
+func (e *domXSSExecutor) navigateWithStorage(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, targetURL, key, marker, value string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, err error) {
 	page, err := bctx.NewPage(ctx)
 	if err != nil {
 		return nil, nil, "", nil, err
@@ -986,9 +1175,9 @@ func (e *domXSSExecutor) navigateWithStorage(ctx context.Context, bctx *browser.
 		return nil, nil, "", nil, err
 	}
 	if source == detection.DOMSourceSessionStorage {
-		err = page.SetSessionStorage(ctx, domXSSStorageKey, value)
+		err = page.SetSessionStorage(ctx, key, value)
 	} else {
-		err = page.SetLocalStorage(ctx, domXSSStorageKey, value)
+		err = page.SetLocalStorage(ctx, key, value)
 	}
 	if err != nil {
 		return nil, nil, "", nil, err

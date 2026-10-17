@@ -51,9 +51,10 @@ real, deliberate, separate future work. See "Out of scope" below.
 |---|---|
 | Sources | SEVEN (all client-side sources identified so far): `location.hash` (piece 1); `location.search`/`URLSearchParams`, `window.name`, `postMessage` (piece 2); `document.referrer`, `localStorage`, `sessionStorage` (piece 3 — `detection.DOMXSSSources`) |
 | Sink category | Still exactly ONE, HTML injection: `Element.prototype.innerHTML` / `outerHTML` setters, `document.write` / `document.writeln` (`detection.DOMXSSSink`) — UNCHANGED from pieces 1/2, reused as-is |
-| Pairs tested per endpoint per source | At most ONE — the first reachable sink, by whichever the page's own script happened to call first (see "Two-phase design" below) — same boundary as piece 1, now per source |
+| Pairs tested per endpoint/source/selector | At most ONE — the first reachable sink (by the page's own script call order) for each query parameter or storage key; non-selector sources have one pass — see "Two-phase design" below |
 | Methods probed | GET/HEAD-navigable endpoints only — UNCHANGED from piece 1 |
-| Query source coverage | Only endpoints with at least one DISCOVERED `Location=Query` parameter (reused from the SAME Parameter registry Reflected XSS already populates) — an endpoint with no discovered query parameter has nothing for this source to target, so it is skipped for that endpoint (documented, not silently incomplete) |
+| Query source coverage | Every distinct discovered `Location=Query` parameter name, sorted lexicographically for deterministic ordering — each name gets an independent canary/payload pass and finding identity. If no query parameter was discovered, a skipped `TestCase` says the source was not tested (not a clean negative) |
+| Storage key coverage | Per backend, union keys already present in target-origin storage (including storage-state-seeded localStorage) and keys named in the page's own `Storage.getItem` calls observed by an init-script hook. Keys are deduplicated and sorted; at most 32 per backend/endpoint are tested, with skipped extras recorded in the discovery `TestCase`. No observed/present key means a skipped/not-tested diagnostic and no synthetic key is seeded |
 
 Every navigation this engine performs still goes through the **same**
 scope-enforcing `browser.Manager` the rest of the product already uses
@@ -76,18 +77,16 @@ unsafely re-reads the RAW query string from `location.search` and gets
 popped anyway — two genuinely different code paths, both legitimately
 exploitable, both worth their own Finding.
 
-**These two detections are intentionally NEVER deduplicated against each
-other**, even when they share an endpoint and parameter name — see
-`domXSSFindingDedupKey`'s disjoint `"dom_xss"` tag (unchanged from piece
-1) and the new, explicit
+These two detections are intentionally NEVER deduplicated against each
+other, even when they share an endpoint and parameter name — see
+`domXSSFindingDedupKey`'s disjoint `"dom_xss"` tag and the explicit
 `TestQueryStringDOMXSSFindingDoesNotCollideWithReflectedXSSOnSameParameter`
-test (`internal/scan/domxss_test.go`), which builds exactly this scenario
-— a Reflected-XSS Finding and a DOM-XSS (query source) Finding on the SAME
-endpoint and parameter name "q" — and asserts both exist as two distinct
-Finding rows. Live-validated too: see "Live validation" below, where the
-disposable lab's `/query` route reflects `x` server-side AND reads it
-client-side, and the real scan produces exactly one `reflected_xss`
-Finding and one separate `dom_xss` Finding for the same endpoint.
+test (`internal/scan/domxss_test.go`), which creates a Reflected-XSS
+Finding and a DOM-XSS (query source) Finding for the SAME endpoint and
+parameter "q" and asserts both remain distinct rows. The earlier piece-2
+live lab also reflected and re-read one query parameter; this update's CLI
+revalidation below focuses on iterating query names and uses a client-side
+only query route.
 
 ## `window.name` — the navigation-sequencing note
 
@@ -222,47 +221,58 @@ applied to the hash source). The live-lab route below is built this way
 deliberately, mirroring the hash lab's own `decodeURIComponent
 (location.hash)` requirement.
 
-## `localStorage` / `sessionStorage` — ORIGIN-scoped, not tab-scoped
+## `localStorage` / `sessionStorage` — target-derived keys, ORIGIN-scoped
 
 Unlike `window.name` (persists across any same-tab navigation, even
-cross-origin), `localStorage`/`sessionStorage` are **ORIGIN-scoped**: a
-value written from a page on a DIFFERENT origin is simply invisible to a
-page on the target's origin, no matter what tab/context it is in. This is
-the one genuinely different piece of sequencing piece 3 needed —
-`navigateWithStorage` (`internal/scan/domxss.go`):
+cross-origin), `localStorage`/`sessionStorage` are **ORIGIN-scoped**. A
+value written from a different origin is invisible to the target. Storage
+source selection therefore uses the target page's real browser context,
+not an assumed product-wide key:
 
-1. install the sink-hook harness FIRST (before any navigation at all —
-   Playwright re-runs it on every subsequent navigation this page makes,
-   including step 4's target navigation, exactly like every other
-   source);
-2. navigate the SAME page to a harmless, SAME-ORIGIN page first — this
-   engine uses the target's own origin ROOT (`domXSSOriginURL`, a pure
-   helper that derives `scheme://host/` from the target endpoint URL),
-   not a separate discovery step: it is guaranteed same-origin by
-   construction and needs no extra lookup. (A 404 for the root path is
-   fine — it is still a valid document on the right origin, which is all
-   a storage write needs.)
-3. set `localStorage`/`sessionStorage` via the browser package's EXISTING
-   `Page.SetLocalStorage`/`Page.SetSessionStorage` (added in an earlier
-   session, never used by any production code path until now — no new
-   browser primitive was needed for this) under a fixed, documented key
-   name, `indago_domxss_probe` (`domXSSStorageKey`) — there is no
-   server-side parameter to derive a key from for this source, same
-   boundary Hash/WindowName/PostMessage/Referrer already have;
-4. THEN navigate (same page) to the target URL — the write from step 3 is
-   now visible, since both navigations share the same origin.
+1. Create the scan's isolated Playwright context, seeded only with the
+   scan's configured storage state (if any), and navigate through the
+   existing scope-enforcing manager to the target page.
+2. Before the target's scripts run, install an init-script observer on
+   `Storage.prototype.getItem`. It records the backend and requested key,
+   preserves the API's string conversion, calls the native method, and
+   returns that native result unchanged. This observation pass does not
+   write or replace storage values.
+3. On the loaded target origin, enumerate existing keys with
+   `Storage.key(i)` (including localStorage keys seeded by storage state),
+   then union them with the page's observed `getItem` keys. Deduplicate and
+   sort names deterministically, separately for localStorage and
+   sessionStorage.
+4. If a backend has no present or requested keys, record a skipped
+   TestCase saying that source was **not tested**. Indago does not seed a
+   magic/default key and does not imply a negative result.
+5. For each discovered key, up to a ceiling of **32 keys per backend per
+   endpoint**, run the ordinary two phases independently. For each phase,
+   install the sink harness, navigate the same page to the target's own
+   origin root, write the canary or payload under that exact discovered
+   key, then navigate to the target. All writes are confined to the scan's
+   isolated browser context. If more than 32 keys are observed, the key
+   discovery TestCase records the observed count, the ceiling, and how
+   many additional keys were skipped.
 
-`localStorage` and `sessionStorage` are modeled as TWO separate
-`detection.DOMXSSSource` values (`DOMSourceLocalStorage`,
-`DOMSourceSessionStorage`) sharing this ONE navigation helper
-parametrized by backend — not two near-duplicate code paths, and not one
-source with a hidden "backend" sub-field either: each gets its own,
-independently labeled, independently Confirmed Finding (see "Live
-validation" below), since the two backends have genuinely different
-real-world read patterns (session-only vs. persistent) even though the
-exploitation shape and sequencing are identical.
+`localStorage` and `sessionStorage` remain TWO distinct
+`detection.DOMXSSSource` values and finding labels. Each candidate carries
+its storage key in `Candidate.Parameter`; the backend is carried in
+`ContextSub`, the title and test notes name both backend and key, and the
+finding dedup identity includes the key. This lets operators distinguish
+(e.g.) `localStorage` key `profile_note` from `sessionStorage` key
+`profile_note`.
 
-Still the SAME **(Endpoint, source, sink)** identity piece 1 established —
+A confirmed sink execution proves only that the value Indago wrote in its
+isolated context reaches the sink and can execute. It does **not** establish
+that an attacker can write or poison that key. Treat storage exploitability
+as a manual check of attacker-relevant write paths unless the target's
+existing application flow itself demonstrates that control; the finding
+rationale and verification note state this limitation.
+
+Still the SAME **(Endpoint, source, sink)** identity piece 1 established for
+sources without a named selector; query and storage candidates extend that
+identity with the query parameter name or storage key (storage backend is
+already distinct in `source`):
 `detection.DOMXSSSource` now has seven values:
 
 ```go
@@ -275,19 +285,16 @@ DOMSourceLocalStorage   DOMXSSSource = "localStorage"           // piece 3
 DOMSourceSessionStorage DOMXSSSource = "sessionStorage"         // piece 3
 ```
 
-`detection.DOMXSSPayloadFor` now takes `source` as an explicit first
+`detection.DOMXSSPayloadFor` takes `source` as an explicit first
 parameter (was implicitly always `DOMSourceHash`) and still reuses the
-EXISTING `detection.Candidate` shape unchanged — `Context` still carries
-the **sink** name, `ContextSub` still carries the **source** name. This is
-the field an operator uses to tell a hash-sourced finding apart from a
-query/window.name/postMessage-sourced one on every existing presentation
-surface (CLI `finding show`, the web API's `parsed_detail`, markdown/HTML
-reports) — zero new plumbing needed for this slice either, exactly the
-same reuse piece 1 relied on. `domXSSFindingTitle`/`domXSSFindingDedupKey`
-(both unchanged function signatures) already took `source` as a parameter
-in piece 1's own code, so every new source's Finding is automatically
-titled distinctly ("DOM XSS: `window.name` reaches `innerHTML` at GET
-/winname") and deduped distinctly, with no further change needed there.
+EXISTING `detection.Candidate` shape — `Context` carries the **sink** name,
+`ContextSub` the **source/backend** name, and query/storage candidates also
+carry the selected name in `Candidate.Parameter` (query candidates set
+`Location=Query`). The source plus selector appear in the finding title,
+detail, and dedup identity; different query parameters and storage keys
+therefore remain distinguishable. The existing disjoint `"dom_xss"` tag
+still guarantees that a DOM-XSS query finding never collides with a
+Reflected-XSS finding on the same endpoint and query parameter.
 
 ## Two-phase design: canary reachability, then payload verification
 
@@ -299,11 +306,11 @@ canary/payload value reaches the browser before each navigation
 | Source | Injection mechanism | New Go helper |
 |---|---|---|
 | `location.hash` | encode into the URL fragment | `domXSSHashURL` (piece 1) |
-| `location.search` | encode into a URL query parameter (an EXISTING discovered parameter name — see below) | `domXSSQueryURL` (piece 2) |
+| `location.search` | encode into a URL query parameter (one discovered name per independent probe; see below) | `domXSSQueryURL` (piece 2) |
 | `window.name` | `Evaluate` on a neutral page, then navigate same page to target | `navigateWithWindowName`/`setWindowNameScript` (piece 2) |
 | `postMessage` | navigate to target, then create an opaque-origin sandboxed `srcdoc` sender frame that posts to the target | `navigateWithPostMessage`/`postMessageScript` (piece 2; corrected to preserve untrusted sender origin/source semantics) |
 | `document.referrer` | wrap in a synthetic absolute URL, pass as the navigation's Referer override | `navigateWithReferrer`/`domXSSRefererURL` (piece 3) |
-| `localStorage` / `sessionStorage` | navigate to the target's own origin root, `Evaluate`-write via `Page.SetLocalStorage`/`SetSessionStorage`, THEN navigate to target | `navigateWithStorage`/`domXSSOriginURL` (piece 3) |
+| `localStorage` / `sessionStorage` | observe the target's present/read keys; for each bounded key, navigate to the same-origin root, write that exact key, THEN navigate to target | `discoverStorageKeys`/`navigateWithStorage` |
 
 The sink-hook harness (`domXSSHarnessScript`), the reachability parser
 (`parseDOMXSSReachability`), and the phase-2 verification signal
@@ -323,19 +330,23 @@ and the API `detection.DOMSourceQuery`'s own doc comment names — implements
 exactly that spec behavior. The two sources need, and get, genuinely
 different encoders, matching how real browsers actually decode each one.
 
-### How the query source picks WHICH parameter to target
+### How the query source selects parameters
 
-A DOM-XSS "site" has no server-side parameter at all for Hash/WindowName/
-PostMessage — but Query genuinely needs a parameter NAME to set a value
-on. `domXSSExecutor.firstQueryParamName` resolves this by reading the
-SAME `store.Parameters().ListByEndpoint` registry Reflected XSS's own
-query-injection-point testing already populates, and picks the first
-discovered `Location=Query` parameter (deterministic, by store order) — a
-deliberate reuse of existing discovery data, never a new parallel
-mechanism. An endpoint with no discovered query parameter is skipped for
-this source only (recorded as a completed, no-op TestCase, never a
-failure) — there is nothing to target without knowing a parameter name a
-page's own JS might plausibly read.
+A DOM-XSS "site" has no server-side parameter for Hash/WindowName/
+PostMessage — but Query needs a parameter NAME to set. For the query source,
+`domXSSExecutor.queryParamNames` reads the same
+`store.Parameters().ListByEndpoint` registry that Reflected XSS populates,
+selects every distinct non-empty `Location=Query` name, and sorts names
+lexicographically before probing. Each name gets its own canary reachability
+and payload verification pass; query names are not capped. The tested name
+is carried in the candidate's `Parameter`, the finding's `ParameterName`,
+the title/test notes, and the DOM-XSS dedup key. Thus multiple query
+parameters at the same endpoint/source/sink produce separate findings.
+
+An endpoint with no discovered query parameter is recorded as a skipped
+TestCase saying `location.search` was **not tested** because no candidate
+parameter was available. This is not a clean negative and is not silently
+reported as safe.
 
 ## Wiring into the scan (extended)
 
@@ -344,10 +355,17 @@ page's own JS might plausibly read.
   jobs per endpoint, one per `detection.DOMXSSSources` entry, instead of
   piece 1's one job per endpoint. `domXSSJob` gained a `Source` field;
   `parseDOMXSSJob` now requires it to be one of the seven valid values.
-- `domXSSExecutor.Handle` is now source-generic: it resolves the query
-  parameter (query source only), then dispatches navigation through
-  `navigateSource` — one shared code path for all seven sources, branching
-  only on the injection mechanism.
+- `domXSSExecutor.Handle` now enumerates all query parameter names for the
+  query source (sorted/deduplicated) and independently probes each one. For
+  localStorage/sessionStorage it runs the observation-only target pass,
+  enumerates present keys and intercepted `getItem` names, then tests up to
+  32 sorted keys per backend; empty key sets and over-cap skips are explicit
+  in TestCase notes.
+- `domXSSExecutor.navigateSource` remains one source-generic navigation
+  dispatcher, with source-specific injection mechanics. Query candidates
+  receive the parameter name; storage candidates receive the key, while the
+  backend remains the source label. Finding title/detail/dedup identity now
+  distinguish each selector without changing Reflected-XSS correlation.
 - Test-count impact: `internal/scan/executor_integration_test.go`'s
   `countDistinctNavigableURLs` test helper multiplies its endpoint count
   by `len(detection.DOMXSSSources)` (now 7, was 4) to independently
@@ -369,51 +387,51 @@ page's own JS might plausibly read.
 
 ## Presentation
 
-UNCHANGED from piece 1 — CLI `finding list`/`finding show`, the web API,
-and the web UI's Findings tab all render every source's `dom_xss` Finding
-through the SAME generic rendering Reflected XSS findings already use.
-Live-verified (see "Live validation" below): all seven sources' findings
-render correctly, each with a distinct, correctly-labeled title and
-`Parameter` field ("location.hash" / "location.search" / "window.name" /
-"postMessage" / "document.referrer" / "localStorage" / "sessionStorage").
+Live-verified (see "Live validation" below): all sources render on the
+existing presentation surfaces with their source labels. Query findings
+also show the selected query parameter; localStorage/sessionStorage findings
+show the distinct backend and key. Non-parameterized sources retain the
+source value in the existing `Parameter` field.
 
 ## Live validation
 
-Piece 2's disposable lab (`indago-domxss-lab2.py`) covered query-string/
-window.name/postMessage; piece 3 used a NEW disposable lab
-(`indago-domxss-lab3.py`, NOT part of the repo — same throwaway pattern)
-with three routes, each genuinely needing its specific new source:
+Piece 2's earlier live lab exercised `location.search`, `window.name`, and
+`postMessage`; piece 3's earlier lab exercised `document.referrer`. The
+source-selection changes in this update were revalidated with the actual
+`indago` CLI and Chromium against a disposable, scope-limited local lab
+(not a unit-test-only run):
 
-- `/referrer` — `document.getElementById('sink').innerHTML =
-  decodeURIComponent(document.referrer)`. The `decodeURIComponent` call is
-  REQUIRED, not cosmetic — see "`document.referrer` — the Referer-override
-  mechanism" above for why a real browser's Referer header can never carry
-  a literal, unescaped `<`, mirroring the hash source's own documented
-  `decodeURIComponent(location.hash)` requirement.
-- `/localstorage` — `document.getElementById('sink').innerHTML =
-  localStorage.getItem('indago_domxss_probe')`.
-- `/sessionstorage` — `document.getElementById('sink').innerHTML =
-  sessionStorage.getItem('indago_domxss_probe')`.
+- `/query?first=unused&x=unused` had a page script that reads only `x` and
+  assigns it to `innerHTML`. Discovery found both query names. The first
+  candidate (`first`) completed with `no HTML-injection sink reachable`;
+  the independent `x` canary reached `innerHTML`, and its payload produced
+  the browser signal `playwright: <marker> is not defined`.
+- `/local` read `localStorage.getItem('profile_note')`; the CLI reported a
+  Confirmed finding titled `DOM XSS: localStorage key "profile_note"
+  reaches innerHTML at GET /local` and included the attacker-control caveat
+  in both the finding summary and candidate rationale.
+- `/session` read `sessionStorage.getItem('tab_note')`; the CLI reported a
+  Confirmed finding titled `DOM XSS: sessionStorage key "tab_note" reaches
+  innerHTML at GET /session`, with the same caveat.
+- `/safe` read no storage value. The completed scan had zero DOM-XSS
+  findings for that endpoint, and its localStorage/sessionStorage TestCases
+  were both `skipped` with explicit `not tested: no storage key was present
+  and no getItem key was observed` notes.
 
-A real scan (`indago scan create`/`start`, CLI, not a unit test) against
-each route produced exactly one Finding per route, all Confirmed:
+The CLI scan completed with 5 endpoints, 17 discovered parameters, 57
+completed jobs, 3 Confirmed findings, 0 failed jobs, and no pending
+findings. `finding show` identified the query parameter `x`, localStorage
+key `profile_note`, and sessionStorage key `tab_note`; all three stored the
+actual browser execution signal. The query TestCase notes show the inert
+first parameter did not reach a sink before the `x` pass confirmed.
 
-```
-confirmed  high  dom_xss  DOM XSS: document.referrer reaches innerHTML at GET /referrer
-confirmed  high  dom_xss  DOM XSS: localStorage reaches innerHTML at GET /localstorage
-confirmed  high  dom_xss  DOM XSS: sessionStorage reaches innerHTML at GET /sessionstorage
-```
+The latest scan does not claim storage exploitability from an Indago-only
+write: it documents the manual attacker-control check in each storage
+finding. All setup writes occurred in isolated Playwright contexts. The
+existing `.invalid` Referer override behavior and its `decodeURIComponent`
+requirement remain as described above; prior piece-3 live validation
+confirmed that source separately.
 
-Three DISTINCT, correctly-labeled Finding rows, each confirmed via the
-SAME deterministic bare-marker signal every other source already uses
-(`Uncaught ReferenceError: <marker> is not defined`) — proving the new
-Referer-override mechanism and the origin-scoped storage pre-navigation
-sequencing both actually work against a real Chromium browser, not just
-that the Go code compiles. The FIRST attempt against `/referrer` (before
-`domXSSRefererURL` existed) came back a clean, honest negative — see
-"`document.referrer` — the Referer-override mechanism" above for exactly
-what that looked like and why, caught by this live run and not by any
-unit test.
 
 ## Out of scope for this slice (updated — explicitly, not an oversight)
 
@@ -432,14 +450,17 @@ deliberate exclusions for future, separate pieces of work:
   `insertAdjacentHTML`, `Range.createContextualFragment` are all still
   real, deliberate exclusions for a future, separate piece — THIS is now
   the only remaining axis of DOM-XSS coverage, not sources.
-- **More than one reachable pair per endpoint per source per probe
-  pass**: if a page reaches TWO or more hooked sinks from the SAME source,
+- **More than one reachable pair per endpoint/source/selector per probe
+  pass**: if a page reaches TWO or more hooked sinks from the SAME selector,
   only the first (deterministic, by call order) is tested — unchanged
-  boundary from piece 1, now applying per source too.
-- **Query-string source without a discovered query parameter**: an
-  endpoint whose query parameters were never discovered (e.g. no crawled
-  link or user-provided seed ever exposed one) cannot be targeted by this
-  source — a real, documented gap, not a silent one.
+  boundary from piece 1, now applying to each query parameter/storage key.
+- **Query parameter coverage when no query parameter was discovered**:
+  an endpoint with no discovered `Location=Query` name has no candidate to
+  test. Indago records a skipped/not-tested diagnostic, not a clean negative.
+- **Storage keys not present or requested on the target page**: a backend
+  with no existing keys and no observed `getItem` names is likewise marked
+  skipped/not tested; no arbitrary key is seeded. The bounded 32-key cap is
+  explicit in the storage discovery TestCase.
 - **Stored DOM XSS** (a source that itself came from a stored/server-side
   value rather than purely client-side) — out of scope for the whole
   product, not just this slice (AGENTS.md §3).
