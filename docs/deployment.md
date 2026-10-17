@@ -19,6 +19,85 @@ and `make build`. Failure logs are retained for seven days. Locally set
 
 ---
 
+## Docker (Linux/amd64)
+
+The multi-stage `Dockerfile` includes the real Go binary, Playwright driver
+from `go.mod`, Node 24, Debian Chromium, fonts and CA certificates. **Only native
+Linux/amd64 was built/tested**; the build rejects other target architectures.
+Base tags and apt packages float: this is not a reproducible-digest guarantee.
+Rebuild regularly for browser/OS fixes. `.dockerignore` excludes runtime data,
+VCS, env files, sessions, keys, tests, logs and local build output.
+
+```bash
+docker build --platform linux/amd64 \
+  --build-arg VERSION="$(git describe --tags --always)" \
+  --build-arg COMMIT="$(git rev-parse --short HEAD)" \
+  --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -t indago:p1-deployment .
+```
+
+Provision outside the checkout:
+
+- `/srv/indago/tls/server.crt` and `server.key`: an operator-provided valid TLS
+  pair; key owned by numeric UID/GID **10001:10001**, mode **0600**. Directory
+  must permit UID 10001 traversal. Mount only these service-specific secrets,
+  never a host-wide certificate/secret directory.
+- `/srv/indago/tls/ca.crt`: issuing CA bundle, readable by UID 10001. For a
+  self-signed leaf, this can be the leaf itself. The server certificate needs
+  **IP:127.0.0.1 in its SAN** for the in-container strict healthcheck, plus any
+  external names clients use. `INDAGO_HEALTH_CA` can name another mounted CA
+  bundle path. Healthcheck is `/healthz` (no bearer required); it never uses
+  `-k` or disables certificate verification. An invalid CA/SAN makes it unhealthy.
+- `/srv/indago/server.env`: mode **0600**, host operator-owned, containing only
+  `INDAGO_API_TOKEN=` followed by a securely generated token of at least 32
+  characters. Generate through your secret manager or write directly to this
+  file (do not put the value in command-line flags/history). Docker reads the
+  env file; the scanner reads only its environment, never a token config file.
+  Docker administrators can inspect container environment; Docker access is
+  privileged access to these secrets.
+
+```bash
+# Create only once. Docker initializes this empty volume with image ownership.
+docker volume create indago-data
+docker run -d --name indago --restart unless-stopped \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges:true \
+  --memory=2g --shm-size=256m --stop-timeout=60 \
+  --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 \
+  --tmpfs /var/cache/indago:rw,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0750 \
+  --env-file /srv/indago/server.env \
+  --mount type=volume,src=indago-data,dst=/var/lib/indago \
+  --mount type=bind,src=/srv/indago/tls,dst=/tls,readonly \
+  -p 127.0.0.1:8750:8750 indago:p1-deployment
+curl --cacert /srv/indago/tls/ca.crt https://127.0.0.1:8750/healthz
+docker inspect --format '{{.State.Health.Status}}' indago
+docker stop --time 60 indago
+```
+
+The default command enables `-browser` and binds `0.0.0.0` **inside** the
+container with `-allow-remote` and mounted native TLS. Missing token or TLS
+fails closed; there is no plaintext remote default. Publish on host loopback
+as shown, not all interfaces. A target at `127.0.0.1` means the container itself,
+not the host; use explicitly scoped reachable targets on an operator-owned
+network. Never mount the Docker socket or use `--privileged`.
+
+The scanner runs as UID **10001**, with a writable data volume and tmpfs cache
+and temporary directories. For an existing bind-mounted data directory,
+provision ownership to 10001:10001 yourself; the image never recursively chowns
+host data. Stop before backup, and never share a data volume across servers.
+Allow at least the tested **2 GiB memory / 256 MiB shm** for small browser scans;
+raise those for larger browser concurrency. These are test settings, not a
+maximum-resource guarantee. SIGTERM gets 60 seconds before Docker force-kills.
+
+**Browser isolation limit:** the existing Playwright launch defaults disable
+Chromium's sandbox (`--no-sandbox`); non-root plus container restrictions does
+not restore it. This image does not change that scanner policy or claim
+sandboxed browsing. A hostile target/browser exploit can access the scanner's
+own data and environment. Use a dedicated disposable VM/host and restricted
+network egress for untrusted targets; do not share sensitive workloads. No
+namespace/syscall restrictions beyond the tested Docker defaults are promised.
+
+---
+
 ## 1. Network exposure — read this first
 
 **The control API (`/api/...`) has an optional bearer token and no per-operator

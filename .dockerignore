@@ -1,0 +1,34 @@
+# Allow only the sources and runtime support consumed by COPY.
+**
+!go.mod
+!go.sum
+!Makefile
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!deploy/
+!deploy/docker/
+!deploy/docker/healthcheck.sh
+# Defense in depth for sensitive/generated files anywhere in source paths.
+**/*_test.go
+**/testdata/
+data/
+.git
+.env
+.env.*
+**/.env
+**/.env.*
+sessions/
+**/sessions/
+**/*storage-state*.json
+**/*.key
+*.key
+**/*.pem
+**/*.db
+**/*.sqlite*
+bin/
+dist/
+**/*.log
+*.log
+coverage*

@@ -34,7 +34,55 @@ not a GitHub Actions pass. A subsequent section records remote availability.
 
 ## Docker
 
-Pending the separate Docker deliverable.
+- RED: `go test ./deploy -run TestDockerContract -v` failed on missing
+  `Dockerfile`; GREEN after Dockerfile/ignore/strict healthcheck were added.
+- Actual `docker build --platform linux/amd64 --build-arg VERSION=p1-deployment
+  --build-arg COMMIT=949bf7f --build-arg BUILD_DATE=2026-10-17T09:07:17Z
+  -t indago:p1-deployment .` exit 0; module verification passed and driver printed
+  `Version 1.62.1`. Tag is retained for operator use, not published to a registry.
+- Image ID:
+  `sha256:f60a258ef43821280986d3cfc2f4b2964999b46c43a5e8d982f281a31d5c9205`.
+  `docker image inspect`: user `10001:10001`, architecture `amd64`.
+  `docker exec ... id -u`: **10001**.
+- Real runtime used read-only rootfs, cap-drop ALL, no-new-privileges, 2 GiB
+  memory, 256 MiB shm, writable tmpfs `/tmp` and `/var/cache/indago`, a disposable
+  owned named data volume and scratch-only TLS bind mount. No socket/privileged
+  flags. Distro Chromium: **155.0.8059.79, Debian 12**.
+- Generated a one-day EC self-signed SAN certificate and random 64-character
+  environment token, never printed. Strict `curl --cacert` returned healthz 200,
+  projects 401 without bearer / 200 with bearer (bearer in 0600 curl config,
+  not argv). UI `/` and actual static asset `/app.js` returned 200. `/metrics`
+  returned 401 without / 200 with bearer. Docker health reached **healthy**.
+- Default startup with mounted TLS but no token exited **1**, explicitly refusing
+  remote bind without token. With token but missing TLS exited **1**, certificate
+  load failure; neither silently downgraded.
+- Real host CLI created project `e4c29175-dfd9-49a4-ad38-3119be3f2bc4` over strict
+  HTTPS. API set scope to container-local `127.0.0.1`, paths `/vulnerable` and
+  `/safe`, and created targets/scans. A temporary Node lab listened only on
+  container loopback `:8989`; it is not an external target.
+- Positive scan `9d76f167-7f0b-4206-bc42-bcaa49f1800b` completed with **1 confirmed**.
+  Screenshot/DOM/browser-log metadata existed; fetched actual browser-log bytes
+  included `playwright: ind64f6c46855fff00b is not defined`. Thus browser replay
+  genuinely ran, not merely accepted a `-browser` flag. An out-of-scope invalid
+  image resource was blocked by the existing scope gate.
+- Escaped benign control scan `74991f40-6992-4d93-9ace-46837b0e0215` completed with
+  **1 rejected, 0 confirmed**. No false vulnerability confirmation.
+- `docker stop -t 60` exited **0**, no OOM/forced kill; restart preserved the
+  prior project via authenticated GET; final SIGTERM stop also exited **0**.
+  Logs were checked for the exact disposable API token and private-key/session
+  indicators: absent. Scans here were anonymous (no real session used).
+- Harness corrections, not product fixes: static assets live at `/app.js`, not
+  `/assets/app.js`; Docker's ephemeral host port must be re-read after restart.
+  Every failed harness run cleaned its own resources before retrying.
+- Own named containers, data volumes, loopback lab, token/curl config, TLS
+  certificate/key and dummy database/evidence tree removed. Published port
+  verified closed. Safe result JSON and harness retained only in scratch.
+
+`INDAGO_CHROMIUM_PATH=/usr/bin/google-chrome make check` passed again after the
+Docker additions: gofmt clean, vet clean, all race-test packages passed
+(existing packages cached, deployment contract rerun in 1.012s). Only native
+Linux/amd64 is verified; other platforms, a Chromium sandbox and
+digest-reproducible apt builds are not.
 
 ## systemd
 

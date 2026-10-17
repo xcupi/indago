@@ -35,3 +35,12 @@ func TestCIContract(t *testing.T) {
 	}
 	requireText(t, "scripts/ci-browser-check.py", "TestIntegrationRenderRealBrowser", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestUINavigation", "TestUICooldownClock", "TestE2E_FullPipelineAgainstCorpus", "skip", "raise SystemExit", "INDAGO_CHROMIUM_PATH")
 }
+
+func TestDockerContract(t *testing.T) {
+	s := requireText(t, "Dockerfile", "AS build", "go mod verify", "make build", "PLAYWRIGHT_DRIVER_PATH=/opt/playwright", "--version", "chromium", "ca-certificates", "USER 10001:10001", "VOLUME [\"/var/lib/indago\"]", "HEALTHCHECK", "STOPSIGNAL SIGTERM", "-allow-remote", "-tls-cert", "-tls-key")
+	if strings.Contains(s, "allow-plaintext-remote") {
+		t.Error("image must not downgrade remote TLS")
+	}
+	requireText(t, ".dockerignore", "data/", ".git", ".env", "sessions/", "*.key", "bin/", "*.log")
+	requireText(t, "deploy/docker/healthcheck.sh", "--cacert", "INDAGO_HEALTH_CA", "https://127.0.0.1:8750/healthz")
+}
