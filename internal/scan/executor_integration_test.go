@@ -221,7 +221,8 @@ func TestScanExecutesPostWhenAllowed(t *testing.T) {
 
 // countDistinctNavigableURLs independently re-derives, from the Endpoint
 // registry alone, how many DOM-XSS probe jobs (one per distinct GET/HEAD-
-// navigable endpoint URL — see scan.selectDOMXSSEndpoints, unexported)
+// navigable endpoint URL, PER IMPLEMENTED SOURCE — see
+// detection.DOMXSSSources and scan.selectDOMXSSEndpoints, unexported)
 // this scan's one-time DOM-XSS pass should have enqueued, so these tests
 // cross-check the real engine's behavior rather than merely trusting it.
 func countDistinctNavigableURLs(eps []*domain.Endpoint) int {
@@ -239,7 +240,7 @@ func countDistinctNavigableURLs(eps []*domain.Endpoint) int {
 		seen[ep.URL] = true
 		n++
 	}
-	return n
+	return n * len(detection.DOMXSSSources)
 }
 
 // Cancel interrupts an in-flight test request and its CANCELLED result is

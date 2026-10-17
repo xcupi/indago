@@ -10,6 +10,8 @@ package scan
 import (
 	"context"
 	"encoding/json"
+	"net/url"
+	"strings"
 	"sync"
 	"testing"
 
@@ -156,6 +158,94 @@ func TestDomXSSHashURLNoExistingFragment(t *testing.T) {
 	}
 }
 
+// --- domXSSQueryURL: the query-string source's own URL builder ---
+
+func TestDomXSSQueryURLSetsParamPreservesOthersAndFragment(t *testing.T) {
+	got := domXSSQueryURL("https://target.example/page?x=1&y=2#frag", "x", "<img onerror=M>")
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("result is not a valid URL: %v (%q)", err, got)
+	}
+	if u.Query().Get("x") != "<img onerror=M>" {
+		t.Fatalf("param x = %q, want the injected value", u.Query().Get("x"))
+	}
+	if u.Query().Get("y") != "2" {
+		t.Fatalf("param y = %q, want untouched (2)", u.Query().Get("y"))
+	}
+	if u.Fragment != "frag" {
+		t.Fatalf("fragment = %q, want preserved (frag)", u.Fragment)
+	}
+}
+
+func TestDomXSSQueryURLNoExistingQuery(t *testing.T) {
+	got := domXSSQueryURL("https://target.example/page", "q", "abc")
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("result is not a valid URL: %v (%q)", err, got)
+	}
+	if u.Query().Get("q") != "abc" {
+		t.Fatalf("param q = %q, want abc", u.Query().Get("q"))
+	}
+}
+
+func TestDomXSSQueryURLUsesFormEncodingNotJSEncoding(t *testing.T) {
+	// Unlike the hash source (jsEncodeURIComponent), the query-string
+	// source deliberately uses Go's standard net/url form encoding —
+	// URLSearchParams decodes "+" as a space per the WHATWG spec, so a
+	// literal space in the raw query string should round-trip as "+",
+	// not "%20". See domXSSQueryURL's doc comment.
+	got := domXSSQueryURL("https://target.example/page", "q", "a b")
+	if !strings.Contains(got, "q=a+b") {
+		t.Fatalf("got %q, want a form-encoded space (a+b)", got)
+	}
+}
+
+// --- window.name / postMessage source-side script builders (pure) ---
+
+func TestSetWindowNameScriptEmbedsValueAsJSStringLiteral(t *testing.T) {
+	value := "<img src=x onerror=MARKER>"
+	script := setWindowNameScript(value)
+	if !strings.Contains(script, "window.name") {
+		t.Fatalf("script should set window.name: %q", script)
+	}
+	if !strings.Contains(script, "MARKER") {
+		t.Fatalf("script should embed the value: %q", script)
+	}
+	// No URL percent-encoding at all — this goes through Evaluate, not a
+	// navigation URL (see setWindowNameScript's doc comment).
+	if strings.Contains(script, "%3C") || strings.Contains(script, "%20") {
+		t.Fatalf("script must not URL-encode the value: %q", script)
+	}
+}
+
+func TestPostMessageScriptFiresPostMessageAndWaits(t *testing.T) {
+	value := "<img src=x onerror=MARKER>"
+	script := postMessageScript(value)
+	for _, want := range []string{"window.postMessage", "MARKER", "'*'", "setTimeout"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q: %q", want, script)
+		}
+	}
+}
+
+// --- domXSSJob now carries a Source; firstQueryParamName ---
+
+func TestParseDOMXSSJobRequiresValidSource(t *testing.T) {
+	payload, _ := json.Marshal(domXSSJob{EndpointID: domain.NewID(), Source: detection.DOMSourceHash})
+	dj, err := parseDOMXSSJob(&domain.TestJob{Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dj.Source != detection.DOMSourceHash {
+		t.Fatalf("source = %s, want %s", dj.Source, detection.DOMSourceHash)
+	}
+
+	badPayload, _ := json.Marshal(domXSSJob{EndpointID: domain.NewID(), Source: "eval"})
+	if _, err := parseDOMXSSJob(&domain.TestJob{Payload: badPayload}); err == nil {
+		t.Fatal("expected an error for an invalid/unimplemented source")
+	}
+}
+
 // --- domXSSNavigable / selectDOMXSSEndpoints ---
 
 func TestDomXSSNavigable(t *testing.T) {
@@ -192,7 +282,7 @@ func TestSelectDOMXSSEndpointsFiltersAndDedupes(t *testing.T) {
 
 func TestParseDOMXSSJobRoundTrip(t *testing.T) {
 	epID := domain.NewID()
-	payload, err := json.Marshal(domXSSJob{EndpointID: epID})
+	payload, err := json.Marshal(domXSSJob{EndpointID: epID, Source: detection.DOMSourceHash})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,6 +294,9 @@ func TestParseDOMXSSJobRoundTrip(t *testing.T) {
 	if dj.EndpointID != epID {
 		t.Fatalf("got %s, want %s", dj.EndpointID, epID)
 	}
+	if dj.Source != detection.DOMSourceHash {
+		t.Fatalf("source = %s, want %s", dj.Source, detection.DOMSourceHash)
+	}
 }
 
 func TestParseDOMXSSJobRejectsEmptyOrMissingPayload(t *testing.T) {
@@ -212,7 +305,14 @@ func TestParseDOMXSSJobRejectsEmptyOrMissingPayload(t *testing.T) {
 	}
 	payload, _ := json.Marshal(domXSSJob{})
 	if _, err := parseDOMXSSJob(&domain.TestJob{Payload: payload}); err == nil {
-		t.Fatal("expected an error for a job payload with an empty EndpointID")
+		t.Fatal("expected an error for a job payload with an empty EndpointID and no source")
+	}
+	// A valid EndpointID but a missing/invalid Source must also be rejected
+	// (every job enqueued by enqueueDOMXSSProbes carries one of the four
+	// implemented sources — a job without one is malformed).
+	missingSource, _ := json.Marshal(domXSSJob{EndpointID: domain.NewID()})
+	if _, err := parseDOMXSSJob(&domain.TestJob{Payload: missingSource}); err == nil {
+		t.Fatal("expected an error for a job payload with no source")
 	}
 }
 
@@ -229,7 +329,7 @@ func TestUpsertDOMXSSFindingCreatesPendingFinding(t *testing.T) {
 	env := newScanEnv(t)
 	ep := domXSSTestEndpoint(t, env, "http://x/page")
 	marker := "indhashmarker1"
-	cand, ok := detection.DOMXSSPayloadFor(detection.DOMSinkInnerHTML, marker)
+	cand, ok := detection.DOMXSSPayloadFor(detection.DOMSourceHash, detection.DOMSinkInnerHTML, marker)
 	if !ok {
 		t.Fatal("expected a candidate")
 	}
@@ -256,7 +356,7 @@ func TestUpsertDOMXSSFindingAbsorbsRepeatReachability(t *testing.T) {
 	env := newScanEnv(t)
 	ep := domXSSTestEndpoint(t, env, "http://x/page")
 	marker := "indhashmarker2"
-	cand, _ := detection.DOMXSSPayloadFor(detection.DOMSinkInnerHTML, marker)
+	cand, _ := detection.DOMXSSPayloadFor(detection.DOMSourceHash, detection.DOMSinkInnerHTML, marker)
 	canary := detection.DOMXSSCanary(marker)
 	ctx := context.Background()
 
@@ -287,8 +387,8 @@ func TestUpsertDOMXSSFindingDistinctSinksAreDistinctFindings(t *testing.T) {
 	marker := "indhashmarker3"
 	ctx := context.Background()
 
-	innerHTML, _ := detection.DOMXSSPayloadFor(detection.DOMSinkInnerHTML, marker)
-	outerHTML, _ := detection.DOMXSSPayloadFor(detection.DOMSinkOuterHTML, marker)
+	innerHTML, _ := detection.DOMXSSPayloadFor(detection.DOMSourceHash, detection.DOMSinkInnerHTML, marker)
+	outerHTML, _ := detection.DOMXSSPayloadFor(detection.DOMSourceHash, detection.DOMSinkOuterHTML, marker)
 	canary := detection.DOMXSSCanary(marker)
 
 	if _, err := upsertDOMXSSFinding(ctx, env.st, env.scanID, ep, innerHTML, canary, domain.NewID()); err != nil {
@@ -308,7 +408,7 @@ func TestCorrelateDOMXSSVerificationPromotesAndStaysConfirmed(t *testing.T) {
 	env := newScanEnv(t)
 	ep := domXSSTestEndpoint(t, env, "http://x/page")
 	marker := "indhashmarker4"
-	cand, _ := detection.DOMXSSPayloadFor(detection.DOMSinkInnerHTML, marker)
+	cand, _ := detection.DOMXSSPayloadFor(detection.DOMSourceHash, detection.DOMSinkInnerHTML, marker)
 	canary := detection.DOMXSSCanary(marker)
 	ctx := context.Background()
 
@@ -363,5 +463,72 @@ func TestDomXSSFindingDedupKeyNeverCollidesWithReflectedXSS(t *testing.T) {
 	domXSSKey := domXSSFindingDedupKey(ip, detection.DOMSourceHash, detection.DOMSinkInnerHTML)
 	if reflectedKey == domXSSKey {
 		t.Fatal("a reflected-xss and a dom-xss dedup key must never collide, even sharing the same raw ID")
+	}
+}
+
+// TestQueryStringDOMXSSFindingDoesNotCollideWithReflectedXSSOnSameParameter
+// is the explicit correctness property scope item E calls for: Indago's
+// EXISTING Reflected-XSS pipeline tests whether the SERVER reflects a query
+// parameter into the HTTP response body; the NEW query-string DOM-XSS
+// source (detection.DOMSourceQuery) tests whether the PAGE'S OWN JS re-reads
+// that SAME parameter name and feeds it into a sink — a genuinely
+// different code path. Both may legitimately fire on the SAME endpoint and
+// parameter name ("q"), and must produce TWO DISTINCT findings, never
+// merged/deduped against each other.
+func TestQueryStringDOMXSSFindingDoesNotCollideWithReflectedXSSOnSameParameter(t *testing.T) {
+	env := newScanEnv(t)
+	ctx := context.Background()
+	ep := domXSSTestEndpoint(t, env, "http://x/search?q=hello")
+	param := env.param(ep, "q", domain.LocationQuery, "hello")
+	injPoint := env.injection(ep, param)
+
+	// Reflected XSS side: the server echoes "q" into the response body.
+	reflectedCand := detection.Candidate{
+		Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Context: detection.CtxHTMLText,
+		Value: "<svg onload=m1>", DedupKey: "<svg onload=m1>", Priority: 90,
+	}
+	reflectedFinding, err := upsertPendingFinding(ctx, env.st, env.scanID, ep, injPoint.ID, param, reflectedCand, domain.NewID())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// DOM-XSS query-string side: the page's OWN JS re-reads location.search
+	// for the SAME parameter name "q" and feeds it into innerHTML —
+	// independent of whatever the server did with the parameter.
+	marker := "indquerycollide1"
+	domCand, ok := detection.DOMXSSPayloadFor(detection.DOMSourceQuery, detection.DOMSinkInnerHTML, marker)
+	if !ok {
+		t.Fatal("expected a candidate")
+	}
+	canary := detection.DOMXSSCanary(marker)
+	domFinding, err := upsertDOMXSSFinding(ctx, env.st, env.scanID, ep, domCand, canary, domain.NewID())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if reflectedFinding.ID == domFinding.ID {
+		t.Fatal("the reflected-xss and dom-xss (query source) findings must be DISTINCT Finding rows, even for the same endpoint and parameter name")
+	}
+	findings, err := env.st.Findings().ListByScan(ctx, env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("expected exactly 2 distinct findings (reflected + dom-xss query), got %d", len(findings))
+	}
+	var sawReflected, sawDOMXSS bool
+	for _, f := range findings {
+		switch f.VulnClass {
+		case domain.VulnReflectedXSS:
+			sawReflected = true
+		case domain.VulnDOMXSS:
+			sawDOMXSS = true
+			if f.Summary == "" && detection.DOMXSSSource(decodeFindingDetail(f.Detail).ParameterName) != detection.DOMSourceQuery {
+				t.Fatalf("dom-xss finding should be labeled with the query source, detail=%+v", decodeFindingDetail(f.Detail))
+			}
+		}
+	}
+	if !sawReflected || !sawDOMXSS {
+		t.Fatalf("expected one of each vuln class, findings=%+v", findings)
 	}
 }

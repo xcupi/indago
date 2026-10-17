@@ -55,6 +55,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -72,9 +73,13 @@ import (
 // job payload + the one-time, scan-wide enqueue pass
 // ---------------------------------------------------------------------------
 
-// domXSSJob is the JobDOMXSS queue payload: which endpoint to probe.
+// domXSSJob is the JobDOMXSS queue payload: which endpoint and which
+// client-side SOURCE to probe (one job per (endpoint, source) — see
+// enqueueDOMXSSProbes). The sink is never part of the job: it is
+// discovered during phase 1, not chosen in advance.
 type domXSSJob struct {
-	EndpointID domain.ID `json:"endpoint_id"`
+	EndpointID domain.ID              `json:"endpoint_id"`
+	Source     detection.DOMXSSSource `json:"source"`
 }
 
 func parseDOMXSSJob(job *domain.TestJob) (domXSSJob, error) {
@@ -85,7 +90,7 @@ func parseDOMXSSJob(job *domain.TestJob) (domXSSJob, error) {
 	if err := json.Unmarshal(job.Payload, &dj); err != nil {
 		return dj, fmt.Errorf("decode dom-xss job payload: %w", err)
 	}
-	if dj.EndpointID.Empty() {
+	if dj.EndpointID.Empty() || !dj.Source.IsValid() {
 		return dj, errors.New("dom-xss job payload incomplete")
 	}
 	return dj, nil
@@ -126,10 +131,11 @@ func selectDOMXSSEndpoints(endpoints []*domain.Endpoint) []*domain.Endpoint {
 // execution.go's domXSSPassDone/evaluate — the SAME "run once when the
 // ordinary job queue goes quiet" shape combined.go's
 // enqueueCombinedCandidates uses): one JobDOMXSS per distinct discovered
-// GET/HEAD-navigable Endpoint URL (see selectDOMXSSEndpoints). It reuses
-// the scan's existing Endpoint registry — never a parallel discovery
-// mechanism. Best-effort throughout: a failure here is logged, never
-// fatal.
+// GET/HEAD-navigable Endpoint URL (see selectDOMXSSEndpoints) PER
+// IMPLEMENTED SOURCE (detection.DOMXSSSources — hash, query, window.name,
+// postMessage as of this second slice). It reuses the scan's existing
+// Endpoint registry — never a parallel discovery mechanism. Best-effort
+// throughout: a failure here is logged, never fatal.
 func (c *Controller) enqueueDOMXSSProbes(ctx context.Context, scanID domain.ID) {
 	endpoints, err := c.store.Endpoints().ListByScan(ctx, scanID)
 	if err != nil {
@@ -140,25 +146,27 @@ func (c *Controller) enqueueDOMXSSProbes(ctx context.Context, scanID domain.ID) 
 	now := time.Now()
 	n := 0
 	for _, ep := range targets {
-		payload, err := json.Marshal(domXSSJob{EndpointID: ep.ID})
-		if err != nil {
-			c.log.Warn("dom-xss probes: marshal job", "scan", scanID, "err", err)
-			continue
+		for _, source := range detection.DOMXSSSources {
+			payload, err := json.Marshal(domXSSJob{EndpointID: ep.ID, Source: source})
+			if err != nil {
+				c.log.Warn("dom-xss probes: marshal job", "scan", scanID, "err", err)
+				continue
+			}
+			job := &domain.TestJob{
+				ID: domain.NewID(), ScanID: scanID, Type: domain.JobDOMXSS, State: domain.JobQueued,
+				Priority: 50, Target: domain.JobTarget{EndpointID: ep.ID, URL: ep.URL},
+				Payload: payload, MaxAttempts: 2,
+				AvailableAt: now, CreatedAt: now, UpdatedAt: now,
+			}
+			if err := c.queue.Enqueue(ctx, job); err != nil {
+				c.log.Warn("dom-xss probes: enqueue job", "scan", scanID, "source", source, "err", err)
+				continue
+			}
+			n++
 		}
-		job := &domain.TestJob{
-			ID: domain.NewID(), ScanID: scanID, Type: domain.JobDOMXSS, State: domain.JobQueued,
-			Priority: 50, Target: domain.JobTarget{EndpointID: ep.ID, URL: ep.URL},
-			Payload: payload, MaxAttempts: 2,
-			AvailableAt: now, CreatedAt: now, UpdatedAt: now,
-		}
-		if err := c.queue.Enqueue(ctx, job); err != nil {
-			c.log.Warn("dom-xss probes: enqueue job", "scan", scanID, "err", err)
-			continue
-		}
-		n++
 	}
 	if n > 0 {
-		c.log.Info("dom-xss probes: enqueued", "scan", scanID, "endpoints", n)
+		c.log.Info("dom-xss probes: enqueued", "scan", scanID, "jobs", n, "endpoints", len(targets))
 	}
 }
 
@@ -294,6 +302,35 @@ func domXSSHashURL(endpointURL, fragmentValue string) string {
 	return stripFragment(endpointURL) + "#" + jsEncodeURIComponent(fragmentValue)
 }
 
+// domXSSQueryURL builds the navigation URL with the query parameter named
+// param set to value, preserving every other existing query parameter and
+// the endpoint's own fragment (if any). Deliberately uses Go's net/url
+// query encoding (application/x-www-form-urlencoded semantics, "+" for
+// space) rather than jsEncodeURIComponent — unlike a URL FRAGMENT (read
+// raw via location.hash, which has no built-in decoding), the WHATWG URL
+// parser decodes a QUERY STRING's "+" as a space itself, and
+// URLSearchParams (the realistic way a page reads location.search, see
+// detection.DOMSourceQuery) implements exactly that spec behavior. So the
+// two sources need, and get, genuinely different encoders — this is not
+// an inconsistency to fix.
+func domXSSQueryURL(endpointURL, param, value string) string {
+	u, err := url.Parse(endpointURL)
+	if err != nil {
+		// Defensive fallback for a malformed endpoint URL; should not
+		// happen in practice since the endpoint was already navigated
+		// once by discovery.
+		sep := "?"
+		if strings.Contains(endpointURL, "?") {
+			sep = "&"
+		}
+		return endpointURL + sep + param + "=" + url.QueryEscape(value)
+	}
+	q := u.Query()
+	q.Set(param, value)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 // jsEncodeURIComponent percent-encodes s exactly like JavaScript's
 // encodeURIComponent (unreserved set: A-Z a-z 0-9 - _ . ! ~ * ' ( )) — NOT
 // Go's url.QueryEscape, which turns a space into "+" (application/
@@ -356,8 +393,12 @@ func confirmedDOMXSSTitle(title string) string {
 // correlateDOMXSSVerification, after the payload-verification phase, can
 // promote it. The caller MUST hold findingsMu (mirrors upsertPendingFinding,
 // which is also unlocked itself and relies on its caller to serialize it).
+// source is derived from cand.ContextSub (see detection.DOMXSSPayloadFor's
+// field-repurposing doc comment) — NOT hardcoded to any one source, so
+// every one of the four implemented sources produces its own distinct,
+// correctly-labeled Finding via the exact same function.
 func upsertDOMXSSFinding(ctx context.Context, st store.Store, scanID domain.ID, ep *domain.Endpoint, cand detection.Candidate, canaryValue string, reachTestCaseID domain.ID) (*domain.Finding, error) {
-	source := detection.DOMSourceHash
+	source := detection.DOMXSSSource(cand.ContextSub)
 	sink := detection.DOMXSSSink(cand.Context)
 	key := domXSSFindingDedupKey(ep.ID, source, sink)
 	now := time.Now()
@@ -366,7 +407,7 @@ func upsertDOMXSSFinding(ctx context.Context, st store.Store, scanID domain.ID, 
 		VerifyTestCaseID: reachTestCaseID,
 		Verdict:          domain.VerdictPending,
 		Confidence:       domain.ConfidenceLow,
-		Notes:            "reachability probe: a benign canary in location.hash reached this sink — reachability only, not yet a confirmed vulnerability",
+		Notes:            fmt.Sprintf("reachability probe: a benign canary in %s reached this sink — reachability only, not yet a confirmed vulnerability", source),
 		At:               now,
 	}
 
@@ -516,6 +557,25 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 		return nil
 	}
 
+	source := dj.Source
+	var queryParam string
+	if source == detection.DOMSourceQuery {
+		queryParam, err = e.firstQueryParamName(ctx, ep.ID)
+		if err != nil {
+			e.log.Warn("dom-xss: list parameters for query-string source", "job", job.ID, "err", err)
+		}
+		if queryParam == "" {
+			// No discovered query parameter to target — a documented
+			// boundary (mirrors domXSSNavigable's GET/HEAD-only
+			// boundary), not a failure: this source has nothing to set
+			// without knowing a parameter name the page's own JS might
+			// read. See docs/dom-xss.md.
+			tc := e.newTestCase(ctx, job, ep.URL)
+			e.finishTestCase(ctx, tc, nil, "query-string DOM-XSS source skipped: no discovered query parameter on this endpoint")
+			return nil
+		}
+	}
+
 	marker := detection.NewProbe(job.ScanID, ep.ID).Token
 	sessionStatePath := e.sessionStatePathFor(ctx, job.ScanID)
 
@@ -532,9 +592,8 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 
 	// --- Phase 1: reachability ---
 	canary := detection.DOMXSSCanary(marker)
-	canaryURL := domXSSHashURL(ep.URL, canary)
-	console, _, _, _, navErr := e.navigate(ctx, bctx, canaryURL, marker)
-	reachTC := e.newTestCase(ctx, job, canaryURL)
+	console, _, _, _, canaryNavURL, navErr := e.navigateSource(ctx, bctx, source, ep, queryParam, marker, canary)
+	reachTC := e.newTestCase(ctx, job, canaryNavURL)
 	if navErr != nil {
 		e.finishTestCase(ctx, reachTC, navErr, "reachability probe")
 		if ctx.Err() != nil {
@@ -544,16 +603,17 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	}
 	reachable := parseDOMXSSReachability(console, marker)
 	if len(reachable) == 0 {
-		e.finishTestCase(ctx, reachTC, nil, "no HTML-injection sink reachable from location.hash (negative result)")
+		e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("no HTML-injection sink reachable from %s (negative result)", source))
 		return nil
 	}
 	// Bounded to the FIRST reachable sink (deterministic: whichever the
 	// page's own script used first) — see this file's header comment:
-	// this slice tests one pair per endpoint, not every reachable sink.
+	// this slice tests one pair per endpoint per source, not every
+	// reachable sink.
 	sink := reachable[0]
 	e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("reachable sink: %s (canary observed in the hooked setter/call)", sink))
 
-	cand, ok := detection.DOMXSSPayloadFor(sink, marker)
+	cand, ok := detection.DOMXSSPayloadFor(source, sink, marker)
 	if !ok {
 		return nil
 	}
@@ -568,9 +628,8 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 
 	// --- Phase 2: verification (the EXACT SAME deterministic bare-marker
 	// signal Reflected XSS verification already uses) ---
-	payloadURL := domXSSHashURL(ep.URL, cand.Value)
-	console2, pageErrs2, html2, screenshot2, verr := e.navigate(ctx, bctx, payloadURL, marker)
-	verifyTC := e.newTestCase(ctx, job, payloadURL)
+	console2, pageErrs2, html2, screenshot2, payloadNavURL, verr := e.navigateSource(ctx, bctx, source, ep, queryParam, marker, cand.Value)
+	verifyTC := e.newTestCase(ctx, job, payloadNavURL)
 	if verr != nil {
 		e.finishTestCase(ctx, verifyTC, verr, "verification navigation")
 		return nil // the finding stays Pending; a later retry can still verify it
@@ -597,8 +656,65 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	verifyTC.EvidenceIDs = evidenceIDs
 	e.finishTestCase(ctx, verifyTC, nil, notes)
 
-	e.correlateDOMXSSVerification(ctx, finding.ID, cand, verdict, confidence, notes, verifyTC.ID, evidenceIDs, payloadURL)
+	e.correlateDOMXSSVerification(ctx, finding.ID, cand, verdict, confidence, notes, verifyTC.ID, evidenceIDs, payloadNavURL)
 	return nil
+}
+
+// firstQueryParamName returns the name of the first discovered Location-
+// Query parameter for endpointID (stable, by store order), or "" if none
+// have been discovered. Reuses the SAME Parameter registry Reflected
+// XSS's own query-injection-point testing already reads — see
+// detection.DOMSourceQuery's doc comment: this engine deliberately tests
+// the SAME parameter NAME a page's own client-side JS might read from
+// location.search, independent of (and never deduplicated against) the
+// server-side reflection pipeline.
+func (e *domXSSExecutor) firstQueryParamName(ctx context.Context, endpointID domain.ID) (string, error) {
+	params, err := e.store.Parameters().ListByEndpoint(ctx, endpointID)
+	if err != nil {
+		return "", err
+	}
+	for _, p := range params {
+		if p != nil && p.Location == domain.LocationQuery && p.Name != "" {
+			return p.Name, nil
+		}
+	}
+	return "", nil
+}
+
+// navigateSource performs ONE phase's navigation for source, injecting
+// value via that source's own mechanism, and returns the page's
+// observations plus the URL actually navigated to (used for the
+// TestCase's own URL field and, for verification, the Finding's "verified
+// URL"). marker installs the sink-hook harness (see domXSSHarnessScript);
+// value is this phase's canary or real payload.
+//
+// Hash and Query both encode value directly into the navigation URL (the
+// SAME single-navigation mechanism, just a different URL part — see
+// domXSSHashURL/domXSSQueryURL). WindowName and PostMessage are
+// mechanically different (see navigateWithWindowName/
+// navigateWithPostMessage's own doc comments) — this is exactly the "only
+// the source-side injection mechanism is new per source" boundary
+// docs/dom-xss.md describes; the sink-hook harness and the phase-2
+// verification signal are identical for all four.
+func (e *domXSSExecutor) navigateSource(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, ep *domain.Endpoint, queryParam, marker, value string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, navURL string, err error) {
+	switch source {
+	case detection.DOMSourceQuery:
+		navURL = domXSSQueryURL(ep.URL, queryParam, value)
+		console, pageErrs, html, screenshot, err = e.navigate(ctx, bctx, navURL, marker)
+		return console, pageErrs, html, screenshot, navURL, err
+	case detection.DOMSourceWindowName:
+		navURL = ep.URL
+		console, pageErrs, html, screenshot, err = e.navigateWithWindowName(ctx, bctx, navURL, marker, value)
+		return console, pageErrs, html, screenshot, navURL, err
+	case detection.DOMSourcePostMessage:
+		navURL = ep.URL
+		console, pageErrs, html, screenshot, err = e.navigateWithPostMessage(ctx, bctx, navURL, marker, value)
+		return console, pageErrs, html, screenshot, navURL, err
+	default: // detection.DOMSourceHash
+		navURL = domXSSHashURL(ep.URL, value)
+		console, pageErrs, html, screenshot, err = e.navigate(ctx, bctx, navURL, marker)
+		return console, pageErrs, html, screenshot, navURL, err
+	}
 }
 
 // sessionStatePathFor returns the scan's saved authenticated session
@@ -633,6 +749,122 @@ func (e *domXSSExecutor) navigate(ctx context.Context, bctx *browser.Context, na
 	html, _ = page.Content(ctx)
 	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
 	return page.ConsoleMessages(), page.PageErrors(), html, shot, nil
+}
+
+// navigateWithWindowName implements the ONE genuinely different mechanical
+// step window.name needs versus Hash/Query (see
+// detection.DOMSourceWindowName's doc comment): window.name PERSISTS
+// across a same-tab navigation, even cross-origin, in real browsers —
+// unlike Hash/Query it cannot be set by simply encoding it into the URL
+// being navigated to. Sequence (same page/tab throughout, never a new
+// one — this is load-bearing, since window.name is a property of the TAB,
+// not the document):
+//  1. install the sink-hook harness (BEFORE any navigation, so it is
+//     already in place for every navigation this page makes — Playwright's
+//     AddInitScript re-runs it on every subsequent navigation, including
+//     step 3's);
+//  2. navigate to a neutral page first (about:blank — the simplest choice
+//     given browser.Page's existing Navigate; about: URLs are never
+//     subject to the scope gate at all, see browser.isNetworkURL, so this
+//     cannot leak a real request anywhere);
+//  3. set window.name via Evaluate;
+//  4. THEN navigate (same page) to targetURL — window.name is still set,
+//     exactly reproducing the real-world legacy attack (an attacker page
+//     sets window.name on a tab it controls, then redirects that SAME tab
+//     to the victim page).
+func (e *domXSSExecutor) navigateWithWindowName(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, err error) {
+	page, err := bctx.NewPage(ctx)
+	if err != nil {
+		return nil, nil, "", nil, err
+	}
+	defer page.Close()
+	if err := page.AddInitScript(ctx, domXSSHarnessScript(marker)); err != nil {
+		return nil, nil, "", nil, err
+	}
+	if _, err := page.Navigate(ctx, "about:blank", browser.NavOptions{WaitUntil: browser.WaitLoad}); err != nil {
+		return nil, nil, "", nil, err
+	}
+	if _, err := page.Evaluate(ctx, setWindowNameScript(value)); err != nil {
+		return nil, nil, "", nil, err
+	}
+	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{WaitUntil: browser.WaitLoad}); err != nil {
+		return nil, nil, "", nil, err
+	}
+	html, _ = page.Content(ctx)
+	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
+	return page.ConsoleMessages(), page.PageErrors(), html, shot, nil
+}
+
+// setWindowNameScript builds the Evaluate script that sets window.name to
+// value, JS-string-literal-quoted via goQuoteJS (the exact same escaping
+// helper the harness itself uses) — no URL percent-encoding is involved at
+// all here, unlike Hash/Query: the value becomes a JS string directly,
+// never travels through a URL.
+func setWindowNameScript(value string) string {
+	return "window.name = " + goQuoteJS(value) + ";"
+}
+
+// navigateWithPostMessage implements the postMessage source's testing
+// methodology (see detection.DOMSourcePostMessage's doc comment and
+// docs/dom-xss.md's "postMessage testing methodology" section — this is
+// the least obvious of the four sources).
+//
+// The realistic vulnerable pattern is a page with its OWN
+// `window.addEventListener('message', ...)` handler that uses event.data
+// in a dangerous sink WITHOUT validating event.origin/event.source — in
+// the real world this is exploitable by ANY other page/frame/popup that
+// holds a reference to this window (an <iframe> embed, a window.open()
+// popup, or a malicious page the victim visits that opens this one in a
+// new tab). Reproducing that exactly would need a second, attacker-
+// controlled origin; this engine instead does the mechanically equivalent
+// thing without one: navigate to the ALREADY-LOADED target page (same
+// browser context, same mechanism every other source already uses), then
+// use Evaluate to run `window.postMessage(value, '*')` directly AGAINST
+// THAT SAME PAGE. This faithfully simulates an untrusted message
+// arriving: the page's own listener has no way to tell a message
+// delivered this way apart from one delivered by a real third-party
+// frame — what the listener inspects is event.origin/event.source/
+// event.data, and none of those differ based on how postMessage was
+// invoked. Since the vulnerability being tested is precisely "the
+// listener does not validate the sender", nothing needs to be faked on
+// the sender side to test it validly.
+//
+// The Evaluate script returns a short-lived Promise so the call waits for
+// the message handler's own (synchronous or microtask-queued) reaction
+// before this function reads back console/page-error state — postMessage
+// delivery and the page's listener callback are asynchronous.
+func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, err error) {
+	page, err := bctx.NewPage(ctx)
+	if err != nil {
+		return nil, nil, "", nil, err
+	}
+	defer page.Close()
+	if err := page.AddInitScript(ctx, domXSSHarnessScript(marker)); err != nil {
+		return nil, nil, "", nil, err
+	}
+	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{WaitUntil: browser.WaitLoad}); err != nil {
+		return nil, nil, "", nil, err
+	}
+	if _, err := page.Evaluate(ctx, postMessageScript(value)); err != nil {
+		return nil, nil, "", nil, err
+	}
+	html, _ = page.Content(ctx)
+	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
+	return page.ConsoleMessages(), page.PageErrors(), html, shot, nil
+}
+
+// postMessageScript builds the Evaluate script that fires
+// window.postMessage(value, '*') against the page it runs in, waiting
+// (via a short setTimeout wrapped in a Promise, which Evaluate awaits)
+// for the target's own message listener to react before returning. '*'
+// (no targetOrigin restriction) is this engine's own sender-side choice,
+// not a statement about the TARGET's validation — it exists so the
+// message is delivered regardless of the target's current origin, mirrors
+// how trivially an attacker can do the same, and the whole point of this
+// probe is to observe whether the LISTENER validates anything, not to
+// pre-filter on its behalf.
+func postMessageScript(value string) string {
+	return "(() => new Promise((resolve) => { window.postMessage(" + goQuoteJS(value) + ", '*'); setTimeout(resolve, 300); }))();"
 }
 
 // newTestCase creates and persists a running TestCase for one navigation
