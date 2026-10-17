@@ -157,11 +157,13 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 		nav, err = page.NavigateForm(ctx, method, in.URL, in.FormValues, browser.NavOptions{
 			WaitUntil: browser.WaitLoad,
 			Timeout:   v.cfg.NavigationTimeout,
+			Limiter:   in.Limiter,
 		})
 	} else {
 		nav, err = page.Navigate(ctx, in.URL, browser.NavOptions{
 			WaitUntil: browser.WaitLoad,
 			Timeout:   v.cfg.NavigationTimeout,
+			Limiter:   in.Limiter,
 		})
 	}
 	if err != nil {

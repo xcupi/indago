@@ -264,6 +264,11 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 		ctx, cancel = context.WithTimeout(ctx, c.timeout)
 		defer cancel()
 	}
+	if req.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
+		defer cancel()
+	}
 
 	hr, err := c.buildRequest(ctx, req)
 	if err != nil {

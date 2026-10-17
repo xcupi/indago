@@ -61,8 +61,10 @@ per scan:
 ## 1b. Test job execution
 
 Each `JobTest` is run by the **executor** (`internal/scan/executor.go`) on the
-worker pool's `http` group, so HTTP concurrency, the request rate, pause/resume,
-and cancel are exactly the pool's.
+worker pool's `http` group, so HTTP concurrency, pause/resume, and cancel are
+exactly the pool's. The request rate is NOT a pool property: every request the
+executor sends goes through the scan's scope-enforcing engine, which takes one
+permit per request from the scan's shared limiter (see §"Request pacing" below).
 
 1. **Resolve** the job's endpoint, the endpoint's parameters, and (for an
    injection-point job) the focused parameter; all must belong to the job's scan.
@@ -175,6 +177,38 @@ browser configured for the scan → the job is `skipped`, not failed.
   `cancelled` ("interrupted by restart"); their requeued jobs record fresh attempts.
 - Completed-scan status reports `tests` counts (success/error/timeout/cancelled/
   skipped/running), also shown by `indago scan status`.
+
+## 1d. Request pacing (`requests_per_second`)
+
+`domain.ScanConfig.RequestsPerSecond` (0 = unlimited) is one budget per scan.
+Each scan execution owns ONE `ratelimit.Limiter`, created in `launch`, and every
+target-facing request of that scan takes a permit from it:
+
+- **Raw HTTP** (discovery fetches — crawl, sitemap, robots, content wordlist —
+  redirect hops, and raw test requests incl. dynamic-token refresh): taken in
+  `scopedEngine.Do`, once per request and per redirect hop, AFTER the scope check
+  (an out-of-scope request takes no permit) and BEFORE the request is sent.
+- **Browser discovery** (`browser.RenderOptions.Limiter`) and **browser
+  verification** (`verification.Input.Limiter`): one permit per navigation,
+  taken in `Page.Navigate` / `Page.NavigateForm` before the navigation starts.
+  The browser `Manager` is shared by all scans, so the limiter is passed per call.
+
+A runtime `Reconfigure` calls `SetRate` on that same instance, so a change
+reaches a crawl or browser step that is already running; a permit already
+reserved keeps its slot, and lowering to unlimited releases queued waiters.
+
+A request's `RequestTimeout` (and the HTTP client's own timeout) starts when the
+request is sent: time spent waiting for a permit is never reported as a TIMEOUT.
+
+Consequence: the rate counts requests, not jobs. A test job that sends several
+requests (baseline, reflection, candidate) now consumes several permits; before
+this, the rate applied per job and could be exceeded by that factor.
+
+Not paced (documented exceptions): subresources, XHR/fetch and WebSocket traffic
+that a loaded page issues on its own (one permit covers the navigation, not each
+subresource — the browser's own request interception would have to block on the
+limiter); and interactive/auto login, which runs when a session is established,
+before any scan execution exists, so no scan limiter applies to it.
 
 ## 2. Scope is enforced at five points (fail closed)
 
@@ -321,7 +355,7 @@ so all three always agree:
 | … quick / crawl + limits | `POST /api/scans` + `"quick_scan":true` or `"max_depth":N,"max_pages":N,"max_endpoints":N` | `indago scan create … -quick` or `-depth N -max-pages N -max-endpoints N` |
 | … with an existing session | `POST /api/scans` + `"auth_mode":"existing","auth_state_path":"/abs/state.json"` | `indago scan create … -auth-state FILE` (`-auth existing` implied; a relative path is made absolute by the CLI) |
 | start / pause / resume / cancel | `POST /api/scans/{id}/{action}` | `indago scan start\|pause\|resume\|cancel ID` |
-| runtime concurrency / rate | `POST /api/scans/{id}/config` (the four runtime fields; crawl extent preserved) | `indago scan config ID [-discovery N] [-http N] [-browser N] [-rate N]` |
+| runtime concurrency / rate (`requests_per_second` paces all target-facing traffic of the scan) | `POST /api/scans/{id}/config` (the four runtime fields; crawl extent preserved) | `indago scan config ID [-discovery N] [-http N] [-browser N] [-rate N]` |
 | status (state, discovery, jobs, findings, request rate, live workers, 429/5xx, redacted session) | `GET /api/scans/{id}/status` | `indago scan status ID [-json]` |
 | interactive login (capture a session file for `existing` mode; needs `-browser`) | `POST /api/auth/login` | (dashboard only) |
 
@@ -367,6 +401,9 @@ already fixed in code and have been removed: live discovery concurrency
 (the reflection step), and the in-memory `pause_and_ask` marker (now
 `ScanStats.AskedAtConfirmed`, persisted).
 
+- **Page-initiated subresource requests are not individually paced.** The rate
+  limit covers navigations and every raw HTTP request, but not each subresource,
+  XHR, or fetch a loaded page issues by itself (§1d).
 - **At-least-once job execution (accepted).** Per-job progress inside a handler
   is not persisted; a crashed job is re-run from the start (§6). Outcomes
   stay correct: findings correlate, evidence is unioned, and verdicts only move

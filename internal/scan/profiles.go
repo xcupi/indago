@@ -11,6 +11,8 @@ const (
 )
 
 // ProfileConfig returns the concurrency/rate preset for a named profile.
+// RequestsPerSecond is the scan-wide budget for every target-facing request
+// (crawl, browser, and HTTP tests alike; see domain.ScanConfig).
 //
 // Defaults are conservative by design. The Balanced profile matches the spec's
 // initial defaults (Discovery=4, HTTP=10, Browser=2). Custom returns Balanced as

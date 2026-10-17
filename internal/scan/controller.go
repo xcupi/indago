@@ -670,7 +670,9 @@ func (c *Controller) Reconfigure(ctx context.Context, scanID domain.ID, cfg doma
 		_ = ex.pool.Resize(GroupDiscovery, cfg.DiscoveryConcurrency)
 		_ = ex.pool.Resize(GroupHTTP, cfg.HTTPConcurrency)
 		_ = ex.pool.Resize(GroupBrowser, minBrowserWorkers(cfg.BrowserConcurrency))
-		ex.pool.SetRate(cfg.RequestsPerSecond)
+		// The scan's one limiter: reaches discovery fetches, redirect hops,
+		// browser discovery and verification, and raw test requests at once.
+		ex.limiter.SetRate(cfg.RequestsPerSecond)
 		// GroupDiscovery above is queue-pool bookkeeping only: discovery itself
 		// never runs as a queued job (see handlers.go), so resizing it changes
 		// nothing on its own. Discovery has its own concurrency fan-out
@@ -1034,10 +1036,9 @@ func (c *Controller) poolConfig(sc *domain.Scan) worker.Config {
 			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest}, Size: sc.Config.HTTPConcurrency},
 			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
 		},
-		LeaseDuration:     c.opts.LeaseDuration,
-		Heartbeat:         c.opts.Heartbeat,
-		IdlePoll:          c.opts.IdlePoll,
-		RequestsPerSecond: sc.Config.RequestsPerSecond,
+		LeaseDuration: c.opts.LeaseDuration,
+		Heartbeat:     c.opts.Heartbeat,
+		IdlePoll:      c.opts.IdlePoll,
 	}
 }
 

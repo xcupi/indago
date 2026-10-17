@@ -11,6 +11,7 @@ import (
 
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/ratelimit"
 )
 
 // maxScopedRedirects bounds the redirect chain followed by scopedEngine.
@@ -37,6 +38,9 @@ type scopedEngine struct {
 	// the caller set — see WithSessionCookies. nil for most scans (anonymous
 	// auth, or no browser storage state).
 	cookies []*http.Cookie
+	// limiter paces every request this engine sends (one permit per request,
+	// per redirect hop), after the scope check — see WithRateLimiter.
+	limiter *ratelimit.Limiter
 }
 
 var _ httpengine.Engine = (*scopedEngine)(nil)
@@ -55,6 +59,15 @@ func newScopedEngine(inner httpengine.Engine, scope domain.Scope) *scopedEngine 
 // requests even though the underlying transport (c.opts.HTTP) is shared.
 func (s *scopedEngine) WithSessionCookies(cookies []*http.Cookie) *scopedEngine {
 	s.cookies = cookies
+	return s
+}
+
+// WithRateLimiter paces every request this engine sends with the scan's shared
+// limiter: one permit per request and per redirect hop, taken AFTER the scope
+// check (an out-of-scope request never consumes a permit) and BEFORE the request
+// leaves. nil leaves the engine unpaced. Returns the same engine for chaining.
+func (s *scopedEngine) WithRateLimiter(l *ratelimit.Limiter) *scopedEngine {
+	s.limiter = l
 	return s
 }
 
@@ -94,6 +107,11 @@ func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpen
 	for hop := 0; ; hop++ {
 		if d := s.scope.Permits(cur.URL); !d.Allowed {
 			return nil, fmt.Errorf("%w: %s", ErrOutOfScope, d.Reason)
+		}
+		// Pace AFTER the scope check (an out-of-scope request takes no permit)
+		// and BEFORE the request is sent — once per hop, so redirects count.
+		if err := s.limiter.Wait(ctx); err != nil {
+			return nil, err
 		}
 		resp, err := s.inner.Do(ctx, &cur)
 		if err != nil {

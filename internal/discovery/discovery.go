@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/ratelimit"
 )
 
 // Errors.
@@ -136,6 +137,10 @@ func (c *liveConcurrency) Set(n int) {
 // Config tunes discovery behavior. Zero values get sensible defaults via
 // withDefaults.
 type Config struct {
+	// Limiter is the scan's shared request-rate limiter. Browser-based sources
+	// pace their navigations with it; HTTP fetches are paced by the scan's
+	// scope-enforcing engine, which is handed the same limiter. nil = unlimited.
+	Limiter             *ratelimit.Limiter
 	MaxDepth            int      // crawl depth (0 = seeds only)
 	MaxEndpoints        int      // cap on endpoints discovered (0 → default)
 	MaxPages            int      // cap on pages fetched by the crawler (0 → default)

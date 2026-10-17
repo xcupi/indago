@@ -8,11 +8,12 @@ import (
 	"github.com/indago/indago/internal/browser"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/ratelimit"
 	"github.com/indago/indago/internal/verification"
 	"github.com/indago/indago/internal/worker"
 )
 
-func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope, proxyPool []string) map[domain.JobType]worker.Handler {
+func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope, proxyPool []string, limiter *ratelimit.Limiter) map[domain.JobType]worker.Handler {
 	h := phase0Handlers(c.log)
 	// Shared by both executors so Finding correlation (candidate-side upsert
 	// and verification-side update) is race-free across the whole scan — see
@@ -22,7 +23,7 @@ func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope, 
 	findingsMu := &sync.Mutex{}
 	tokenMu := &sync.Mutex{}
 	h[domain.JobTest] = newExecutor(c.store, eng, c.opts.Evidence, c.queue, c.opts.Executor, c.log, findingsMu, tokenMu)
-	h[domain.JobVerify] = newVerifyExecutor(c.store, eng, c.verifier(), c.opts.Evidence, scope, c.opts.Executor, c.log, findingsMu, tokenMu, proxyPool)
+	h[domain.JobVerify] = newVerifyExecutor(c.store, eng, c.verifier(), c.opts.Evidence, scope, c.opts.Executor, c.log, findingsMu, tokenMu, proxyPool, limiter)
 	return h
 }
 

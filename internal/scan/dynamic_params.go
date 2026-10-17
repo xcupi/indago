@@ -115,9 +115,7 @@ func refreshDynamicParams(ctx context.Context, eng httpengine.Engine, timeout ti
 	}
 	u.RawQuery = ""
 
-	rctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	resp, err := eng.Do(rctx, &httpengine.Request{Method: "GET", URL: u.String()})
+	resp, err := eng.Do(ctx, &httpengine.Request{Method: "GET", URL: u.String(), Timeout: timeout})
 	if err != nil || resp == nil || len(resp.Body) == 0 {
 		return params
 	}

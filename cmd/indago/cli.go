@@ -508,7 +508,7 @@ func (c *cli) scanConfig(args []string) error {
 	disc := fs.Int("discovery", -1, "discovery concurrency")
 	httpC := fs.Int("http", -1, "HTTP concurrency")
 	browserC := fs.Int("browser", -1, "browser concurrency")
-	rps := fs.Float64("rate", -1, "requests per second (0 = unlimited)")
+	rps := fs.Float64("rate", -1, "target requests per second, all scan traffic combined incl. crawl and browser (0 = unlimited)")
 	pos, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err

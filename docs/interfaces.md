@@ -83,12 +83,13 @@ func New(q queue.Queue, handlers map[domain.JobType]Handler, cfg Config, log) *P
 func (p *Pool) Start(ctx) error
 func (p *Pool) Pause(); func (p *Pool) Resume()
 func (p *Pool) Resize(group string, n int) error
-func (p *Pool) SetRate(rps float64)
 func (p *Pool) Stop()
 ```
 
 - ✅ implemented. Named groups (`discovery`/`http`/`browser`), runtime resize,
-  pause/resume, lease heartbeating, optional rate limiting.
+  pause/resume, lease heartbeating. Request-rate limiting is not a pool concern:
+  it lives in `internal/ratelimit` and paces each request at the scope-enforcing
+  engine (see docs/architecture.md, "Rate limiting").
 - `ErrPermanent` marks a non-retryable handler failure; any other error is
   retried subject to the job's `MaxAttempts`.
 - **Handlers are supplied by the caller** (`scan.Options.Handlers`). The default

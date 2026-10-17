@@ -215,7 +215,7 @@ func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*
 		return nil, err
 	}
 
-	nav, err := page.Navigate(ctx, url, NavOptions{WaitUntil: opts.WaitUntil, Timeout: opts.Timeout})
+	nav, err := page.Navigate(ctx, url, NavOptions{WaitUntil: opts.WaitUntil, Timeout: opts.Timeout, Limiter: opts.Limiter})
 	if err != nil {
 		return nil, err
 	}
@@ -605,6 +605,9 @@ func (p *Page) Navigate(ctx context.Context, url string, opts NavOptions) (*NavR
 	if wait == "" {
 		wait = WaitLoad
 	}
+	if err := opts.Limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
 	status, finalURL, err := gotoWithCtx(ctx, p.handle, url, wait, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("browser: navigate: %w", err)
@@ -644,6 +647,9 @@ func (p *Page) NavigateForm(ctx context.Context, method, url string, fields map[
 	fp, ok := p.handle.(formPoster)
 	if !ok {
 		return nil, ErrFormPostUnsupported
+	}
+	if err := opts.Limiter.Wait(ctx); err != nil {
+		return nil, err
 	}
 	timeout := opts.Timeout
 	if timeout <= 0 {

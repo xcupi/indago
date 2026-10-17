@@ -19,6 +19,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/indago/indago/internal/ratelimit"
 )
 
 // Errors.
@@ -143,6 +145,10 @@ type ContextOptions struct {
 type NavOptions struct {
 	WaitUntil string        // one of the Wait* constants ("" → load)
 	Timeout   time.Duration // 0 → Manager default
+	// Limiter, when non-nil, paces this navigation (one permit per navigation,
+	// taken before the request is sent). It is the scan's shared limiter, so
+	// browser navigations count against the same RequestsPerSecond as HTTP.
+	Limiter *ratelimit.Limiter
 }
 
 // NavResult is the outcome of a navigation.
@@ -217,6 +223,8 @@ type RenderOptions struct {
 	Timeout time.Duration
 	// Screenshot requests a screenshot be captured.
 	Screenshot bool
+	// Limiter paces the navigation; see NavOptions.Limiter.
+	Limiter *ratelimit.Limiter
 }
 
 // RenderResult captures observations from loading a page. Fields are generic so
