@@ -49,7 +49,7 @@ func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	var req createTargetReq
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeJSONBodyError(w, err)
 		return
 	}
 	req.Name = strings.TrimSpace(req.Name)
@@ -119,7 +119,7 @@ func (s *Server) handlePutScope(w http.ResponseWriter, r *http.Request) {
 	}
 	var req scopeReq
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeJSONBodyError(w, err)
 		return
 	}
 	include := cleanList(req.IncludeHosts)
@@ -226,7 +226,7 @@ type createScanReq struct {
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 	var req createScanReq
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeJSONBodyError(w, err)
 		return
 	}
 	if req.ProjectID == "" || req.TargetID == "" {
@@ -361,7 +361,7 @@ func (s *Server) handleReconfigureScan(w http.ResponseWriter, r *http.Request) {
 	}
 	var req reconfigureReq
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeJSONBodyError(w, err)
 		return
 	}
 	cfg := sc.Config // preserve QuickScan/MaxDepth/MaxPages/MaxEndpoints
@@ -403,7 +403,7 @@ func (s *Server) handleInteractiveLogin(w http.ResponseWriter, r *http.Request) 
 	}
 	var req loginReq
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeJSONBodyError(w, err)
 		return
 	}
 	u, err := url.Parse(strings.TrimSpace(req.LoginURL))

@@ -71,7 +71,7 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 
 	var req createReportReq
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeJSONBodyError(w, err)
 		return
 	}
 	format := domain.ReportFormat(strings.TrimSpace(req.Format))

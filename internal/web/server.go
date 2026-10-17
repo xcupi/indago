@@ -7,11 +7,13 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"embed"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -203,7 +205,7 @@ type createProjectReq struct {
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	var req createProjectReq
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeJSONBodyError(w, err)
 		return
 	}
 	if req.Name == "" {
@@ -296,11 +298,32 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+func writeJSONBodyError(w http.ResponseWriter, err error) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, "JSON body exceeds 1 MiB limit")
+		return
+	}
+	writeError(w, http.StatusBadRequest, "invalid JSON body")
+}
+
 func readJSON(r *http.Request, v any) error {
 	defer r.Body.Close()
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+	// Read the complete bounded body before decoding: even trailing whitespace
+	// counts, and an early valid object cannot bypass the size limit.
+	body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
-	return dec.Decode(v)
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		return errors.New("expected one JSON document")
+	}
+	return nil
 }
 
 // ListenAndServe binds addr and serves until ctx is canceled, then shuts down
