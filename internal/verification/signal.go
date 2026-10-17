@@ -55,6 +55,19 @@ func firstContaining(token string, messages []string) (string, bool) {
 	return "", false
 }
 
+// MatchExecutionSignal is matchExecutionSignal's exported form, reused by
+// other engines that need the SAME deterministic bare-marker-as-code
+// verification mechanism Reflected XSS already uses (see this file's doc
+// comment for why it is a sound, non-heuristic signal) — e.g. DOM XSS
+// payload verification (internal/scan/domxss.go), which replays the
+// identical bare-marker trick (an <img onerror=MARKER> assigned to an
+// HTML-injection sink) and must be confirmed by the SAME
+// "Uncaught ReferenceError: MARKER is not defined" signal, never a
+// separately-invented one.
+func MatchExecutionSignal(token string, pageErrors, consoleErrors []string) (Signal, string, bool) {
+	return matchExecutionSignal(token, pageErrors, consoleErrors)
+}
+
 // domExcerpt returns a bounded window of html around the first occurrence of
 // token, for a readable, auditable evidence snippet. "" when token is absent.
 func domExcerpt(html, token string, window int) string {

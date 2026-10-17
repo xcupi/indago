@@ -287,4 +287,11 @@ func (p *pwPage) WaitForURL(glob string, timeout time.Duration) error {
 	return p.p.WaitForURL(glob, opts)
 }
 
+// AddInitScript installs script via Playwright's own init-script mechanism
+// (runs before any of the page's own scripts, on every navigation this page
+// makes from here on).
+func (p *pwPage) AddInitScript(script string) error {
+	return p.p.AddInitScript(pw.Script{Content: pw.String(script)})
+}
+
 func (p *pwPage) Close() error { return p.p.Close() }

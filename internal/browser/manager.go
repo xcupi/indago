@@ -667,6 +667,16 @@ func (p *Page) NavigateForm(ctx context.Context, method, url string, fields map[
 	return &NavResult{Status: r.status, FinalURL: r.finalURL}, nil
 }
 
+// AddInitScript installs script to run in this page BEFORE any of the
+// page's own scripts, on this navigation and every subsequent one this
+// Page makes (Playwright's own init-script mechanism) — MUST be called
+// before Navigate for the hook to be in place before the page's own
+// onload-style handler can run. Used by DOM-XSS reachability/verification
+// probing (internal/scan/domxss.go) to install sink hooks.
+func (p *Page) AddInitScript(ctx context.Context, script string) error {
+	return callCtxErr(ctx, func() error { return p.handle.AddInitScript(script) })
+}
+
 // Evaluate runs a JavaScript expression in the page and returns its result.
 // It is the general escape hatch for driving and inspecting a loaded page —
 // used by UI/integration tests to click, fill, and read DOM state against the

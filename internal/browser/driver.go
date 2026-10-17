@@ -65,6 +65,14 @@ type pageHandle interface {
 	// WaitForURL blocks until navigation reaches a URL matching glob (used for
 	// interactive login).
 	WaitForURL(glob string, timeout time.Duration) error
+	// AddInitScript installs script to run in this page BEFORE any of the
+	// page's own scripts, on this navigation and every subsequent one in
+	// this page (Playwright's own init-script mechanism). Used by DOM-XSS
+	// probing (internal/scan/domxss.go) to install sink hooks that must be
+	// in place before a page's own onload-style handler can run — a
+	// listener attached via Evaluate AFTER the page has already loaded
+	// would miss a handler that already fired.
+	AddInitScript(script string) error
 	Close() error
 }
 

@@ -1032,7 +1032,7 @@ func (c *Controller) poolConfig(sc *domain.Scan) worker.Config {
 		Groups: []worker.GroupSpec{
 			{Name: GroupDiscovery, Types: []domain.JobType{domain.JobDiscovery}, Size: sc.Config.DiscoveryConcurrency},
 			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest}, Size: sc.Config.HTTPConcurrency},
-			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
+			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify, domain.JobDOMXSS}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
 		},
 		LeaseDuration:     c.opts.LeaseDuration,
 		Heartbeat:         c.opts.Heartbeat,

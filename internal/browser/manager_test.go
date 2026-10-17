@@ -212,6 +212,7 @@ type fakePage struct {
 	dlgFn        func(string)
 	errFn        func(string)
 	localStorage map[string]string
+	initScripts  []string
 }
 
 func (p *fakePage) Goto(url, waitUntil string, timeout time.Duration) (int, string, error) {
@@ -265,6 +266,22 @@ func (p *fakePage) WaitForURL(glob string, timeout time.Duration) error {
 		time.Sleep(p.gotoDelay)
 	}
 	return nil
+}
+
+// AddInitScript records the script (order preserved) so a test can assert
+// it was installed, and — critically — installed BEFORE Navigate/Goto was
+// called (see TestAddInitScriptInstalledBeforeNavigate).
+func (p *fakePage) AddInitScript(script string) error {
+	p.mu.Lock()
+	p.initScripts = append(p.initScripts, script)
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *fakePage) InitScripts() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.initScripts...)
 }
 
 func (p *fakePage) Close() error {
@@ -764,6 +781,43 @@ func TestContextNewPageClosesResourceCreatedAfterCancellation(t *testing.T) {
 		defer fc.mu.Unlock()
 		return len(fc.pages) == 1 && fc.pages[0].isClosed()
 	})
+}
+
+// AddInitScript must be callable before Navigate and reach the underlying
+// page handle — the mechanism DOM-XSS probing (internal/scan/domxss.go)
+// relies on to have its sink hooks in place before a page's own
+// onload-style handler can run (a listener attached AFTER load would miss
+// a handler that already fired).
+func TestAddInitScriptInstalledBeforeNavigate(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+	ctx := context.Background()
+
+	c, err := m.NewContext(ctx, ContextOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := c.NewPage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.AddInitScript(ctx, "window.__hooked = true;"); err != nil {
+		t.Fatalf("AddInitScript: %v", err)
+	}
+	fp := d.browsers[0].contexts[0].pages[0]
+	if got := fp.InitScripts(); len(got) != 1 || got[0] != "window.__hooked = true;" {
+		t.Fatalf("init script not recorded before navigate: %v", got)
+	}
+
+	if _, err := p.Navigate(ctx, "https://target/page", NavOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	// Still exactly the one script: navigating does not re-install or lose it.
+	if got := fp.InitScripts(); len(got) != 1 {
+		t.Fatalf("init scripts after navigate = %v, want 1", got)
+	}
 }
 
 // TestCloseReturnsPromptlyDespiteAWedgedDriver proves Close no longer blocks

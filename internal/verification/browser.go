@@ -252,6 +252,15 @@ func decide(matched, markerInDOM bool) (domain.Verdict, domain.Confidence, strin
 	}
 }
 
+// Decide is decide's exported form — see "The three-way decision" in
+// docs/browser-verification.md. Reused by DOM XSS payload verification
+// (internal/scan/domxss.go) so a DOM-XSS verdict is produced by the
+// IDENTICAL deterministic rule Reflected XSS verification already uses,
+// never a separately-invented one.
+func Decide(matched, markerInDOM bool) (domain.Verdict, domain.Confidence, string) {
+	return decide(matched, markerInDOM)
+}
+
 // errOutOfScope is returned when the navigation URL itself fails the scope gate
 // (defense in depth: the caller should never hand verification an out-of-scope
 // URL, since the candidate step already ran it through the scope-enforcing

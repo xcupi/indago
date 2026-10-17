@@ -20,8 +20,9 @@ and conservative, operator-controlled behavior.
 | Scaffold | Domain, persistence, queue, workers, interfaces | done |
 | Transport | HTTP engine, browser manager | done |
 | Discovery | Crawl, forms, sitemap/robots, wordlists, params; scan controller integration | **current** |
-| Phase 1 | Reflected XSS detection & verification | next |
-| Later | Stored XSS, DOM XSS, more engines | designed-for |
+| Phase 1 | Reflected XSS detection & verification | done |
+| DOM XSS (first slice) | `location.hash` → innerHTML/outerHTML/document.write — see [`docs/dom-xss.md`](docs/dom-xss.md) | **current** |
+| Later | Stored XSS, more DOM-XSS sources/sinks, more engines | designed-for |
 
 **There is no vulnerability detection, payload generation, or exploitation yet.**
 A scan currently performs scope-enforced *discovery* (real requests to in-scope
@@ -56,6 +57,7 @@ Full design docs live in [`docs/`](docs/):
 - [`interfaces.md`](docs/interfaces.md) — service boundaries & contracts
 - [`repository-structure.md`](docs/repository-structure.md) — layout rationale
 - [`testing-strategy.md`](docs/testing-strategy.md) — how we test
+- [`dom-xss.md`](docs/dom-xss.md) — DOM XSS engine, first slice (`location.hash` → innerHTML/outerHTML/document.write)
 
 ---
 
