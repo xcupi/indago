@@ -12,6 +12,13 @@ func TestMatchExecutionSignal(t *testing.T) {
 		}
 	})
 
+	t.Run("Playwright page error reports the unresolved marker", func(t *testing.T) {
+		sig, text, ok := matchExecutionSignal(token, []string{"playwright: " + token + " is not defined"}, nil)
+		if !ok || sig != SignalPageError || text == "" {
+			t.Fatalf("sig=%s text=%q ok=%v", sig, text, ok)
+		}
+	})
+
 	t.Run("console error names the token", func(t *testing.T) {
 		sig, _, ok := matchExecutionSignal(token, nil, []string{"Uncaught ReferenceError: " + token + " is not defined"})
 		if !ok || sig != SignalConsoleError {
@@ -19,8 +26,22 @@ func TestMatchExecutionSignal(t *testing.T) {
 		}
 	})
 
+	t.Run("generic page error containing the token is not execution", func(t *testing.T) {
+		sig, text, ok := matchExecutionSignal(token, []string{"application error involving " + token}, nil)
+		if ok || sig != SignalNone || text != "" {
+			t.Fatalf("sig=%s text=%q ok=%v, want no execution signal", sig, text, ok)
+		}
+	})
+
+	t.Run("generic console error containing the token is not execution", func(t *testing.T) {
+		sig, text, ok := matchExecutionSignal(token, nil, []string{"application logged user input: " + token})
+		if ok || sig != SignalNone || text != "" {
+			t.Fatalf("sig=%s text=%q ok=%v, want no execution signal", sig, text, ok)
+		}
+	})
+
 	t.Run("page error takes priority over console error", func(t *testing.T) {
-		sig, _, ok := matchExecutionSignal(token, []string{token + " via page error"}, []string{token + " via console"})
+		sig, _, ok := matchExecutionSignal(token, []string{"ReferenceError: " + token + " is not defined"}, []string{"Uncaught ReferenceError: " + token + " is not defined"})
 		if !ok || sig != SignalPageError {
 			t.Fatalf("sig=%s ok=%v, want page_error to win", sig, ok)
 		}

@@ -212,12 +212,17 @@ type fakePage struct {
 	dlgFn        func(string)
 	errFn        func(string)
 	localStorage map[string]string
+	initScripts  []string
+	lastReferer  string // records the referer passed to the most recent Goto, for TestNavigateThreadsRefererToGoto
 }
 
-func (p *fakePage) Goto(url, waitUntil string, timeout time.Duration) (int, string, error) {
+func (p *fakePage) Goto(url, referer, waitUntil string, timeout time.Duration) (int, string, error) {
 	if p.gotoDelay > 0 {
 		time.Sleep(p.gotoDelay)
 	}
+	p.mu.Lock()
+	p.lastReferer = referer
+	p.mu.Unlock()
 	if p.reqFn != nil {
 		p.reqFn(NetworkEvent{URL: url, Method: "GET", ResourceType: "document", At: time.Now()})
 	}
@@ -267,6 +272,22 @@ func (p *fakePage) WaitForURL(glob string, timeout time.Duration) error {
 	return nil
 }
 
+// AddInitScript records the script (order preserved) so a test can assert
+// it was installed, and — critically — installed BEFORE Navigate/Goto was
+// called (see TestAddInitScriptInstalledBeforeNavigate).
+func (p *fakePage) AddInitScript(script string) error {
+	p.mu.Lock()
+	p.initScripts = append(p.initScripts, script)
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *fakePage) InitScripts() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.initScripts...)
+}
+
 func (p *fakePage) Close() error {
 	p.mu.Lock()
 	p.closed = true
@@ -278,6 +299,12 @@ func (p *fakePage) isClosed() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.closed
+}
+
+func (p *fakePage) Referer() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastReferer
 }
 
 // --- tests ---
@@ -764,6 +791,82 @@ func TestContextNewPageClosesResourceCreatedAfterCancellation(t *testing.T) {
 		defer fc.mu.Unlock()
 		return len(fc.pages) == 1 && fc.pages[0].isClosed()
 	})
+}
+
+// AddInitScript must be callable before Navigate and reach the underlying
+// page handle — the mechanism DOM-XSS probing (internal/scan/domxss.go)
+// relies on to have its sink hooks in place before a page's own
+// onload-style handler can run (a listener attached AFTER load would miss
+// a handler that already fired).
+func TestAddInitScriptInstalledBeforeNavigate(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+	ctx := context.Background()
+
+	c, err := m.NewContext(ctx, ContextOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := c.NewPage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.AddInitScript(ctx, "window.__hooked = true;"); err != nil {
+		t.Fatalf("AddInitScript: %v", err)
+	}
+	fp := d.browsers[0].contexts[0].pages[0]
+	if got := fp.InitScripts(); len(got) != 1 || got[0] != "window.__hooked = true;" {
+		t.Fatalf("init script not recorded before navigate: %v", got)
+	}
+
+	if _, err := p.Navigate(ctx, "https://target/page", NavOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	// Still exactly the one script: navigating does not re-install or lose it.
+	if got := fp.InitScripts(); len(got) != 1 {
+		t.Fatalf("init scripts after navigate = %v, want 1", got)
+	}
+}
+
+// TestNavigateThreadsRefererToGoto proves NavOptions.Referer actually
+// reaches the underlying pageHandle.Goto call (threaded through
+// gotoWithCtx) — the new capability DOM-XSS's document.referrer source
+// (internal/scan/domxss.go) needs: a navigation whose Referer HTTP header
+// (and so the target page's own document.referrer) carries the probe's
+// canary/payload value.
+func TestNavigateThreadsRefererToGoto(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+	ctx := context.Background()
+
+	c, err := m.NewContext(ctx, ContextOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := c.NewPage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := d.browsers[0].contexts[0].pages[0]
+
+	if _, err := p.Navigate(ctx, "https://target/page", NavOptions{Referer: "https://attacker.example/evil"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fp.Referer(); got != "https://attacker.example/evil" {
+		t.Fatalf("referer = %q, want the overridden value", got)
+	}
+
+	// A Navigate call with no Referer set must not force one — leaves the
+	// browser's normal referer behavior untouched.
+	if _, err := p.Navigate(ctx, "https://target/other", NavOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fp.Referer(); got != "" {
+		t.Fatalf("referer = %q, want empty (no override)", got)
+	}
 }
 
 // TestCloseReturnsPromptlyDespiteAWedgedDriver proves Close no longer blocks

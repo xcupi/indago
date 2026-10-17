@@ -13,7 +13,16 @@ vulnerabilities against targets **they are explicitly permitted to test**.
 
 - **Phase 1 scope (product):** Reflected XSS detection and verification.
 - **Current phase (code):** Reflected XSS — baseline, **reflection detection**, **context analysis**, **candidate planning**, **candidate execution**, **browser verification** (a reflected candidate is confirmed/rejected/inconclusive only by a real, deterministic browser signal — never by an LLM), **finding correlation & reporting** (repeated results at the same site collapse into one `Finding` without discarding evidence; JSON + Markdown output), and **end-to-end validation/hardening** of that whole pipeline against a local test corpus (see `docs/e2e-validation.md`) — no new detection features, only fixes the corpus's real-browser tests actually caught.
-- **Future (designed for, not built):** Stored XSS, DOM XSS, additional engines.
+- **Phase 2 (started):** DOM XSS — a genuinely different engine (observes the live
+  rendered DOM/JS runtime in a real browser, not the server's HTTP response). First
+  slice landed: source `location.hash` → sink `innerHTML`/`outerHTML`/
+  `document.write`/`writeln`, same two-phase canary-reachability-then-payload-verify
+  design, same deterministic browser-signal verdict mechanism as Reflected XSS. See
+  `docs/dom-xss.md`. Still missing: every other source (query-read-by-JS,
+  postMessage, document.referrer, window.name, localStorage/sessionStorage) and
+  every other sink (eval/Function, location/src assignment) — do not assume DOM XSS
+  is "done" because this slice exists.
+- **Future (designed for, not built):** Stored XSS, additional engines.
 
 The architecture is deliberately generic (not XSS-specific) so new engines plug
 in without reshaping the domain model.
@@ -93,9 +102,14 @@ right now** and must remain stubs/interfaces (job handlers are no-ops):
   decision is a pure function of a deterministic browser signal
   (`internal/verification/browser.go:decide`) — AI remains advisory-only
   everywhere, per §2.5.
-- ❌ DOM XSS. Verification replays the SAME marker/candidate the candidate step
-  already sent; it does not crawl the rendered DOM for new sinks or
-  client-side-only inputs.
+- ❌ DOM XSS beyond the implemented Phase-2 source/sink coverage. The seven
+  implemented source types are `location.hash`, query string
+  (`location.search`/`URLSearchParams`), `window.name`, `postMessage`,
+  `document.referrer`, `localStorage`, and `sessionStorage`, tested against
+  `innerHTML`/`outerHTML`/`document.write`/`writeln` (see `docs/dom-xss.md`
+  for source-specific testing limitations). This is not exhaustive DOM-XSS
+  coverage. Other sink categories (`eval`/`Function`, `location`/`src`
+  assignment) remain out of scope until their own explicit slice.
 - ❌ Automated exploitation / weaponized payloads. Candidate execution AND
   verification only ever send the small, canonical, benign-marker breakouts the
   planner chose — no payload obfuscation, no evasion variants, no exploit
@@ -295,15 +309,41 @@ Implemented so far (infrastructure and **discovery**):
   (`finding poc -scan SID -out FILE.html FID`), API
   (`GET /api/scans/{id}/findings/{fid}/poc`), and a "Download PoC" link in
   the web UI's finding detail view.
-- ⏳ Stubs: detection engines for non-Reflected-XSS vulnerability classes
-  (Stored XSS, DOM XSS)
+- ✅ DOM XSS, Phase-2 (`internal/detection/domxss.go`, `internal/scan/domxss.go`;
+  see `docs/dom-xss.md`): a genuinely different engine from Reflected XSS —
+  navigates the SAME scope-enforcing `browser.Manager`, lets the target's OWN
+  client-side JS run, and observes the live DOM/JS runtime instead of an HTTP
+  response. Two-phase: (1) a benign canary probes reachability via an
+  init-script hook on `innerHTML`/`outerHTML`/`document.write`/`writeln`,
+  installed before any page script runs; (2) a real `<img src=x onerror=MARKER>`-
+  style payload is navigated/delivered and confirmed via the EXACT SAME
+  deterministic browser signal Reflected XSS verification already uses
+  (`verification.MatchExecutionSignal`/`Decide`) — no LLM, no new verdict
+  mechanism. All SEVEN client-side sources now real against this sink category:
+  `location.hash`, query string (a client-side check INDEPENDENT of and never
+  collapsed with Reflected XSS's server-side reflection check on the same
+  parameter — both can legitimately fire on the same endpoint), `window.name`
+  (navigate-elsewhere → set name → navigate-to-target, since it persists across
+  same-tab navigation), `postMessage` (tested via `page.Evaluate` posting
+  directly at the already-loaded target page), `document.referrer` (a synthetic
+  absolute-URL Referer override threaded through `browser.NavOptions` — Chromium
+  silently ignores a non-absolute Referer, a real gotcha found live), and
+  `localStorage`/`sessionStorage` (origin-scoped: navigate same-origin first →
+  write storage via `page.Evaluate` → reload the target). Still only the
+  HTML-injection sink category; every other sink category is still a gap (see
+  the ❌ bullet above), not a false claim of completeness.
+- ⏳ Stubs: detection engines for non-Reflected-XSS, non-DOM-XSS vulnerability
+  classes (Stored XSS), and every DOM-XSS source/sink combination beyond the
+  Phase-2 first slice.
 
 **The dividing line:** transport, browser, discovery, orchestration, and the
 full Reflected XSS pipeline (reflect → context → plan → execute candidates →
 verify) are implemented end to end, with a real verdict (Confirmed/Rejected/
-Inconclusive) for Reflected XSS specifically. Every OTHER vulnerability class
-(Stored XSS, DOM XSS) is still an interface with a stub returning
-`ErrNotImplemented` — Reflected XSS is the one class built all the way through.
+Inconclusive) for Reflected XSS specifically. DOM XSS now has ONE real,
+end-to-end, deterministically-verified slice (`location.hash` → HTML-injection
+sinks) — the first crack in "every other vulnerability class is a stub" — but
+every other source/sink combination for DOM XSS, and Stored XSS entirely, are
+still an interface with a stub returning `ErrNotImplemented`.
 
 **Scope is enforced outside the transport modules.** `httpengine` and `browser`
 perform no scope checks; the scan controller wraps the HTTP engine in a

@@ -241,12 +241,19 @@ const (
 	JobDiscovery JobType = "discovery" // expand the endpoint/parameter registry
 	JobTest      JobType = "test"      // exercise an injection point
 	JobVerify    JobType = "verify"    // browser-verify a candidate finding
+	// JobDOMXSS probes one discovered Endpoint for the DOM-XSS engine's
+	// first slice (location.hash -> innerHTML/outerHTML/document.write —
+	// see internal/scan/domxss.go and docs/dom-xss.md). Dispatched to the
+	// SAME browser worker group as JobVerify: it needs a real browser,
+	// never the raw HTTP engine (the whole point of this engine is that
+	// location.hash never reaches the server at all).
+	JobDOMXSS JobType = "dom_xss"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS:
 		return true
 	default:
 		return false

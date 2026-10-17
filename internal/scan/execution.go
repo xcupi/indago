@@ -39,6 +39,12 @@ type execution struct {
 	// Checked in evaluate() the first time the ordinary job queue goes
 	// quiet, before the scan is allowed to actually complete.
 	combinedPassDone atomic.Bool
+
+	// domXSSPassDone marks that this execution's one-time DOM-XSS probe
+	// pass (see domxss.go's enqueueDOMXSSProbes) has already been
+	// enqueued — the SAME "run once when the queue goes quiet" shape
+	// combinedPassDone uses, checked right after it in evaluate().
+	domXSSPassDone atomic.Bool
 }
 
 // pause routes a scan pause to both the worker pool and discovery.
@@ -370,6 +376,18 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 	if !ex.combinedPassDone.Load() {
 		ex.combinedPassDone.Store(true)
 		c.enqueueCombinedCandidates(ctx, ex.scanID)
+		return false
+	}
+	// Bounded, one-time DOM-XSS probe pass (see domxss.go): runs right
+	// after the combined pass, the SAME "go quiet, run once, let its own
+	// jobs drain before finishing" shape. Only one source/sink category
+	// is implemented (see docs/dom-xss.md) — this is genuinely cheap
+	// (bounded by discovered endpoints, not candidates), so it never
+	// gates behind "single-parameter testing failed" the way combined
+	// does; it runs for every GET/HEAD-navigable endpoint regardless.
+	if !ex.domXSSPassDone.Load() {
+		ex.domXSSPassDone.Store(true)
+		c.enqueueDOMXSSProbes(ctx, ex.scanID)
 		return false
 	}
 	return c.finish(ctx, ex, false)

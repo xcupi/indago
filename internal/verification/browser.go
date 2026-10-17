@@ -16,8 +16,8 @@ import (
 // that already reflected (no new payloads, nothing re-chosen here) in a real,
 // optionally-authenticated browser context, and observes whether the marker
 // token reaches a position the JavaScript engine evaluates — see signal.go for
-// why an uncaught-exception/console-error match is a deterministic, non-timing
-// signal rather than a heuristic.
+// why only a marker-specific unresolved-identifier ReferenceError is a
+// deterministic, non-timing signal rather than a heuristic.
 //
 // Boundaries preserved here:
 //   - No payload generation: Input.Candidate.Value is sent byte-for-byte.
@@ -242,7 +242,7 @@ func decide(matched, markerInDOM bool) (domain.Verdict, domain.Confidence, strin
 	switch {
 	case matched:
 		return domain.VerdictConfirmed, domain.ConfidenceHigh,
-			"the marker was observed as an uncaught exception or console error: the candidate reached an executable position"
+			"the browser reported the marker as an unresolved JavaScript identifier: the candidate reached an executable position"
 	case markerInDOM:
 		return domain.VerdictRejected, domain.ConfidenceHigh,
 			"the candidate was reflected in the rendered page but no execution signal was observed"
@@ -250,6 +250,15 @@ func decide(matched, markerInDOM bool) (domain.Verdict, domain.Confidence, strin
 		return domain.VerdictInconclusive, domain.ConfidenceLow,
 			"the marker was not found in the rendered page during verification; confirmation could not be attempted"
 	}
+}
+
+// Decide is decide's exported form — see "The three-way decision" in
+// docs/browser-verification.md. Reused by DOM XSS payload verification
+// (internal/scan/domxss.go) so a DOM-XSS verdict is produced by the
+// IDENTICAL deterministic rule Reflected XSS verification already uses,
+// never a separately-invented one.
+func Decide(matched, markerInDOM bool) (domain.Verdict, domain.Confidence, string) {
+	return decide(matched, markerInDOM)
 }
 
 // errOutOfScope is returned when the navigation URL itself fails the scope gate
