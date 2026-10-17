@@ -121,6 +121,30 @@ connection report.
   internal/httpengine go.mod go.sum` is empty). No new live TLS differential,
   sandbox change or proxy-stack redesign was performed for P2.1.
 
+## CI follow-up: preserve the expanded concurrency workload
+
+The initial pushed sink SHA `30417e482ed25f675bcaf98338cace8629b5e1e4`
+failed its first CI run:
+https://github.com/xcupi/indago/actions/runs/39043473935 . The only failure was
+`TestE2E_ConcurrentScansShareBrowserPoolSafely` reaching its old 60-second
+completion bound, with discovery complete, 215 jobs succeeded, 3 queued,
+3 running, and no failed/dead jobs. The failure is retained, not rerun until lucky.
+
+An unchanged local reproduction constrained to two CPUs with
+`taskset -c 0,1 env GOMAXPROCS=2 INDAGO_CHROMIUM_PATH=/usr/bin/google-chrome go test
+-race -p 1 ./internal/scan -run '^TestE2E_ConcurrentScansShareBrowserPoolSafely$'
+-count=1 -v` also failed at 60 seconds, with 219 jobs succeeded and 2 still
+running. The test predates the extra seven-source DOM browser pass and explicitly
+checks lifecycle correctness, not a performance SLA.
+
+The fix keeps both complete corpora and every isolation/context-leak assertion,
+uses one shared bounded 2-minute deadline for both scans, and additionally
+requires every endpoint/source DOM job and all jobs succeeded. The same two-CPU
+command then passed: **221 total jobs / 84 DOM jobs per scan**, both complete
+in **64.49 seconds**, with zero leaked contexts. No production timeout, pacing,
+concurrency or browser policy was changed. Full tagged and standard gates are
+required again before publishing the CI-fix checkpoint.
+
 ## Cleanup and safe evidence
 
 Only the owned lab/server/browser trees were terminated. Ports 18751 and 18752

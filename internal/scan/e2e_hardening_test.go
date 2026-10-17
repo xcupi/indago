@@ -49,8 +49,39 @@ func TestE2E_ConcurrentScansShareBrowserPoolSafely(t *testing.T) {
 	if err := ctrl.Start(ctx, scB.ID); err != nil {
 		t.Fatal(err)
 	}
-	doneA := waitStatus(t, ctrl, scA.ID, 60*time.Second, isCompleted)
-	doneB := waitStatus(t, ctrl, scB.ID, 60*time.Second, isCompleted)
+	// The original 60s bound predates the seven-source DOM pass. Both full
+	// corpora now also open a browser context for every navigable endpoint /
+	// source pair. On a two-CPU race runner the old bound expired with only
+	// two jobs still running, not a deadlock. Keep the full workload and all
+	// isolation/leak assertions, but bound BOTH scans by one 2-minute deadline;
+	// this is a lifecycle correctness test, not a throughput SLA.
+	started := time.Now()
+	deadline := started.Add(2 * time.Minute)
+	doneA := waitStatus(t, ctrl, scA.ID, time.Until(deadline), isCompleted)
+	doneB := waitStatus(t, ctrl, scB.ID, time.Until(deadline), isCompleted)
+	for _, done := range []*scan.Status{doneA, doneB} {
+		eps, err := st.Endpoints().ListByScan(ctx, done.Scan.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		jobs, err := q.Jobs(ctx, done.Scan.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		domJobs := 0
+		for _, job := range jobs {
+			if job.Type == domain.JobDOMXSS {
+				domJobs++
+			}
+		}
+		if want := countDistinctNavigableURLs(eps); domJobs != want {
+			t.Fatalf("DOM jobs = %d, want full endpoint/source workload %d", domJobs, want)
+		}
+		if done.Jobs.Succeeded != done.Jobs.Total() {
+			t.Fatalf("incomplete/failed concurrent scan jobs: %+v", done.Jobs)
+		}
+		t.Logf("concurrent scan completed: jobs=%d DOM jobs=%d elapsed=%s", done.Jobs.Total(), domJobs, time.Since(started))
+	}
 
 	findA, _ := st.Findings().ListByScan(ctx, scA.ID)
 	findB, _ := st.Findings().ListByScan(ctx, scB.ID)
