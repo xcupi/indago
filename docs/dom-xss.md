@@ -1,36 +1,47 @@
-# Indago — DOM XSS (second slice: three new sources)
+# Indago — DOM XSS (third slice: document.referrer, localStorage, sessionStorage)
 
-This document describes DOM-XSS detection's SECOND slice — see `AGENTS.md`
+This document describes DOM-XSS detection's THIRD slice — see `AGENTS.md`
 §3 and `docs/dom-xss.md`'s own "Out of scope" sections (both updated below)
 for what is still, honestly, not covered. The FIRST slice (PR #5, commit
 `3676923`) built the whole two-phase harness/engine for exactly ONE source
 (`location.hash`) against the HTML-injection sink category (innerHTML/
-outerHTML/document.write/writeln). This slice adds THREE more client-side
-sources — **query string** (`location.search`/`URLSearchParams`),
-**`window.name`**, and **`postMessage`** — reusing the EXACT SAME sink-hook
-harness, two-phase canary-then-payload design, and deterministic
-verification signal; only the source-side injection mechanism is new per
-source. Reflected XSS only ever inspects the **server's** HTTP response
-body for a marker reflection; none of these four sources are ever sent to
-the server by the browser in a way the existing pipeline would see, so a
-page whose own client-side JavaScript does something like
+outerHTML/document.write/writeln). The SECOND slice (commit `44b857b`)
+added **query string**, **`window.name`**, and **`postMessage`**. This
+THIRD slice adds the final three sources against that SAME sink
+category — **`document.referrer`**, **`localStorage`**, and
+**`sessionStorage`** — reusing the EXACT SAME sink-hook harness, two-phase
+canary-then-payload design, and deterministic verification signal; only
+the source-side injection mechanism is new per source, exactly like
+piece 2. **After this slice, every client-side source this product has
+identified is implemented against the HTML-injection sink category — see
+"Out of scope" below: only NEW SINK CATEGORIES remain as future work.**
+Reflected XSS only ever inspects the **server's** HTTP response body for a
+marker reflection; none of these seven sources are ever sent to the server
+by the browser in a way the existing pipeline would see, so a page whose
+own client-side JavaScript does something like
 
 ```js
 document.getElementById('x').innerHTML = location.hash.substring(1);
 document.getElementById('x').innerHTML = new URLSearchParams(location.search).get('x');
 document.getElementById('x').innerHTML = window.name;
 window.addEventListener('message', e => { document.getElementById('x').innerHTML = e.data; });
+document.getElementById('x').innerHTML = document.referrer;
+document.getElementById('x').innerHTML = localStorage.getItem('key');
+document.getElementById('x').innerHTML = sessionStorage.getItem('key');
 ```
 
 is a genuine, exploitable DOM-based XSS that Indago's entire
 request/response-based pipeline is structurally blind to. This engine
 actually renders the page in a real browser, lets its OWN JavaScript run,
 and observes the live DOM/JS runtime — the fundamentally new capability
-both slices add, not a tweak to the existing Reflected XSS pipeline.
+all three slices add, not a tweak to the existing Reflected XSS pipeline.
 
-**This is explicitly NOT "DOM XSS is done."** It is now two narrow,
-honestly scoped, real, end-to-end vertical slices. See "Out of scope" below
-for everything this still does not cover.
+**This is explicitly NOT "DOM XSS is done" as a whole product** — the
+SOURCE dimension against the HTML-injection sink category is now
+complete, but entirely new SINK categories (`eval`/`Function`,
+`location`/`src` assignment, `setTimeout`/`setInterval` with a string
+argument, `insertAdjacentHTML`, `Range.createContextualFragment`) are
+real, deliberate, separate future work. See "Out of scope" below.
 
 ---
 
@@ -38,8 +49,8 @@ for everything this still does not cover.
 
 | Axis | Implemented |
 |---|---|
-| Sources | FOUR: `location.hash` (piece 1), `location.search`/`URLSearchParams`, `window.name`, `postMessage` (`detection.DOMXSSSources`) |
-| Sink category | Still exactly ONE, HTML injection: `Element.prototype.innerHTML` / `outerHTML` setters, `document.write` / `document.writeln` (`detection.DOMXSSSink`) — UNCHANGED from piece 1, reused as-is |
+| Sources | SEVEN (all client-side sources identified so far): `location.hash` (piece 1); `location.search`/`URLSearchParams`, `window.name`, `postMessage` (piece 2); `document.referrer`, `localStorage`, `sessionStorage` (piece 3 — `detection.DOMXSSSources`) |
+| Sink category | Still exactly ONE, HTML injection: `Element.prototype.innerHTML` / `outerHTML` setters, `document.write` / `document.writeln` (`detection.DOMXSSSink`) — UNCHANGED from pieces 1/2, reused as-is |
 | Pairs tested per endpoint per source | At most ONE — the first reachable sink, by whichever the page's own script happened to call first (see "Two-phase design" below) — same boundary as piece 1, now per source |
 | Methods probed | GET/HEAD-navigable endpoints only — UNCHANGED from piece 1 |
 | Query source coverage | Only endpoints with at least one DISCOVERED `Location=Query` parameter (reused from the SAME Parameter registry Reflected XSS already populates) — an endpoint with no discovered query parameter has nothing for this source to target, so it is skipped for that endpoint (documented, not silently incomplete) |
@@ -108,7 +119,7 @@ victim page (a link, `window.location = victimURL`, or a form submission
 all work identically in the real world — only the mechanical "how do we
 set window.name before the target loads" matters for this probe).
 
-## `postMessage` — testing methodology (the least obvious of the four)
+## `postMessage` — testing methodology (one of the least obvious sources)
 
 The realistic vulnerable pattern is a page with its own
 `window.addEventListener('message', ...)` handler that uses `event.data`
@@ -140,16 +151,112 @@ in a short (300ms) `Promise`/`setTimeout`, which `page.Evaluate` awaits,
 so the probe waits for the listener's own asynchronous reaction before
 reading back console/page-error state.
 
-## Architecture: source/sink model (extended, not replaced)
+## `document.referrer` — the Referer-override mechanism, and a real browser gotcha
 
-Still the SAME **(Endpoint, source, sink)** identity piece 1 established —
-`detection.DOMXSSSource` now has four values instead of one:
+Unlike every other source, the browser automation layer already exposed a
+direct mechanism for this: Playwright's `page.Goto` accepts a `Referer`
+option that overrides the HTTP Referer header for a single navigation —
+threaded all the way down through this product's own `browser.NavOptions`
+→ `pageHandle.Goto` interface (previously `Goto(url, waitUntil string,
+timeout time.Duration)`, now `Goto(url, referer, waitUntil string,
+timeout time.Duration)` — the interface, the real Playwright
+implementation, AND the `manager_test.go` fake test double were all
+updated together, the documented repo pattern). So `navigateWithReferrer`
+is a ONE-STEP navigation, simpler than WindowName/Storage: install the
+harness, then navigate once with the Referer override set to the probe
+value — no neutral pre-navigation needed.
+
+**A real, empirically-discovered gotcha, worth documenting precisely**:
+Chromium silently IGNORES the Referer override unless the given string is
+itself a well-formed absolute URL. A bare canary/payload string like
+`indago-domxss-canary-abc123` or `<img src=x onerror=M>` is rejected
+outright — not an error, `document.referrer` on the target page simply
+reflects whatever the browser's own default referrer computation would
+have produced instead (typically empty, for a fresh navigation with no
+page history), which silently looks like "the source doesn't reach
+anything" rather than "the mechanism was never actually engaged". This
+was caught by a live-lab run, not a unit test: the FIRST implementation
+passed the raw canary/payload value straight as `NavOptions.Referer` and
+every probe came back "no HTML-injection sink reachable from
+document.referrer" even though the lab's own inline script read it
+directly. `domXSSRefererURL` (`internal/scan/domxss.go`) fixes this by
+wrapping the value in a synthetic absolute URL on a fixed, RFC 2606
+reserved `.invalid` host (never resolved/dereferenced — this is a header
+value only, no network request is ever made to it):
 
 ```go
-DOMSourceHash        DOMXSSSource = "location.hash"       // piece 1
-DOMSourceQuery       DOMXSSSource = "location.search"      // piece 2
-DOMSourceWindowName  DOMXSSSource = "window.name"           // piece 2
-DOMSourcePostMessage DOMXSSSource = "postMessage"           // piece 2
+func domXSSRefererURL(fragmentValue string) string {
+    return "https://indago-domxss-probe.invalid/" + jsEncodeURIComponent(fragmentValue)
+}
+```
+
+A second, equally load-bearing consequence of needing an absolute URL:
+the browser's own URL parser ALWAYS percent-encodes `<`/`>`/space in the
+path when constructing the Referer header — there is no way to get a
+literal, unescaped `<` into a real browser's `document.referrer` at all.
+This is a genuine HTTP/URL-spec-level constraint, not an Indago
+limitation, and it means the SAME realistic vulnerable pattern the
+`location.hash` source targets applies here too: a page that reads
+`document.referrer` and explicitly `decodeURIComponent`s it (or a
+substring of it) before using it as markup is exploitable through this
+vector; a page that uses the raw, still-percent-encoded string is not —
+correctly, not a false negative (see "Percent-encoding and why it
+matters" in the piece 1 appendix below for the exact same rationale
+applied to the hash source). The live-lab route below is built this way
+deliberately, mirroring the hash lab's own `decodeURIComponent
+(location.hash)` requirement.
+
+## `localStorage` / `sessionStorage` — ORIGIN-scoped, not tab-scoped
+
+Unlike `window.name` (persists across any same-tab navigation, even
+cross-origin), `localStorage`/`sessionStorage` are **ORIGIN-scoped**: a
+value written from a page on a DIFFERENT origin is simply invisible to a
+page on the target's origin, no matter what tab/context it is in. This is
+the one genuinely different piece of sequencing piece 3 needed —
+`navigateWithStorage` (`internal/scan/domxss.go`):
+
+1. install the sink-hook harness FIRST (before any navigation at all —
+   Playwright re-runs it on every subsequent navigation this page makes,
+   including step 4's target navigation, exactly like every other
+   source);
+2. navigate the SAME page to a harmless, SAME-ORIGIN page first — this
+   engine uses the target's own origin ROOT (`domXSSOriginURL`, a pure
+   helper that derives `scheme://host/` from the target endpoint URL),
+   not a separate discovery step: it is guaranteed same-origin by
+   construction and needs no extra lookup. (A 404 for the root path is
+   fine — it is still a valid document on the right origin, which is all
+   a storage write needs.)
+3. set `localStorage`/`sessionStorage` via the browser package's EXISTING
+   `Page.SetLocalStorage`/`Page.SetSessionStorage` (added in an earlier
+   session, never used by any production code path until now — no new
+   browser primitive was needed for this) under a fixed, documented key
+   name, `indago_domxss_probe` (`domXSSStorageKey`) — there is no
+   server-side parameter to derive a key from for this source, same
+   boundary Hash/WindowName/PostMessage/Referrer already have;
+4. THEN navigate (same page) to the target URL — the write from step 3 is
+   now visible, since both navigations share the same origin.
+
+`localStorage` and `sessionStorage` are modeled as TWO separate
+`detection.DOMXSSSource` values (`DOMSourceLocalStorage`,
+`DOMSourceSessionStorage`) sharing this ONE navigation helper
+parametrized by backend — not two near-duplicate code paths, and not one
+source with a hidden "backend" sub-field either: each gets its own,
+independently labeled, independently Confirmed Finding (see "Live
+validation" below), since the two backends have genuinely different
+real-world read patterns (session-only vs. persistent) even though the
+exploitation shape and sequencing are identical.
+
+Still the SAME **(Endpoint, source, sink)** identity piece 1 established —
+`detection.DOMXSSSource` now has seven values:
+
+```go
+DOMSourceHash           DOMXSSSource = "location.hash"        // piece 1
+DOMSourceQuery          DOMXSSSource = "location.search"       // piece 2
+DOMSourceWindowName     DOMXSSSource = "window.name"           // piece 2
+DOMSourcePostMessage    DOMXSSSource = "postMessage"            // piece 2
+DOMSourceReferrer       DOMXSSSource = "document.referrer"      // piece 3
+DOMSourceLocalStorage   DOMXSSSource = "localStorage"           // piece 3
+DOMSourceSessionStorage DOMXSSSource = "sessionStorage"         // piece 3
 ```
 
 `detection.DOMXSSPayloadFor` now takes `source` as an explicit first
@@ -169,7 +276,7 @@ titled distinctly ("DOM XSS: `window.name` reaches `innerHTML` at GET
 ## Two-phase design: canary reachability, then payload verification
 
 UNCHANGED from piece 1, see below for the full description — reused
-IDENTICALLY by all four sources. The only new work per source is HOW the
+IDENTICALLY by all seven sources. The only new work per source is HOW the
 canary/payload value reaches the browser before each navigation
 (`domXSSExecutor.navigateSource`'s dispatch, `internal/scan/domxss.go`):
 
@@ -179,6 +286,8 @@ canary/payload value reaches the browser before each navigation
 | `location.search` | encode into a URL query parameter (an EXISTING discovered parameter name — see below) | `domXSSQueryURL` (piece 2) |
 | `window.name` | `Evaluate` on a neutral page, then navigate same page to target | `navigateWithWindowName`/`setWindowNameScript` (piece 2) |
 | `postMessage` | navigate to target, then `Evaluate` a `postMessage` call against it | `navigateWithPostMessage`/`postMessageScript` (piece 2) |
+| `document.referrer` | wrap in a synthetic absolute URL, pass as the navigation's Referer override | `navigateWithReferrer`/`domXSSRefererURL` (piece 3) |
+| `localStorage` / `sessionStorage` | navigate to the target's own origin root, `Evaluate`-write via `Page.SetLocalStorage`/`SetSessionStorage`, THEN navigate to target | `navigateWithStorage`/`domXSSOriginURL` (piece 3) |
 
 The sink-hook harness (`domXSSHarnessScript`), the reachability parser
 (`parseDOMXSSReachability`), and the phase-2 verification signal
@@ -215,80 +324,98 @@ page's own JS might plausibly read.
 ## Wiring into the scan (extended)
 
 - `enqueueDOMXSSProbes` now enqueues one `JobDOMXSS` per
-  **(distinct navigable endpoint URL, source)** pair — i.e. up to FOUR
+  **(distinct navigable endpoint URL, source)** pair — i.e. up to SEVEN
   jobs per endpoint, one per `detection.DOMXSSSources` entry, instead of
   piece 1's one job per endpoint. `domXSSJob` gained a `Source` field;
-  `parseDOMXSSJob` now requires it to be one of the four valid values.
+  `parseDOMXSSJob` now requires it to be one of the seven valid values.
 - `domXSSExecutor.Handle` is now source-generic: it resolves the query
   parameter (query source only), then dispatches navigation through
-  `navigateSource` — one shared code path for all four sources, branching
+  `navigateSource` — one shared code path for all seven sources, branching
   only on the injection mechanism.
 - Test-count impact: `internal/scan/executor_integration_test.go`'s
-  `countDistinctNavigableURLs` test helper now multiplies its endpoint
-  count by `len(detection.DOMXSSSources)` (4) to independently re-derive
-  the expected DOM-XSS job count — every integration test that asserts an
-  exact job/test-case total against this helper picked up the new count
-  automatically (`TestScanCompletesAfterDiscoveryAndJobs`,
+  `countDistinctNavigableURLs` test helper multiplies its endpoint count
+  by `len(detection.DOMXSSSources)` (now 7, was 4) to independently
+  re-derive the expected DOM-XSS job count — because this is computed
+  from `len(detection.DOMXSSSources)` rather than a hardcoded literal,
+  every integration test that asserts an exact job/test-case total
+  against this helper picked up the new count AUTOMATICALLY, with no
+  test edit needed (`TestScanCompletesAfterDiscoveryAndJobs`,
   `TestRestartRecoversAndResumesScan`, etc. — see
-  `internal/scan/recovery_test.go`/`integration_test.go`).
+  `internal/scan/recovery_test.go`/`integration_test.go`) — this is
+  exactly the fix piece 2 put in place for this recurring pitfall, now
+  paying off on its own for piece 3.
+- `browser.NavOptions` gained a `Referer` field, threaded through
+  `pageHandle.Goto` (interface in `driver.go`, real implementation in
+  `playwright.go`, fake test double in `manager_test.go` — all three
+  updated together, per the documented repo pattern for interface
+  extensions) — see "`document.referrer` — the Referer-override
+  mechanism" above.
 
 ## Presentation
 
 UNCHANGED from piece 1 — CLI `finding list`/`finding show`, the web API,
 and the web UI's Findings tab all render every source's `dom_xss` Finding
 through the SAME generic rendering Reflected XSS findings already use.
-Live-verified (see "Live validation" below): all four sources' findings
+Live-verified (see "Live validation" below): all seven sources' findings
 render correctly, each with a distinct, correctly-labeled title and
 `Parameter` field ("location.hash" / "location.search" / "window.name" /
-"postMessage").
+"postMessage" / "document.referrer" / "localStorage" / "sessionStorage").
 
 ## Live validation
 
-A disposable lab (`indago-domxss-lab2.py`, NOT part of the repo — mirrors
-piece 1's own `indago-domxss-lab.py` pattern) serves three routes, each
-genuinely needing its specific new source:
+Piece 2's disposable lab (`indago-domxss-lab2.py`) covered query-string/
+window.name/postMessage; piece 3 used a NEW disposable lab
+(`indago-domxss-lab3.py`, NOT part of the repo — same throwaway pattern)
+with three routes, each genuinely needing its specific new source:
 
-- `/query?x=...` — the server ALSO reflects `x` raw into the response body
-  (a genuine, independent Reflected-XSS bug) AND the page's own inline
-  script does `document.getElementById('sink').innerHTML =
-  new URLSearchParams(location.search).get('x')` (a genuine, independent
-  DOM-XSS bug) — the exact scenario the "query-string source vs. Reflected
-  XSS" section above describes.
-- `/winname` — `document.getElementById('sink').innerHTML = window.name`.
-- `/postmsg` — `window.addEventListener('message', e =>
-  document.getElementById('sink').innerHTML = e.data)`, no origin check.
+- `/referrer` — `document.getElementById('sink').innerHTML =
+  decodeURIComponent(document.referrer)`. The `decodeURIComponent` call is
+  REQUIRED, not cosmetic — see "`document.referrer` — the Referer-override
+  mechanism" above for why a real browser's Referer header can never carry
+  a literal, unescaped `<`, mirroring the hash source's own documented
+  `decodeURIComponent(location.hash)` requirement.
+- `/localstorage` — `document.getElementById('sink').innerHTML =
+  localStorage.getItem('indago_domxss_probe')`.
+- `/sessionstorage` — `document.getElementById('sink').innerHTML =
+  sessionStorage.getItem('indago_domxss_probe')`.
 
 A real scan (`indago scan create`/`start`, CLI, not a unit test) against
-this lab produced exactly these four Findings, all Confirmed:
+each route produced exactly one Finding per route, all Confirmed:
 
 ```
-confirmed  high  reflected_xss  Reflected XSS in parameter "x" (html_text) at GET /query?x
-confirmed  high  dom_xss        DOM XSS: location.search reaches innerHTML at GET /query?x
-confirmed  high  dom_xss        DOM XSS: window.name reaches innerHTML at GET /winname
-confirmed  high  dom_xss        DOM XSS: postMessage reaches innerHTML at GET /postmsg
+confirmed  high  dom_xss  DOM XSS: document.referrer reaches innerHTML at GET /referrer
+confirmed  high  dom_xss  DOM XSS: localStorage reaches innerHTML at GET /localstorage
+confirmed  high  dom_xss  DOM XSS: sessionStorage reaches innerHTML at GET /sessionstorage
 ```
 
-Four DISTINCT Finding rows — the `/query?x` endpoint alone produced TWO
-separate Findings (`reflected_xss` and `dom_xss`), proving the
-non-collision property live, not just in a unit test; the two `window.name`
-and `postMessage` findings prove the new navigation sequencing/testing
-methodology actually works against a real Chromium browser, not just that
-the Go code compiles.
+Three DISTINCT, correctly-labeled Finding rows, each confirmed via the
+SAME deterministic bare-marker signal every other source already uses
+(`Uncaught ReferenceError: <marker> is not defined`) — proving the new
+Referer-override mechanism and the origin-scoped storage pre-navigation
+sequencing both actually work against a real Chromium browser, not just
+that the Go code compiles. The FIRST attempt against `/referrer` (before
+`domXSSRefererURL` existed) came back a clean, honest negative — see
+"`document.referrer` — the Referer-override mechanism" above for exactly
+what that looked like and why, caught by this live run and not by any
+unit test.
 
 ## Out of scope for this slice (updated — explicitly, not an oversight)
 
 To avoid anyone assuming "DOM XSS is done" — the following are real,
 deliberate exclusions for future, separate pieces of work:
 
-- **Sources still NOT implemented**: `document.referrer`,
-  `localStorage`/`sessionStorage`. (Hash, query-string, window.name, and
-  postMessage are now all implemented — see above.)
+- **Sources**: ALL client-side sources identified so far are now
+  implemented (hash, query-string, window.name, postMessage,
+  document.referrer, localStorage, sessionStorage — see
+  `detection.DOMXSSSources`). A genuinely new source not yet identified
+  would still be new work, but nothing on the current list remains.
 - **Sinks**: still only the three HTML-injection sinks from piece 1
   (innerHTML/outerHTML/document.write/writeln). `eval`/`Function`,
   `location`/`src` assignment sinks (e.g. `location.href = ...`, `<script
   src>` assignment), `setTimeout`/`setInterval` with a string argument,
   `insertAdjacentHTML`, `Range.createContextualFragment` are all still
-  real, deliberate exclusions for a future, separate piece.
+  real, deliberate exclusions for a future, separate piece — THIS is now
+  the only remaining axis of DOM-XSS coverage, not sources.
 - **More than one reachable pair per endpoint per source per probe
   pass**: if a page reaches TWO or more hooked sinks from the SAME source,
   only the first (deterministic, by call order) is tested — unchanged
@@ -309,7 +436,7 @@ No LLM verdict (the signal match/decide functions are the SAME
 deterministic Go code Reflected XSS verification uses —
 `verification.MatchExecutionSignal`/`Decide`, unchanged), no evasion, no
 simulated user interaction, no exfiltration/weaponized payloads (every
-candidate across all four sources is a benign bare-marker probe, never
+candidate across all seven sources is a benign bare-marker probe, never
 `alert(`/`document.cookie`/`fetch(`), every navigation goes through the
 SAME scope-enforcing `browser.Manager` the rest of the product uses
 (including the new neutral `about:blank` hop for window.name, itself never
@@ -525,7 +652,9 @@ Reflected XSS findings.
 
 ## Out of scope for this slice (PIECE 1, HISTORICAL — see the top-level
 ## "Out of scope for this slice (updated)" section above for the CURRENT,
-## accurate list; postMessage/window.name/query-string are now implemented)
+## accurate list; postMessage/window.name/query-string/document.referrer/
+## localStorage/sessionStorage are now ALL implemented — only new SINK
+## categories remain)
 
 To avoid anyone assuming "DOM XSS is done" — the following are real,
 deliberate exclusions for a future, separate piece of work:

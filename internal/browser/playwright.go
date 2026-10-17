@@ -148,7 +148,7 @@ func (c *pwContext) Close() error { return c.c.Close() }
 
 type pwPage struct{ p pw.Page }
 
-func (p *pwPage) Goto(url, waitUntil string, timeout time.Duration) (int, string, error) {
+func (p *pwPage) Goto(url, referer, waitUntil string, timeout time.Duration) (int, string, error) {
 	opts := pw.PageGotoOptions{}
 	if timeout > 0 {
 		opts.Timeout = pw.Float(float64(timeout.Milliseconds()))
@@ -156,6 +156,9 @@ func (p *pwPage) Goto(url, waitUntil string, timeout time.Duration) (int, string
 	if waitUntil != "" {
 		ws := pw.WaitUntilState(waitUntil)
 		opts.WaitUntil = &ws
+	}
+	if referer != "" {
+		opts.Referer = pw.String(referer)
 	}
 	resp, err := p.p.Goto(url, opts)
 	if err != nil {

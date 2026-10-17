@@ -66,13 +66,37 @@ const (
 	// methodology" section for how this is probed without a second
 	// controlled origin.
 	DOMSourcePostMessage DOMXSSSource = "postMessage"
+
+	// DOMSourceReferrer is document.referrer, the HTTP Referer header
+	// value the browser sets automatically on a real navigation. Unlike
+	// Hash/Query it is set via the navigation's Referer HEADER, not
+	// encoded into the URL — see navigateWithReferrer in
+	// internal/scan/domxss.go, which drives the navigation with an
+	// explicit referer override (browser.NavOptions.Referer).
+	DOMSourceReferrer DOMXSSSource = "document.referrer"
+
+	// DOMSourceLocalStorage and DOMSourceSessionStorage are
+	// window.localStorage/window.sessionStorage. Unlike every other
+	// source, these are ORIGIN-scoped, not window/tab-scoped — a value
+	// written to storage is only visible to a page on the SAME ORIGIN
+	// that wrote it. Probing them needs a same-origin pre-navigation
+	// before the write (see navigateWithStorage in
+	// internal/scan/domxss.go), unlike window.name (tab-scoped, any
+	// neutral page works) or Hash/Query (no storage at all). They share
+	// one navigation helper parametrized by backend, not two
+	// near-duplicate code paths — the sequencing and exploitation shape
+	// are identical, only the JS object (localStorage vs sessionStorage)
+	// differs.
+	DOMSourceLocalStorage   DOMXSSSource = "localStorage"
+	DOMSourceSessionStorage DOMXSSSource = "sessionStorage"
 )
 
 // IsValid reports whether source is one of this engine's implemented
 // client-side sources.
 func (s DOMXSSSource) IsValid() bool {
 	switch s {
-	case DOMSourceHash, DOMSourceQuery, DOMSourceWindowName, DOMSourcePostMessage:
+	case DOMSourceHash, DOMSourceQuery, DOMSourceWindowName, DOMSourcePostMessage,
+		DOMSourceReferrer, DOMSourceLocalStorage, DOMSourceSessionStorage:
 		return true
 	default:
 		return false
@@ -82,7 +106,10 @@ func (s DOMXSSSource) IsValid() bool {
 // DOMXSSSources lists every implemented source, in the fixed order the
 // engine probes them in for a given endpoint (see
 // internal/scan/domxss.go's domXSSSourcesFor).
-var DOMXSSSources = []DOMXSSSource{DOMSourceHash, DOMSourceQuery, DOMSourceWindowName, DOMSourcePostMessage}
+var DOMXSSSources = []DOMXSSSource{
+	DOMSourceHash, DOMSourceQuery, DOMSourceWindowName, DOMSourcePostMessage,
+	DOMSourceReferrer, DOMSourceLocalStorage, DOMSourceSessionStorage,
+}
 
 // DOMXSSSink identifies an HTML-injection sink this engine hooks. Exactly
 // these three for this first slice (document.writeln shares
@@ -178,6 +205,12 @@ func domXSSRationale(source DOMXSSSource, sink DOMXSSSink) string {
 		how = "the window.name value (set before, and persisting across, the navigation that loaded this page)"
 	case DOMSourcePostMessage:
 		how = "a postMessage value received by this page's own window message-event listener, which did not validate event.origin/event.source,"
+	case DOMSourceReferrer:
+		how = "the document.referrer value (the HTTP Referer header of the navigation that loaded this page)"
+	case DOMSourceLocalStorage:
+		how = "a localStorage value (origin-scoped; read by this page's own client-side JavaScript)"
+	case DOMSourceSessionStorage:
+		how = "a sessionStorage value (origin-scoped; read by this page's own client-side JavaScript)"
 	default: // DOMSourceHash
 		how = "the location.hash value"
 	}

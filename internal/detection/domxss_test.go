@@ -68,10 +68,13 @@ func TestDOMXSSPayloadForEachSink(t *testing.T) {
 	}
 }
 
-// TestDOMXSSPayloadForEachSource confirms all four sources (piece 1's
-// location.hash plus this piece's query/window.name/postMessage) produce a
-// valid candidate correctly labeled via ContextSub, so an operator can tell
-// findings from different sources apart (see docs/dom-xss.md).
+// TestDOMXSSPayloadForEachSource confirms every implemented source (piece
+// 1's location.hash; piece 2's query/window.name/postMessage; piece 3's
+// document.referrer/localStorage/sessionStorage) produces a valid
+// candidate correctly labeled via ContextSub, so an operator can tell
+// findings from different sources apart (see docs/dom-xss.md). Iterates
+// detection.DOMXSSSources directly so a future source is covered
+// automatically.
 func TestDOMXSSPayloadForEachSource(t *testing.T) {
 	marker := "indsrcmark1"
 	for _, source := range detection.DOMXSSSources {
@@ -110,7 +113,7 @@ func TestDOMXSSSourceIsValid(t *testing.T) {
 			t.Fatalf("%s should be a valid source", s)
 		}
 	}
-	for _, bad := range []detection.DOMXSSSource{"document.referrer", "localStorage", ""} {
+	for _, bad := range []detection.DOMXSSSource{"eval", "setTimeout", ""} {
 		if bad.IsValid() {
 			t.Fatalf("%s is out of scope and must not be a valid source", bad)
 		}
@@ -121,7 +124,7 @@ func TestDOMXSSPayloadForRejectsUnknownSinkOrEmptyMarker(t *testing.T) {
 	if _, ok := detection.DOMXSSPayloadFor(detection.DOMSourceHash, detection.DOMXSSSink("eval"), "indabc"); ok {
 		t.Fatal("an out-of-scope sink must not produce a candidate")
 	}
-	if _, ok := detection.DOMXSSPayloadFor(detection.DOMXSSSource("document.referrer"), detection.DOMSinkInnerHTML, "indabc"); ok {
+	if _, ok := detection.DOMXSSPayloadFor(detection.DOMXSSSource("eval"), detection.DOMSinkInnerHTML, "indabc"); ok {
 		t.Fatal("an out-of-scope source must not produce a candidate")
 	}
 	if _, ok := detection.DOMXSSPayloadFor(detection.DOMSourceHash, detection.DOMSinkInnerHTML, ""); ok {
@@ -146,5 +149,71 @@ func TestDOMXSSPayloadForDistinctSinksDontCollide(t *testing.T) {
 	b, _ := detection.DOMXSSPayloadFor(detection.DOMSourceHash, detection.DOMSinkOuterHTML, marker)
 	if a.DedupKey == b.DedupKey {
 		t.Fatalf("different sinks must not share a dedup key: %q", a.DedupKey)
+	}
+}
+
+// --- piece 3: document.referrer / localStorage / sessionStorage ---
+
+func TestDOMXSSSourcesIncludesPieceThreeSources(t *testing.T) {
+	want := []detection.DOMXSSSource{detection.DOMSourceReferrer, detection.DOMSourceLocalStorage, detection.DOMSourceSessionStorage}
+	for _, w := range want {
+		found := false
+		for _, s := range detection.DOMXSSSources {
+			if s == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("detection.DOMXSSSources is missing %s", w)
+		}
+		if !w.IsValid() {
+			t.Fatalf("%s should be a valid source", w)
+		}
+	}
+}
+
+// TestDOMXSSRationaleDistinguishesPieceThreeSources confirms each of the
+// three new sources gets its own, genuinely distinct rationale sentence
+// (not a copy-pasted generic one) — an operator reading a Finding's
+// Summary should be able to tell a referrer-sourced finding apart from a
+// localStorage- or sessionStorage-sourced one by text alone.
+func TestDOMXSSRationaleDistinguishesPieceThreeSources(t *testing.T) {
+	marker := "indpiece3rat1"
+	referrer, _ := detection.DOMXSSPayloadFor(detection.DOMSourceReferrer, detection.DOMSinkInnerHTML, marker)
+	local, _ := detection.DOMXSSPayloadFor(detection.DOMSourceLocalStorage, detection.DOMSinkInnerHTML, marker)
+	session, _ := detection.DOMXSSPayloadFor(detection.DOMSourceSessionStorage, detection.DOMSinkInnerHTML, marker)
+
+	if !strings.Contains(referrer.Rationale, "document.referrer") {
+		t.Fatalf("referrer rationale should mention document.referrer: %q", referrer.Rationale)
+	}
+	if !strings.Contains(local.Rationale, "localStorage") || strings.Contains(local.Rationale, "sessionStorage") {
+		t.Fatalf("localStorage rationale should mention localStorage only: %q", local.Rationale)
+	}
+	if !strings.Contains(session.Rationale, "sessionStorage") {
+		t.Fatalf("sessionStorage rationale should mention sessionStorage: %q", session.Rationale)
+	}
+	if referrer.Rationale == local.Rationale || local.Rationale == session.Rationale || referrer.Rationale == session.Rationale {
+		t.Fatalf("all three rationales must be distinct text, got:\n%q\n%q\n%q", referrer.Rationale, local.Rationale, session.Rationale)
+	}
+}
+
+// localStorage and sessionStorage are their own distinct DOMXSSSource
+// values (not one source with a "backend" sub-field) — this is what lets
+// each produce its own, independently labeled Finding even against the
+// SAME endpoint/sink, which TestDOMXSSPayloadForDistinctSourcesDontCollide
+// already proves generically for every pair in detection.DOMXSSSources;
+// this test makes the localStorage/sessionStorage pair explicit since it
+// is the one piece 3 introduces as a deliberate two-backend pair sharing
+// one navigation helper (see docs/dom-xss.md).
+func TestLocalStorageAndSessionStorageAreDistinctSources(t *testing.T) {
+	marker := "indstoragepair1"
+	local, _ := detection.DOMXSSPayloadFor(detection.DOMSourceLocalStorage, detection.DOMSinkInnerHTML, marker)
+	session, _ := detection.DOMXSSPayloadFor(detection.DOMSourceSessionStorage, detection.DOMSinkInnerHTML, marker)
+	if local.DedupKey == session.DedupKey {
+		t.Fatalf("localStorage and sessionStorage must not share a dedup key: %q", local.DedupKey)
+	}
+	if local.ContextSub == session.ContextSub {
+		t.Fatalf("localStorage and sessionStorage must carry distinct ContextSub labels: %q", local.ContextSub)
 	}
 }

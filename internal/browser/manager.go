@@ -292,7 +292,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 		return nil, fmt.Errorf("browser: login page: %w", err)
 	}
 
-	if _, _, err := gotoWithCtx(ctx, ph, opts.LoginURL, WaitLoad, m.cfg.NavigationTimeout); err != nil {
+	if _, _, err := gotoWithCtx(ctx, ph, opts.LoginURL, "", WaitLoad, m.cfg.NavigationTimeout); err != nil {
 		return nil, fmt.Errorf("browser: open login page: %w", err)
 	}
 
@@ -313,7 +313,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	if err := os.Chmod(opts.StorageStatePath, 0o600); err != nil {
 		return nil, fmt.Errorf("browser: restrict session file permissions: %w", err)
 	}
-	_, finalURL, _ := ph.Goto(opts.LoginURL, WaitCommit, m.cfg.NavigationTimeout) // best-effort current URL
+	_, finalURL, _ := ph.Goto(opts.LoginURL, "", WaitCommit, m.cfg.NavigationTimeout) // best-effort current URL
 	return &LoginResult{StorageStatePath: opts.StorageStatePath, FinalURL: finalURL}, nil
 }
 
@@ -417,7 +417,7 @@ func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginR
 		return nil, fmt.Errorf("browser: login page: %w", err)
 	}
 
-	if _, _, err := gotoWithCtx(ctx, ph, opts.LoginURL, WaitLoad, m.cfg.NavigationTimeout); err != nil {
+	if _, _, err := gotoWithCtx(ctx, ph, opts.LoginURL, "", WaitLoad, m.cfg.NavigationTimeout); err != nil {
 		return nil, fmt.Errorf("browser: open login page: %w", err)
 	}
 
@@ -452,7 +452,7 @@ func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginR
 	if err := os.Chmod(opts.StorageStatePath, 0o600); err != nil {
 		return nil, fmt.Errorf("browser: restrict session file permissions: %w", err)
 	}
-	_, finalURL, _ := ph.Goto(opts.LoginURL, WaitCommit, m.cfg.NavigationTimeout) // best-effort current URL
+	_, finalURL, _ := ph.Goto(opts.LoginURL, "", WaitCommit, m.cfg.NavigationTimeout) // best-effort current URL
 	return &LoginResult{StorageStatePath: opts.StorageStatePath, FinalURL: finalURL}, nil
 }
 
@@ -605,7 +605,7 @@ func (p *Page) Navigate(ctx context.Context, url string, opts NavOptions) (*NavR
 	if wait == "" {
 		wait = WaitLoad
 	}
-	status, finalURL, err := gotoWithCtx(ctx, p.handle, url, wait, timeout)
+	status, finalURL, err := gotoWithCtx(ctx, p.handle, url, opts.Referer, wait, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("browser: navigate: %w", err)
 	}
@@ -861,13 +861,13 @@ func callCtxCreate[T interface{ Close() error }](ctx context.Context, fn func() 
 	}
 }
 
-func gotoWithCtx(ctx context.Context, ph pageHandle, url, wait string, timeout time.Duration) (int, string, error) {
+func gotoWithCtx(ctx context.Context, ph pageHandle, url, referer, wait string, timeout time.Duration) (int, string, error) {
 	type nav struct {
 		status   int
 		finalURL string
 	}
 	r, err := callCtx(ctx, func() (nav, error) {
-		s, u, err := ph.Goto(url, wait, timeout)
+		s, u, err := ph.Goto(url, referer, wait, timeout)
 		return nav{s, u}, err
 	})
 	return r.status, r.finalURL, err

@@ -228,6 +228,84 @@ func TestPostMessageScriptFiresPostMessageAndWaits(t *testing.T) {
 	}
 }
 
+// --- piece 3: document.referrer / localStorage / sessionStorage ---
+
+// domXSSOriginURL is the only genuinely new pure helper piece 3 adds (the
+// referrer source needs no custom script builder at all — see
+// navigateWithReferrer's doc comment — and the storage source reuses the
+// EXISTING browser.Page.SetLocalStorage/SetSessionStorage, so there is no
+// new storage-side script to unit test either; the sequencing itself is
+// validated live, see docs/dom-xss.md).
+func TestDomXSSOriginURLDerivesSchemeAndHostOnly(t *testing.T) {
+	cases := map[string]string{
+		"https://target.example/page?x=1#frag": "https://target.example/",
+		"https://target.example:8443/a/b/c":    "https://target.example:8443/",
+		"http://127.0.0.1:9000/winname":        "http://127.0.0.1:9000/",
+	}
+	for in, want := range cases {
+		got, err := domXSSOriginURL(in)
+		if err != nil {
+			t.Fatalf("domXSSOriginURL(%q): %v", in, err)
+		}
+		if got != want {
+			t.Fatalf("domXSSOriginURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestDomXSSOriginURLRejectsMalformedOrSchemelessURL(t *testing.T) {
+	for _, bad := range []string{"not-a-url-at-all-no-scheme", "/just/a/path", ""} {
+		if _, err := domXSSOriginURL(bad); err == nil {
+			t.Fatalf("domXSSOriginURL(%q): expected an error, got none", bad)
+		}
+	}
+}
+
+// domXSSRefererURL: Chromium's Referer override is silently ignored
+// unless the value is itself a well-formed absolute URL — this helper
+// wraps the canary/payload accordingly (see its own doc comment, and the
+// live-lab section of docs/dom-xss.md, for the empirical discovery behind
+// this).
+func TestDomXSSRefererURLIsAWellFormedAbsoluteURLEmbeddingTheValue(t *testing.T) {
+	got := domXSSRefererURL("indago-domxss-canary-abc123")
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("domXSSRefererURL produced an invalid URL: %v (%q)", err, got)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		t.Fatalf("domXSSRefererURL must produce an absolute URL, got %q", got)
+	}
+	if !strings.Contains(got, "indago-domxss-canary-abc123") {
+		t.Fatalf("got %q, want it to contain the value", got)
+	}
+}
+
+func TestDomXSSRefererURLPercentEncodesMarkup(t *testing.T) {
+	// A literal "<"/">" can never survive as-is in an HTTP Referer header
+	// (the browser's own URL parser always percent-encodes it) — this is
+	// the same jsEncodeURIComponent encoder the hash source already uses,
+	// reused here rather than reinvented.
+	got := domXSSRefererURL("<img src=x onerror=M>")
+	if strings.ContainsAny(got, "<>") {
+		t.Fatalf("domXSSRefererURL must not contain a literal %q/%q: %q", "<", ">", got)
+	}
+	if !strings.Contains(got, "MARKER") && !strings.Contains(got, "onerror%3DM") {
+		t.Fatalf("got %q, want the percent-encoded payload to still be present", got)
+	}
+}
+
+// domXSSStorageKey is a fixed, documented convention (there is no
+// server-side parameter to derive a key from for this source, same
+// boundary Hash/WindowName/PostMessage/Referrer already have) — this test
+// exists mainly to pin the exact key name so a future change to it is a
+// deliberate, reviewed decision rather than an accidental rename that
+// silently breaks every live-lab route tuned to read it.
+func TestDomXSSStorageKeyIsStable(t *testing.T) {
+	if domXSSStorageKey != "indago_domxss_probe" {
+		t.Fatalf("domXSSStorageKey = %q, want the documented stable key name", domXSSStorageKey)
+	}
+}
+
 // --- domXSSJob now carries a Source; firstQueryParamName ---
 
 func TestParseDOMXSSJobRequiresValidSource(t *testing.T) {

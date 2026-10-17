@@ -143,6 +143,12 @@ type ContextOptions struct {
 type NavOptions struct {
 	WaitUntil string        // one of the Wait* constants ("" → load)
 	Timeout   time.Duration // 0 → Manager default
+	// Referer, when non-empty, overrides the Referer HTTP header sent with
+	// this navigation (threaded to pageHandle.Goto's own referer
+	// parameter). "" leaves the browser's normal referer behavior
+	// unchanged. Used by DOM-XSS's document.referrer source
+	// (internal/scan/domxss.go) — see docs/dom-xss.md.
+	Referer string
 }
 
 // NavResult is the outcome of a navigation.

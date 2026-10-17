@@ -43,7 +43,14 @@ type contextHandle interface {
 // pageHandle is a single page/tab within a context.
 type pageHandle interface {
 	// Goto navigates to url and returns the HTTP status and final URL.
-	Goto(url, waitUntil string, timeout time.Duration) (status int, finalURL string, err error)
+	// referer, when non-empty, overrides the Referer HTTP header sent with
+	// this navigation (Playwright's own PageGotoOptions.Referer) — used by
+	// DOM-XSS's document.referrer source (internal/scan/domxss.go) to
+	// drive a real navigation whose Referer header (and therefore the
+	// target page's own document.referrer) carries the probe's
+	// canary/payload value. "" leaves the browser's normal referer
+	// behavior untouched (no override).
+	Goto(url, referer, waitUntil string, timeout time.Duration) (status int, finalURL string, err error)
 	Content() (string, error)
 	Screenshot(fullPage bool) ([]byte, error)
 	// Evaluate runs a JS expression with an optional argument and returns the

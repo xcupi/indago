@@ -331,6 +331,26 @@ func domXSSQueryURL(endpointURL, param, value string) string {
 	return u.String()
 }
 
+// domXSSOriginURL returns the scheme+host origin ROOT ("https://host/") of
+// endpointURL — the same-origin neutral page the localStorage/
+// sessionStorage source's navigateWithStorage navigates to BEFORE writing
+// to storage (see detection.DOMSourceLocalStorage's doc comment: storage
+// is ORIGIN-scoped, so the write must happen on a page already on the
+// target's own origin, unlike window.name which tolerates any neutral
+// page at all). Pure/testable; a malformed endpointURL is reported as an
+// error rather than silently falling back, since there is no safe default
+// origin to guess.
+func domXSSOriginURL(endpointURL string) (string, error) {
+	u, err := url.Parse(endpointURL)
+	if err != nil {
+		return "", fmt.Errorf("parse endpoint URL for origin: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("endpoint URL %q has no scheme/host to derive an origin from", endpointURL)
+	}
+	return u.Scheme + "://" + u.Host + "/", nil
+}
+
 // jsEncodeURIComponent percent-encodes s exactly like JavaScript's
 // encodeURIComponent (unreserved set: A-Z a-z 0-9 - _ . ! ~ * ' ( )) — NOT
 // Go's url.QueryEscape, which turns a space into "+" (application/
@@ -710,6 +730,14 @@ func (e *domXSSExecutor) navigateSource(ctx context.Context, bctx *browser.Conte
 		navURL = ep.URL
 		console, pageErrs, html, screenshot, err = e.navigateWithPostMessage(ctx, bctx, navURL, marker, value)
 		return console, pageErrs, html, screenshot, navURL, err
+	case detection.DOMSourceReferrer:
+		navURL = ep.URL
+		console, pageErrs, html, screenshot, err = e.navigateWithReferrer(ctx, bctx, navURL, marker, value)
+		return console, pageErrs, html, screenshot, navURL, err
+	case detection.DOMSourceLocalStorage, detection.DOMSourceSessionStorage:
+		navURL = ep.URL
+		console, pageErrs, html, screenshot, err = e.navigateWithStorage(ctx, bctx, source, navURL, marker, value)
+		return console, pageErrs, html, screenshot, navURL, err
 	default: // detection.DOMSourceHash
 		navURL = domXSSHashURL(ep.URL, value)
 		console, pageErrs, html, screenshot, err = e.navigate(ctx, bctx, navURL, marker)
@@ -865,6 +893,128 @@ func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *brow
 // pre-filter on its behalf.
 func postMessageScript(value string) string {
 	return "(() => new Promise((resolve) => { window.postMessage(" + goQuoteJS(value) + ", '*'); setTimeout(resolve, 300); }))();"
+}
+
+// domXSSStorageKey is the single, fixed localStorage/sessionStorage key
+// name this engine writes the canary/payload under for BOTH storage
+// backends — there is no server-side parameter to key off of for this
+// source (same boundary Hash/WindowName/PostMessage/Referrer already
+// have), so a documented, fixed convention is used instead of a
+// discovered name. A page's own vulnerable JS is expected to read this
+// exact key via getItem (see docs/dom-xss.md's live-lab routes).
+const domXSSStorageKey = "indago_domxss_probe"
+
+// domXSSRefererURL builds a synthetic, well-formed absolute URL carrying
+// fragmentValue (percent-encoded by jsEncodeURIComponent) as its path —
+// the value actually passed as the navigation's Referer override. This
+// indirection is load-bearing, discovered empirically against a real
+// Chromium: Playwright's/Chromium's Referer override is SILENTLY IGNORED
+// unless the given string is itself a well-formed absolute URL (a bare
+// canary/payload string like "indago-domxss-canary-abc123" or
+// "<img src=x onerror=M>" is rejected outright, and document.referrer
+// then reflects whatever the browser's own default referrer computation
+// would have produced instead — NOT an error, just quietly wrong). The
+// fixed ".invalid" host (RFC 2606 — reserved, never resolved/dereferenced;
+// this is a header value only, no network request is ever made to it) is
+// an arbitrary, inert placeholder; only the embedded path segment matters.
+//
+// A second, equally load-bearing consequence of needing an absolute URL:
+// the browser's own URL parser ALWAYS percent-encodes "<"/">"/space in the
+// path when constructing the Referer header, exactly like it already does
+// for a URL fragment (see jsEncodeURIComponent's doc comment on the hash
+// source) — there is no way to get a literal, unescaped "<" into a real
+// browser's document.referrer at all, a genuine protocol-level
+// constraint, not an Indago limitation. So the SAME realistic vulnerable
+// pattern the hash source targets applies here too: a page that reads
+// document.referrer and explicitly decodeURIComponent's it (or a
+// substring of it) before using it as markup is exploitable through this
+// vector; a page that uses the raw, still-percent-encoded string is not —
+// correctly, not a false negative. See docs/dom-xss.md.
+func domXSSRefererURL(fragmentValue string) string {
+	return "https://indago-domxss-probe.invalid/" + jsEncodeURIComponent(fragmentValue)
+}
+
+// navigateWithReferrer implements the document.referrer source. Unlike
+// Hash/Query (encoded into the URL being navigated TO) or WindowName/
+// PostMessage (set via a separate Evaluate step), the browser automation
+// layer itself exposes a direct mechanism for this: Playwright's own
+// Page.Goto accepts a Referer override for a single navigation
+// (browser.NavOptions.Referer, newly threaded all the way down to
+// pageHandle.Goto — see driver.go/playwright.go). So this is a ONE-STEP
+// navigation, not a multi-step sequence like WindowName/Storage: the
+// harness is installed first (same discipline as every other source),
+// then the single navigation to targetURL carries domXSSRefererURL(value)
+// as the Referer HTTP header, which the browser reflects into the loaded
+// page's own document.referrer (see domXSSRefererURL's doc comment for
+// why the value must be wrapped in a synthetic absolute URL rather than
+// passed raw).
+func (e *domXSSExecutor) navigateWithReferrer(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, err error) {
+	page, err := bctx.NewPage(ctx)
+	if err != nil {
+		return nil, nil, "", nil, err
+	}
+	defer page.Close()
+	if err := page.AddInitScript(ctx, domXSSHarnessScript(marker)); err != nil {
+		return nil, nil, "", nil, err
+	}
+	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{WaitUntil: browser.WaitLoad, Referer: domXSSRefererURL(value)}); err != nil {
+		return nil, nil, "", nil, err
+	}
+	html, _ = page.Content(ctx)
+	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
+	return page.ConsoleMessages(), page.PageErrors(), html, shot, nil
+}
+
+// navigateWithStorage implements BOTH the localStorage and sessionStorage
+// sources — ONE shared sequence parametrized by backend (source), since
+// the exploitation pattern and navigation sequencing are identical for
+// both (see detection.DOMSourceLocalStorage's doc comment). Unlike
+// window.name (tab-scoped — any neutral page works, see
+// navigateWithWindowName), localStorage/sessionStorage are ORIGIN-scoped:
+// a value written from a page on a DIFFERENT origin would simply not be
+// visible to the target. Correct sequencing:
+//  1. install the sink-hook harness FIRST (before any navigation at all —
+//     Playwright re-runs it on every subsequent navigation this page
+//     makes, including step 4's target navigation);
+//  2. navigate to a harmless, SAME-ORIGIN page first — this engine uses
+//     the target's own origin ROOT (domXSSOriginURL(targetURL)), which is
+//     guaranteed same-origin by construction and needs no extra
+//     discovery;
+//  3. set localStorage/sessionStorage (browser.Page's existing
+//     SetLocalStorage/SetSessionStorage — no new browser primitive
+//     needed, both already existed) under the fixed domXSSStorageKey key;
+//  4. THEN navigate (same page) to targetURL — the write from step 3 is
+//     now visible since both navigations share the same origin.
+func (e *domXSSExecutor) navigateWithStorage(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, targetURL, marker, value string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, err error) {
+	page, err := bctx.NewPage(ctx)
+	if err != nil {
+		return nil, nil, "", nil, err
+	}
+	defer page.Close()
+	if err := page.AddInitScript(ctx, domXSSHarnessScript(marker)); err != nil {
+		return nil, nil, "", nil, err
+	}
+	originURL, err := domXSSOriginURL(targetURL)
+	if err != nil {
+		return nil, nil, "", nil, err
+	}
+	if _, err := page.Navigate(ctx, originURL, browser.NavOptions{WaitUntil: browser.WaitLoad}); err != nil {
+		return nil, nil, "", nil, err
+	}
+	if source == detection.DOMSourceSessionStorage {
+		err = page.SetSessionStorage(ctx, domXSSStorageKey, value)
+	} else {
+		err = page.SetLocalStorage(ctx, domXSSStorageKey, value)
+	}
+	if err != nil {
+		return nil, nil, "", nil, err
+	}
+	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{WaitUntil: browser.WaitLoad}); err != nil {
+		return nil, nil, "", nil, err
+	}
+	html, _ = page.Content(ctx)
+	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
+	return page.ConsoleMessages(), page.PageErrors(), html, shot, nil
 }
 
 // newTestCase creates and persists a running TestCase for one navigation
