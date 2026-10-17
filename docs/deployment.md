@@ -388,6 +388,111 @@ written atomically (§4). Both are specifically about what happens if the
 process is killed mid-write, not just mid-request — see the hardening
 report for what was verified here.
 
+### Retention: `indago evidence prune`
+
+Evidence is never expired automatically, and request blobs can hold the
+target's session cookies verbatim (§6). `indago evidence prune` bounds how long
+evidence lives. It reads the data directory directly, so the server does not
+need to be stopped.
+
+```bash
+# Dry run (the default): lists what WOULD be deleted, deletes nothing.
+indago evidence prune -data /var/lib/indago -older-than 720h
+
+# Delete it.
+indago evidence prune -data /var/lib/indago -older-than 720h -apply
+```
+
+- **`-older-than` is required**, with no default. It uses Go duration syntax
+  (`h`, `m`, `s`; there is no `d`), and the minimum is `1h`. `720h` is 30 days.
+- **Eligible:** scans in a terminal state (`completed`, `failed`, `canceled`)
+  whose last activity is before `now − older-than`. Last activity is the later
+  of `ended_at` and `updated_at`, so a recently touched scan is never pruned on
+  the strength of an older end time.
+- **Never touched:** evidence of `created`, `running`, `paused`,
+  `awaiting_auth`, and `canceling` scans, however old. A terminal scan with no
+  usable timestamp is skipped and listed in the output (fail closed).
+- **Deleted, per evidence row:** the blob file under `evidence/`, then the
+  metadata row. Only after the blob is confirmed gone is the row removed. A
+  blob that is already missing is reported as `already-gone`, and its row is
+  removed. A row whose path escapes `evidence/`, or that names a symlink or a
+  directory, is `refused`: nothing outside the root is touched, and the row is
+  kept.
+- **Findings are kept.** Their evidence links to deleted rows are removed, and
+  the output reports how many findings lost links. Verdicts and text are not
+  changed.
+- **`-include-sessions`** (off by default) also removes the saved session
+  (storage-state) file that a scan recorded, but only when the file is inside
+  `sessions/` and no non-eligible scan still uses it. Files outside `sessions/`
+  (a login you keep elsewhere, passed with `-auth-state`) are never touched.
+- **`-include-reports`** (off by default) removes the generated report files and
+  their index rows for eligible scans.
+- **`-scan <id>`** restricts the run to one scan.
+- **Not deleted:** scan records, findings, endpoints, parameters, jobs, AI
+  tasks, test-case records, the database itself, and anything in `config.json`.
+
+**Exit status:** `0` when the run is clean, including a dry run. `1` if any
+item was refused or failed, or if the command itself errored. Failed items are
+listed, and the rest of the run still completes.
+
+**Audit trail:** one line per scan that had something deleted, on stderr, for
+example `evidence pruned scan_id=... cutoff=... evidence_removed=12 ...`. It
+carries IDs, counts, and the cutoff, never blob content or absolute paths.
+
+**Concurrency with a running server.** The command opens `indago.db` the same
+way the server does (WAL mode and a 5 s busy timeout), and it takes no lock
+file, so it does not refuse to run when `serve` is up. It only deletes evidence
+of terminal scans, and blobs are content-addressed, so a blob re-written by a
+late writer is recreated rather than corrupted. The residual risks are a
+finding in the same project being updated by the server at the same instant
+its evidence links are cut, and a late in-flight write to a canceled scan
+landing just after its row is removed. For the widest margin, run it when no
+scan is active, or stop the server first.
+
+**What this does not do:**
+
+- It does not overwrite file contents before unlinking. On SSD, copy-on-write,
+  or journaling filesystems, deleted cookies can remain recoverable from the
+  disk. Use full-disk encryption if that matters to you.
+- It does not remove copies in backups made under §5. Expire those separately.
+- Test-case records keep the IDs of evidence that was deleted. Content lookups
+  for those IDs return "not found", as §4 already describes for missing blobs.
+- It considers only the most recent session record per scan (the store has no
+  list-all for sessions), and it cannot reach evidence rows whose scan row no
+  longer exists. Both are rare by construction; neither is deleted.
+- There is no in-process schedule and no API endpoint. Use a timer (below).
+
+**Scheduling, systemd example.** Run it daily with a fixed cutoff. Keep the
+cutoff explicit in the unit so the policy is visible in one place.
+
+```ini
+# /etc/systemd/system/indago-evidence-prune.service
+[Unit]
+Description=Indago evidence retention prune
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/indago evidence prune -data /var/lib/indago -older-than 720h -apply
+User=indago
+```
+
+```ini
+# /etc/systemd/system/indago-evidence-prune.timer
+[Unit]
+Description=Daily Indago evidence retention prune
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable it with `systemctl enable --now indago-evidence-prune.timer`. Check a
+run with `journalctl -u indago-evidence-prune.service`. Before enabling `-apply`
+in a unit, run the dry run by hand first and read its output.
+
 ---
 
 ## 6. Secrets and configuration
@@ -415,7 +520,8 @@ report for what was verified here.
 - Evidence request blobs can contain the target's session cookie verbatim
   (that's the point — full request capture for evidence integrity,
   `AGENTS.md` §2.6). Restricting who can read `-data` (§4) is what protects
-  that, not anything in the API.
+  that, not anything in the API. To bound how long those blobs are kept, run
+  `indago evidence prune` (dry run by default; see §5, Retention).
 
 ---
 

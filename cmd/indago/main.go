@@ -66,6 +66,8 @@ func main() {
 		err = cmdDB(args)
 	case "serve":
 		err = cmdServe(args)
+	case "evidence":
+		err = cmdEvidence(args)
 	case "project", "target", "scope", "scan", "finding", "endpoint", "auth", "report":
 		err = newCLI(defaultServer(), os.Stdout).runClient(cmd, args)
 	case "help", "-h", "--help":
@@ -113,6 +115,10 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER_URL, default htt
   report create -scan <scan-id|prefix> -format json|markdown|html [-mode all|confirmed|selected] [-finding ID]... [-out FILE]
   report list -scan <scan-id|prefix> [-json]
   report show <report-id|prefix> [-out FILE] [-download]
+
+Local maintenance (reads -data directly; no server needed):
+  evidence prune -older-than DURATION [-data DIR] [-scan ID] [-include-sessions] [-include-reports] [-apply]
+              dry run by default; deletes evidence of terminal scans older than the cutoff (docs/deployment.md, Retention)
 
 Scope is mandatory: nothing is requested outside it. Authorized use only.
 `)
