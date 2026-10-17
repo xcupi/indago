@@ -215,7 +215,16 @@ func randomizedTLSDialer(dialer *net.Dialer, insecureSkipVerify bool) func(ctx c
 			rawConn.Close()
 			return nil, fmt.Errorf("httpengine: randomized TLS dial: %w", err)
 		}
-		uConn := utls.UClient(rawConn, &utls.Config{ServerName: host, InsecureSkipVerify: insecureSkipVerify}, utls.HelloRandomized)
+		spec, err := randomizedClientHelloSpec()
+		if err != nil {
+			rawConn.Close()
+			return nil, fmt.Errorf("httpengine: randomized TLS spec: %w", err)
+		}
+		uConn := utls.UClient(rawConn, &utls.Config{ServerName: host, InsecureSkipVerify: insecureSkipVerify}, utls.HelloCustom)
+		if err := uConn.ApplyPreset(&spec); err != nil {
+			rawConn.Close()
+			return nil, fmt.Errorf("httpengine: randomized TLS preset: %w", err)
+		}
 		if err := uConn.HandshakeContext(ctx); err != nil {
 			rawConn.Close()
 			return nil, fmt.Errorf("httpengine: randomized TLS handshake: %w", err)
