@@ -59,3 +59,39 @@ jobs:
           path: ci-check.log
           if-no-files-found: ignore
           retention-days: 7
+
+  # Required gate: a failure here fails the whole run. Builds the shipped image and proves
+  # Chromium's process sandbox works in it with the documented seccomp recipe,
+  # fails closed without it, and that the probe can tell sandboxed from not.
+  docker-sandbox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Build the shipped image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker version
+          docker build -t indago-ci:sandbox \
+            --build-arg VERSION=ci \
+            --build-arg COMMIT="$GITHUB_SHA" \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" . 2>&1 | tee docker-build.log
+      - name: Verify the Chromium process sandbox inside the image
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-docker-sandbox-check.py --image indago-ci:sandbox --out docker-sandbox-ci 2>&1 | tee docker-sandbox-ci.log
+      - name: Keep failure logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: docker-sandbox-failure
+          path: |
+            docker-build.log
+            docker-sandbox-ci.log
+            docker-sandbox-ci/
+          if-no-files-found: ignore
+          retention-days: 7
