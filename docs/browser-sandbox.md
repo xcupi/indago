@@ -60,6 +60,14 @@ the probe discriminates; it reads the kernel's view, not only the command line.
   `deploy/ci_runtime_test.go`), so the sandbox cannot silently degrade into a
   skipped test. Other browser tests also start sandboxed by default, so a host
   that cannot provide the sandbox surfaces as a failed/skipped required test.
+- The Docker image is covered separately by the CI job `docker-sandbox`
+  (`scripts/ci-docker-sandbox-check.py`, see `docs/deployment.md`): fails closed
+  under Docker's default seccomp, sandboxed under the recipe below, and an
+  unsandboxed control. Its verdict logic is unit-tested with synthetic
+  measurements (`deploy/ci_docker_sandbox_test.go`, including that a probe which
+  cannot read renderers or reads an unreadable namespace never counts as
+  evidence), and deliberately breaking the recipe (dropping `chroot`) was shown
+  locally to fail the check, with Chromium's own `sys_chroot` error as the reason.
 
 ## Docker
 

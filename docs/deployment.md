@@ -23,6 +23,28 @@ of any required root fail the check. The workflow then runs clean-test-cache
 `make check` and `make build`. Failure logs are retained for seven days. Locally set
 `INDAGO_CHROMIUM_PATH` to your installed Chrome and follow the same commands.
 
+A second, independent job, `docker-sandbox`, builds the shipped image and runs
+`scripts/ci-docker-sandbox-check.py` (needs Docker and network access to fetch
+the pinned upstream seccomp profile). It must pass for the run to pass. It
+checks three things inside the container: Docker's default seccomp with the
+sandbox on **fails closed** ("No usable sandbox", never a silent downgrade); the
+documented recipe profile (default + `clone`, `unshare`, `chroot`) starts with
+`sandbox=true`, scans a vulnerable page (Confirmed) and a safe page (Rejected),
+and every measured renderer is sandboxed; and the `-browser-no-sandbox` control
+reads as *unsandboxed* with the same probe. The upstream profile is pinned to a
+commit and a SHA-256, so it cannot change underneath CI. Run it locally with
+`python3 scripts/ci-docker-sandbox-check.py --image <image>`.
+
+Scope of that check, stated plainly: it runs the image's binary as
+`serve -browser` over loopback HTTP without TLS, not the shipped `CMD` (which adds
+TLS and `-browser-no-sandbox`). A renderer counts as sandboxed only when it has no
+`--no-sandbox` and its net, pid and user namespaces all differ from the scanner's;
+a renderer whose namespaces never become readable is not counted as evidence
+either way, and at least one readable renderer is required. It does not tell
+Chromium's own seccomp layer apart from Docker's inherited filter. The first
+lines of the job output print the host's user-namespace sysctls and Docker's
+security options so a red run on a new runner image can be diagnosed.
+
 ---
 
 ## Docker (Linux/amd64)
