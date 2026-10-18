@@ -1,4 +1,47 @@
-# Indago — bounded DOM-XSS HTML sink coverage
+# Indago — bounded DOM-XSS HTML and string-timer sinks
+
+## P2.3: primitive-string setTimeout / setInterval
+
+The current sink inventory extends the unchanged HTML sinks below with exactly
+`window.setTimeout` and `window.setInterval` **primitive-string handlers**. No new
+source, domain schema or candidate category is added. Both are tested against all
+seven existing sources in `TestDOMStringTimerSourceMatrix`: 14 positives, 14 safe
+JavaScript-string-literal negatives, 14 exact forged-runtime-console negatives,
+and canceled/CSP-blocked/callback-only/rejecting-message/delayed controls for each
+timer, exactly **52 scenarios**. Every safe/forged pair reaches its selected sink
+and finishes real payload verification; a missing selector cannot pass.
+
+Wrappers are installed before page scripts and call native **first**, with the
+exact receiver and every argument, then return the identical ID. Native errors,
+delay coercion, callbacks and extra callback arguments, shared-ID cancellation,
+CSP and Trusted Types remain native. Only successful primitive-string calls are
+reported; objects, boxed strings, TrustedScript and function handlers are never
+coerced again for observation. No timer is invoked, accelerated, rescheduled or
+converted to a function; the harness never evals code. Thirty native differential
+contracts exercise both timers using comparable ordered spy/init scripts.
+
+Timer verification uses only the **bare marker JavaScript expression**, not the
+HTML image payload (which stays unchanged for HTML sinks). Confirmation still
+requires the exact marker-specific **page error**; console reports are evidence
+only, even when formatted as an exact runtime ReferenceError. Timer evidence
+retains the actual selected sink and string payload report as well as runtime,
+DOM and screenshot attribution. Canceled, CSP-blocked and delayed calls can reach
+a string sink without execution and must not confirm. Callback-only and rejected
+message controls do not establish string-sink reachability.
+
+Referrer fixtures extract and decode the appropriate path component of the
+**absolute** referrer URL before passing it as JavaScript; they do not attempt to
+execute the whole URL. Query names and custom storage keys are discovered,
+window.name uses the same tab, and postMessage uses the existing opaque-origin
+non-self sender. Storage attacker poisonability still requires manual review.
+The existing load/readback observation window (and existing bounded message
+settling) is unchanged: arbitrary long timers, string-literal breakouts,
+automatic activation, eval/Function and location/src sinks remain unsupported.
+First-reachable-sink, selector and GET/HEAD limits still apply.
+
+See [`p23-string-timers-validation.md`](p23-string-timers-validation.md) for actual
+TDD, native contracts, CLI/controller outcomes, evidence hashes, gates and cleanup.
+P2.2 below remains historical HTML evidence, not a timer claim.
 
 ## P2.1: exactly two additional HTML sink methods
 
@@ -150,10 +193,10 @@ and observes the live DOM/JS runtime — the fundamentally new capability
 all three slices add, not a tweak to the existing Reflected XSS pipeline.
 
 **This is explicitly NOT "DOM XSS is done" as a whole product** — the
-SOURCE dimension against the HTML-injection sink category is now
-complete, but entirely new SINK categories (`eval`/`Function`,
-`location`/`src` assignment, `setTimeout`/`setInterval` with a string
-argument) are real, deliberate, separate future work. The two HTML method
+SOURCE inventory against bounded HTML sinks was implemented in that historical
+slice; this is not exhaustive transformation coverage. P2.3 above now adds only
+primitive-string timers. `eval`/`Function` and `location`/`src` assignment remain
+separate future work. The two HTML method
 sinks added by P2.1 are described at the top of this document. See "Out of scope" below.
 
 ---
@@ -163,7 +206,7 @@ sinks added by P2.1 are described at the top of this document. See "Out of scope
 | Axis | Implemented |
 |---|---|
 | Sources | SEVEN (all client-side sources identified so far): `location.hash` (piece 1); `location.search`/`URLSearchParams`, `window.name`, `postMessage` (piece 2); `document.referrer`, `localStorage`, `sessionStorage` (piece 3 — `detection.DOMXSSSources`) |
-| Sink category | Still exactly ONE, HTML injection: `Element.prototype.innerHTML` / `outerHTML` setters, `document.write` / `document.writeln`, `Element.prototype.insertAdjacentHTML`, `Range.prototype.createContextualFragment` (`detection.DOMXSSSink`; P2.1 methods have the primitive-string and insertion limits above) |
+| Sink categories (current) | Bounded HTML injection: `Element.prototype.innerHTML` / `outerHTML`, `document.write` / `document.writeln`, `Element.prototype.insertAdjacentHTML`, `Range.prototype.createContextualFragment`; P2.3 adds only primitive-string `setTimeout` / `setInterval` (see native/timing limits above) |
 | Pairs tested per endpoint/source/selector | At most ONE — the first reachable sink (by the page's own script call order) for each query parameter or storage key; non-selector sources have one pass — see "Two-phase design" below |
 | Methods probed | GET/HEAD-navigable endpoints only — UNCHANGED from piece 1 |
 | Query source coverage | Every distinct discovered `Location=Query` parameter name, sorted lexicographically for deterministic ordering — each name gets an independent canary/payload pass and finding identity. If no query parameter was discovered, a skipped `TestCase` says the source was not tested (not a clean negative) |
@@ -556,9 +599,9 @@ deliberate exclusions for future, separate pieces of work:
   document.referrer, localStorage, sessionStorage — see
   `detection.DOMXSSSources`). A genuinely new source not yet identified
   would still be new work, but nothing on the current list remains.
-- **Sinks**: HTML injection only: innerHTML/outerHTML/document.write/writeln
-  plus the two P2.1 methods above. `eval`/`Function`, `location`/`src`
-  assignment (including script-src), and string timers remain excluded.
+- **Sinks**: bounded HTML injection plus the two P2.3 primitive-string timers
+  listed above. `eval`/`Function` and `location`/`src` assignment (including
+  script-src) remain excluded.
   Other HTML methods are not implicitly covered. Source-specific limits and
   the first-reachable-sink bound still apply; this is not exhaustive DOM XSS.
 - **More than one reachable pair per endpoint/source/selector per probe

@@ -1,14 +1,11 @@
 package detection
 
-// This file is the (currently single-source, single-sink-category)
-// DOM-XSS candidate model — see docs/dom-xss.md for the full design and
-// the explicit scope boundary of this first slice. Unlike Reflected XSS, a
-// DOM-XSS "site" is identified by (client-side source, HTML-injection
-// sink) at one Endpoint, not a server-side parameter/injection point —
-// there is no HTTP request/response cycle to inspect at all. That is the
-// whole point of this engine: location.hash (the URL fragment) is NEVER
-// sent to the server by the browser, so Indago's entire server-response-
-// based Reflected XSS pipeline is structurally blind to it.
+// This file is the pure seven-source DOM-XSS candidate model. HTML sinks
+// receive the unchanged marker image; primitive-string timers receive only a
+// bare marker JavaScript expression. See docs/dom-xss.md for bounded coverage.
+// A DOM-XSS site is identified by (client-side source, sink) at an Endpoint,
+// not a server-side injection point. In particular, fragments never reach the
+// server-response-based Reflected XSS pipeline.
 //
 // The two genuinely new, minimal domain concepts this needs are
 // DOMXSSSource and DOMXSSSink below. Everything else deliberately REUSES
@@ -110,11 +107,9 @@ var DOMXSSSources = []DOMXSSSource{
 	DOMSourceReferrer, DOMSourceLocalStorage, DOMSourceSessionStorage,
 }
 
-// DOMXSSSink identifies an HTML-injection sink this engine hooks. Exactly
-// these HTML sinks are implemented (document.writeln shares
-// document.write's hook and is reported under the same sink name) — see
-// docs/dom-xss.md for what is deliberately NOT implemented yet
-// (eval/Function, location/src assignment sinks).
+// DOMXSSSink identifies the bounded HTML and primitive-string timer sinks.
+// document.writeln shares document.write's identity. eval/Function and
+// location/src assignment remain excluded; see docs/dom-xss.md.
 type DOMXSSSink string
 
 const (
@@ -123,13 +118,14 @@ const (
 	DOMSinkDocumentWrite            DOMXSSSink = "document.write"
 	DOMSinkInsertAdjacentHTML       DOMXSSSink = "insertAdjacentHTML"
 	DOMSinkCreateContextualFragment DOMXSSSink = "Range.createContextualFragment"
+	DOMSinkSetTimeout               DOMXSSSink = "setTimeout"
+	DOMSinkSetInterval              DOMXSSSink = "setInterval"
 )
 
-// IsValid reports whether sink is one of this slice's implemented
-// HTML-injection sinks.
+// IsValid reports whether sink is one of this engine's implemented sinks.
 func (s DOMXSSSink) IsValid() bool {
 	switch s {
-	case DOMSinkInnerHTML, DOMSinkOuterHTML, DOMSinkDocumentWrite, DOMSinkInsertAdjacentHTML, DOMSinkCreateContextualFragment:
+	case DOMSinkInnerHTML, DOMSinkOuterHTML, DOMSinkDocumentWrite, DOMSinkInsertAdjacentHTML, DOMSinkCreateContextualFragment, DOMSinkSetTimeout, DOMSinkSetInterval:
 		return true
 	default:
 		return false
@@ -167,6 +163,10 @@ func DOMXSSCanary(marker string) string {
 // "<img src=x onerror=M>" string parses and fires as-is the moment the
 // sink sets/writes it.
 //
+// Primitive-string timer candidates instead contain ONLY the bare marker
+// expression: native timers evaluate JavaScript, not HTML. No string-literal
+// breakout is attempted. Invalid/non-identifier markers are rejected.
+//
 // Field repurposing (documented once here; applies everywhere this
 // Candidate is read back by scan/report/web/cli code): Category is always
 // CatDOMXSS; Context carries the SINK name (not an HTML/JS parse
@@ -179,10 +179,13 @@ func DOMXSSCanary(marker string) string {
 // source in ContextSub. Other sources leave Location/Parameter/
 // InjectionPointID at zero values because they have no named selector.
 func DOMXSSPayloadFor(source DOMXSSSource, sink DOMXSSSink, marker string) (Candidate, bool) {
-	if !sink.IsValid() || !source.IsValid() || marker == "" {
+	if !sink.IsValid() || !source.IsValid() || !validDOMXSSMarker(marker) {
 		return Candidate{}, false
 	}
 	value := "<img src=x onerror=" + marker + ">"
+	if sink == DOMSinkSetTimeout || sink == DOMSinkSetInterval {
+		value = marker // A timer evaluates JavaScript, not HTML.
+	}
 	return Candidate{
 		Source:     SourceBuiltin,
 		Category:   CatDOMXSS,
@@ -193,6 +196,26 @@ func DOMXSSPayloadFor(source DOMXSSSource, sink DOMXSSSink, marker string) (Cand
 		Rationale:  domXSSRationale(source, sink),
 		DedupKey:   "dom_xss\x00" + string(source) + "\x00" + string(sink) + "\x00" + value,
 	}, true
+}
+
+// validDOMXSSMarker accepts only a bare ASCII identifier, never supplied code,
+// literals, keywords or the commonly defined undefined/NaN/Infinity globals.
+func validDOMXSSMarker(marker string) bool {
+	if marker == "" {
+		return false
+	}
+	for i := 0; i < len(marker); i++ {
+		c := marker[i]
+		if c == '_' || c == '$' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || i > 0 && c >= '0' && c <= '9' {
+			continue
+		}
+		return false
+	}
+	switch marker {
+	case "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for", "function", "if", "implements", "import", "in", "instanceof", "interface", "let", "new", "null", "package", "private", "protected", "public", "return", "static", "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while", "with", "yield", "undefined", "NaN", "Infinity":
+		return false
+	}
+	return true
 }
 
 // domXSSRationale explains, per source, how the verification candidate's
@@ -219,6 +242,9 @@ func domXSSRationale(source DOMXSSSource, sink DOMXSSSink) string {
 		storageControlCaveat = "; this reachability does not establish that an attacker can write or poison the key—manual exploitability review is required unless an attacker-relevant application flow demonstrates that control"
 	default: // DOMSourceHash
 		how = "the location.hash value"
+	}
+	if sink == DOMSinkSetTimeout || sink == DOMSinkSetInterval {
+		return how + " reaches the primitive-string handler of native " + string(sink) + "; the browser alone schedules and evaluates the benign bare marker expression, subject to native delay, cancellation, CSP and Trusted Types; confirmation requires the exact marker-specific page error within the bounded observation window" + storageControlCaveat
 	}
 	if sink == DOMSinkCreateContextualFragment {
 		return how + " is parsed by " + string(sink) + "; confirmation additionally requires observed target insertion of a returned node and the marker-specific browser runtime signal; Indago never inserts the fragment" + storageControlCaveat

@@ -20,9 +20,9 @@ package scan
 //   - query probes each distinct discovered query name; storage probes keys
 //     present in target-origin storage or requested by the page's getItem calls
 //     (capped at 32 per backend/endpoint).
-//   - exactly ONE sink category: HTML injection (innerHTML/outerHTML/
-//     document.write/writeln, insertAdjacentHTML, createContextualFragment)
-//     — see detection.DOMXSSSink.
+//   - bounded HTML injection (innerHTML/outerHTML, document.write/writeln,
+//     insertAdjacentHTML, createContextualFragment) and primitive-string
+//     setTimeout/setInterval handlers — see detection.DOMXSSSink.
 //   - at most one reachable sink is verified per endpoint/source/selector
 //     pass: if a page reaches more than one hooked sink, only the first (by
 //     whichever the page happened to call first) is tested.
@@ -34,7 +34,8 @@ package scan
 //     via a uniquely-prefixed console.log whenever a canary-containing value
 //     reaches a hooked sink. Reachability is not itself a confirmed finding.
 //  2. VERIFICATION (real payload): after a reachable pair is found, build the
-//     deterministic candidate (a bare <img src=x onerror=MARKER>) and repeat
+//     sink-specific candidate (marker image for HTML; bare marker expression
+//     for string timers) and repeat
 //     the source-specific navigation. Confirm only on the exact same
 //     deterministic browser signal Reflected XSS verification uses
 //     (verification.MatchExecutionSignal / verification.Decide), attributed
@@ -240,7 +241,7 @@ func hasConnectedDOMXSSFragment(messages []browser.ConsoleMessage, marker string
 func goQuoteJS(s string) string { return fmt.Sprintf("%q", s) }
 
 // domXSSHarnessScript builds the init-script harness: monkey-patches
-// the implemented HTML sinks (see detection.DOMXSSSink) to
+// the implemented HTML and primitive-string timer sinks to
 // report (via a uniquely-prefixed console.log) whenever a value
 // CONTAINING marker reaches one of them. Installed via
 // browser.Page.AddInitScript, BEFORE any page script runs: attaching a
@@ -278,6 +279,24 @@ const domXSSHarnessTemplate = `(() => {
   }
   hookProp(Element.prototype, 'innerHTML');
   hookProp(Element.prototype, 'outerHTML');
+  // Native-first, observational string timer hook. Strict mode preserves even
+  // null/undefined receivers for native Web IDL validation. Never coerce a
+  // handler, replace a callback, evaluate code, or schedule an extra timer.
+  for (const name of ['setTimeout', 'setInterval']) {
+    try {
+      const desc = Object.getOwnPropertyDescriptor(window, name);
+      const native = desc.value;
+      Object.defineProperty(window, name, {
+        ...desc,
+        value: function () {
+          'use strict';
+          const result = native.apply(this, arguments);
+          if (typeof arguments[0] === 'string') report(name, arguments[0]);
+          return result;
+        }
+      });
+    } catch (_) {}
+  }
   // Call native first with the original receiver and every argument. Observe
   // only primitive strings: logging must not repeat Web IDL object coercion.
   try {
@@ -783,7 +802,7 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	}
 	reachable := parseDOMXSSReachability(console, marker)
 	if len(reachable) == 0 {
-		e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("no HTML-injection sink reachable from %s (negative result)", label))
+		e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("no implemented DOM-XSS sink reachable from %s (negative result)", label))
 		return nil
 	}
 	// Bounded to the FIRST reachable sink (deterministic: whichever the
@@ -842,7 +861,7 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	var evidenceIDs []domain.ID
 	if e.evidence != nil {
 		logLines := append(append([]string(nil), consoleErrs...), pageErrs2...)
-		if sink == detection.DOMSinkCreateContextualFragment {
+		if sink == detection.DOMSinkCreateContextualFragment || sink == detection.DOMSinkSetTimeout || sink == detection.DOMSinkSetInterval {
 			for _, message := range console2 {
 				if strings.HasPrefix(message.Text, domXSSConsolePrefix) {
 					logLines = append(logLines, message.Text)

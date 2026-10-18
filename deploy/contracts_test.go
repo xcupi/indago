@@ -33,7 +33,7 @@ func TestCIContract(t *testing.T) {
 			t.Errorf("action not SHA-pinned: %s", pin[0])
 		}
 	}
-	requireText(t, "scripts/ci-browser-check.py", "TestIntegrationRenderRealBrowser", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestUINavigation", "TestUICooldownClock", "TestE2E_FullPipelineAgainstCorpus", "TestDOMHTMLSourceMatrix", "browser_integration", "skip", "raise SystemExit", "INDAGO_CHROMIUM_PATH")
+	requireText(t, "scripts/ci-browser-check.py", "TestIntegrationRenderRealBrowser", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestUINavigation", "TestUICooldownClock", "TestE2E_FullPipelineAgainstCorpus", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix", "browser_integration", "skip", "raise SystemExit", "INDAGO_CHROMIUM_PATH")
 }
 
 func TestDockerContract(t *testing.T) {

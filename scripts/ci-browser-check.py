@@ -17,6 +17,7 @@ required = {
     "TestUINavigation",
     "TestUICooldownClock",
     "TestDOMHTMLSourceMatrix",
+    "TestDOMStringTimerSourceMatrix",
 }
 if not shutil.which("node"):
     raise SystemExit("required Node.js unavailable")
@@ -38,7 +39,7 @@ for line in proc.stdout:
     name = event.get("Test")
     if name in required and event["Action"] == "pass":
         passed.add(name)
-    if name in required or (name or "").startswith("TestDOMHTMLSourceMatrix/"):
+    if (name or "").split("/", 1)[0] in required:
         if event["Action"] in ("skip", "fail"):
             failed = True
 code = proc.wait()

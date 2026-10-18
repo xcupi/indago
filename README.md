@@ -21,13 +21,15 @@ and conservative, operator-controlled behavior.
 | Transport | HTTP engine, browser manager | done |
 | Discovery | Crawl, forms, sitemap/robots, wordlists, params; scan controller integration | **current** |
 | Phase 1 | Reflected XSS detection & verification | done |
-| DOM XSS (bounded HTML sinks) | Seven implemented source types → innerHTML/outerHTML/document.write/writeln/insertAdjacentHTML/Range.createContextualFragment; source-specific limits in [`docs/dom-xss.md`](docs/dom-xss.md) | **current** |
+| DOM XSS (bounded HTML/string-timer sinks) | Seven implemented source types → innerHTML/outerHTML/document.write/writeln/insertAdjacentHTML/Range.createContextualFragment plus primitive-string setTimeout/setInterval; native behavior and source/timing limits in [`docs/dom-xss.md`](docs/dom-xss.md) | **current** |
 | Later | Stored XSS, more DOM-XSS sources/sinks, more engines | designed-for |
 
 Scans perform scope-enforced discovery, benign-marker Reflected-XSS testing,
 and browser-backed DOM-XSS probing for the bounded source/sink coverage above.
 Confirmation requires a marker-specific browser runtime signal, not reachability
-or console text alone. Stored XSS and other DOM sink categories are not built. See
+or console text alone. String timers are observed, never accelerated or rewritten;
+long timers and JavaScript-string breakouts are not promised. Stored XSS and
+other DOM sink categories are not built. See
 [`AGENTS.md`](AGENTS.md) for the exact boundary and
 [`docs/scan-orchestration.md`](docs/scan-orchestration.md) for how a scan runs.
 

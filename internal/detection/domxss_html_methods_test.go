@@ -11,7 +11,7 @@ func TestDOMHTMLMethodSinkCandidates(t *testing.T) {
 			}
 		}
 	}
-	for _, sink := range []DOMXSSSink{"eval", "Function", "location", "src", "setTimeout"} {
+	for _, sink := range []DOMXSSSink{"eval", "Function", "location", "src"} {
 		if sink.IsValid() {
 			t.Fatalf("out-of-scope sink accepted: %s", sink)
 		}
