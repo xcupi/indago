@@ -5,8 +5,11 @@
 Current HTML sinks: `innerHTML`, `outerHTML`, `document.write`/`writeln`,
 **`Element.prototype.insertAdjacentHTML`** and
 **`Range.prototype.createContextualFragment`**. No source was added in P2.1.
-Seven source types are implemented, with the query/storage bounds below;
-implementation inventory does not imply every source/sink pair was validated.
+Seven source types are implemented, with the query/storage bounds below.
+P2.2 now positively validates all seven against **both** methods, with paired
+escaped and forged-console negatives; see the current inventory below.
+This bounded matrix is not exhaustive coverage of application transformations,
+sender allowlists, input types, timing, or multiple reachable sinks.
 
 The two new wrappers call the original native method **first**, with the
 original receiver and **all arguments**, then return the identical native
@@ -66,6 +69,42 @@ the seven navigation mechanisms plus storage observation, and real proxy/session
 referrer/scope/evidence behavior. This is **not** a claim that all seven sources
 were positively exercised against both new sinks. See
 `docs/p21-html-sinks-validation.md` for actual CLI routes/results and gates.
+That is historical P2.1 evidence: P2.2 supersedes **only** its hash/query-only
+positive-validation limit, not the original results or the remaining limits.
+
+### P2.2 current tested source/method inventory
+
+`TestDOMHTMLSourceMatrix` runs 46 real-Chromium scenarios without test skips:
+exactly 14 positive pairs, 14 escaped negatives, 14 runtime-shaped forged-console
+negatives, two origin/source-rejecting message controls, and detached plus
+innocent-sibling-only Range controls. Each escaped/forged control must select
+its real source, reach the named hook, create a finding, and finish payload
+verification; absence of a selected query/storage key cannot pass the control.
+
+| Source | insertAdjacentHTML | Range.createContextualFragment | Selector / mechanism |
+|---|---|---|---|
+| `location.hash` | Confirmed + escaped/forged Rejected | Confirmed + escaped/forged Rejected | decoded fragment |
+| `location.search` | Confirmed + escaped/forged Rejected | Confirmed + escaped/forged Rejected | discovered `matrix_query`, `URLSearchParams` |
+| `window.name` | Confirmed + escaped/forged Rejected | Confirmed + escaped/forged Rejected | same-tab pre-navigation write |
+| `postMessage` | Confirmed + escaped/forged Rejected | Confirmed + escaped/forged Rejected | existing opaque `srcdoc` sender, never self-post |
+| `document.referrer` | Confirmed + escaped/forged Rejected | Confirmed + escaped/forged Rejected | absolute Referer URL + `decodeURIComponent` |
+| `localStorage` | Confirmed + escaped/forged Rejected | Confirmed + escaped/forged Rejected | page-observed `getItem('matrix_profile_note')` |
+| `sessionStorage` | Confirmed + escaped/forged Rejected | Confirmed + escaped/forged Rejected | page-observed `getItem('matrix_tab_note')` |
+
+Positive assertions require exactly one Confirmed finding with correct
+source/sink/selector, marker-specific page error, and screenshot/DOM/browser-log
+metadata backed by matching bytes, size and SHA256. Range additionally requires
+connection evidence for the actual canonical marker-handler element. Message
+DOM evidence records `origin="null"` and non-self source; rejecting controls
+independently prove the message handler received and rejected that sender.
+
+The real CLI/server/controller corpus and exact gates/readback are recorded in
+[`p22-source-matrix-validation.md`](p22-source-matrix-validation.md). No engine,
+source, payload, verdict, production limit or authorization policy was changed.
+Storage attacker poisonability still needs manual review; opaque-origin testing
+does not test every allowlist. Primitive-string-only observation, first-reachable
+sink, selector bounds, Range observation-window/transient/shadow-tree limits,
+and all out-of-scope sink categories remain as documented above and below.
 
 ## Source slices: design and prior validation
 

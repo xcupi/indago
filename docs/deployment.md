@@ -12,9 +12,10 @@ checks and the distinction between local and GitHub validation.
 `.github/workflows/ci.yml` runs on pushes, pull requests and manual dispatch;
 it has read-only contents permissions and never deploys/releases. It provisions
 Go from `go.mod`, Node 24, the documented Playwright driver and runner system
-Chrome. `scripts/ci-browser-check.py` requires six actual passing runtime tests
-(no skips), then the workflow runs `go mod verify`, clean-test-cache `make check`
-and `make build`. Failure logs are retained for seven days. Locally set
+Chrome. `scripts/ci-browser-check.py` requires seven actual passing runtime tests
+(no skips), including the build-tagged seven-source HTML sink matrix; skipped
+matrix subtests also fail the check. The workflow then runs clean-test-cache
+`make check` and `make build`. Failure logs are retained for seven days. Locally set
 `INDAGO_CHROMIUM_PATH` to your installed Chrome and follow the same commands.
 
 ---

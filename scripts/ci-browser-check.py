@@ -16,6 +16,7 @@ required = {
     "TestE2E_FullPipelineAgainstCorpus",
     "TestUINavigation",
     "TestUICooldownClock",
+    "TestDOMHTMLSourceMatrix",
 }
 if not shutil.which("node"):
     raise SystemExit("required Node.js unavailable")
@@ -23,7 +24,7 @@ chrome = os.environ.get("INDAGO_CHROMIUM_PATH", "")
 if not chrome or not os.access(chrome, os.X_OK):
     raise SystemExit("required INDAGO_CHROMIUM_PATH is not executable")
 command = [
-    "go", "test", "-race", "-p", "1", "-count=1", "-json",
+    "go", "test", "-tags", "browser_integration", "-race", "-p", "1", "-count=1", "-json",
     "./internal/browser", "./internal/verification", "./internal/scan", "./internal/web",
     "-run", "^(" + "|".join(sorted(required)) + ")$",
 ]
@@ -35,12 +36,12 @@ for line in proc.stdout:
     if event.get("Output"):
         print(event["Output"], end="", flush=True)
     name = event.get("Test")
-    if name in required:
-        if event["Action"] == "pass":
-            passed.add(name)
+    if name in required and event["Action"] == "pass":
+        passed.add(name)
+    if name in required or (name or "").startswith("TestDOMHTMLSourceMatrix/"):
         if event["Action"] in ("skip", "fail"):
             failed = True
 code = proc.wait()
 if code or failed or passed != required:
     raise SystemExit("required runtime checks failed/skipped/missing: " + ", ".join(sorted(required - passed)))
-print("Required Node/browser tests: all 6 passed; no skips")
+print(f"Required Node/browser tests: all {len(required)} passed; no skips")
