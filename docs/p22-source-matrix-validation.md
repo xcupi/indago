@@ -287,3 +287,22 @@ uses the preserved readbacks, not a claim to have queried that deleted DB.
 Independent diff review, publication and final-SHA CI are delivery gates; their
 final result/commit/URL are supplied in the delivery summary rather than guessed
 before publication. Publication does not merge any prerequisite or PR into main.
+
+### Publication exposed an older referrer fixture race
+
+The first P2.2 push, `4ea53b7`, passed the CI runtime preflight but failed the
+clean-cache standard race gate in
+`TestIntegrationNavigateRefererReachesDocumentReferrerRealBrowser`. The full
+failure is retained at
+https://github.com/xcupi/indago/actions/runs/39082671407. This is not a successful
+remote gate and is not discarded by rerunning it unchanged.
+
+The server handler wrote a plain shared string while the test read it without
+Go synchronization. The handler also recorded every request, allowing favicon
+requests to overwrite the document's Referer. A 20-repetition local real-browser
+race run reproduced the same write/read stack. The fixture now records the root
+document only and uses initialized `atomic.Value` storage for every write/read;
+the exact HTTP Referer and rendered `document.referrer` assertions are unchanged.
+A 100-repetition real-Chromium race run passed with no failures or skips. The
+follow-up changes test code and this provenance record only, not the scanner,
+verdict policy, browser limits or security boundaries.

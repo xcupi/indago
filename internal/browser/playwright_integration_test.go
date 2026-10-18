@@ -217,9 +217,15 @@ func TestIntegrationScopeGateBlocksRequestsRealBrowser(t *testing.T) {
 // either Playwright or this package's own threading is caught here
 // rather than only in a live DOM-XSS scan.
 func TestIntegrationNavigateRefererReachesDocumentReferrerRealBrowser(t *testing.T) {
-	var gotReferer string
+	var gotReferer atomic.Value
+	gotReferer.Store("")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotReferer = r.Header.Get("Referer")
+		// Only the tested document counts, not later favicon/subresource requests.
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		gotReferer.Store(r.Header.Get("Referer"))
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, `<!doctype html><html><body><div id="sink"></div>
 <script>document.getElementById('sink').innerHTML = document.referrer;</script>
@@ -246,8 +252,8 @@ func TestIntegrationNavigateRefererReachesDocumentReferrerRealBrowser(t *testing
 		t.Fatalf("navigate: %v", err)
 	}
 
-	if gotReferer != referer {
-		t.Fatalf("server-observed Referer header = %q, want %q", gotReferer, referer)
+	if got := gotReferer.Load(); got != referer {
+		t.Fatalf("server-observed Referer header = %q, want %q", got, referer)
 	}
 	html, err := p.Content(ctx)
 	if err != nil {
