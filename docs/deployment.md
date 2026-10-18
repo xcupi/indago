@@ -94,13 +94,18 @@ Allow at least the tested **2 GiB memory / 256 MiB shm** for small browser scans
 raise those for larger browser concurrency. These are test settings, not a
 maximum-resource guarantee. SIGTERM gets 60 seconds before Docker force-kills.
 
-**Browser isolation limit:** the existing Playwright launch defaults disable
-Chromium's sandbox (`--no-sandbox`); non-root plus container restrictions does
-not restore it. This image does not change that scanner policy or claim
-sandboxed browsing. A hostile target/browser exploit can access the scanner's
-own data and environment. Use a dedicated disposable VM/host and restricted
-network egress for untrusted targets; do not share sensitive workloads. No
-namespace/syscall restrictions beyond the tested Docker defaults are promised.
+**Browser isolation:** Chromium's process sandbox is ON by default for
+`indago serve -browser`. The shipped image's default command passes the explicit
+`-browser-no-sandbox` opt-out because Docker's default seccomp profile blocks the
+user namespaces the sandbox needs (measured: the sandboxed browser refuses to
+start, it does not silently degrade). With the opt-out, a hostile target/browser
+exploit can access the scanner's own data and environment; a startup WARN says
+so. To keep the sandbox in a container, drop `-browser-no-sandbox` from the
+command and relax the container's seccomp profile instead — see
+[`browser-sandbox.md`](browser-sandbox.md) for the measured trade-off. Use a
+dedicated disposable VM/host and restricted network egress for untrusted
+targets; do not share sensitive workloads. No namespace/syscall restrictions
+beyond the tested Docker defaults are promised.
 
 ---
 
@@ -462,10 +467,13 @@ History:
 
 A host provisioned for an older driver needs the install step re-run.
 
-Headless Chromium needs the usual sandboxing/shared-library support most
-minimal container base images lack — the `--with-deps` install step above
-handles that on Debian/Ubuntu-family images; for other bases install
-Chromium's runtime dependencies manually (fonts, `libnss3`, `libatk`, etc.).
+Headless Chromium needs shared-library support most minimal container base
+images lack — the `--with-deps` install step above handles that on
+Debian/Ubuntu-family images; for other bases install Chromium's runtime
+dependencies manually (fonts, `libnss3`, `libatk`, etc.). Its process sandbox is
+on by default and needs kernel/container support (user namespaces or the setuid
+helper); see [`browser-sandbox.md`](browser-sandbox.md) if the browser refuses to
+start.
 
 Without a usable driver or browser, `-browser` fails fast at startup. A
 missing driver reports `run playwright (is it installed? …)`; a bad browser

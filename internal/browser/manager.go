@@ -55,8 +55,13 @@ func NewManager(cfg Config, log *slog.Logger) (*Manager, error) {
 	if exe == "" {
 		exe = os.Getenv("INDAGO_CHROMIUM_PATH")
 	}
-	return newManager(cfg, log, func() (driver, error) { return newPlaywrightDriver(exe) })
+	return newManager(cfg, log, func() (driver, error) { return newPlaywrightDriver(exe, cfg.DisableSandbox) })
 }
+
+// sandboxOptOutHint is appended to a launch failure while the sandbox is on.
+// It names the explicit opt-out but the manager never applies it by itself: a
+// failed sandboxed launch is reported, not silently retried without isolation.
+const sandboxOptOutHint = "; Chromium's process sandbox is ON and may be unsupported here (for example an unprivileged container or a restricted user namespace). Fix the host, or knowingly lower isolation with the explicit -browser-no-sandbox flag (see docs/browser-sandbox.md)"
 
 // newManager is the injectable constructor used by tests.
 func newManager(cfg Config, log *slog.Logger, factory newDriverFunc) (*Manager, error) {
@@ -64,6 +69,9 @@ func newManager(cfg Config, log *slog.Logger, factory newDriverFunc) (*Manager, 
 		log = slog.Default()
 	}
 	cfg = cfg.withDefaults()
+	if cfg.DisableSandbox {
+		log.Warn("Chromium process sandbox is DISABLED (--no-sandbox): a hostile page that exploits the renderer can act as the scanner's OS user, reach its files and loopback services; use only against targets you trust or inside an isolated environment")
+	}
 
 	drv, err := factory()
 	if err != nil {
@@ -80,11 +88,15 @@ func newManager(cfg Config, log *slog.Logger, factory newDriverFunc) (*Manager, 
 		b, err := drv.Launch(cfg.Headless)
 		if err != nil {
 			_ = m.Close() // tear down anything already launched
-			return nil, fmt.Errorf("browser: launch: %w", err)
+			hint := ""
+			if !cfg.DisableSandbox {
+				hint = sandboxOptOutHint
+			}
+			return nil, fmt.Errorf("browser: launch: %w%s", err, hint)
 		}
 		m.browsers = append(m.browsers, b)
 	}
-	m.log.Info("browser manager started", "pool", cfg.PoolSize, "headless", cfg.Headless)
+	m.log.Info("browser manager started", "pool", cfg.PoolSize, "headless", cfg.Headless, "sandbox", !cfg.DisableSandbox)
 	return m, nil
 }
 

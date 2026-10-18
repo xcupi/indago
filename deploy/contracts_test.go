@@ -33,11 +33,11 @@ func TestCIContract(t *testing.T) {
 			t.Errorf("action not SHA-pinned: %s", pin[0])
 		}
 	}
-	requireText(t, "scripts/ci-browser-check.py", "TestIntegrationRenderRealBrowser", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestUINavigation", "TestUICooldownClock", "TestE2E_FullPipelineAgainstCorpus", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix", "browser_integration", "skip", "raise SystemExit", "INDAGO_CHROMIUM_PATH")
+	requireText(t, "scripts/ci-browser-check.py", "TestIntegrationRenderRealBrowser", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestUINavigation", "TestUICooldownClock", "TestE2E_FullPipelineAgainstCorpus", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix", "TestIntegrationDefaultConfigRendererIsSandboxed", "TestIntegrationDisableSandboxIsExplicitOptOut", "browser_integration", "skip", "raise SystemExit", "INDAGO_CHROMIUM_PATH")
 }
 
 func TestDockerContract(t *testing.T) {
-	s := requireText(t, "Dockerfile", "AS build", "go mod verify", "make build", "PLAYWRIGHT_DRIVER_PATH=/opt/playwright", "--version", "chromium", "ca-certificates", "USER 10001:10001", "VOLUME [\"/var/lib/indago\"]", "HEALTHCHECK", "STOPSIGNAL SIGTERM", "-allow-remote", "-tls-cert", "-tls-key")
+	s := requireText(t, "Dockerfile", "AS build", "go mod verify", "make build", "PLAYWRIGHT_DRIVER_PATH=/opt/playwright", "--version", "chromium", "ca-certificates", "USER 10001:10001", "VOLUME [\"/var/lib/indago\"]", "HEALTHCHECK", "STOPSIGNAL SIGTERM", "-allow-remote", "-tls-cert", "-tls-key", "-browser-no-sandbox")
 	if strings.Contains(s, "allow-plaintext-remote") {
 		t.Error("image must not downgrade remote TLS")
 	}

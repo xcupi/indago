@@ -16,7 +16,7 @@ func TestCIRuntimeRejectsMissingSkippedFailedRootsAndDescendants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots := []string{"TestIntegrationRenderRealBrowser", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestIntegrationVerifyReflectionOnlyIsRejected", "TestE2E_FullPipelineAgainstCorpus", "TestUINavigation", "TestUICooldownClock", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix"}
+	roots := []string{"TestIntegrationRenderRealBrowser", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestIntegrationVerifyReflectionOnlyIsRejected", "TestE2E_FullPipelineAgainstCorpus", "TestUINavigation", "TestUICooldownClock", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix", "TestIntegrationDefaultConfigRendererIsSandboxed", "TestIntegrationDisableSandboxIsExplicitOptOut"}
 	for _, tc := range []struct {
 		name, root, action, child string
 		wantPass                  bool
@@ -30,6 +30,14 @@ func TestCIRuntimeRejectsMissingSkippedFailedRootsAndDescendants(t *testing.T) {
 		{"html-missing", "TestDOMHTMLSourceMatrix", "missing", "", false},
 		{"html-child-skip", "TestDOMHTMLSourceMatrix", "skip", "/insertAdjacentHTML/location.hash/positive", false},
 		{"html-child-fail", "TestDOMHTMLSourceMatrix", "fail", "/Range.createContextualFragment/localStorage/forged", false},
+		// A sandbox that silently degrades to "skipped" would hide a disabled
+		// process sandbox, so each sandbox test is required to actually pass.
+		{"sandbox-default-missing", "TestIntegrationDefaultConfigRendererIsSandboxed", "missing", "", false},
+		{"sandbox-default-skip", "TestIntegrationDefaultConfigRendererIsSandboxed", "skip", "", false},
+		{"sandbox-default-fail", "TestIntegrationDefaultConfigRendererIsSandboxed", "fail", "", false},
+		{"sandbox-optout-skip", "TestIntegrationDisableSandboxIsExplicitOptOut", "skip", "", false},
+		{"sandbox-optout-missing", "TestIntegrationDisableSandboxIsExplicitOptOut", "missing", "", false},
+		{"sandbox-optout-fail", "TestIntegrationDisableSandboxIsExplicitOptOut", "fail", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

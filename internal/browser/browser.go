@@ -64,6 +64,11 @@ type Config struct {
 	// anyway, leaving the underlying Chromium process orphaned rather than
 	// hanging.
 	ShutdownTimeout time.Duration
+	// DisableSandbox launches Chromium with its process sandbox turned OFF
+	// (--no-sandbox). The zero value keeps the sandbox ON: this is an explicit,
+	// operator-chosen reduction of isolation, never a default and never an
+	// automatic fallback. See docs/browser-sandbox.md.
+	DisableSandbox bool
 }
 
 // DefaultConfig returns conservative defaults.

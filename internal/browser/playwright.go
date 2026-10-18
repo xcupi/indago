@@ -26,22 +26,31 @@ func IsTimeout(err error) bool {
 // a browser are gated behind the `browser_integration` build tag.
 
 // newPlaywrightDriver starts a Playwright engine.
-// exe, when non-empty, is the Chromium binary to launch.
-func newPlaywrightDriver(exe string) (driver, error) {
+// exe, when non-empty, is the Chromium binary to launch. disableSandbox is the
+// operator's explicit opt-out of Chromium's process sandbox; the zero value
+// keeps it ON.
+func newPlaywrightDriver(exe string, disableSandbox bool) (driver, error) {
 	p, err := pw.Run()
 	if err != nil {
 		return nil, fmt.Errorf("run playwright (install the driver: go run github.com/mxschmitt/playwright-go/cmd/playwright@v0.6201.1 --version): %w", err)
 	}
-	return &pwDriver{pw: p, exe: exe}, nil
+	return &pwDriver{pw: p, exe: exe, disableSandbox: disableSandbox}, nil
 }
 
 type pwDriver struct {
-	pw  *pw.Playwright
-	exe string
+	pw             *pw.Playwright
+	exe            string
+	disableSandbox bool
 }
 
 func (d *pwDriver) Launch(headless bool) (browserHandle, error) {
-	opts := pw.BrowserTypeLaunchOptions{Headless: pw.Bool(headless)}
+	// Playwright adds --no-sandbox unless chromiumSandbox is exactly true, so
+	// the sandbox must be requested explicitly: leaving the option unset would
+	// silently disable it.
+	opts := pw.BrowserTypeLaunchOptions{
+		Headless:        pw.Bool(headless),
+		ChromiumSandbox: pw.Bool(!d.disableSandbox),
+	}
 	if d.exe != "" {
 		opts.ExecutablePath = pw.String(d.exe)
 	}

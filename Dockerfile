@@ -46,4 +46,8 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=3 \
     CMD ["/usr/local/bin/indago-healthcheck"]
 ENTRYPOINT ["/usr/local/bin/indago"]
 # Fails closed without an environment token and a mounted TLS pair.
-CMD ["serve", "-data", "/var/lib/indago", "-addr", "0.0.0.0:8750", "-allow-remote", "-tls-cert", "/tls/server.crt", "-tls-key", "/tls/server.key", "-browser"]
+# -browser-no-sandbox is an EXPLICIT, knowing opt-out: Docker's default seccomp
+# profile blocks the user namespaces Chromium's process sandbox needs, so the
+# browser would not start at all. This lowers isolation from hostile pages; see
+# docs/browser-sandbox.md for running sandboxed (relaxed seccomp) instead.
+CMD ["serve", "-data", "/var/lib/indago", "-addr", "0.0.0.0:8750", "-allow-remote", "-tls-cert", "/tls/server.crt", "-tls-key", "/tls/server.key", "-browser", "-browser-no-sandbox"]

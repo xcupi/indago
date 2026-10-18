@@ -114,7 +114,9 @@ values, no payloads) and the result plus request/response evidence is stored
 under `data/evidence/`. POST/PUT/PATCH/DELETE endpoints are skipped unless you
 start the server with `-allow-state-changing`. `indago serve -browser` adds
 browser network discovery (needs Chromium; out-of-scope requests are blocked in
-the browser).
+the browser). Chromium's process sandbox is on by default; hosts that cannot
+provide it must opt out explicitly with `-browser-no-sandbox`
+(see [`docs/browser-sandbox.md`](docs/browser-sandbox.md)).
 
 Run the quality gate:
 

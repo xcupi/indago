@@ -176,6 +176,8 @@ func cmdServe(args []string) error {
 		"also execute POST/PUT/PATCH/DELETE endpoints (default: only GET/HEAD/OPTIONS; others are skipped)")
 	useBrowser := fs.Bool("browser", false, "enable browser network-observation discovery AND browser verification of reflected XSS candidates (needs Chromium; requests are scope-gated)")
 	chromium := fs.String("chromium", "", "Chromium executable for -browser (default: $INDAGO_CHROMIUM_PATH or the Playwright cache)")
+	browserNoSandbox := fs.Bool("browser-no-sandbox", false,
+		"launch -browser Chromium WITHOUT its process sandbox (--no-sandbox). The sandbox is ON by default; use only when the host cannot provide it (e.g. an unprivileged container). Lowers isolation from hostile pages")
 	allowRemote := fs.Bool("allow-remote", false,
 		"allow binding a non-loopback address; requires INDAGO_API_TOKEN and -tls-cert/-tls-key (see docs/deployment.md)")
 	tlsCert := fs.String("tls-cert", "", "PEM certificate file: serve HTTPS (a path, not the certificate value)")
@@ -194,6 +196,11 @@ func cmdServe(args []string) error {
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 
 	log := newLogger(*debug)
+
+	browserCfg, err := browserConfigFromFlags(*useBrowser, *browserNoSandbox, *chromium)
+	if err != nil {
+		return err
+	}
 
 	// The API bearer token is read once, here, from the environment: never a
 	// flag (shell history, `ps`), never written to config.json, never logged.
@@ -282,7 +289,7 @@ func cmdServe(args []string) error {
 	}
 	var loginFn web.LoginFunc
 	if *useBrowser {
-		bm, err := browser.NewManager(browser.Config{Headless: true, ExecutablePath: *chromium}, log)
+		bm, err := browser.NewManager(browserCfg, log)
 		if err != nil {
 			return fmt.Errorf("start browser (-browser): %w", err)
 		}
