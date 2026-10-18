@@ -63,22 +63,75 @@ the probe discriminates; it reads the kernel's view, not only the command line.
 
 ## Docker
 
-Measured with an image built from this tree (non-root UID 10001):
+Measured with the image built from `main` (Debian bookworm `chromium`
+155.0.8059.79, non-root UID 10001, **no** setuid `chrome-sandbox`, so only the
+user-namespace sandbox is possible), run with the hardened flags from
+`docs/deployment.md` (`--read-only --cap-drop=ALL
+--security-opt=no-new-privileges:true`, AppArmor `docker-default` left on).
+"Renderers" are real renderer processes measured from inside the container while
+a scan ran; a renderer counts as sandboxed only if it lacks `--no-sandbox` **and**
+its net, pid and user namespaces all differ from the scanner's. Seccomp alone is
+not used as evidence here: Docker's own filter is inherited by every process, so
+`Seccomp: 2` appears even with `--no-sandbox`.
 
 | Container setup | Result |
 |---|---|
-| Docker default seccomp, sandbox on | Fails closed: `No usable sandbox!`, exit 1, with the opt-out hint |
-| Docker default seccomp, `-browser-no-sandbox` | Starts, `sandbox=false` |
-| `--security-opt seccomp=unconfined`, sandbox on | Browser launches, `sandbox=true` |
+| Docker built-in default seccomp, sandbox on | Fails closed, exit 1: Chromium reports `No usable sandbox!`; Indago adds the opt-out hint |
+| Same, with the upstream moby `default.json` passed explicitly | Identical failure (the file behaves like the built-in profile) |
+| Docker default seccomp, `-browser-no-sandbox` | Starts, `sandbox=false`; 10 renderers, all `--no-sandbox`, none isolated |
+| `--security-opt seccomp=unconfined`, sandbox on | Starts, `sandbox=true`; 6 renderers, all sandboxed |
+| default + `unshare`, `clone` | Fails closed: `Check failed: sys_chroot("/proc/self/fdinfo/")` (Chromium got past namespace creation and needs `chroot`) |
+| default + `unshare`, `clone`, `chroot` | Starts, `sandbox=true`; 6 renderers, all sandboxed |
+| default + `clone`, `chroot` (no `unshare`) | Fails closed: `No usable sandbox!` |
+| default + `unshare`, `chroot` (no `clone`) | Fails closed: `No usable sandbox!` |
 
-So Docker's default syscall filter blocks what Chromium's sandbox needs. The
-shipped image therefore passes `-browser-no-sandbox` **explicitly** in its
-default command (a visible, documented choice, not a hidden default). To run
-sandboxed in a container, remove that flag and relax the container's seccomp
-profile; this trades container syscall filtering for Chromium's own sandbox,
-and you should prefer a purpose-built profile over `unconfined`. For the third
-row only successful launch was measured, not the renderers' seccomp state inside
-the container.
+So the Docker default blocks the sandbox because `unshare`, `clone` with
+namespace flags and `chroot` need `CAP_SYS_ADMIN` / `CAP_SYS_CHROOT` there, and
+in this image **each of those three is required** (removing any one fails
+closed). `AppArmor docker-default`, `--cap-drop=ALL` and `no-new-privileges` did
+not prevent the sandbox once those syscalls were allowed. The shipped image
+still passes `-browser-no-sandbox` **explicitly** in its default command, so it
+starts anywhere, but with no process sandbox.
+
+### Running the image sandboxed
+
+Derive the profile from **your own Docker version's** default profile (the one
+used above is the upstream `moby/profiles` `default.json`; the controls show it
+matched this daemon's built-in, but a different Docker may differ) and add only
+the three syscalls:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/moby/profiles/main/seccomp/default.json -o default.json
+python3 - <<'EOF'
+import json
+d = json.load(open('default.json'))
+d['syscalls'].append({'names': ['clone', 'unshare', 'chroot'], 'action': 'SCMP_ACT_ALLOW'})
+json.dump(d, open('indago-chromium-seccomp.json', 'w'))
+EOF
+```
+
+Then run the normal hardened command from `docs/deployment.md`, add
+`--security-opt seccomp=$PWD/indago-chromium-seccomp.json`, and override the
+command so it does **not** contain `-browser-no-sandbox`:
+
+```sh
+... indago:TAG serve -data /var/lib/indago -addr 0.0.0.0:8750 -allow-remote \
+    -tls-cert /tls/server.crt -tls-key /tls/server.key -browser
+```
+
+Measured with exactly that configuration (strict TLS, bearer token,
+`--read-only`, `--cap-drop=ALL`): startup log `sandbox=true` with no DISABLED
+warning, 27 renderers measured and all sandboxed, healthcheck `healthy`, the
+vulnerable fixture Confirmed (marker-specific browser error) and the safe one
+Rejected, project persisted across a restart, graceful stop exit 0, and no token
+or key material in the logs.
+
+Prefer this over `seccomp=unconfined`. It is still a **trade-off**: the three
+added rules let *every* process in the container create user namespaces, which
+enlarges the kernel attack surface available to a compromised process in the
+container, and it needs a host where unprivileged user namespaces are allowed
+(`user.max_user_namespaces > 0`, and no policy that forbids them). Without the
+profile the image fails closed rather than falling back.
 
 ## Not established
 
@@ -91,3 +144,12 @@ the container.
   isolation; a dedicated disposable VM and restricted egress remain advisable for
   untrusted targets.
 - No benchmark of the sandbox's performance cost was made.
+- Docker: one host, one daemon (Docker 29.9) and one image were measured. The
+  added `clone` rule is unconditional; a narrower rule that only admits the
+  `CLONE_NEW*` flags Chromium uses was not tried. Rootless Docker, user-namespace
+  remapping, Kubernetes seccomp/PodSecurity settings and other distributions
+  were not measured. The first Docker experiments used host networking only to
+  reach a loopback lab target; the final configuration run used the normal
+  published-port setup. Measurements were taken as UID 10001 inside the
+  container, the same user as the scanner, so a sandboxed renderer still shares
+  the scanner's OS user.
