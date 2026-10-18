@@ -101,8 +101,11 @@ user namespaces the sandbox needs (measured: the sandboxed browser refuses to
 start, it does not silently degrade). With the opt-out, a hostile target/browser
 exploit can access the scanner's own data and environment; a startup WARN says
 so. To keep the sandbox in a container, drop `-browser-no-sandbox` from the
-command and relax the container's seccomp profile instead — see
-[`browser-sandbox.md`](browser-sandbox.md) for the measured trade-off. Use a
+command and run with a seccomp profile that additionally allows `clone`,
+`unshare` and `chroot` (all three are required; measured, including a full
+TLS/token run with the sandbox verified on every renderer) — the recipe,
+results and trade-off are in [`browser-sandbox.md`](browser-sandbox.md#docker).
+Prefer that over `seccomp=unconfined`. Use a
 dedicated disposable VM/host and restricted network egress for untrusted
 targets; do not share sensitive workloads. No namespace/syscall restrictions
 beyond the tested Docker defaults are promised.
