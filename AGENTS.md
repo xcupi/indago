@@ -23,7 +23,9 @@ vulnerabilities against targets **they are explicitly permitted to test**.
   setTimeout/setInterval sinks, preserving native behavior and deterministic
   verification. Authorization is not proof of implementation; current test/live
   status belongs in the topical validation docs. eval/Function, location/src
-  assignment and browser sandbox changes remain outside this slice.
+  assignment and any change to the browser sandbox policy remain outside this
+  slice (the Chromium process-sandbox default is a separate, already-delivered
+  slice; see `docs/browser-sandbox.md`).
 - **Future (designed for, not built):** Stored XSS, additional engines.
 
 The architecture is deliberately generic (not XSS-specific) so new engines plug
@@ -81,7 +83,15 @@ and must be preserved by every change:
    A change that would weaken any of THESE remaining boundaries must still
    stop and raise it, per point 6 below.
 3. **Conservative by default.** Default profiles use low concurrency and request
-   rates. Aggressive behavior is opt-in and operator-configured.
+   rates. Aggressive behavior is opt-in and operator-configured. This includes
+   isolation: Chromium's **process sandbox is ON by default**
+   (`browser.Config.DisableSandbox`, zero value = sandbox on). Turning it off
+   requires the explicit operator flag `-browser-no-sandbox`, which logs a WARN
+   and is refused without `-browser`; it is never an automatic fallback — a
+   sandboxed launch that fails is reported with a pointer to the opt-out, not
+   retried without isolation. The shipped Docker image passes that opt-out
+   explicitly (Docker's default seccomp profile blocks the sandbox); see
+   `docs/browser-sandbox.md`.
 4. **No DoS / high-volume abuse.** Rate and concurrency controls exist to protect
    targets, not to maximize throughput against them.
 5. **AI is advisory only.** An LLM may assist (triage, prioritization, context
@@ -111,9 +121,11 @@ right now** and must remain stubs/interfaces (job handlers are no-ops):
   native callback/timing/argument/return-ID/cancellation behavior, CSP controls,
   all-seven-source validation and console-forgery rejection. Do not accelerate,
   invoke or rewrite target timers to obtain execution. eval/Function,
-  location/src assignment, new sources, automated activation and sandbox-policy
-  changes remain out of scope. Consult `docs/dom-xss.md` and the P2.3 validation
-  record for actual verified coverage and remaining limitations.
+  location/src assignment, new sources, automated activation and any further
+  sandbox-policy change beyond the default-on Chromium process sandbox
+  (`docs/browser-sandbox.md`) remain out of scope. Consult `docs/dom-xss.md` and
+  the P2.3 validation record for actual verified coverage and remaining
+  limitations.
 - ❌ Automated exploitation / weaponized payloads. Candidate execution AND
   verification only ever send the small, canonical, benign-marker breakouts the
   planner chose — no payload obfuscation, no evasion variants, no exploit
@@ -130,7 +142,9 @@ Implemented so far (infrastructure and **discovery**):
 - ✅ Persistence layer (SQLite + in-memory), migrations
 - ✅ Persistent job queue + concurrent worker pool
 - ✅ HTTP engine (neutral transport; no scope checks inside it)
-- ✅ Browser manager (Chromium/Playwright; neutral automation)
+- ✅ Browser manager (Chromium/Playwright; neutral automation). Launches with
+  Chromium's process sandbox ON unless the operator passes `-browser-no-sandbox`
+  (see §2.3 and `docs/browser-sandbox.md`).
 - ✅ Discovery (seeds, crawl, forms, sitemap, robots, wordlists, params,
   network observation) — real requests to **in-scope** targets only
 - ✅ Scan controller: wires discovery + queue + workers, pause/resume/cancel,
