@@ -284,10 +284,13 @@ func (e *executor) send(ctx context.Context, req *httpengine.Request) (*httpengi
 	if err := ctx.Err(); err != nil {
 		return nil, domain.OutcomeCancelled, err, 0 // already canceled: send nothing
 	}
-	rctx, cancel := context.WithTimeout(ctx, e.cfg.RequestTimeout)
-	defer cancel()
+	// The timeout travels WITH the request (applied inside Do): the engine may
+	// hold this request for a rate-limit permit first, and that wait is not
+	// network time and must not be reported as a TIMEOUT.
+	timed := *req
+	timed.Timeout = e.cfg.RequestTimeout
 	t0 := time.Now()
-	resp, err := e.engine.Do(rctx, req)
+	resp, err := e.engine.Do(ctx, &timed)
 	dur := time.Since(t0)
 	switch {
 	case err == nil:

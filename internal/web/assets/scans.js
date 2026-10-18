@@ -435,9 +435,9 @@ const ROLE_LABELS = {
 // to view; rel=noopener keeps the new tab from reaching back into this one.
 function evidenceLinks(ev) {
   const frag = document.createDocumentFragment();
-  const view = link("open", "/api/evidence/" + encodeURIComponent(ev.id) + "/content", "act");
+  const view = contentLink("open", "/api/evidence/" + encodeURIComponent(ev.id) + "/content", "act");
   view.target = "_blank"; view.rel = "noopener noreferrer";
-  const dl = link("download", "/api/evidence/" + encodeURIComponent(ev.id) + "/content?download", "act");
+  const dl = contentLink("download", "/api/evidence/" + encodeURIComponent(ev.id) + "/content?download", "act", true);
   dl.rel = "noopener noreferrer"; dl.style.marginLeft = "8px";
   frag.append(view, dl);
   return frag;
@@ -511,7 +511,7 @@ function findingDetailEl(f, scanId) {
     // Standalone PoC: a presentation-only capability over the data already
     // above (the confirmed candidate/request) — see scan.GeneratePoC. Only
     // ever reachable for a Confirmed finding, same as this hero block.
-    const pocLink = link("⬇ Download PoC (standalone HTML)", api.scan(scanId) + "/findings/" + encodeURIComponent(f.id) + "/poc", "act poc-link");
+    const pocLink = contentLink("⬇ Download PoC (standalone HTML)", api.scan(scanId) + "/findings/" + encodeURIComponent(f.id) + "/poc", "act poc-link", true);
     pocLink.title = "A standalone HTML file that reproduces this exact request when opened in a browser — or, for a header/cookie override a link cannot carry, the exact curl command";
     hero.appendChild(el("div", undefined, "poc-action")).appendChild(pocLink);
     box.appendChild(hero);
@@ -714,6 +714,8 @@ function findingsTable(findings, scanId, state, emptyText) {
   return wrap;
 }
 
+const REPORT_HEADERS = ["Created", "Format", "Selection", "Findings", "Verdicts", "Open"];
+
 function reportRow(r) {
   const tr = el("tr");
   const s = r.summary || {};
@@ -723,10 +725,11 @@ function reportRow(r) {
   tr.appendChild(cell(String(s.total_findings || 0) + (s.scan_findings ? " of " + s.scan_findings : ""), "c-words"));
   tr.appendChild(cell(verdictBreakdown(s.by_verdict), "c-words"));
   const openTd = el("td");
-  const view = link("view", "/api/reports/" + encodeURIComponent(r.id) + "/content", "act"); view.target = "_blank"; view.rel = "noopener noreferrer";
-  const dl = link("download", "/api/reports/" + encodeURIComponent(r.id) + "/content?download", "act"); dl.style.marginLeft = "10px";
+  const view = contentLink("view", "/api/reports/" + encodeURIComponent(r.id) + "/content", "act"); view.target = "_blank"; view.rel = "noopener noreferrer";
+  const dl = contentLink("download", "/api/reports/" + encodeURIComponent(r.id) + "/content?download", "act", true); dl.style.marginLeft = "10px";
   openTd.append(view, dl);
   tr.appendChild(openTd);
+  [...tr.children].forEach((td, i) => { td.dataset.label = REPORT_HEADERS[i]; });
   return tr;
 }
 
@@ -805,9 +808,9 @@ function reportsPanel(scanId) {
   onSelectionChange(state, wrap, update);
 
   const tbody = el("tbody"); tbody.id = "reportsBody";
-  const t = el("table");
+  const t = el("table", undefined, "reports-table");
   const thead = el("thead"); const hr = el("tr");
-  ["Created", "Format", "Selection", "Findings", "Verdicts", "Open"].forEach((h) => hr.appendChild(el("th", h)));
+  REPORT_HEADERS.forEach((h) => hr.appendChild(el("th", h)));
   thead.appendChild(hr); t.append(thead, tbody);
   let reportsSig = null;
   async function reload() {
@@ -823,7 +826,7 @@ function reportsPanel(scanId) {
   const controls = el("div", undefined, "form-actions");
   controls.append(fmt, aiSummaryLabel, gen);
   wrap.append(modeRow, preview, controls, errBox, t);
-  wrap.live = () => { reload(); refreshPreview(); };
+  wrap.live = singleFlight(() => Promise.all([reload(), refreshPreview()]));
   update();
   reload();
   return wrap;
@@ -843,7 +846,9 @@ async function renderScanDetail(params, view) {
   try { st = await getJSON(api.scan(scanId) + "/status"); }
   catch (e) {
     view.appendChild(pageHead("Scan"));
-    view.appendChild(emptyState("Scan not found.", "Back to Scans", () => navigate("#/scans")));
+    view.appendChild(e.status === 429
+      ? emptyState("Scan load throttled. Wait for the cooldown, then use Refresh.", "Retry load", () => route())
+      : emptyState("Scan not found.", "Back to Scans", () => navigate("#/scans")));
     return;
   }
   const s = st.scan;
@@ -872,17 +877,18 @@ async function renderScanDetail(params, view) {
   // that patches in new data instead: rebuilding them every tick used to
   // reset the selection and collapse open rows every couple of seconds.
   const renderTab = (status, isRefresh) => {
+    if (!panel.isConnected) return;
     const cur = SCAN_TABS.includes((location.hash.split("/")[3] || "overview")) ? (location.hash.split("/")[3] || "overview") : "overview";
     if (cur !== tab) return; // tab changed; router will re-render
     const existing = panel.firstChild;
-    if (isRefresh && existing && typeof existing.live === "function") { existing.live(status); return; }
+    if (isRefresh && existing && typeof existing.live === "function") return existing.live(status);
     panel.replaceChildren(scanTabPanel(cur, status, scanId));
   };
   renderTab(st, false);
 
   // Live refresh of the active tab.
   return async () => {
-    try { const fresh = await getJSON(api.scan(scanId) + "/status"); renderTab(fresh, true); } catch (e) { /* keep last */ }
+    try { const fresh = await getJSON(api.scan(scanId) + "/status"); await renderTab(fresh, true); } catch (e) { /* keep last */ }
   };
 }
 
@@ -1047,7 +1053,7 @@ function findingsTabPanel(scanId) {
   }
   const rp = reportsPanel(scanId);
   wrap.append(card("Findings", extra.el, body), card("Generate report", rp));
-  wrap.live = () => { load(); rp.live(); };
+  wrap.live = singleFlight(() => Promise.all([load(), rp.live()]));
   load();
   return wrap;
 }
@@ -1117,7 +1123,7 @@ function evidencePanel(scanId) {
       if (sig === null) body.replaceChildren(el("div", "error loading evidence", "err"));
     }
   }
-  wrap.live = load;
+  wrap.live = singleFlight(load);
   load();
   return wrap;
 }

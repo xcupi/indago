@@ -40,6 +40,11 @@ type Request struct {
 	// used as the request's Content-Type. The POSTForm/POSTJSON constructors set
 	// it for you.
 	ContentType string
+	// Timeout, when > 0, bounds this request's own network I/O (the send and
+	// the body read) for this single Do call; it is applied inside Do, so time a
+	// caller spends waiting before calling Do (e.g. for a rate-limit permit)
+	// does not count against it. 0 leaves only the client's configured timeout.
+	Timeout time.Duration
 }
 
 // NewRequest returns a request with the given method and URL.

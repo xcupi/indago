@@ -16,6 +16,7 @@ import (
 
 	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/ratelimit"
 )
 
 // ErrNotImplemented indicates the Phase 0 stub with no behavior.
@@ -75,6 +76,9 @@ type Input struct {
 	// SessionStatePath, when non-empty, seeds the browser context with the
 	// scan's saved (authenticated) session material.
 	SessionStatePath string
+	// Limiter, when non-nil, paces this attempt's navigation with the scan's
+	// shared rate limiter (see browser.NavOptions.Limiter).
+	Limiter *ratelimit.Limiter
 	// ProxyServer, when non-empty, routes this one verification attempt's
 	// browser context through the given proxy (operator-supplied; see
 	// domain.ScanConfig.ProxyPool and browser.ContextOptions.ProxyServer).

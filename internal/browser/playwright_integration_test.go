@@ -203,3 +203,63 @@ func TestIntegrationScopeGateBlocksRequestsRealBrowser(t *testing.T) {
 		t.Fatal("blocked requests should be reported")
 	}
 }
+
+// TestIntegrationNavigateRefererReachesDocumentReferrerRealBrowser proves
+// NavOptions.Referer (threaded to pageHandle.Goto's referer override) is
+// actually observable as document.referrer in a REAL Chromium — the
+// mechanism DOM-XSS's document.referrer source (internal/scan/domxss.go,
+// navigateWithReferrer) depends on. Debugging note for anyone touching
+// this again: Chromium only honors an explicit Referer override for a
+// cross-origin top-level navigation when the override's origin itself
+// would be considered a plausible referrer (i.e. it does not simply
+// accept an arbitrary string) — this test pins the exact, realistic shape
+// (an http(s) URL) that is known to work, so a future regression in
+// either Playwright or this package's own threading is caught here
+// rather than only in a live DOM-XSS scan.
+func TestIntegrationNavigateRefererReachesDocumentReferrerRealBrowser(t *testing.T) {
+	var gotReferer atomic.Value
+	gotReferer.Store("")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the tested document counts, not later favicon/subresource requests.
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		gotReferer.Store(r.Header.Get("Referer"))
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<!doctype html><html><body><div id="sink"></div>
+<script>document.getElementById('sink').innerHTML = document.referrer;</script>
+</body></html>`)
+	}))
+	defer srv.Close()
+
+	m := newManagerOrSkip(t, browser.DefaultConfig())
+	defer m.Close()
+	ctx := context.Background()
+
+	c, err := m.NewContext(ctx, browser.ContextOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	p, err := c.NewPage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	referer := "https://attacker.example/evil-page"
+	if _, err := p.Navigate(ctx, srv.URL, browser.NavOptions{WaitUntil: browser.WaitLoad, Referer: referer}); err != nil {
+		t.Fatalf("navigate: %v", err)
+	}
+
+	if got := gotReferer.Load(); got != referer {
+		t.Fatalf("server-observed Referer header = %q, want %q", got, referer)
+	}
+	html, err := p.Content(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(html, referer) {
+		t.Fatalf("document.referrer did not reach the sink; rendered HTML: %.300s", html)
+	}
+}

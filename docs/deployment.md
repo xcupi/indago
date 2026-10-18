@@ -3,16 +3,232 @@
 This covers running `indago serve` outside a local dev loop: binding,
 browser/Playwright setup, the on-disk data layout, backup/recovery, and
 shutdown behavior. See `AGENTS.md` for the product's scope and safety rules;
-this file is operational, not architectural.
+this file is operational, not architectural. See
+[p1-deployment-validation.md](p1-deployment-validation.md) for actual deployment
+checks and the distinction between local and GitHub validation.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on pushes, pull requests and manual dispatch;
+it has read-only contents permissions and never deploys/releases. It provisions
+Go from `go.mod`, Node 24, the documented Playwright driver and runner system
+Chrome. `scripts/ci-browser-check.py` requires eight actual passing runtime roots
+(no skips): `TestIntegrationRenderRealBrowser`,
+`TestIntegrationVerifyExecutableCandidateIsConfirmed`,
+`TestIntegrationVerifyReflectionOnlyIsRejected`, `TestE2E_FullPipelineAgainstCorpus`,
+`TestUINavigation`, `TestUICooldownClock`, `TestDOMHTMLSourceMatrix` (46 scenarios),
+and `TestDOMStringTimerSourceMatrix` (52 scenarios). Both matrices use
+`browser_integration`; missing/skipped/failed roots and skipped/failed descendants
+of any required root fail the check. The workflow then runs clean-test-cache
+`make check` and `make build`. Failure logs are retained for seven days. Locally set
+`INDAGO_CHROMIUM_PATH` to your installed Chrome and follow the same commands.
+
+---
+
+## Docker (Linux/amd64)
+
+The multi-stage `Dockerfile` includes the real Go binary, Playwright driver
+from `go.mod`, Node 24, Debian Chromium, fonts and CA certificates. **Only native
+Linux/amd64 was built/tested**; the build rejects other target architectures.
+Base tags and apt packages float: this is not a reproducible-digest guarantee.
+Rebuild regularly for browser/OS fixes. `.dockerignore` excludes runtime data,
+VCS, env files, sessions, keys, tests, logs and local build output.
+
+```bash
+docker build --platform linux/amd64 \
+  --build-arg VERSION="$(git describe --tags --always)" \
+  --build-arg COMMIT="$(git rev-parse --short HEAD)" \
+  --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -t indago:p1-deployment .
+```
+
+Provision outside the checkout:
+
+- `/srv/indago/tls/server.crt` and `server.key`: an operator-provided valid TLS
+  pair; key owned by numeric UID/GID **10001:10001**, mode **0600**. Directory
+  must permit UID 10001 traversal. Mount only these service-specific secrets,
+  never a host-wide certificate/secret directory.
+- `/srv/indago/tls/ca.crt`: issuing CA bundle, readable by UID 10001. For a
+  self-signed leaf, this can be the leaf itself. The server certificate needs
+  **IP:127.0.0.1 in its SAN** for the in-container strict healthcheck, plus any
+  external names clients use. `INDAGO_HEALTH_CA` can name another mounted CA
+  bundle path. Healthcheck is `/healthz` (no bearer required); it never uses
+  `-k` or disables certificate verification. An invalid CA/SAN makes it unhealthy.
+- `/srv/indago/server.env`: mode **0600**, host operator-owned, containing only
+  `INDAGO_API_TOKEN=` followed by a securely generated token of at least 32
+  characters. Generate through your secret manager or write directly to this
+  file (do not put the value in command-line flags/history). Docker reads the
+  env file; the scanner reads only its environment, never a token config file.
+  Docker administrators can inspect container environment; Docker access is
+  privileged access to these secrets.
+
+```bash
+# Create only once. Docker initializes this empty volume with image ownership.
+docker volume create indago-data
+docker run -d --name indago --restart unless-stopped \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges:true \
+  --memory=2g --shm-size=256m --stop-timeout=60 \
+  --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 \
+  --tmpfs /var/cache/indago:rw,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0750 \
+  --env-file /srv/indago/server.env \
+  --mount type=volume,src=indago-data,dst=/var/lib/indago \
+  --mount type=bind,src=/srv/indago/tls,dst=/tls,readonly \
+  -p 127.0.0.1:8750:8750 indago:p1-deployment
+curl --cacert /srv/indago/tls/ca.crt https://127.0.0.1:8750/healthz
+docker inspect --format '{{.State.Health.Status}}' indago
+docker stop --time 60 indago
+```
+
+The default command enables `-browser` and binds `0.0.0.0` **inside** the
+container with `-allow-remote` and mounted native TLS. Missing token or TLS
+fails closed; there is no plaintext remote default. Publish on host loopback
+as shown, not all interfaces. A target at `127.0.0.1` means the container itself,
+not the host; use explicitly scoped reachable targets on an operator-owned
+network. Never mount the Docker socket or use `--privileged`.
+
+The scanner runs as UID **10001**, with a writable data volume and tmpfs cache
+and temporary directories. For an existing bind-mounted data directory,
+provision ownership to 10001:10001 yourself; the image never recursively chowns
+host data. Stop before backup, and never share a data volume across servers.
+Allow at least the tested **2 GiB memory / 256 MiB shm** for small browser scans;
+raise those for larger browser concurrency. These are test settings, not a
+maximum-resource guarantee. SIGTERM gets 60 seconds before Docker force-kills.
+
+**Browser isolation:** Chromium's process sandbox is ON by default for
+`indago serve -browser`. The shipped image's default command passes the explicit
+`-browser-no-sandbox` opt-out because Docker's default seccomp profile blocks the
+user namespaces the sandbox needs (measured: the sandboxed browser refuses to
+start, it does not silently degrade). With the opt-out, a hostile target/browser
+exploit can access the scanner's own data and environment; a startup WARN says
+so. To keep the sandbox in a container, drop `-browser-no-sandbox` from the
+command and relax the container's seccomp profile instead — see
+[`browser-sandbox.md`](browser-sandbox.md) for the measured trade-off. Use a
+dedicated disposable VM/host and restricted network egress for untrusted
+targets; do not share sensitive workloads. No namespace/syscall restrictions
+beyond the tested Docker defaults are promised.
 
 ---
 
 ## 1. Network exposure — read this first
 
-**The API has no authentication.** `internal/auth` only implements anonymous
-sessions for the *target* application a scan authenticates against —
-Indago's own control API (`/api/...`) has no login, no token, no per-operator
-identity. Anyone who can reach it can:
+**The control API (`/api/...`) has an optional bearer token and no per-operator
+identity.** Whether it requires a token is decided at `indago serve` startup by
+the `INDAGO_API_TOKEN` environment variable:
+
+- **Unset (default):** the API is open to anyone who can reach the port. This is
+  the single-operator loopback mode and is unchanged from before.
+- **Set:** every `/api/` request must send `Authorization: Bearer <token>`.
+  A missing or wrong token gets `401` with `WWW-Authenticate: Bearer`.
+  `/healthz` and the static UI stay open so the page can load and prompt for
+  the token. The token is accepted only in that header — never in a query
+  string or a cookie.
+
+Rules for the token:
+
+- Use at least 32 characters with no whitespace, e.g.
+  `export INDAGO_API_TOKEN="$(openssl rand -hex 32)"`. A shorter or malformed
+  value makes `serve` refuse to start (the error does not print the value).
+- It is read once, at startup, from the environment. It is never a
+  command-line flag (shell history, `ps`), never written to `config.json`, and
+  never logged or echoed in an error or response.
+- The CLI sends it on every request when `INDAGO_API_TOKEN` is set in its
+  environment. Without it, a token-protected server answers `401` and the CLI
+  says which variable to set.
+- The web UI asks for the token on the first `401` and keeps it in
+  `sessionStorage` — cleared when the tab closes, never in `localStorage` or a
+  cookie. Evidence and report links are fetched with the token too.
+- It is one shared secret. There are no per-operator accounts, roles, audit
+  trail, or rotation without restarting the server.
+- **TLS is native but optional on loopback.** `indago serve -tls-cert FILE
+  -tls-key FILE` serves HTTPS (TLS 1.2 minimum). Without them the server speaks
+  plain HTTP, which is fine on `127.0.0.1` only. A remote bind **must** use TLS
+  (see below); without TLS the token and all API traffic travel in clear text.
+
+### Rate limiting
+
+Every `/api/` request and `GET /metrics` is counted against a **per-client-IP
+token bucket**, on by default:
+
+- Defaults: 50 requests/second sustained, bucket of 200 (`-api-rate`,
+  `-api-burst`, or `server.api_rate` / `server.api_burst` in `config.json`;
+  a flag overrides the config value for that run). `-api-rate 0` disables the
+  limiter. A negative rate, or a burst below 1 with a positive rate, is an
+  error at startup.
+- A refused request gets `429 Too Many Requests` with a `Retry-After` header
+  (whole seconds, at least 1) and the body `{"error":"rate limit exceeded"}`.
+- The client is the TCP peer address (`RemoteAddr`). `X-Forwarded-For` and
+  `X-Real-IP` are **ignored**: any client can send them, so trusting them would
+  let one client pick a fresh bucket on every request.
+- `/healthz` and the static UI are not limited. The limiter runs after the
+  Host/CSRF check and before the token check, so unauthenticated floods are
+  limited too. Idle buckets are evicted after 10 minutes; at most 10,000 clients
+  are tracked, and clients beyond that are refused rather than growing memory.
+- The defaults clear the bundled UI and the CLI. The UI's "1 second" live
+  refresh sends about one request per scan per tick on the Scans view (two per
+  scan on the Dashboard, for scans with confirmed findings). At that setting a
+  project with roughly 25 scans sustains about 50 requests/second. For larger
+  projects use a longer refresh interval or raise `-api-rate`.
+
+**Behind a reverse proxy, every client shares the proxy's address and therefore
+one bucket.** The server cannot tell the clients apart, so one busy client can
+exhaust the budget for all of them. The server will not read forwarded headers
+to fix this. If you need per-client limits behind a proxy, enforce them in the
+proxy, keyed on the client address the proxy itself sees.
+
+### UI recovery from throttling
+
+The console shares one API cooldown per browser tab across JSON loads,
+actions, and protected content fetches. `Retry-After` accepts whole seconds or
+an HTTP-date (IMF-fixdate, GMT). Waits are clamped to **1–60 seconds**;
+missing/invalid/negative/past-date values use a **2-second fallback**. A
+concurrent 429 can extend, never shorten, the current deadline. This is not
+cross-browser-tab coordination and does not change the server's IP bucket.
+
+GET/HEAD retry at most **twice** after the original attempt (three total).
+POST/PUT/PATCH/DELETE are **never replayed after 429**; an action attempted
+during cooldown fails locally without sending, with “Wait for the cooldown,
+then try again. The action was not retried.” Existing 401 token prompting and
+one authentication retry remain unchanged.
+
+A persistent status banner says “API throttled — waiting …s before retrying
+reads.” It clears on the next successful fetch outside cooldown, not on a
+blind timeout. Exhausted reads explain the retry limit and offer Refresh;
+initial scan-load throttling is not labeled “Scan not found.” Live polls skip
+cooldown ticks and drop overlapping refreshes instead of queueing them.
+Same-URL JSON loads within a route share one in-flight result; old-route
+reads stop retrying/discard late results and cannot render into a new route.
+Live polling may initiate a later bounded load after cooldown; with Live off,
+use Refresh after an exhausted initial load. Server-provided 429 error bodies
+are not copied into banners/action errors.
+
+### Metrics (`GET /metrics`)
+
+`GET /metrics` serves Prometheus text exposition format 0.0.4 (hand-written, no
+extra dependency). It exposes:
+
+- `indago_http_requests_total{method,route,code}`: `route` is the mux **pattern**
+  (for example `GET /api/scans/{id}`), never the raw path. Requests that match no
+  pattern are `unmatched`. Methods outside the standard set are `OTHER`.
+- `indago_http_request_duration_seconds{route}`: histogram with fixed buckets.
+- `indago_rate_limited_total`: requests refused with `429`.
+- `indago_auth_rejected_total`: requests refused with `401` by the token check.
+- `indago_build_info{version}`: always `1`.
+
+Access follows the token setting:
+
+- **`INDAGO_API_TOKEN` unset:** unauthenticated, the same as `/healthz`. This is
+  acceptable only on loopback, the same rule as the rest of the server.
+- **`INDAGO_API_TOKEN` set:** requires `Authorization: Bearer <token>`, as the
+  API does. A missing or wrong token gets `401`.
+
+`/metrics` is subject to the rate limit above. A scrape interval of 15 seconds or
+more is far inside the default budget.
+
+The output never contains a token, a client IP address, a target URL, finding
+content, or an evidence path. Label values come only from the method, the route
+pattern, and the status code. No per-scan job counter is exported yet.
+
+Without a token, anyone who can reach the API can:
 
 - create projects/scopes/targets and start scans against whatever target they
   specify (scope is enforced, but the API lets its caller set the scope)
@@ -24,10 +240,12 @@ identity. Anyone who can reach it can:
   `docs/finding-correlation.md` ("Opening evidence safely").
 - generate and read reports
 
+With a token configured, the same capabilities are available to whoever holds
+the token. Keeping the token secret, and the port reachable only by intended
+clients, is the actual security boundary.
+
 This is an intentional trade-off for a local-first, single-operator tool, not
-an oversight — see `AGENTS.md` §1. It means the deployment boundary that
-actually matters is **who can reach the port**, not anything the API itself
-checks.
+an oversight — see `AGENTS.md` §1.
 
 ### Secure default
 
@@ -40,20 +258,72 @@ workstation or a dedicated scanning host they alone can SSH/console into.
 
 Binding any other address — `0.0.0.0`, a LAN IP, `::`, anything
 `isLoopbackAddr` doesn't recognize as `localhost`/`127.0.0.1`/`::1` — is
-**refused outright** unless you pass `-allow-remote`:
+**refused outright** unless you pass `-allow-remote` **and** set
+`INDAGO_API_TOKEN`:
 
 ```bash
+export INDAGO_API_TOKEN="$(openssl rand -hex 32)"
 indago serve -addr 0.0.0.0:8750 -allow-remote
 ```
 
-Without `-allow-remote` this fails fast with an explanatory error instead of
-starting; the goal is to make the above trade-off a decision you make on
-purpose, not something a log line warns about after the fact. If you do need
-remote access (a shared scanning box, a container where `127.0.0.1` isn't
-reachable from the host), put a real access-control layer in front of it —
-a reverse proxy with its own auth, a VPN/SSH tunnel, or a firewall rule
-scoped to specific source IPs/users. Indago itself still won't authenticate
-the request.
+Either one missing fails fast with an explanatory error instead of starting.
+The token is required for remote binds because otherwise any host that can
+reach the port would have full control of the API. The goal is to make both
+decisions deliberate, not something a log line warns about after the fact.
+
+A remote bind also **requires TLS**: pass `-tls-cert` and `-tls-key` as well.
+Without them `serve` refuses to start, because the token would otherwise travel
+unencrypted:
+
+```bash
+# Throwaway self-signed certificate for a private host. Use a CA-issued
+# certificate where you can. Keep the key file readable only by the service user.
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout /etc/indago/tls.key -out /etc/indago/tls.crt -days 365 \
+  -subj "/CN=indago.internal" \
+  -addext "subjectAltName=DNS:indago.internal,IP:10.0.0.5"
+chmod 600 /etc/indago/tls.key
+
+export INDAGO_API_TOKEN="$(openssl rand -hex 32)"
+indago serve -addr 0.0.0.0:8750 -allow-remote \
+  -tls-cert /etc/indago/tls.crt -tls-key /etc/indago/tls.key
+```
+
+- `-tls-cert` and `-tls-key` are file **paths**, given together. The pair is
+  loaded and checked at startup, so a wrong path or a mismatched key fails
+  immediately. Errors name the files and never print key material. Startup logs
+  the two paths, never their contents.
+- A remote bind without TLS is refused. The escape hatch is
+  `-allow-plaintext-remote`: it is explicit, off by default, and logs a
+  warning that the bearer token travels unencrypted. Prefer TLS.
+- Loopback binds are unchanged: plain HTTP is allowed there, and a
+  TLS-terminating reverse proxy in front works too.
+
+If you cannot use native TLS, a TLS-terminating reverse proxy, a VPN/SSH tunnel,
+or a firewall rule scoped to specific source IPs/users also works. Keep the
+token requirement in either case.
+
+**Using the CLI against an HTTPS server.** The CLI reads these environment
+variables. None of them is a flag, and none of them takes a secret value:
+
+| Variable | Purpose |
+|---|---|
+| `INDAGO_SERVER_URL` | Server base URL, e.g. `https://indago.internal:8750`. Default `http://127.0.0.1:8750`. `INDAGO_SERVER` is the older name and is still honoured. |
+| `INDAGO_CA_CERT` | PEM file of CA certificate(s) to trust in addition to the system roots: a private CA or the self-signed certificate above. The file is read by path, and its contents are never printed. There is no option to skip certificate verification. |
+| `INDAGO_API_TOKEN` | Bearer token, as on the server (§1). |
+
+```bash
+export INDAGO_SERVER_URL=https://indago.internal:8750
+export INDAGO_CA_CERT=/etc/indago/tls.crt
+export INDAGO_API_TOKEN=...   # the same token the server was started with
+indago project list
+```
+
+Without `INDAGO_CA_CERT`, a self-signed server certificate fails verification,
+and the CLI's error says which variable to set.
+
+The web UI runs in the browser, so it trusts whatever the browser trusts. For a
+self-signed certificate, import it into the browser's trust store.
 
 Two request-level protections exist regardless of bind address and need no
 configuration:
@@ -66,9 +336,10 @@ configuration:
   alias; a wildcard bind can't enumerate valid hosts in advance; both bind
   modes keep the CSRF checks above.
 
-Neither is a substitute for restricting network reach — they stop a
-malicious web page from driving the API through your browser, not a party
-that can already reach the port directly (`curl` doesn't care about CORS).
+Neither is a substitute for the token or for restricting network reach — they
+stop a malicious web page from driving the API through your browser, not a
+party that can already reach the port directly (`curl` doesn't care about
+CORS).
 
 ---
 
@@ -85,7 +356,13 @@ Useful flags (`indago serve -h` or `cmd/indago/main.go` for the full list):
 |---|---|
 | `-data DIR` | Data directory (default `./data`) |
 | `-addr HOST:PORT` | Listen address (overrides `config.json`) |
-| `-allow-remote` | Required to bind a non-loopback address (§1) |
+| `-api-rate N` | Per-client-IP sustained requests/second on `/api/` and `/metrics`. Default `50`; `0` disables. Overrides `server.api_rate`. Flag values apply to this run only; they are not written back to `config.json`. Negative is an error (§1, *Rate limiting*) |
+| `-api-burst N` | Per-client-IP burst size on `/api/` and `/metrics`. Default `200`; must be at least 1 while the rate is above 0. Overrides `server.api_burst` (§1) |
+| `GET /metrics` | Prometheus exposition. Unauthenticated when `INDAGO_API_TOKEN` is unset; needs the bearer token when set (§1, *Metrics*) |
+| `-allow-remote` | Allow binding a non-loopback address; also requires `INDAGO_API_TOKEN` and TLS (§1) |
+| `-tls-cert FILE` / `-tls-key FILE` | Serve HTTPS with this PEM certificate and key. Give both or neither. Required for a remote bind (§1). Paths, not secret values |
+| `-allow-plaintext-remote` | Permit a remote bind without TLS. Off by default; logs a warning that the token travels unencrypted (§1) |
+| `INDAGO_API_TOKEN` (env) | Bearer token for the control API; unset = no token (§1). Never a flag |
 | `-browser` | Enable browser-based discovery + verification (needs Chromium — §3) |
 | `-chromium PATH` | Chromium binary to use (overrides `$INDAGO_CHROMIUM_PATH` / the Playwright cache) |
 | `-allow-state-changing` | Also execute POST/PUT/PATCH/DELETE test requests against targets (default: GET/HEAD/OPTIONS only) |
@@ -95,32 +372,24 @@ Useful flags (`indago serve -h` or `cmd/indago/main.go` for the full list):
 secrets to it (session cookies, API keys, and the like are kept out of log
 lines by design — see the hardening report delivered alongside this phase).
 
-### Running as a service
+### Running as a long-lived service
 
-There's no bundled unit file; a minimal `systemd` service looks like:
+Indago ships no service-manager unit. The supported long-running deployment is
+the Docker image (see **Docker** above), which runs as a non-root user with
+TLS and the API token supplied from outside the image. If you prefer to run
+the binary directly under your own supervisor (systemd, runit, launchd, ...),
+write that unit for your host. Keep these requirements:
 
-```ini
-[Unit]
-Description=Indago
-After=network.target
+- run as a dedicated non-root account, never as root;
+- supply `INDAGO_API_TOKEN` from a root-owned, mode 0600 environment file or
+  secret manager, never as a flag or in `config.json`;
+- bind loopback (default) and terminate TLS in a local proxy, or follow §1 for
+  a remote bind (`-allow-remote`, token, and `-tls-cert`/`-tls-key`);
+- send SIGTERM and allow time for graceful shutdown (§7);
+- for `-browser`, see §3. Do not add blanket syscall or namespace restrictions
+  that you have not tested against Chromium.
 
-[Service]
-ExecStart=/usr/local/bin/indago serve -data /var/lib/indago
-Restart=on-failure
-User=indago
-# The process handles SIGTERM/SIGINT itself (graceful shutdown, §5);
-# systemd's default TimeoutStopSec is enough headroom for that.
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Run `indago db init -data /var/lib/indago` once before the first start (or
-let the service user do it — `serve` itself also runs migrations on startup,
-so a missing-but-creatable data dir is fine; a missing *parent* directory is
-not). Give the service user ownership of `-data`'s directory: everything
-Indago writes (database, evidence, reports, config) goes under it, with
-owner-only-plus-group file permissions (`0640`/`0750`) — see §4.
+No unit was validated by this project, so none is provided.
 
 ### Process model
 
@@ -128,6 +397,20 @@ One `indago serve` process per data directory. SQLite is opened with a
 single connection (`SetMaxOpenConns(1)`) deliberately — it's a single-writer,
 single-process design (`AGENTS.md` §1's "single-user"); do not point two
 `indago serve` processes at the same `-data` directory concurrently.
+
+### Outbound scan TLS (not API/listener TLS)
+
+`scan create -randomize-tls-fingerprint` is optional and off by default.
+Its uTLS transport deliberately advertises only HTTP/1.1 (or no ALPN),
+because Go's HTTP/1.x transport cannot switch to h2 on a `*utls.UConn`.
+An HTTPS target supporting both h2 and HTTP/1.1 works; h2-only targets are
+not supported in this mode. The ordinary transport and Chromium's own TLS
+are unchanged. Certificate verification and the existing no-proxy-combination
+rule remain in force. See [randomized TLS validation](randomized-tls-validation.md)
+for the hybrid-key-share, ALPN and certificate-family cipher fixes and real
+CLI comparisons. The rare no-common-cipher handshake rejection is resolved;
+this is not a guarantee of compatibility with every server TLS policy. This
+setting does not change the TLS configuration of `indago serve`.
 
 ---
 
@@ -184,10 +467,13 @@ History:
 
 A host provisioned for an older driver needs the install step re-run.
 
-Headless Chromium needs the usual sandboxing/shared-library support most
-minimal container base images lack — the `--with-deps` install step above
-handles that on Debian/Ubuntu-family images; for other bases install
-Chromium's runtime dependencies manually (fonts, `libnss3`, `libatk`, etc.).
+Headless Chromium needs shared-library support most minimal container base
+images lack — the `--with-deps` install step above handles that on
+Debian/Ubuntu-family images; for other bases install Chromium's runtime
+dependencies manually (fonts, `libnss3`, `libatk`, etc.). Its process sandbox is
+on by default and needs kernel/container support (user namespaces or the setuid
+helper); see [`browser-sandbox.md`](browser-sandbox.md) if the browser refuses to
+start.
 
 Without a usable driver or browser, `-browser` fails fast at startup. A
 missing driver reports `run playwright (is it installed? …)`; a bad browser
@@ -300,6 +586,100 @@ written atomically (§4). Both are specifically about what happens if the
 process is killed mid-write, not just mid-request — see the hardening
 report for what was verified here.
 
+### Retention: `indago evidence prune`
+
+Evidence is never expired automatically, and request blobs can hold the
+target's session cookies verbatim (§6). `indago evidence prune` bounds how long
+evidence lives. It reads the data directory directly. **Stop the server first**
+for maintenance: concurrent prune/serve safety has not been established.
+
+```bash
+# Dry run (the default): lists what WOULD be deleted, deletes nothing.
+indago evidence prune -data /var/lib/indago -older-than 720h
+
+# Delete it.
+indago evidence prune -data /var/lib/indago -older-than 720h -apply
+```
+
+- **`-older-than` is required**, with no default. It uses Go duration syntax
+  (`h`, `m`, `s`; there is no `d`), and the minimum is `1h`. `720h` is 30 days.
+- **Eligible:** scans in a terminal state (`completed`, `failed`, `canceled`)
+  whose last activity is before `now − older-than`. Last activity is the later
+  of `ended_at` and `updated_at`, so a recently touched scan is never pruned on
+  the strength of an older end time.
+- **Never touched:** evidence of `created`, `running`, `paused`,
+  `awaiting_auth`, and `canceling` scans, however old. A terminal scan with no
+  usable timestamp is skipped and listed in the output (fail closed).
+- **Deleted, per evidence row:** the blob file under `evidence/`, then the
+  metadata row. Only after the blob is confirmed gone is the row removed. A
+  blob that is already missing is reported as `already-gone`, and its row is
+  removed. A row whose path escapes `evidence/`, or that names a symlink or a
+  directory, is `refused`: nothing outside the root is touched, and the row is
+  kept.
+- **Findings are kept.** Their evidence links to deleted rows are removed, and
+  the output reports how many findings lost links. Verdicts and text are not
+  changed.
+- **`-include-sessions`** (off by default) also removes the saved session
+  (storage-state) file that a scan recorded, but only when the file is inside
+  `sessions/` and no non-eligible scan still uses it. Files outside `sessions/`
+  (a login you keep elsewhere, passed with `-auth-state`) are never touched.
+- **`-include-reports`** (off by default) removes the generated report files and
+  their index rows for eligible scans.
+- **`-scan <id>`** restricts the run to one scan.
+- **Not deleted:** scan records, findings, endpoints, parameters, jobs, AI
+  tasks, test-case records, the database itself, and anything in `config.json`.
+
+**Exit status:** `0` when nothing failed, including a dry run. A row refused as
+outside the evidence root is a **warning**: it is listed, the rest of the run
+completes, and the exit status is still `0`. `1` only if an item failed with an
+I/O or store error, or if the command itself errored. Failed items are listed,
+and the rest of the run still completes.
+
+**Audit trail:** one line per scan that had something deleted, on stderr, for
+example `evidence pruned scan_id=... cutoff=... evidence_removed=12 ...`. It
+carries IDs, counts, and the cutoff, never blob content or absolute paths.
+
+**Concurrency with a running server is not validated.** The command does not
+refuse to open a live data directory (WAL mode and a busy timeout are not an
+application-level maintenance lock). Terminal scan eligibility and atomic blob
+writes do not prove safe concurrent finding-link/session/report updates.
+**Stop the server, dry-run, review, prune offline, then restart.** Do not
+share the data directory with another server or maintenance writer.
+
+**What this does not do:**
+
+- It does not overwrite file contents before unlinking. On SSD, copy-on-write,
+  or journaling filesystems, deleted cookies can remain recoverable from the
+  disk. Use full-disk encryption if that matters to you.
+- It does not remove copies in backups made under §5. Expire those separately.
+- Test-case records keep the IDs of evidence that was deleted. Content lookups
+  for those IDs return "not found", as §4 already describes for missing blobs.
+- It considers only the most recent session record per scan (the store has no
+  list-all for sessions), and it cannot reach evidence rows whose scan row no
+  longer exists. Both are rare by construction; neither is deleted.
+- There is no in-process schedule and no API endpoint. Optional offline scheduling
+  requires explicit service coordination (below).
+
+**Optional scheduled retention: coordinate offline maintenance.** No timer is
+installed by this repository. An always-on prune/timer example was removed
+because it was not safe to present as validated. Manual operator maintenance is:
+
+```bash
+# 1. Stop the server (however you run it) and verify nothing has the data dir open.
+# 2. Dry run and inspect first.
+indago evidence prune -data /var/lib/indago -older-than 720h
+# 3. Only after review:
+indago evidence prune -data /var/lib/indago -older-than 720h -apply
+# 4. Start the server again.
+```
+
+If you add an optional timer, it must use an explicit maintenance coordinator
+that stops and verifies the server is stopped, runs the fixed cutoff under the
+same non-root account that owns the data directory, and restarts the server afterward with a visible failure
+policy. A separate daily oneshot that just opens the live DB is **not** safe
+coordination. Do not enable a timer until that workflow and dry-run output have
+been reviewed for your installation.
+
 ---
 
 ## 6. Secrets and configuration
@@ -327,7 +707,8 @@ report for what was verified here.
 - Evidence request blobs can contain the target's session cookie verbatim
   (that's the point — full request capture for evidence integrity,
   `AGENTS.md` §2.6). Restricting who can read `-data` (§4) is what protects
-  that, not anything in the API.
+  that, not anything in the API. To bound how long those blobs are kept, run
+  `indago evidence prune` (dry run by default; see §5, Retention).
 
 ---
 
@@ -356,6 +737,8 @@ being graceful.
 
 `GET /healthz` — `{"status":"ok"}` after a live store ping, `503` otherwise.
 `GET /api/version` — `{"version": "...", "name": "indago"}`.
+`GET /metrics` — Prometheus exposition (§1, *Metrics*). Needs the bearer token
+when `INDAGO_API_TOKEN` is set, and is rate limited like the API.
 
 Neither requires the `X-Indago-Client` header (both are GET) and neither
 returns anything beyond those two fields — no internal paths, no config, no

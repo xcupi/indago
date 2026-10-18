@@ -19,6 +19,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/indago/indago/internal/ratelimit"
 )
 
 // Errors.
@@ -62,6 +64,11 @@ type Config struct {
 	// anyway, leaving the underlying Chromium process orphaned rather than
 	// hanging.
 	ShutdownTimeout time.Duration
+	// DisableSandbox launches Chromium with its process sandbox turned OFF
+	// (--no-sandbox). The zero value keeps the sandbox ON: this is an explicit,
+	// operator-chosen reduction of isolation, never a default and never an
+	// automatic fallback. See docs/browser-sandbox.md.
+	DisableSandbox bool
 }
 
 // DefaultConfig returns conservative defaults.
@@ -143,6 +150,16 @@ type ContextOptions struct {
 type NavOptions struct {
 	WaitUntil string        // one of the Wait* constants ("" → load)
 	Timeout   time.Duration // 0 → Manager default
+	// Limiter, when non-nil, paces this navigation (one permit per navigation,
+	// taken before the request is sent). It is the scan's shared limiter, so
+	// browser navigations count against the same RequestsPerSecond as HTTP.
+	Limiter *ratelimit.Limiter
+	// Referer, when non-empty, overrides the Referer HTTP header sent with
+	// this navigation (threaded to pageHandle.Goto's own referer
+	// parameter). "" leaves the browser's normal referer behavior
+	// unchanged. Used by DOM-XSS's document.referrer source
+	// (internal/scan/domxss.go) — see docs/dom-xss.md.
+	Referer string
 }
 
 // NavResult is the outcome of a navigation.
@@ -217,6 +234,8 @@ type RenderOptions struct {
 	Timeout time.Duration
 	// Screenshot requests a screenshot be captured.
 	Screenshot bool
+	// Limiter paces the navigation; see NavOptions.Limiter.
+	Limiter *ratelimit.Limiter
 }
 
 // RenderResult captures observations from loading a page. Fields are generic so

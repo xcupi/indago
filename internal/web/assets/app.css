@@ -160,6 +160,12 @@ fieldset legend { color: var(--muted); font-size: 11px; text-transform: uppercas
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6);
   display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; z-index: 50; overflow-y: auto;
 }
+/* Sandboxed artifact viewer (token mode): HTML/SVG/XML evidence and reports. */
+.artifact-viewer { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; background: var(--bg); }
+.artifact-bar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.artifact-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.artifact-close { margin-left: auto; }
+.artifact-frame { flex: 1; width: 100%; border: 0; background: #fff; }
 .modal-box { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: 100%; max-width: 720px; padding: 18px 20px; }
 .modal-head { display: flex; align-items: center; margin-bottom: 6px; }
 .modal-head h2 { margin: 0; font-size: 16px; }
@@ -196,18 +202,19 @@ td.c-ident { min-width: 9ch; }
 a.act { white-space: nowrap; overflow-wrap: normal; }
 td.c-endpoint { min-width: 16ch; }
 td.c-title { min-width: 24ch; }
-/* Phone width: nine columns cannot fit without splitting words, so each
-   finding row stacks into a labelled card (Select all stays in the toolbar). */
+/* Phone width: findings and reports cannot fit all their readable columns
+   (even empty report headers overflow with wider system fonts). Stack each
+   row with labels instead; keep every value and action visible and wrapping. */
 @media (max-width: 720px) {
-  .findings-table thead { display: none; }
-  .findings-table, .findings-table tbody, .findings-table tr, .findings-table td { display: block; }
-  .findings-table tr { border-bottom: 1px solid var(--border); padding: 8px 0; }
-  .findings-table td { border: 0; padding: 3px 6px; min-width: 0; max-width: none; }
-  .findings-table td[data-label]:not(:empty)::before {
+  :is(.findings-table, .reports-table) thead { display: none; }
+  :is(.findings-table, .reports-table), :is(.findings-table, .reports-table) :is(tbody, tr, td) { display: block; }
+  :is(.findings-table, .reports-table) tr { border-bottom: 1px solid var(--border); padding: 8px 0; }
+  :is(.findings-table, .reports-table) td { border: 0; padding: 3px 6px; min-width: 0; max-width: none; }
+  :is(.findings-table, .reports-table) td[data-label]:not(:empty)::before {
     content: attr(data-label); display: block; color: var(--muted); font-size: 11px;
     text-transform: uppercase; letter-spacing: .5px; font-family: inherit;
   }
-  .findings-table td[data-label]:empty { display: none; }
+  :is(.findings-table, .reports-table) td[data-label]:empty { display: none; }
 }
 .card, .detail, .metric { min-width: 0; }
 .card { overflow-x: auto; }

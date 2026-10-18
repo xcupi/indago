@@ -4,14 +4,16 @@ Indago is a **local-first, single-user** web application security hunting
 platform. This document describes the system architecture established in
 **Phase 0** (scaffold) and the shape it is designed to grow into.
 
-> Scope reminder: there is **no** exploit payload generation, no LLM-decided
-> verdict, and no DOM/Stored XSS yet. Transport, browser, discovery, scan
-> orchestration, and the full Reflected XSS pipeline (reflect → context → plan →
+> Scope reminder: there is **no** exploit payload generation and no
+> LLM-decided verdict. Transport, browser, discovery, scan orchestration,
+> and the full Reflected XSS pipeline (reflect → context → plan →
 > execute candidates → browser-verify) are real (see
 > [`scan-orchestration.md`](scan-orchestration.md) and
-> [`browser-verification.md`](browser-verification.md)); every OTHER
-> vulnerability class is still an interface with an `ErrNotImplemented` stub.
-> See [`../AGENTS.md`](../AGENTS.md).
+> [`browser-verification.md`](browser-verification.md)); a first, narrow
+> DOM-XSS slice (`location.hash` → innerHTML/outerHTML/document.write) is
+> also real (see [`dom-xss.md`](dom-xss.md)) — every OTHER vulnerability
+> class, and every OTHER DOM-XSS source/sink, is still out of scope. See
+> [`../AGENTS.md`](../AGENTS.md).
 
 ---
 
@@ -117,12 +119,16 @@ job is enqueued immediately. Workers consume the queue continuously.
   Sizes map from `domain.ScanConfig` (DiscoveryConcurrency / HTTPConcurrency /
   BrowserConcurrency).
 - **Runtime tunable.** Group sizes and the request rate can change while a scan
-  runs (`Controller.Reconfigure` → `Pool.Resize` / `Pool.SetRate`).
+  runs (`Controller.Reconfigure` → `Pool.Resize` and the scan's `ratelimit.Limiter.SetRate`).
 - **Typed, scan-scoped leasing.** `Queue.Lease` filters by scan ID and job
   types, so each scan's pool draws only its own work and pause/cancel are
   per-scan.
-- **Rate limiting.** A dependency-free limiter spaces target-facing (`http`)
-  requests to honor `RequestsPerSecond`. Conservative defaults.
+- **Rate limiting.** One `ratelimit.Limiter` per scan execution paces EVERY
+  target-facing request the scan makes to honor `RequestsPerSecond`: discovery
+  fetches (including redirect hops, via the scope-enforcing engine), raw HTTP
+  test requests, browser discovery navigations, and browser verification
+  navigations. Requests are paced after the scope check. 0 = unlimited.
+  Conservative defaults.
 - **Multicore.** Work is naturally parallel across goroutines; SQLite access is
   serialized (single writer) for correctness on a local single-user DB.
 

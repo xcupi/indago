@@ -164,14 +164,129 @@ function pagedList(items, pageSize, renderPage, emptyText) {
 // ---------------------------------------------------------------------------
 // HTTP
 // ---------------------------------------------------------------------------
-async function getJSON(url) {
-  const r = await fetch(url);
+// The control API may require a bearer token (INDAGO_API_TOKEN on the server).
+// The token is kept in sessionStorage only: never localStorage, never a
+// cookie, never rendered into the DOM. It is cleared when the tab closes.
+const TOKEN_KEY = "indago.apiToken";
+let tokenDeclinedAt = 0; // a cancelled prompt is not repeated for a minute
+
+function storedToken() {
+  try { return sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
+}
+function storeToken(tok) {
+  try { if (tok) sessionStorage.setItem(TOKEN_KEY, tok); else sessionStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ }
+}
+
+// withToken returns copy of fetch options carrying the bearer token, if any.
+function withToken(opts, tok) {
+  const o = Object.assign({}, opts, { headers: Object.assign({}, opts.headers || {}) });
+  if (tok) o.headers["Authorization"] = "Bearer " + tok;
+  return o;
+}
+
+// askToken prompts the operator for the API token. It returns the entered
+// token, or "" when cancelled (a cancel is not re-prompted for a minute).
+function askToken() {
+  if (Date.now() - tokenDeclinedAt < 60000) return "";
+  const v = window.prompt("This Indago server requires its API token (INDAGO_API_TOKEN). Enter it to continue; it is kept for this browser tab only.", "");
+  const tok = (v || "").trim();
+  if (!tok) { tokenDeclinedAt = Date.now(); return ""; }
+  storeToken(tok);
+  return tok;
+}
+
+// One cooldown for all API helpers in this console tab. Read requests retry at
+// most twice; writes are never replayed after a 429.
+let apiCooldownUntil = 0;
+let apiCooldownWait = null;
+function apiCoolingDown() { return Date.now() < apiCooldownUntil; }
+function retryAfterMs(header) {
+  const value = (header || "").trim();
+  let ms = 2000; // conservative fallback for missing/invalid values
+  if (/^\d+$/.test(value)) ms = Number(value) * 1000;
+  else if (/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(value)) {
+    ms = Date.parse(value) - Date.now();
+  }
+  return Number.isFinite(ms) && ms >= 0 ? Math.max(1000, Math.min(60000, ms)) : 2000;
+}
+function noteAPIThrottle(r) {
+  const ms = retryAfterMs(r.headers.get("Retry-After"));
+  apiCooldownUntil = Math.max(apiCooldownUntil, Date.now() + ms);
+  $("apiStatus").textContent = "API throttled — waiting " + Math.ceil(ms / 1000) + "s before retrying reads. Actions are not retried; wait, then try again.";
+}
+async function waitAPICooldown() {
+  while (apiCoolingDown()) {
+    if (!apiCooldownWait) {
+      apiCooldownWait = new Promise((resolve) => setTimeout(resolve, apiCooldownUntil - Date.now()))
+        .finally(() => { apiCooldownWait = null; });
+    }
+    await apiCooldownWait;
+  }
+}
+async function tokenFetch(url, opts) {
+  const sent = storedToken();
+  const r = await fetch(url, withToken(opts, sent));
+  if (r.status !== 401) return r;
+  let tok = storedToken();
+  if (tok === sent) tok = askToken();
+  if (!tok) return r;
+  return fetch(url, withToken(opts, tok));
+}
+const API_THROTTLE_ERROR = "API throttled. Wait for the cooldown, then try again. The action was not retried.";
+function throttleResponse(read) {
+  const error = read ? "API throttled. Automatic read retries exhausted; wait, then use Refresh." : API_THROTTLE_ERROR;
+  return new Response(JSON.stringify({ error }), { status: 429, headers: { "Content-Type": "application/json" } });
+}
+async function authedFetch(url, opts) {
+  const read = ["GET", "HEAD"].includes((opts && opts.method || "GET").toUpperCase());
+  const view = currentView;
+  const checkView = () => { if (read && view !== currentView) throw new Error("navigation changed; request discarded"); };
+  if (!read && apiCoolingDown()) return throttleResponse();
+  for (let attempt = 0; ; attempt++) {
+    await waitAPICooldown();
+    checkView();
+    const r = await tokenFetch(url, opts);
+    checkView();
+    if (r.status !== 429) {
+      if (r.ok && !apiCoolingDown()) $("apiStatus").textContent = "";
+      return r;
+    }
+    noteAPIThrottle(r);
+    if (!read || attempt >= 2) {
+      if (read) $("apiStatus").textContent = "API throttled — waiting for cooldown. Automatic retries exhausted; use Refresh or the next live poll.";
+      return throttleResponse(read);
+    }
+  }
+}
+
+// errorText extracts the server's {"error": ...} message from a response.
+async function errorText(r) {
+  try { const j = await r.json(); return j && j.error ? String(j.error) : ""; } catch (e) { return ""; }
+}
+
+// Share a decoded GET, not a Response whose body can only be consumed once.
+const pendingJSON = new Map();
+function getJSON(url) {
+  const view = currentView;
+  const existing = pendingJSON.get(url);
+  if (existing && existing.view === view) return existing.promise;
+  const entry = { view, promise: null };
+  entry.promise = loadJSON(url).finally(() => { if (pendingJSON.get(url) === entry) pendingJSON.delete(url); });
+  pendingJSON.set(url, entry);
+  return entry.promise;
+}
+async function loadJSON(url) {
+  const view = currentView;
+  const r = await authedFetch(url, { method: "GET" });
   if (!r.ok) {
-    const err = new Error(url + " -> " + r.status);
+    const detail = await errorText(r);
+    const err = new Error(url + " -> " + r.status + (detail ? ": " + detail : ""));
     err.status = r.status;
     throw err;
   }
-  return r.json();
+  const data = await r.json();
+  if (view !== currentView) throw new Error("navigation changed; data discarded");
+  return data;
 }
 
 // mutate issues a state-changing request with the CSRF header. It never throws
@@ -184,7 +299,7 @@ async function mutate(method, url, body) {
   }
   let r;
   try {
-    r = await fetch(url, opts);
+    r = await authedFetch(url, opts);
   } catch (e) {
     return { ok: false, status: 0, data: { error: "network error: " + e } };
   }
@@ -192,6 +307,100 @@ async function mutate(method, url, body) {
   try { data = await r.json(); } catch (e) { /* no body */ }
   return { ok: r.ok, status: r.status, data };
 }
+
+// contentLink links to protected content (evidence/report bytes, PoC files). A
+// plain navigation cannot carry the Authorization header, so when a token is
+// stored the click is routed through openProtected. Without a token it is an
+// ordinary link.
+function contentLink(text, href, cls, asDownload) {
+  const a = link(text, href, cls);
+  a.addEventListener("click", (e) => {
+    if (!storedToken()) return;
+    e.preventDefault();
+    openProtected(href, asDownload);
+  });
+  return a;
+}
+
+// The CSP the server sends with evidence and report content. The artifact
+// frame repeats it (the iframe csp attribute, where the browser supports it),
+// since a blob URL carries no server headers.
+const ARTIFACT_CSP = "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'";
+
+// openProtected fetches protected content with the token. "Download" saves the
+// original bytes. "Open" depends on the type: HTML, SVG and XML (script-capable)
+// render in a sandboxed frame (see showArtifact), never as this console's own
+// origin and never as text; other types open in a new tab, with JavaScript
+// shown as plain text.
+async function openProtected(href, asDownload) {
+  let r;
+  try {
+    r = await authedFetch(href, { method: "GET" });
+  } catch (e) {
+    showError("network error: " + e);
+    return;
+  }
+  if (!r.ok) {
+    const detail = await errorText(r);
+    showError(href + " -> " + r.status + (detail ? ": " + detail : ""));
+    return;
+  }
+  const type = r.headers.get("Content-Type") || "application/octet-stream";
+  const body = await r.blob();
+  const disp = r.headers.get("Content-Disposition") || "";
+  const m = /filename="([^"]+)"/.exec(disp);
+  const name = m ? m[1] : "download";
+  if (asDownload) {
+    const u = URL.createObjectURL(new Blob([body], { type }));
+    const a = document.createElement("a");
+    a.href = u; a.download = name; a.rel = "noopener noreferrer";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(u), 10000);
+    return;
+  }
+  if (/html|svg|xml/i.test(type)) {
+    showArtifact(body, type, name);
+    return;
+  }
+  const safeType = /javascript|ecmascript/i.test(type) ? "text/plain; charset=utf-8" : type;
+  const u = URL.createObjectURL(new Blob([body], { type: safeType }));
+  const w = window.open(u, "_blank", "noopener,noreferrer");
+  if (!w) showError("the browser blocked the new tab; allow pop-ups for this console or use download");
+  setTimeout(() => URL.revokeObjectURL(u), 60000);
+}
+
+// showArtifact shows script-capable content (HTML, SVG, XML) in a full-window
+// frame with sandbox="": no scripts, no forms, no same-origin access. The
+// document gets an opaque origin, so the captured markup cannot read this
+// console or drive its API. The frame is the same protection the server gives
+// the same content when it is opened directly (see docs/finding-correlation.md).
+let artifactURL = null;
+function showArtifact(body, type, name) {
+  closeArtifact();
+  artifactURL = URL.createObjectURL(new Blob([body], { type }));
+  const bar = el("div", undefined, "artifact-bar");
+  bar.appendChild(el("span", name, "artifact-name"));
+  const close = button("Close", closeArtifact, "artifact-close");
+  bar.appendChild(close);
+  const frame = document.createElement("iframe");
+  frame.className = "artifact-frame";
+  frame.setAttribute("sandbox", "");
+  frame.setAttribute("csp", ARTIFACT_CSP);
+  frame.setAttribute("referrerpolicy", "no-referrer");
+  frame.title = name;
+  frame.src = artifactURL;
+  const viewer = el("div", undefined, "artifact-viewer");
+  viewer.id = "artifactViewer";
+  viewer.append(bar, frame);
+  document.body.appendChild(viewer);
+  close.focus();
+}
+function closeArtifact() {
+  const v = $("artifactViewer");
+  if (v) v.remove();
+  if (artifactURL) { URL.revokeObjectURL(artifactURL); artifactURL = null; }
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("artifactViewer")) closeArtifact(); });
 
 function errMsg(res, fallback) {
   if (res && res.data && res.data.error) return res.data.error;
@@ -243,6 +452,17 @@ function updateLiveCtl() {
   $("refreshNow").classList.toggle("hidden", !currentView.refresh);
 }
 
+// Drop duplicate refresh invocations instead of accumulating awaiters every
+// poll tick. The original invocation owns completion/rendering.
+function singleFlight(fn) {
+  let pending = false;
+  return async (...args) => {
+    if (pending) return;
+    pending = true;
+    try { return await fn(...args); } finally { pending = false; }
+  };
+}
+
 async function refreshNow() {
   const btn = $("refreshNow");
   btn.disabled = true;
@@ -263,7 +483,7 @@ async function loadProjects() {
   try {
     ctx.projects = (await getJSON("/api/projects")) || [];
   } catch (e) {
-    ctx.projects = [];
+    return ctx.projects; // a failed/throttled load is not an empty project list
   }
   if (ctx.projectId && !currentProject()) ctx.projectId = "";
   renderProjectSelect();
@@ -344,8 +564,11 @@ async function route() {
   const section = path.split("/")[1] || "dashboard";
   document.querySelectorAll("#sidebar a").forEach((a) => a.classList.toggle("active", a.dataset.nav === section));
 
-  const view = $("view");
-  view.replaceChildren();
+  // Detach the previous container. Late render/catch continuations may still
+  // update their own nodes, but can never append into the new route.
+  const view = el("div");
+  view.id = "view";
+  $("view").replaceWith(view);
   view.dataset.view = match.name;
   currentView.name = match.name;
   const token = currentView; // a newer navigation replaces currentView
@@ -353,18 +576,22 @@ async function route() {
     const refresh = await match.render(params, view);
     if (token !== currentView) return; // navigated away while rendering
     if (typeof refresh === "function") {
-      currentView.refresh = refresh;
+      currentView.refresh = singleFlight(refresh);
       const ms = refreshMs();
       if (ms > 0) {
         currentView.timer = setInterval(() => {
-          if (token === currentView && $("modal").classList.contains("hidden")) refresh();
+          if (token === currentView && !apiCoolingDown() && $("modal").classList.contains("hidden")) currentView.refresh();
         }, ms);
       }
+    } else if ($("apiStatus").textContent) {
+      currentView.refresh = () => route(); // retry a throttled initial load manually
     }
     updateLiveCtl();
   } catch (e) {
     if (token !== currentView) return;
     view.replaceChildren(card("Error", el("p", "Could not load this view: " + e.message, "err")));
+    currentView.refresh = () => route();
+    updateLiveCtl();
   }
 }
 

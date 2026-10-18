@@ -9,6 +9,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -27,12 +29,50 @@ import (
 	"github.com/indago/indago/internal/web"
 )
 
-// defaultServer returns the API base URL: $INDAGO_SERVER or the local default.
+const (
+	defaultServerURL = "http://127.0.0.1:8750"
+	serverURLEnv     = "INDAGO_SERVER_URL" // e.g. https://indago.internal:8750
+	legacyServerEnv  = "INDAGO_SERVER"     // older name, still honoured
+	caCertEnv        = "INDAGO_CA_CERT"    // PEM CA bundle to trust (private or self-signed server cert)
+)
+
+// defaultServer returns the API base URL: $INDAGO_SERVER_URL, then
+// $INDAGO_SERVER, then the local default.
 func defaultServer() string {
-	if v := os.Getenv("INDAGO_SERVER"); v != "" {
+	if v := os.Getenv(serverURLEnv); v != "" {
 		return v
 	}
-	return "http://127.0.0.1:8750"
+	if v := os.Getenv(legacyServerEnv); v != "" {
+		return v
+	}
+	return defaultServerURL
+}
+
+// clientTransport is the transport for API calls. $INDAGO_CA_CERT names a PEM
+// file whose certificates are trusted in addition to the system roots, for a
+// private CA or a self-signed server certificate. The file is read by path and
+// its contents are never printed. There is deliberately no option to skip
+// certificate verification.
+func clientTransport() (*http.Transport, error) {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	path := os.Getenv(caCertEnv)
+	if path == "" {
+		return tr, nil
+	}
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s: cannot read CA file %s: %w", caCertEnv, path, err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("%s: %s contains no PEM certificates", caCertEnv, path)
+	}
+	tr.TLSClientConfig.RootCAs = pool
+	return tr, nil
 }
 
 // cli carries the server address and output stream for client commands.
@@ -40,13 +80,52 @@ type cli struct {
 	server string
 	out    io.Writer
 	http   *http.Client
+	// token is $INDAGO_API_TOKEN, sent as a bearer token on every request when
+	// set. It is read from the environment only, never from a flag.
+	token string
+	// setupErr is a startup failure (an unreadable $INDAGO_CA_CERT). It is
+	// returned by every request rather than silently ignoring the trust setting.
+	setupErr error
 }
 
 func newCLI(server string, out io.Writer) *cli {
-	return &cli{
+	c := &cli{
 		server: strings.TrimRight(server, "/"),
 		out:    out,
 		http:   &http.Client{Timeout: 30 * time.Second},
+		token:  os.Getenv(apiTokenEnv),
+	}
+	tr, err := clientTransport()
+	if err != nil {
+		c.setupErr = err
+	} else {
+		c.http.Transport = tr
+	}
+	return c
+}
+
+// send performs one request. A connection or TLS failure names the server; a
+// certificate that cannot be verified also says how to trust a private CA.
+func (c *cli) send(req *http.Request) (*http.Response, error) {
+	if c.setupErr != nil {
+		return nil, c.setupErr
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		hint := ""
+		var verr *tls.CertificateVerificationError
+		if errors.As(err, &verr) && os.Getenv(caCertEnv) == "" {
+			hint = "; for a private or self-signed server certificate, set " + caCertEnv + " to its CA file"
+		}
+		return nil, fmt.Errorf("cannot reach the indago server at %s (is `indago serve` running?): %w%s", c.server, err, hint)
+	}
+	return resp, nil
+}
+
+// authorize adds the bearer token to req when one is configured.
+func (c *cli) authorize(req *http.Request) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 }
 
@@ -57,6 +136,26 @@ type apiError struct {
 }
 
 func (e *apiError) Error() string { return fmt.Sprintf("%s (HTTP %d)", e.Message, e.Status) }
+
+// failure builds the error for a non-2xx response. The token is never part of
+// the message; a 401 gets a hint about the variable the operator must set.
+func (c *cli) failure(status int, data []byte) *apiError {
+	var e struct {
+		Error string `json:"error"`
+	}
+	msg := strings.TrimSpace(string(data))
+	if json.Unmarshal(data, &e) == nil && e.Error != "" {
+		msg = e.Error
+	}
+	if status == http.StatusUnauthorized {
+		if c.token == "" {
+			msg = "the server requires an API token: set " + apiTokenEnv + " to the token the server was started with"
+		} else {
+			msg += "; check " + apiTokenEnv
+		}
+	}
+	return &apiError{Status: status, Message: msg}
+}
 
 // call performs a JSON request. in may be nil; out may be nil.
 func (c *cli) call(method, path string, in, out any) error {
@@ -78,21 +177,15 @@ func (c *cli) call(method, path string, in, out any) error {
 	if method != http.MethodGet {
 		req.Header.Set(web.ClientHeader, "cli")
 	}
-	resp, err := c.http.Do(req)
+	c.authorize(req)
+	resp, err := c.send(req)
 	if err != nil {
-		return fmt.Errorf("cannot reach the indago server at %s (is `indago serve` running?): %w", c.server, err)
+		return err
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		var e struct {
-			Error string `json:"error"`
-		}
-		msg := strings.TrimSpace(string(data))
-		if json.Unmarshal(data, &e) == nil && e.Error != "" {
-			msg = e.Error
-		}
-		return &apiError{Status: resp.StatusCode, Message: msg}
+		return c.failure(resp.StatusCode, data)
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -109,21 +202,15 @@ func (c *cli) getRaw(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.http.Do(req)
+	c.authorize(req)
+	resp, err := c.send(req)
 	if err != nil {
-		return nil, fmt.Errorf("cannot reach the indago server at %s (is `indago serve` running?): %w", c.server, err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		var e struct {
-			Error string `json:"error"`
-		}
-		msg := strings.TrimSpace(string(data))
-		if json.Unmarshal(data, &e) == nil && e.Error != "" {
-			msg = e.Error
-		}
-		return nil, &apiError{Status: resp.StatusCode, Message: msg}
+		return nil, c.failure(resp.StatusCode, data)
 	}
 	return data, nil
 }
@@ -508,7 +595,7 @@ func (c *cli) scanConfig(args []string) error {
 	disc := fs.Int("discovery", -1, "discovery concurrency")
 	httpC := fs.Int("http", -1, "HTTP concurrency")
 	browserC := fs.Int("browser", -1, "browser concurrency")
-	rps := fs.Float64("rate", -1, "requests per second (0 = unlimited)")
+	rps := fs.Float64("rate", -1, "target requests per second, all scan traffic combined incl. crawl and browser (0 = unlimited)")
 	pos, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err

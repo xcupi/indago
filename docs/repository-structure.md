@@ -45,8 +45,10 @@ indago/
 │   │   └── sqlite.go         SQLite queue (atomic guarded leasing)
 │   │
 │   ├── worker/               Concurrent worker pool
-│   │   ├── pool.go           Groups, resize, pause/resume, heartbeat
-│   │   └── rate.go           Dependency-free rate limiter
+│   │   └── pool.go           Groups, resize, pause/resume, heartbeat
+│   │
+│   ├── ratelimit/            Per-scan request-rate limiter (shared by all target-facing paths)
+│   │   └── ratelimit.go      Dependency-free limiter; SetRate applies to in-flight scans
 │   │
 │   ├── auth/                 Authentication (Anonymous ✅; others stub)
 │   ├── discovery/            Source interface + Sink + registry (stubs)

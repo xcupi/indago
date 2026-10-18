@@ -162,10 +162,14 @@ func (p ProfileName) IsValid() bool {
 // discovery starts, so changing them only affects a subsequent discovery run —
 // exactly like DiscoveryConcurrency's effect on the crawl fan-out.
 type ScanConfig struct {
-	DiscoveryConcurrency int     `json:"discovery_concurrency"`
-	HTTPConcurrency      int     `json:"http_concurrency"`
-	BrowserConcurrency   int     `json:"browser_concurrency"`
-	RequestsPerSecond    float64 `json:"requests_per_second"` // 0 = unlimited (discouraged)
+	DiscoveryConcurrency int `json:"discovery_concurrency"`
+	HTTPConcurrency      int `json:"http_concurrency"`
+	BrowserConcurrency   int `json:"browser_concurrency"`
+	// RequestsPerSecond is ONE budget for all of the scan's target-facing
+	// requests: discovery fetches (crawl, sitemap, robots, content), redirect
+	// hops, raw test requests, and browser discovery/verification navigations.
+	// 0 = unlimited (discouraged).
+	RequestsPerSecond float64 `json:"requests_per_second"`
 
 	// QuickScan limits discovery to the seeds themselves (crawl depth 0): the
 	// seed endpoints and their own parameters are tested, but no links are

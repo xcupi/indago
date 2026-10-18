@@ -9,6 +9,7 @@ import (
 	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/ratelimit"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/worker"
 )
@@ -19,6 +20,13 @@ type execution struct {
 	scanID domain.ID
 	pool   *worker.Pool
 	disc   *discovery.Manager // nil when discovery had already completed
+
+	// limiter is the scan's ONE request-rate limiter. The same instance paces
+	// every target-facing path of the scan — raw HTTP (discovery, candidate and
+	// reflection tests, redirect hops, via scopedEngine), browser discovery
+	// navigations, and browser verification — so SetRate on it (runtime
+	// reconfigure) takes effect on all of them at once.
+	limiter *ratelimit.Limiter
 
 	cancel   context.CancelFunc
 	discDone chan struct{} // closed when the discovery goroutine has exited
@@ -39,6 +47,12 @@ type execution struct {
 	// Checked in evaluate() the first time the ordinary job queue goes
 	// quiet, before the scan is allowed to actually complete.
 	combinedPassDone atomic.Bool
+
+	// domXSSPassDone marks that this execution's one-time DOM-XSS probe
+	// pass (see domxss.go's enqueueDOMXSSProbes) has already been
+	// enqueued — the SAME "run once when the queue goes quiet" shape
+	// combinedPassDone uses, checked right after it in evaluate().
+	domXSSPassDone atomic.Bool
 }
 
 // pause routes a scan pause to both the worker pool and discovery.
@@ -74,15 +88,16 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 	// own ProxyPool, in which case it's a fresh client dedicated to this scan
 	// (see scanHTTPEngine) — closeHTTP releases it once the scan stops.
 	httpEng, closeHTTP := c.scanHTTPEngine(sc)
-	eng := newScopedEngine(httpEng, scope)
-	cookies := c.sessionCookiesFor(ctx, sc, target)
+	limiter := ratelimit.New(sc.Config.RequestsPerSecond)
+	eng := newScopedEngine(httpEng, scope).WithRateLimiter(limiter)
+	cookies := c.sessionCookiesFor(ctx, sc)
 	if len(cookies) > 0 {
 		eng = eng.WithSessionCookies(cookies)
 	}
 
 	handlers := c.opts.Handlers
 	if handlers == nil {
-		handlers = c.defaultHandlers(eng, scope, sc.Config.ProxyPool)
+		handlers = c.defaultHandlers(eng, scope, sc.Config.ProxyPool, limiter)
 	}
 	pool := worker.New(c.queue, handlers, c.poolConfig(sc), c.log)
 	if err := pool.Start(runCtx); err != nil {
@@ -94,6 +109,7 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 	ex := &execution{
 		scanID:    sc.ID,
 		pool:      pool,
+		limiter:   limiter,
 		cancel:    cancel,
 		discDone:  make(chan struct{}),
 		monDone:   make(chan struct{}),
@@ -111,6 +127,7 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 		// injection points for cookies actually present in the scan's
 		// session context, excluding whatever looks like the auth cookie.
 		cfg.SessionCookies = cookies
+		cfg.Limiter = limiter
 		reg := discovery.NewRealRegistry(eng, c.opts.Browser, cfg)
 		ex.disc = discovery.NewManager(c.store, c.queue, reg, cfg, c.log)
 		seeds := seedsFor(sc, target)
@@ -370,6 +387,18 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 	if !ex.combinedPassDone.Load() {
 		ex.combinedPassDone.Store(true)
 		c.enqueueCombinedCandidates(ctx, ex.scanID)
+		return false
+	}
+	// Bounded, one-time DOM-XSS probe pass (see domxss.go): runs right
+	// after the combined pass, the SAME "go quiet, run once, let its own
+	// jobs drain before finishing" shape. Only one source/sink category
+	// is implemented (see docs/dom-xss.md) — this is genuinely cheap
+	// (bounded by discovered endpoints, not candidates), so it never
+	// gates behind "single-parameter testing failed" the way combined
+	// does; it runs for every GET/HEAD-navigable endpoint regardless.
+	if !ex.domXSSPassDone.Load() {
+		ex.domXSSPassDone.Store(true)
+		c.enqueueDOMXSSProbes(ctx, ex.scanID)
 		return false
 	}
 	return c.finish(ctx, ex, false)

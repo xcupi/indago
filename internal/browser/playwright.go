@@ -26,22 +26,31 @@ func IsTimeout(err error) bool {
 // a browser are gated behind the `browser_integration` build tag.
 
 // newPlaywrightDriver starts a Playwright engine.
-// exe, when non-empty, is the Chromium binary to launch.
-func newPlaywrightDriver(exe string) (driver, error) {
+// exe, when non-empty, is the Chromium binary to launch. disableSandbox is the
+// operator's explicit opt-out of Chromium's process sandbox; the zero value
+// keeps it ON.
+func newPlaywrightDriver(exe string, disableSandbox bool) (driver, error) {
 	p, err := pw.Run()
 	if err != nil {
 		return nil, fmt.Errorf("run playwright (install the driver: go run github.com/mxschmitt/playwright-go/cmd/playwright@v0.6201.1 --version): %w", err)
 	}
-	return &pwDriver{pw: p, exe: exe}, nil
+	return &pwDriver{pw: p, exe: exe, disableSandbox: disableSandbox}, nil
 }
 
 type pwDriver struct {
-	pw  *pw.Playwright
-	exe string
+	pw             *pw.Playwright
+	exe            string
+	disableSandbox bool
 }
 
 func (d *pwDriver) Launch(headless bool) (browserHandle, error) {
-	opts := pw.BrowserTypeLaunchOptions{Headless: pw.Bool(headless)}
+	// Playwright adds --no-sandbox unless chromiumSandbox is exactly true, so
+	// the sandbox must be requested explicitly: leaving the option unset would
+	// silently disable it.
+	opts := pw.BrowserTypeLaunchOptions{
+		Headless:        pw.Bool(headless),
+		ChromiumSandbox: pw.Bool(!d.disableSandbox),
+	}
 	if d.exe != "" {
 		opts.ExecutablePath = pw.String(d.exe)
 	}
@@ -148,7 +157,7 @@ func (c *pwContext) Close() error { return c.c.Close() }
 
 type pwPage struct{ p pw.Page }
 
-func (p *pwPage) Goto(url, waitUntil string, timeout time.Duration) (int, string, error) {
+func (p *pwPage) Goto(url, referer, waitUntil string, timeout time.Duration) (int, string, error) {
 	opts := pw.PageGotoOptions{}
 	if timeout > 0 {
 		opts.Timeout = pw.Float(float64(timeout.Milliseconds()))
@@ -156,6 +165,9 @@ func (p *pwPage) Goto(url, waitUntil string, timeout time.Duration) (int, string
 	if waitUntil != "" {
 		ws := pw.WaitUntilState(waitUntil)
 		opts.WaitUntil = &ws
+	}
+	if referer != "" {
+		opts.Referer = pw.String(referer)
 	}
 	resp, err := p.p.Goto(url, opts)
 	if err != nil {
@@ -285,6 +297,13 @@ func (p *pwPage) WaitForURL(glob string, timeout time.Duration) error {
 		opts.Timeout = pw.Float(float64(timeout.Milliseconds()))
 	}
 	return p.p.WaitForURL(glob, opts)
+}
+
+// AddInitScript installs script via Playwright's own init-script mechanism
+// (runs before any of the page's own scripts, on every navigation this page
+// makes from here on).
+func (p *pwPage) AddInitScript(script string) error {
+	return p.p.AddInitScript(pw.Script{Content: pw.String(script)})
 }
 
 func (p *pwPage) Close() error { return p.p.Close() }

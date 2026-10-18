@@ -14,8 +14,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/discovery"
@@ -351,6 +354,120 @@ func TestGeneratePoCCombinedQueryPlusHeaderIsNotOneClick(t *testing.T) {
 	}
 	if !strings.Contains(html, "combined") && !strings.Contains(html, "Combined") {
 		t.Fatal("expected the artifact to flag this as a combined (multi-parameter) finding")
+	}
+}
+
+// Authenticated and token-bearing requests are templates, not one-click
+// reproductions. The saved session file is deliberately a dummy local fixture;
+// GeneratePoC must inspect only session metadata and never read or render it.
+func TestGeneratePoCAuthenticatedQueryUsesOperatorSessionWithoutSecrets(t *testing.T) {
+	srv := echoServer(t)
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/s", domain.MethodGET)
+	focus := env.param(ep, "q", domain.LocationQuery, "hi")
+	ip := env.injection(ep, focus)
+	m := marker(env.scanID, ip.ID)
+	candidate := detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Context: detection.CtxHTMLText,
+		Parameter: "q", Location: domain.LocationQuery, Value: "<svg onload=" + m + ">", DedupKey: "auth-query", Priority: 90}
+
+	secret := "poc-test-session-cookie-not-real"
+	statePath := filepath.Join(t.TempDir(), "storage-state.json")
+	if err := os.WriteFile(statePath, []byte(`{"cookies":[{"name":"sid","value":"`+secret+`"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	sessionID := domain.NewID()
+	env.sc.SessionID = sessionID
+	if err := env.st.Scans().Update(context.Background(), env.sc); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.st.Sessions().Create(context.Background(), &domain.Session{
+		ID: sessionID, ScanID: env.scanID, Mode: domain.AuthExisting,
+		State: domain.SessionActive, StatePath: statePath, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fid := confirmOne(t, env, ep, ip, candidate)
+	poc, err := GeneratePoC(context.Background(), env.st, fid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if poc.OneClick {
+		t.Fatal("an authenticated scan must not generate a one-click PoC")
+	}
+	html := string(poc.HTML)
+	for _, want := range []string{"own authorized authenticated session", "session cookies are not embedded", "-b", "INDAGO_COOKIE_JAR", m} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("authenticated PoC missing %q", want)
+		}
+	}
+	if strings.Contains(html, `http-equiv="refresh"`) {
+		t.Fatal("an authenticated PoC must not auto-navigate")
+	}
+	for _, forbidden := range []string{secret, statePath} {
+		if strings.Contains(html, forbidden) || strings.Contains(poc.URL, forbidden) {
+			t.Fatal("PoC leaked saved session material")
+		}
+	}
+}
+
+func TestGeneratePoCDynamicQueryTokenIsRedactedAndManual(t *testing.T) {
+	srv := echoServer(t)
+	env := newScanEnv(t)
+	stale := "STALE_CSRF_VALUE_DO_NOT_RENDER"
+	ep := env.endpoint(srv.URL+"/s?csrf_token="+stale, domain.MethodGET)
+	focus := env.param(ep, "q", domain.LocationQuery, "hi")
+	_ = env.param(ep, "csrf_token", domain.LocationQuery, stale)
+	ip := env.injection(ep, focus)
+	m := marker(env.scanID, ip.ID)
+	candidate := detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Context: detection.CtxHTMLText,
+		Parameter: "q", Location: domain.LocationQuery, Value: "<svg onload=" + m + ">", DedupKey: "csrf-query", Priority: 90}
+
+	fid := confirmOne(t, env, ep, ip, candidate)
+	poc, err := GeneratePoC(context.Background(), env.st, fid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if poc.OneClick {
+		t.Fatal("a dynamic non-focus token must disable one-click reproduction")
+	}
+	if strings.Contains(poc.URL, stale) || strings.Contains(string(poc.HTML), stale) {
+		t.Fatal("PoC rendered the stale CSRF token")
+	}
+	for _, want := range []string{"FRESH_csrf_token_VALUE", "refresh current CSRF token", "token-issuing page", m, "request template"} {
+		if !strings.Contains(poc.URL+string(poc.HTML), want) {
+			t.Fatalf("dynamic-token PoC missing %q", want)
+		}
+	}
+	if strings.Contains(string(poc.HTML), `http-equiv="refresh"`) {
+		t.Fatal("a dynamic-token PoC must not auto-navigate")
+	}
+}
+
+func TestGeneratePoCDynamicFormPostDoesNotAutoSubmit(t *testing.T) {
+	srv := echoServer(t)
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/submit", domain.MethodPOST)
+	focus := env.param(ep, "q", domain.LocationForm, "hi")
+	stale := "STALE_POST_CSRF_VALUE"
+	_ = env.param(ep, "csrf_token", domain.LocationForm, stale)
+	ip := env.injection(ep, focus)
+	m := marker(env.scanID, ip.ID)
+	candidate := detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Context: detection.CtxHTMLText,
+		Parameter: "q", Location: domain.LocationForm, Value: "<svg onload=" + m + ">", DedupKey: "csrf-post", Priority: 90}
+
+	fid := confirmOne(t, env, ep, ip, candidate)
+	poc, err := GeneratePoC(context.Background(), env.st, fid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(poc.HTML)
+	if poc.OneClick || strings.Contains(html, `onload="document.getElementById('indago-poc-form').submit()"`) {
+		t.Fatal("a POST form with a dynamic token must not auto-submit")
+	}
+	if strings.Contains(html, stale) || !strings.Contains(html, "FRESH_csrf_token_VALUE") || !strings.Contains(html, m) {
+		t.Fatal("POST template must redact the stale token while preserving the focused candidate payload")
 	}
 }
 

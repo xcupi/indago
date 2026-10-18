@@ -35,6 +35,7 @@ import (
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/ratelimit"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/verification"
 	"github.com/indago/indago/internal/worker"
@@ -195,10 +196,13 @@ type verifyExecutor struct {
 	// connection. proxyNext round-robins through it across concurrent verify
 	// jobs — see nextProxy.
 	proxyPool []string
+	// limiter is the scan's shared request-rate limiter; every browser
+	// navigation this executor drives is paced with it (verification.Input.Limiter).
+	limiter   *ratelimit.Limiter
 	proxyNext atomic.Uint64
 }
 
-func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Verifier, ev evidence.Store, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, tokenMu *sync.Mutex, proxyPool []string) *verifyExecutor {
+func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Verifier, ev evidence.Store, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, tokenMu *sync.Mutex, proxyPool []string, limiter *ratelimit.Limiter) *verifyExecutor {
 	if v == nil {
 		v = verification.Stub{}
 	}
@@ -208,7 +212,7 @@ func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Ver
 	if tokenMu == nil {
 		tokenMu = &sync.Mutex{}
 	}
-	return &verifyExecutor{store: st, engine: eng, verifier: v, evidence: ev, scope: scope, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu, tokenMu: tokenMu, proxyPool: proxyPool}
+	return &verifyExecutor{store: st, engine: eng, verifier: v, evidence: ev, scope: scope, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu, tokenMu: tokenMu, proxyPool: proxyPool, limiter: limiter}
 }
 
 // nextProxy round-robins through proxyPool ("" when empty: direct connection,
@@ -382,6 +386,7 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 			}
 		}
 
+		in.Limiter = e.limiter
 		vres, verifyErr = e.verifier.Verify(ctx, in)
 	})
 	if err != nil {

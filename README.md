@@ -20,12 +20,16 @@ and conservative, operator-controlled behavior.
 | Scaffold | Domain, persistence, queue, workers, interfaces | done |
 | Transport | HTTP engine, browser manager | done |
 | Discovery | Crawl, forms, sitemap/robots, wordlists, params; scan controller integration | **current** |
-| Phase 1 | Reflected XSS detection & verification | next |
-| Later | Stored XSS, DOM XSS, more engines | designed-for |
+| Phase 1 | Reflected XSS detection & verification | done |
+| DOM XSS (bounded HTML/string-timer sinks) | Seven implemented source types → innerHTML/outerHTML/document.write/writeln/insertAdjacentHTML/Range.createContextualFragment plus primitive-string setTimeout/setInterval; native behavior and source/timing limits in [`docs/dom-xss.md`](docs/dom-xss.md) | **current** |
+| Later | Stored XSS, more DOM-XSS sources/sinks, more engines | designed-for |
 
-**There is no vulnerability detection, payload generation, or exploitation yet.**
-A scan currently performs scope-enforced *discovery* (real requests to in-scope
-targets only) and drains its test jobs through no-op handlers. See
+Scans perform scope-enforced discovery, benign-marker Reflected-XSS testing,
+and browser-backed DOM-XSS probing for the bounded source/sink coverage above.
+Confirmation requires a marker-specific browser runtime signal, not reachability
+or console text alone. String timers are observed, never accelerated or rewritten;
+long timers and JavaScript-string breakouts are not promised. Stored XSS and
+other DOM sink categories are not built. See
 [`AGENTS.md`](AGENTS.md) for the exact boundary and
 [`docs/scan-orchestration.md`](docs/scan-orchestration.md) for how a scan runs.
 
@@ -56,6 +60,7 @@ Full design docs live in [`docs/`](docs/):
 - [`interfaces.md`](docs/interfaces.md) — service boundaries & contracts
 - [`repository-structure.md`](docs/repository-structure.md) — layout rationale
 - [`testing-strategy.md`](docs/testing-strategy.md) — how we test
+- [`dom-xss.md`](docs/dom-xss.md) — DOM XSS source/sink coverage, two-phase design, and validation limits
 
 ---
 
@@ -109,7 +114,9 @@ values, no payloads) and the result plus request/response evidence is stored
 under `data/evidence/`. POST/PUT/PATCH/DELETE endpoints are skipped unless you
 start the server with `-allow-state-changing`. `indago serve -browser` adds
 browser network discovery (needs Chromium; out-of-scope requests are blocked in
-the browser).
+the browser). Chromium's process sandbox is on by default; hosts that cannot
+provide it must opt out explicitly with `-browser-no-sandbox`
+(see [`docs/browser-sandbox.md`](docs/browser-sandbox.md)).
 
 Run the quality gate:
 

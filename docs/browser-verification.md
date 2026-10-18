@@ -29,15 +29,21 @@ browser report an exception naming `TOKEN`" are the same question.
 This is why the signal needs no payload, no timing heuristic, and no simulated
 user action: `internal/verification/signal.go`'s `matchExecutionSignal` just
 scans the browser's own uncaught-exception (`page_error`) and console-error
-channels for the exact token, after navigation reaches `load`. Nothing is
-executed *by* the verifier — the candidate either reaches an evaluated position
-or it doesn't, and the browser reports the difference on its own.
+channels for the exact marker-specific ReferenceError signature, after
+navigation reaches `load`. Generic application output (for example,
+`console.error(userControlledValue)`) is not evidence merely because it
+contains the marker. Chromium's Playwright page-error event omits the error
+class but reports an unresolved bare marker as `playwright: TOKEN is not
+defined`; the matcher accepts that exact form only on the page-error channel.
+Nothing is executed *by* the verifier — the candidate either reaches an
+evaluated position or it doesn't, and the browser reports the difference on
+its own.
 
 ## The three-way decision (`decide`)
 
 | Observed | Verdict | Confidence |
 |---|---|---|
-| the marker names an uncaught exception / console error | `confirmed` | high |
+| the browser reports the marker as an unresolved JavaScript identifier | `confirmed` | high |
 | the candidate is in the rendered page, but no such signal | `rejected` | high |
 | the marker isn't even found in the rendered page this time | `inconclusive` | low |
 

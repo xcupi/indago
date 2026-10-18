@@ -90,11 +90,36 @@ func NewStub(name string, class domain.VulnClass) Engine {
 	return stubEngine{name: name, class: class}
 }
 
+// domxssEngine registers DOM XSS for Registry enumeration (Classes()).
+//
+// NOTE, same as Reflected XSS already demonstrates: DOM XSS's REAL
+// detection pipeline does not run through this Registry/Engine interface
+// at all. This generic Input (ScanID + InjectionPoint) cannot express
+// what DOM XSS actually needs — an Endpoint to navigate plus a
+// client-side source/sink pair, not a server-side injection point — and
+// Detect here is never called by the running product (confirmed by
+// grepping for ".Detect(" across the repo: the only call site is this
+// package's own test). The real engine is internal/scan/domxss.go: a
+// two-phase canary-reachability-then-payload-verify probe against
+// discovered Endpoints, through the SAME scope-enforcing browser.Manager
+// discovery and Reflected XSS verification already use. Registered here
+// only so Registry.Classes() enumerates DOM XSS accurately instead of
+// silently omitting it.
+type domxssEngine struct{}
+
+func (domxssEngine) Name() string                { return "dom-xss" }
+func (domxssEngine) VulnClass() domain.VulnClass { return domain.VulnDOMXSS }
+func (domxssEngine) Detect(context.Context, Input) (*Outcome, error) {
+	return nil, ErrNotImplemented
+}
+
 // DefaultRegistry returns a registry containing the Phase 1 target engine
-// (Reflected XSS) as a stub. Stored/DOM XSS are intentionally absent until their
-// phases.
+// (Reflected XSS, still a bookkeeping stub here — see NewStub's doc
+// comment on this Registry's real role) and DOM XSS (see domxssEngine).
+// Stored XSS remains intentionally absent until its own phase.
 func DefaultRegistry() *Registry {
 	r := NewRegistry()
 	r.Register(NewStub("reflected-xss", domain.VulnReflectedXSS))
+	r.Register(domxssEngine{})
 	return r
 }

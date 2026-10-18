@@ -95,7 +95,7 @@ func newScanEnv(t *testing.T) *scanEnv {
 }
 
 func (e *scanEnv) verifyExec(v verification.Verifier, scope domain.Scope, cfg ExecutorConfig) *verifyExecutor {
-	return newVerifyExecutor(e.st, nil, v, e.ev, scope, cfg, execLog(), nil, nil, nil)
+	return newVerifyExecutor(e.st, nil, v, e.ev, scope, cfg, execLog(), nil, nil, nil, nil)
 }
 
 func (e *scanEnv) verifyJobFor(target domain.JobTarget, cand detection.Candidate, findingID domain.ID) *domain.TestJob {

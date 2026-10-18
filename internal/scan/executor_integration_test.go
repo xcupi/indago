@@ -40,6 +40,36 @@ func TestScanExecutesEveryJobAndPersistsResults(t *testing.T) {
 
 	total := done.Discovery.Endpoints + done.Discovery.InjectionPoints
 	cases, _ := st.TestCases().ListByScan(ctx, sc.ID)
+
+	// The DOM-XSS engine (internal/scan/domxss.go) runs its own one-time
+	// probe pass per distinct GET/HEAD-navigable endpoint URL, entirely
+	// separate from the Reflected-XSS JobTest/JobVerify pipeline this test
+	// otherwise exercises — no browser is configured in this test's
+	// scan.Options, so every one of those probes is recorded Skipped (the
+	// SAME "no browser configured" skip verifyExecutor already uses).
+	// Split them out before applying the pre-existing, Reflected-XSS-only
+	// assertions below, and cross-check their count independently against
+	// the endpoint registry.
+	var domXSSCases, otherCases []*domain.TestCase
+	for _, tc := range cases {
+		if tc.VulnClass == domain.VulnDOMXSS {
+			domXSSCases = append(domXSSCases, tc)
+		} else {
+			otherCases = append(otherCases, tc)
+		}
+	}
+	eps, _ := st.Endpoints().ListByScan(ctx, sc.ID)
+	wantDOMXSS := countDistinctNavigableURLs(eps)
+	if len(domXSSCases) != wantDOMXSS {
+		t.Fatalf("dom-xss probe test cases = %d, want one per distinct GET/HEAD endpoint (%d)", len(domXSSCases), wantDOMXSS)
+	}
+	for _, tc := range domXSSCases {
+		if tc.Status != domain.TestCaseSkipped || !strings.Contains(tc.Note, "no browser configured") {
+			t.Fatalf("dom-xss probe without a configured browser should be skipped, not run: %+v", tc)
+		}
+	}
+	cases = otherCases
+
 	if len(cases) != total {
 		t.Fatalf("test cases = %d, want one per job (%d)", len(cases), total)
 	}
@@ -98,9 +128,11 @@ func TestScanExecutesEveryJobAndPersistsResults(t *testing.T) {
 		}
 	}
 
-	// Status reports the same breakdown, and every evidence reference resolves.
-	if done.Tests.Success != success || done.Tests.Skipped != skipped || done.Tests.Error+done.Tests.Timeout+done.Tests.Cancelled+done.Tests.Running != 0 {
-		t.Fatalf("status tests = %+v", done.Tests)
+	// Status reports the same breakdown (PLUS the DOM-XSS engine's own
+	// skipped-no-browser probes counted separately above), and every
+	// evidence reference resolves.
+	if done.Tests.Success != success || done.Tests.Skipped != skipped+wantDOMXSS || done.Tests.Error+done.Tests.Timeout+done.Tests.Cancelled+done.Tests.Running != 0 {
+		t.Fatalf("status tests = %+v (want success=%d skipped=%d+%d dom-xss)", done.Tests, success, skipped, wantDOMXSS)
 	}
 	// Every evidence reference held by a test case must resolve to a readable blob.
 	for _, tc := range cases {
@@ -153,8 +185,16 @@ func TestScanExecutesPostWhenAllowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := waitStatus(t, ctrl, sc.ID, 8*time.Second, isCompleted)
-	if done.Tests.Skipped != 0 || done.Tests.Success != done.Jobs.Total() {
-		t.Fatalf("tests = %+v jobs = %+v", done.Tests, done.Jobs)
+	// No browser is configured in this test's scan.Options, so the
+	// DOM-XSS engine's own one-time probe pass (internal/scan/domxss.go)
+	// records every one of its jobs Skipped (one per distinct GET/HEAD
+	// endpoint URL) rather than failing — see
+	// TestScanExecutesEveryJobAndPersistsResults for the full assertion
+	// of that shape; here just account for the count.
+	eps, _ := st.Endpoints().ListByScan(ctx, sc.ID)
+	wantDOMXSSSkipped := countDistinctNavigableURLs(eps)
+	if done.Tests.Skipped != wantDOMXSSSkipped || done.Tests.Success != done.Jobs.Total()-wantDOMXSSSkipped {
+		t.Fatalf("tests = %+v jobs = %+v (want %d dom-xss skips)", done.Tests, done.Jobs, wantDOMXSSSkipped)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -177,6 +217,30 @@ func TestScanExecutesPostWhenAllowed(t *testing.T) {
 	if !sawBaseline || !sawMutated {
 		t.Fatalf("expected both baseline and mutated POSTs with the opt-in on: %q", bodies)
 	}
+}
+
+// countDistinctNavigableURLs independently re-derives, from the Endpoint
+// registry alone, how many DOM-XSS probe jobs (one per distinct GET/HEAD-
+// navigable endpoint URL, PER IMPLEMENTED SOURCE — see
+// detection.DOMXSSSources and scan.selectDOMXSSEndpoints, unexported)
+// this scan's one-time DOM-XSS pass should have enqueued, so these tests
+// cross-check the real engine's behavior rather than merely trusting it.
+func countDistinctNavigableURLs(eps []*domain.Endpoint) int {
+	seen := map[string]bool{}
+	n := 0
+	for _, ep := range eps {
+		switch ep.Method {
+		case domain.MethodGET, domain.MethodHEAD, "":
+		default:
+			continue
+		}
+		if seen[ep.URL] {
+			continue
+		}
+		seen[ep.URL] = true
+		n++
+	}
+	return n * len(detection.DOMXSSSources)
 }
 
 // Cancel interrupts an in-flight test request and its CANCELLED result is

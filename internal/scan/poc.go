@@ -1,14 +1,11 @@
 package scan
 
-// This file generates a standalone, browser-openable Proof-of-Concept (PoC)
-// artifact for a CONFIRMED reflected-XSS Finding. It is purely presentation
-// over data the scan already produced — reusing the SAME request-building
-// logic (buildRequest) and the SAME POST-navigation technique the browser
-// verifier itself uses (browser.Page.NavigateForm's auto-submitting hidden
-// <form>, see internal/browser/playwright.go's formHTML) rather than
-// reinventing either. No new detection/exploitation logic: the candidate
-// value and request shape are replayed byte-for-byte exactly like browser
-// verification already did (AGENTS.md §2–§3 are untouched by this file).
+// This file generates a standalone Proof-of-Concept (PoC) artifact for a
+// CONFIRMED reflected-XSS Finding. It is presentation over data the scan
+// already produced, reusing the SAME request-building logic (buildRequest)
+// and POST-navigation technique as browser verification. It performs no
+// network I/O; when authentication or dynamic tokens are needed, it emits a
+// redacted request template rather than claiming an exact replay.
 //
 // Evidence integrity (AGENTS.md §2.6): a PoC may be generated ONLY for a
 // Finding whose STORED Verdict is Confirmed — generating one for a Pending/
@@ -16,26 +13,21 @@ package scan
 // that was never actually confirmed. See GeneratePoC's guard, enforced
 // before anything else runs.
 //
-// Faithfulness over polish: a Query/Path override is fully carried by a
-// plain link, and a POST+form-encoded override by an auto-submitting
-// <form> — both are TRUE one-click reproductions opened directly in any
-// browser. A Header or Cookie override is NOT, and no HTML trick changes
-// that: a plain navigation/form submission cannot set an arbitrary request
-// header (the "forbidden header name" rules every browser enforces), and a
-// static page on an unrelated origin cannot set a cookie for the target's
-// origin (same-origin policy — document.cookie only affects the page's OWN
-// origin). For those, GeneratePoC refuses to render a fake auto-navigating
-// artifact that would silently fail to reproduce the real bug: the HTML
-// says so explicitly and gives the exact HTTP request and curl command
-// instead. A POST+JSON override is likewise never one-click (no HTML form
-// can carry an application/json body) — and, per the documented standing
-// limitation that a POST+JSON candidate can never be browser-verified, can
-// never actually reach GeneratePoC on a real Confirmed finding; handled
-// defensively here rather than assumed.
+// Faithfulness over polish: a Query/Path override can be a plain link, and a
+// POST+form-encoded override can be an auto-submitting <form>, ONLY when the
+// scan had no non-anonymous auth session and there are no non-focus dynamic
+// token parameters. If either dependency exists, the artifact is inert,
+// replaces other captured token values with placeholders, and requires the
+// operator to supply their own authorized session/fresh token manually. A
+// Header or Cookie override is not carryable by a static cross-origin link or
+// form, and a JSON body is not carryable by an HTML form. Those cases remain
+// inert and provide request details plus curl rather than claiming a false
+// one-click reproduction. See GeneratePoC and the per-location constraints.
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -44,6 +36,7 @@ import (
 	"strings"
 
 	"github.com/indago/indago/internal/detection"
+	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/store"
@@ -73,13 +66,21 @@ type PoC struct {
 	Combined   bool
 	ParameterB string
 	LocationB  domain.ParamLocation
+	// AuthenticatedSession is true when this scan had a non-anonymous
+	// session. Its cookie/state material is never loaded into the artifact;
+	// the operator must supply their own authorized session at replay time.
+	AuthenticatedSession bool
+	// DynamicTokenNames contains non-focus request parameter names matching
+	// isDynamicTokenName. Their captured values are replaced with placeholders.
+	DynamicTokenNames []string
+	// RequestTemplate is true when auth or dynamic-token refresh is required,
+	// so the displayed request is not an exact runnable reproduction.
+	RequestTemplate bool
 	// OneClick is true when the generated HTML, opened directly in a
 	// browser with no further action, fully reproduces the confirmed
-	// request (every override is Query/Path/Form). False when a Header,
-	// Cookie, or JSON override is involved — the HTML still documents the
-	// exact request and a working curl command, but intentionally does
-	// NOT auto-navigate/auto-submit, since doing so would not actually
-	// carry that override (see file doc comment).
+	// request (every override is Query/Path/Form and there is no auth or
+	// dynamic-token refresh dependency). False when a Header, Cookie, JSON,
+	// auth, or dynamic-token dependency is involved.
 	OneClick bool
 	HTML     []byte
 }
@@ -137,22 +138,33 @@ func GeneratePoC(ctx context.Context, st store.Store, findingID domain.ID) (*PoC
 		}
 	}
 
+	authenticated, err := scanHasNonAnonymousSession(ctx, st, f.ScanID)
+	if err != nil {
+		return nil, err
+	}
+	dynamicParams := nonFocusDynamicParams(params, focusA, focusB)
+
 	inj := &injection{param: focusA, value: cand.Value}
 	if focusB != nil {
 		inj.paramB, inj.valueB = focusB, cand.ValueB
 	}
-	// Reuse the EXACT request-building logic the candidate step and
-	// browser verification already used — the same function, the same
-	// other-parameters-at-observed-value behavior, never a re-derivation
-	// that could silently drift from what was actually confirmed.
+	// Reuse the same request-building logic as candidate execution and
+	// verification. Then remove captured non-focus CSRF-like values without
+	// contacting the target; a current token must be fetched by the operator.
 	req, err := buildRequest(ep, params, inj)
 	if err != nil {
-		return nil, fmt.Errorf("poc: rebuild the exact confirmed request: %w", err)
+		return nil, fmt.Errorf("poc: rebuild request template: %w", err)
+	}
+	if err := redactDynamicTokenValues(req, dynamicParams); err != nil {
+		return nil, fmt.Errorf("poc: redact dynamic token values: %w", err)
 	}
 
 	p := &PoC{
 		FindingID: f.ID, Method: ep.Method, URL: req.URL,
 		Parameter: focusA.Name, Location: focusA.Location,
+		AuthenticatedSession: authenticated,
+		DynamicTokenNames:    dynamicTokenNames(dynamicParams),
+		RequestTemplate:      authenticated || len(dynamicParams) > 0,
 	}
 	locs := []domain.ParamLocation{focusA.Location}
 	if cand.Combined {
@@ -160,9 +172,167 @@ func GeneratePoC(ctx context.Context, st store.Store, findingID domain.ID) (*PoC
 		p.ParameterB, p.LocationB = cand.ParameterB, cand.LocationB
 		locs = append(locs, focusB.Location)
 	}
-	p.OneClick = allLinkable(locs, ep.Method)
+	p.OneClick = allLinkable(locs, ep.Method) && !p.RequestTemplate
 	p.HTML = renderPoCHTML(p, req)
 	return p, nil
+}
+
+func scanHasNonAnonymousSession(ctx context.Context, st store.Store, scanID domain.ID) (bool, error) {
+	sc, err := st.Scans().Get(ctx, scanID)
+	if err != nil {
+		return false, fmt.Errorf("load scan auth metadata: %w", err)
+	}
+	if sc.SessionID.Empty() {
+		return false, nil
+	}
+	sess, err := st.Sessions().Get(ctx, sc.SessionID)
+	if errors.Is(err, store.ErrNotFound) {
+		// The scan records a session dependency but its metadata is gone; do
+		// not silently turn an unknown session into a public one-click PoC.
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("load scan session metadata: %w", err)
+	}
+	if sess == nil || sess.ScanID != scanID {
+		return true, nil
+	}
+	return sess.Mode != domain.AuthAnonymous, nil
+}
+
+func nonFocusDynamicParams(params []*domain.Parameter, focusA, focusB *domain.Parameter) []*domain.Parameter {
+	var out []*domain.Parameter
+	for _, p := range params {
+		if p == nil || (focusA != nil && p.ID == focusA.ID) || (focusB != nil && p.ID == focusB.ID) {
+			continue
+		}
+		if isDynamicTokenName(p.Name) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func dynamicTokenNames(params []*domain.Parameter) []string {
+	set := make(map[string]struct{}, len(params))
+	for _, p := range params {
+		if p != nil {
+			set[p.Name] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func dynamicTokenPlaceholder(name string) string { return "FRESH_" + name + "_VALUE" }
+
+// redactDynamicTokenValues edits only non-focus dynamic-token parameters in
+// the rendered request. Values are replaced in the request's own encoding
+// (URL/form/JSON/header/cookie), so neither the stale value nor a misleading
+// stale hidden field reaches the downloadable artifact.
+func redactDynamicTokenValues(req *httpengine.Request, params []*domain.Parameter) error {
+	if len(params) == 0 {
+		return nil
+	}
+	u, err := url.Parse(req.URL)
+	if err != nil {
+		return err
+	}
+	query := u.Query()
+	var form url.Values
+	formLoaded := false
+	var jsonBody map[string]json.RawMessage
+	jsonLoaded := false
+
+	for _, p := range params {
+		if p == nil || !isDynamicTokenName(p.Name) {
+			continue
+		}
+		placeholder := dynamicTokenPlaceholder(p.Name)
+		switch p.Location {
+		case domain.LocationQuery:
+			query.Set(p.Name, placeholder)
+		case domain.LocationPath:
+			if idx, ok := discovery.ParsePathSegmentParamName(p.Name); ok {
+				segments := discovery.PathSegments(u.Path)
+				if idx >= 0 && idx < len(segments) {
+					segments[idx] = placeholder
+					u.Path = discovery.JoinPathSegments(segments)
+					u.RawPath = ""
+				}
+			}
+		case domain.LocationForm:
+			if !formLoaded {
+				form, err = url.ParseQuery(string(req.Body))
+				if err != nil {
+					return fmt.Errorf("parse form body: %w", err)
+				}
+				formLoaded = true
+			}
+			form.Set(p.Name, placeholder)
+		case domain.LocationJSON:
+			if !jsonLoaded {
+				if err := json.Unmarshal(req.Body, &jsonBody); err != nil {
+					return fmt.Errorf("parse JSON body: %w", err)
+				}
+				if jsonBody == nil {
+					jsonBody = make(map[string]json.RawMessage)
+				}
+				jsonLoaded = true
+			}
+			encoded, err := json.Marshal(placeholder)
+			if err != nil {
+				return err
+			}
+			jsonBody[p.Name] = encoded
+		case domain.LocationHeader:
+			for name := range req.Headers {
+				if strings.EqualFold(name, p.Name) {
+					req.Headers[name] = placeholder
+				}
+			}
+		case domain.LocationCookie:
+			for _, cookie := range req.Cookies {
+				if cookie != nil && cookie.Name == p.Name {
+					cookie.Value = placeholder
+				}
+			}
+			for name, value := range req.Headers {
+				if strings.EqualFold(name, "Cookie") {
+					req.Headers[name] = redactCookieHeader(value, p.Name, placeholder)
+				}
+			}
+		}
+	}
+
+	u.RawQuery = query.Encode()
+	req.URL = u.String()
+	if formLoaded {
+		req.Body = []byte(form.Encode())
+	}
+	if jsonLoaded {
+		encoded, err := json.Marshal(jsonBody)
+		if err != nil {
+			return err
+		}
+		req.Body = encoded
+	}
+	return nil
+}
+
+func redactCookieHeader(header, cookieName, placeholder string) string {
+	parts := strings.Split(header, ";")
+	for i, part := range parts {
+		name, _, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if ok && name == cookieName {
+			parts[i] = name + "=" + placeholder
+		}
+	}
+	return strings.Join(parts, ";")
 }
 
 // findCandidateForAttempt resolves the verified attempt's full candidate
@@ -254,9 +424,16 @@ func renderPoCHTML(p *PoC, req *httpengine.Request) []byte {
 	fmt.Fprintf(&b, "<body%s>\n", bodyAttr)
 
 	b.WriteString("<h1>Indago — Reflected XSS Proof of Concept</h1>\n")
-	fmt.Fprintf(&b, "<p class=\"meta\">Finding <code>%s</code> — <strong>Verdict: Confirmed</strong> "+
-		"(this artifact replays the exact request Indago's own browser verification already confirmed executes; it fabricates nothing new).</p>\n",
+	fmt.Fprintf(&b, "<p class=\"meta\">Finding <code>%s</code> — <strong>Verdict: Confirmed</strong>. ",
 		html.EscapeString(string(p.FindingID)))
+	switch {
+	case p.RequestTemplate:
+		b.WriteString("This is a request template—not an exact runnable request. Replace the fresh CSRF/session placeholders before replay.</p>\n")
+	case p.OneClick:
+		b.WriteString("This exact request is the one Indago's browser verification confirmed executes; it is based only on the confirmed finding.</p>\n")
+	default:
+		b.WriteString("The request details and equivalent curl command below reproduce the confirmed request; this HTML stays inert because the request uses a carrier a browser link/form cannot set.</p>\n")
+	}
 	fmt.Fprintf(&b, "<p class=\"meta\">Parameter: <code>%s</code> (%s)%s</p>\n",
 		html.EscapeString(p.Parameter), html.EscapeString(string(p.Location)), combinedNote(p))
 
@@ -278,8 +455,8 @@ func renderPoCHTML(p *PoC, req *httpengine.Request) []byte {
 		b.WriteString(pocNotOneClickExplanation(p))
 	}
 
-	b.WriteString(pocRequestDetails(req))
-	fmt.Fprintf(&b, "<h2>Equivalent curl command</h2>\n<pre>%s</pre>\n", html.EscapeString(curlCommand(req)))
+	b.WriteString(pocRequestDetails(req, p.RequestTemplate))
+	fmt.Fprintf(&b, "<h2>Equivalent curl command</h2>\n<pre>%s</pre>\n", html.EscapeString(curlCommand(req, p.AuthenticatedSession)))
 	b.WriteString("</body></html>\n")
 	return b.Bytes()
 }
@@ -344,22 +521,42 @@ func pocNotOneClickExplanation(p *PoC) string {
 			reasons = append(reasons, "no HTML form can carry an application/json request body, and this finding's override lives in a JSON body field")
 		}
 	}
+	if p.AuthenticatedSession {
+		reasons = append(reasons, "this scan used a non-anonymous authenticated session; its session cookies are intentionally not embedded")
+	}
+	if len(p.DynamicTokenNames) > 0 {
+		reasons = append(reasons, fmt.Sprintf("non-focus dynamic token parameter(s) %s have their captured values redacted", strings.Join(p.DynamicTokenNames, ", ")))
+	}
 	var b strings.Builder
 	b.WriteString(`<div class="warn-block">` + "\n")
 	b.WriteString("<h2>⚠ No one-click PoC is possible for this finding</h2>\n<p>")
 	b.WriteString(html.EscapeString(strings.Join(reasons, "; and ")))
-	b.WriteString(". Opening this file does nothing by itself — it is intentionally inert rather than silently claiming to reproduce a request it cannot actually send. " +
-		"Use the exact HTTP request below, or the curl command, to reproduce this finding.</p>\n")
+	if p.RequestTemplate {
+		b.WriteString(". This is a request template, not an exact runnable request. ")
+		if p.AuthenticatedSession {
+			b.WriteString("Use your own authorized authenticated session; session cookies are not embedded. Set <code>INDAGO_COOKIE_JAR</code> to your own authorized cookie-jar file for curl. ")
+		} else {
+			b.WriteString("If the target requires authentication, use your own authorized authenticated session; session cookies are not embedded. ")
+		}
+		b.WriteString("Before replay, refresh current CSRF token(s) from the token-issuing page. Token refresh is manual; PoC generation does not contact the target. Replace the fresh CSRF/session placeholders before replay.</p>\n")
+		b.WriteString("</div>\n")
+		return b.String()
+	}
+	b.WriteString(". Opening this file does nothing by itself — it is intentionally inert rather than silently claiming to reproduce a request it cannot actually send. Use the exact HTTP request below, or the curl command, to reproduce this finding.</p>\n")
 	b.WriteString("</div>\n")
 	return b.String()
 }
 
-// pocRequestDetails renders the exact HTTP request this PoC reproduces as
-// plain, escaped text — useful on its own, and the same information the
-// curl command below encodes as a runnable command.
-func pocRequestDetails(req *httpengine.Request) string {
+// pocRequestDetails labels a fully observed request as exact and a request
+// with auth/CSRF placeholders as a template. Values remain escaped text, never
+// active markup.
+func pocRequestDetails(req *httpengine.Request, requestTemplate bool) string {
 	var b strings.Builder
-	b.WriteString("<h2>Exact HTTP request this reproduces</h2>\n<pre>")
+	if requestTemplate {
+		b.WriteString("<h2>Request template — replace fresh CSRF/session placeholders</h2>\n<pre>")
+	} else {
+		b.WriteString("<h2>Exact HTTP request this reproduces</h2>\n<pre>")
+	}
 	fmt.Fprintf(&b, "%s %s\n", html.EscapeString(req.Method), html.EscapeString(req.URL))
 	keys := make([]string, 0, len(req.Headers))
 	for k := range req.Headers {
@@ -384,10 +581,9 @@ func pocRequestDetails(req *httpengine.Request) string {
 	return b.String()
 }
 
-// curlCommand renders req as a runnable curl command — the fallback that is
-// always correct regardless of location (headers and cookies a browser
-// link/form cannot carry are trivial for curl to set directly).
-func curlCommand(req *httpengine.Request) string {
+// curlCommand renders req as a runnable curl command. For authenticated
+// scans it refers only to an operator-provided cookie jar, never saved state.
+func curlCommand(req *httpengine.Request, authenticated bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "curl -i -X %s %s", req.Method, shellQuote(req.URL))
 	keys := make([]string, 0, len(req.Headers))
@@ -398,12 +594,13 @@ func curlCommand(req *httpengine.Request) string {
 	for _, k := range keys {
 		fmt.Fprintf(&b, " \\\n  -H %s", shellQuote(k+": "+req.Headers[k]))
 	}
-	if len(req.Cookies) > 0 {
-		parts := make([]string, 0, len(req.Cookies))
-		for _, c := range req.Cookies {
-			parts = append(parts, c.Name+"="+c.Value)
+	if authenticated {
+		fmt.Fprintf(&b, " \\\n  -b \"$INDAGO_COOKIE_JAR\"")
+	}
+	for _, c := range req.Cookies {
+		if c != nil {
+			fmt.Fprintf(&b, " \\\n  -b %s", shellQuote(c.Name+"="+c.Value))
 		}
-		fmt.Fprintf(&b, " \\\n  -b %s", shellQuote(strings.Join(parts, "; ")))
 	}
 	if req.ContentType != "" {
 		fmt.Fprintf(&b, " \\\n  -H %s", shellQuote("Content-Type: "+req.ContentType))

@@ -7,16 +7,21 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"embed"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/indago/indago/internal/ai"
+	"github.com/indago/indago/internal/config"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/scan"
@@ -54,6 +59,17 @@ type Server struct {
 	// ai.Disabled{} (the scanner must work with AI disabled): report
 	// creation then skips AI-drafted summaries, never fails because of it.
 	ai ai.Gateway
+
+	// apiTokenDigest is SHA-256 of the configured bearer token (see
+	// SetAPIToken). Nil means the control API is unauthenticated.
+	apiTokenDigest []byte
+
+	// limiter is the per-client-IP rate limiter for /api/ and /metrics (see
+	// SetRateLimit). Nil means disabled.
+	limiter *rateLimiter
+
+	// metrics backs GET /metrics. Methods are nil-safe, so a zero Server works.
+	metrics *httpMetrics
 }
 
 // LoginFunc runs an interactive browser login: it opens a visible browser at
@@ -95,7 +111,11 @@ func NewServer(st store.Store, ctrl *scan.Controller, version string, log *slog.
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{store: st, ctrl: ctrl, log: log, version: version, evidence: evStore, reportsDir: reportsDir}
+	s := &Server{store: st, ctrl: ctrl, log: log, version: version, evidence: evStore, reportsDir: reportsDir,
+		metrics: newHTTPMetrics()}
+	// The defaults are valid by construction, so this cannot fail.
+	_ = s.SetRateLimit(config.DefaultAPIRate, config.DefaultAPIBurst)
+	return s
 }
 
 // Handler returns the configured HTTP handler (routes + static UI).
@@ -104,6 +124,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/version", s.handleVersion)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 
 	mux.HandleFunc("GET /api/projects", s.handleListProjects)
 	mux.HandleFunc("POST /api/projects", s.handleCreateProject)
@@ -146,7 +167,11 @@ func (s *Server) Handler() http.Handler {
 	sub, _ := fs.Sub(assetsFS, "assets")
 	mux.Handle("GET /", http.FileServer(http.FS(sub)))
 
-	return s.withLogging(s.guard(mux))
+	// Order matters: instrument sees every outcome (the guard's 403s, the
+	// limiter's 429s, the token check's 401s). The guard runs first, then the
+	// limiter, then the bearer-token check, so unauthenticated floods are
+	// limited too.
+	return s.withLogging(s.instrument(mux, s.guard(s.rateLimit(s.requireAPIToken(mux)))))
 }
 
 // --- handlers ---
@@ -180,7 +205,7 @@ type createProjectReq struct {
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	var req createProjectReq
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeJSONBodyError(w, err)
 		return
 	}
 	if req.Name == "" {
@@ -273,26 +298,74 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func readJSON(r *http.Request, v any) error {
-	defer r.Body.Close()
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
-	dec.DisallowUnknownFields()
-	return dec.Decode(v)
+func writeJSONBodyError(w http.ResponseWriter, err error) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, "JSON body exceeds 1 MiB limit")
+		return
+	}
+	writeError(w, http.StatusBadRequest, "invalid JSON body")
 }
 
-// ListenAndServe starts the HTTP server and blocks until ctx is canceled, then
-// shuts down gracefully.
-func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
+func readJSON(r *http.Request, v any) error {
+	defer r.Body.Close()
+	// Read the complete bounded body before decoding: even trailing whitespace
+	// counts, and an early valid object cannot bypass the size limit.
+	body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		return errors.New("expected one JSON document")
+	}
+	return nil
+}
+
+// ListenAndServe binds addr and serves until ctx is canceled, then shuts down
+// gracefully. A non-nil tlsCfg serves HTTPS with its certificates (loaded and
+// validated by the caller); nil serves plain HTTP, which is for loopback binds
+// or for a TLS-terminating proxy in front of the server.
+func (s *Server) ListenAndServe(ctx context.Context, addr string, tlsCfg *tls.Config) error {
 	s.allowedHosts = hostsForListenAddr(addr)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return s.serve(ctx, ln, tlsCfg)
+}
+
+// serve runs the HTTP(S) server on an already-bound listener until ctx is
+// canceled. TLS is never below 1.2, whatever the caller passed in.
+func (s *Server) serve(ctx context.Context, ln net.Listener, tlsCfg *tls.Config) error {
 	srv := &http.Server{
-		Addr:              addr,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	scheme := "http"
+	if tlsCfg != nil {
+		cfg := tlsCfg.Clone()
+		if cfg.MinVersion < tls.VersionTLS12 {
+			cfg.MinVersion = tls.VersionTLS12
+		}
+		// Certificates are already in cfg, so ServeTLS needs no file names.
+		srv.TLSConfig = cfg
+		scheme = "https"
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		s.log.Info("web server listening", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		s.log.Info("web server listening", "addr", ln.Addr().String(), "scheme", scheme)
+		var err error
+		if tlsCfg != nil {
+			err = srv.ServeTLS(ln, "", "")
+		} else {
+			err = srv.Serve(ln)
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()

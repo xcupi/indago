@@ -51,12 +51,11 @@ type GroupSpec struct {
 type Config struct {
 	// ScanID restricts this pool to one scan's jobs (empty = any scan). A
 	// per-scan pool lets pause/cancel affect only that scan.
-	ScanID            domain.ID
-	Groups            []GroupSpec
-	LeaseDuration     time.Duration // lease validity per job
-	Heartbeat         time.Duration // lease-extension interval while running
-	IdlePoll          time.Duration // sleep between empty lease attempts
-	RequestsPerSecond float64       // 0 = unlimited; applies to the "http" group
+	ScanID        domain.ID
+	Groups        []GroupSpec
+	LeaseDuration time.Duration // lease validity per job
+	Heartbeat     time.Duration // lease-extension interval while running
+	IdlePoll      time.Duration // sleep between empty lease attempts
 	// ShutdownTimeout bounds how long Stop waits for in-flight handlers to
 	// return. A handler that ignores context cancellation (a hung network or
 	// browser call, say) would otherwise block Stop — and so the whole
@@ -91,7 +90,6 @@ type Pool struct {
 
 	mu      sync.Mutex
 	groups  map[string]*groupState
-	limiter atomic.Pointer[rateLimiter]
 	paused  atomic.Bool
 	started bool
 
@@ -120,7 +118,6 @@ func New(q queue.Queue, handlers map[domain.JobType]Handler, cfg Config, log *sl
 		cfg:      cfg,
 		groups:   make(map[string]*groupState),
 	}
-	p.limiter.Store(newRateLimiter(cfg.RequestsPerSecond))
 	return p
 }
 
@@ -175,12 +172,6 @@ func (p *Pool) Resize(group string, n int) error {
 	p.scaleLocked(g, n)
 	p.log.Info("worker group resized", "group", group, "size", n)
 	return nil
-}
-
-// SetRate updates the request-rate limit (requests/second; 0 = unlimited).
-func (p *Pool) SetRate(rps float64) {
-	p.limiter.Store(newRateLimiter(rps))
-	p.log.Info("worker rate updated", "rps", rps)
 }
 
 // Sizes returns a snapshot of each group's current worker count.
@@ -284,13 +275,6 @@ func (p *Pool) process(ctx context.Context, spec GroupSpec, job *domain.TestJob)
 		p.log.Error("no handler for job type", "type", job.Type, "job", job.ID)
 		_ = p.q.Fail(ctx, job.ID, "no handler registered for type "+string(job.Type), false)
 		return
-	}
-
-	// Rate-limit target-facing traffic (the http group).
-	if spec.Name == "http" {
-		if err := p.limiter.Load().Wait(ctx); err != nil {
-			return // ctx canceled; leave the job to lease recovery
-		}
 	}
 
 	hctx, hcancel := context.WithCancel(ctx)

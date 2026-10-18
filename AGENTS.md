@@ -13,7 +13,18 @@ vulnerabilities against targets **they are explicitly permitted to test**.
 
 - **Phase 1 scope (product):** Reflected XSS detection and verification.
 - **Current phase (code):** Reflected XSS — baseline, **reflection detection**, **context analysis**, **candidate planning**, **candidate execution**, **browser verification** (a reflected candidate is confirmed/rejected/inconclusive only by a real, deterministic browser signal — never by an LLM), **finding correlation & reporting** (repeated results at the same site collapse into one `Finding` without discarding evidence; JSON + Markdown output), and **end-to-end validation/hardening** of that whole pipeline against a local test corpus (see `docs/e2e-validation.md`) — no new detection features, only fixes the corpus's real-browser tests actually caught.
-- **Future (designed for, not built):** Stored XSS, DOM XSS, additional engines.
+- **Phase 2 (in progress):** DOM XSS — a browser-runtime engine separate from
+  Reflected XSS. Seven source types are implemented: hash, query, window.name,
+  postMessage, document.referrer, localStorage and sessionStorage. Current HTML
+  sinks are innerHTML/outerHTML, document.write/writeln, insertAdjacentHTML and
+  Range.createContextualFragment. P2.2 verified both additional methods against
+  all seven sources with meaningful negative controls; see `docs/dom-xss.md`.
+  **P2.3 is explicitly authorized:** add only primitive-string
+  setTimeout/setInterval sinks, preserving native behavior and deterministic
+  verification. Authorization is not proof of implementation; current test/live
+  status belongs in the topical validation docs. eval/Function, location/src
+  assignment and browser sandbox changes remain outside this slice.
+- **Future (designed for, not built):** Stored XSS, additional engines.
 
 The architecture is deliberately generic (not XSS-specific) so new engines plug
 in without reshaping the domain model.
@@ -93,9 +104,16 @@ right now** and must remain stubs/interfaces (job handlers are no-ops):
   decision is a pure function of a deterministic browser signal
   (`internal/verification/browser.go:decide`) — AI remains advisory-only
   everywhere, per §2.5.
-- ❌ DOM XSS. Verification replays the SAME marker/candidate the candidate step
-  already sent; it does not crawl the rendered DOM for new sinks or
-  client-side-only inputs.
+- ❌ DOM XSS beyond the implemented and explicitly authorized Phase-2 slices.
+  Seven source types and the bounded HTML sink inventory above are implemented;
+  this is not exhaustive DOM-XSS coverage. P2.3 permits only primitive-string
+  setTimeout/setInterval observation and benign-marker verification, including
+  native callback/timing/argument/return-ID/cancellation behavior, CSP controls,
+  all-seven-source validation and console-forgery rejection. Do not accelerate,
+  invoke or rewrite target timers to obtain execution. eval/Function,
+  location/src assignment, new sources, automated activation and sandbox-policy
+  changes remain out of scope. Consult `docs/dom-xss.md` and the P2.3 validation
+  record for actual verified coverage and remaining limitations.
 - ❌ Automated exploitation / weaponized payloads. Candidate execution AND
   verification only ever send the small, canonical, benign-marker breakouts the
   planner chose — no payload obfuscation, no evasion variants, no exploit
@@ -295,15 +313,35 @@ Implemented so far (infrastructure and **discovery**):
   (`finding poc -scan SID -out FILE.html FID`), API
   (`GET /api/scans/{id}/findings/{fid}/poc`), and a "Download PoC" link in
   the web UI's finding detail view.
-- ⏳ Stubs: detection engines for non-Reflected-XSS vulnerability classes
-  (Stored XSS, DOM XSS)
+- ✅ DOM XSS, Phase-2 (`internal/detection/domxss.go`, `internal/scan/domxss.go`;
+  see `docs/dom-xss.md`): uses the same scope-enforcing browser manager and
+  shared scan limiter/proxy/session policy. Inert-canary reachability is not
+  confirmation; payload verification requires the exact marker-specific browser
+  page-error signal, never arbitrary or forged console text. Existing HTML
+  sinks: innerHTML/outerHTML, document.write/writeln, insertAdjacentHTML and
+  Range.createContextualFragment. Range confirmation additionally needs observed
+  connection of the actual marker-handler element; the scanner never inserts it.
+  All seven implemented source mechanisms are real: decoded hash, registered
+  query parameters, same-tab window.name, opaque-origin sandboxed srcdoc
+  postMessage sender (never self-post), absolute-URL referrer and observed-key
+  origin-scoped storage. Storage execution does not prove attacker poisonability.
+  P2.2 adds a real seven-source/two-method matrix with escaped/forged negatives,
+  sender-rejection and detached/innocent-sibling controls, plus live CLI/evidence
+  validation. P2.3's string-timer category is authorized as described above, not
+  a blanket authorization for other execution sinks or an unverified readiness
+  claim. Preserve first-reachable-sink, selector and observation-window limits.
+- ⏳ Stubs: detection engines for non-Reflected-XSS, non-DOM-XSS vulnerability
+  classes (Stored XSS), and every DOM-XSS source/sink combination beyond the
+  Phase-2 first slice.
 
 **The dividing line:** transport, browser, discovery, orchestration, and the
 full Reflected XSS pipeline (reflect → context → plan → execute candidates →
 verify) are implemented end to end, with a real verdict (Confirmed/Rejected/
-Inconclusive) for Reflected XSS specifically. Every OTHER vulnerability class
-(Stored XSS, DOM XSS) is still an interface with a stub returning
-`ErrNotImplemented` — Reflected XSS is the one class built all the way through.
+Inconclusive) for Reflected XSS specifically. DOM XSS has a real seven-source,
+bounded HTML-sink engine with deterministic browser verification. P2.3 authorizes
+only the string-timer extension above; actual implementation and validation must
+be established by its tests and live evidence. Other DOM sink categories and
+Stored XSS are not implied by the implemented coverage.
 
 **Scope is enforced outside the transport modules.** `httpengine` and `browser`
 perform no scope checks; the scan controller wraps the HTTP engine in a
