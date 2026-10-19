@@ -110,7 +110,7 @@ func TestUILayoutFooterStaysAfterTallContentAndLongTextWraps(t *testing.T) {
 	// --- Findings tab, desktop width, detail of the long finding expanded ---
 	u.openScanTab(scanID, "findings")
 	u.waitUI("31 confirmed rows", u.rows()+`.length===31`)
-	u.eval(fmt.Sprintf(`(function(){document.querySelector('#findingsBody tr[data-finding-id=%q] td.clickable').click();return true;})()`, long.ID))
+	u.eval(fmt.Sprintf(`(function(){document.querySelector('#findingsBody tr[data-finding-id=%q] td.c-title button.row-toggle').click();return true;})()`, long.ID))
 	u.waitUI("long detail open", `document.querySelector('#findingsBody tr.detail-row .verified pre.payload')`)
 	if !u.evalBool(`document.documentElement.scrollHeight > window.innerHeight * 1.5`) {
 		t.Fatal("setup: the page must be much taller than the viewport for the overlap check to mean anything")
@@ -139,7 +139,7 @@ func TestUILayoutFooterStaysAfterTallContentAndLongTextWraps(t *testing.T) {
 	if !u.evalBool(`document.getElementById('narrow').contentWindow.innerWidth===420 && document.getElementById('narrow').contentDocument.documentElement.scrollHeight > 1400`) {
 		t.Fatal("setup: the narrow frame is not 420px wide and tall enough to scroll")
 	}
-	u.eval(fmt.Sprintf(`(function(){var d=document.getElementById('narrow').contentDocument;d.querySelector('#findingsBody tr[data-finding-id=%q] td.clickable').click();return true;})()`, long.ID))
+	u.eval(fmt.Sprintf(`(function(){var d=document.getElementById('narrow').contentDocument;d.querySelector('#findingsBody tr[data-finding-id=%q] td.c-title button.row-toggle').click();return true;})()`, long.ID))
 	u.waitUI("narrow detail open", `document.getElementById('narrow').contentDocument.querySelector('#findingsBody tr.detail-row .verified pre.payload')`)
 	if v := u.violations("narrow"); len(v) > 0 {
 		t.Fatalf("findings tab (420px):\n  %s", strings.Join(v, "\n  "))

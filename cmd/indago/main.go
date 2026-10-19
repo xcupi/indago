@@ -341,6 +341,11 @@ func cmdServe(args []string) error {
 
 	srv := web.NewServer(db, ctrl, version, log, evStore, cfg.ReportsDir())
 	srv.SetLoginFunc(loginFn) // nil unless -browser: endpoint then reports unavailable
+	srv.SetCapabilities(web.Capabilities{
+		BrowserEnabled:       *useBrowser,
+		BrowserSandbox:       *useBrowser && !*browserNoSandbox,
+		StateChangingAllowed: *allowUnsafe,
+	})
 	if err := srv.SetRateLimit(cfg.Server.APIRate, cfg.Server.APIBurst); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}

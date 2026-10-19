@@ -86,6 +86,12 @@ func newUIHarness(t *testing.T) *uiHarness {
 // sessionStorage before the dashboard loads, the way the dashboard keeps it
 // after the operator enters it, so no prompt is shown.
 func newUIHarnessWithToken(t *testing.T, token string) *uiHarness {
+	return newUIHarnessWith(t, token, web.Capabilities{})
+}
+
+// newUIHarnessWith is newUIHarnessWithToken for a server that advertises caps.
+// The default (zero) caps are a server started without the browser engine.
+func newUIHarnessWith(t *testing.T, token string, caps web.Capabilities) *uiHarness {
 	if testing.Short() {
 		t.Skip("real-browser UI test skipped in -short mode")
 	}
@@ -129,6 +135,7 @@ func newUIHarnessWithToken(t *testing.T, token string) *uiHarness {
 		t.Fatal(err)
 	}
 	h := web.NewServer(st, ctrl, "test", log, evStore, t.TempDir())
+	h.SetCapabilities(caps)
 	if token != "" {
 		if err := h.SetAPIToken(token); err != nil {
 			t.Fatal(err)

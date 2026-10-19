@@ -172,7 +172,27 @@ async function openNewScanModal() {
 
   const actions = el("div", undefined, "form-actions");
   actions.append(create, button("Cancel", closeModal));
-  body.append(rowOf(field("Scan name", name), field("Target", target)), typeFs, candFs, advFs, perfFs, stopFs, authFs, actions, errBox);
+  // Basic choices stay visible; tuning is folded away so Start is reachable
+  // without scrolling past proxy and TLS options most scans never touch.
+  const advBody = el("div");
+  advBody.append(candFs, advFs, perfFs, stopFs);
+  const advanced = collapsible("Advanced options", advBody, false, "candidates, proxy pool, performance, stop policy");
+  advanced.classList.add("advanced-opts");
+  advanced.id = "f_advanced";
+
+  const ready = readinessBanner();
+  const authNote = el("div", undefined, "hint");
+  const syncAuthNote = () => {
+    const needsBrowser = ["interactive", "mfa", "password"].includes(auth.value);
+    authNote.textContent = needsBrowser && !(ctx.caps && ctx.caps.interactive_login)
+      ? "This server was not started with the browser engine, so it cannot perform this login. Start it with -browser, or use an existing session file."
+      : "";
+  };
+  auth.addEventListener("change", syncAuthNote);
+  syncAuthNote();
+  authFs.appendChild(authNote);
+
+  body.append(...(ready ? [ready] : []), rowOf(field("Scan name", name), field("Target", target)), typeFs, authFs, advanced, errBox, actions);
   openModal("New scan", body);
 }
 
@@ -602,12 +622,15 @@ function findingDetailEl(f, scanId) {
 // taken from the row itself so callers that add columns stay correct.
 async function toggleDetail(tr, f, scanId, state, forceOpen) {
   const open = tr._detailRow;
+  const btn = tr.querySelector("button.row-toggle");
   if (open && !forceOpen) {
     open.remove(); tr._detailRow = null;
+    if (btn) btn.setAttribute("aria-expanded", "false");
     if (state) state.expanded.delete(f.id);
     return;
   }
   if (open) return;
+  if (btn) btn.setAttribute("aria-expanded", "true");
   const detailRow = el("tr", undefined, "detail-row");
   const td = el("td"); td.colSpan = tr.children.length; td.appendChild(el("div", "loading…", "hint"));
   detailRow.appendChild(td); tr.after(detailRow);
@@ -632,8 +655,12 @@ function findingRow(f, scanId, state) {
     });
     const td = el("td"); td.appendChild(cb); tr.appendChild(td);
   }
-  const titleTd = cell(f.title || "(untitled)", "clickable c-title");
+  const titleTd = cell(null, "c-title");
+  const toggleBtn = el("button", f.title || "(untitled)", "row-toggle");
+  toggleBtn.type = "button";
+  toggleBtn.setAttribute("aria-expanded", "false");
   if (f.combined) titleTd.title = "Combined (multi-parameter) finding — second parameter: " + (f.parameter_b_name || "?");
+  titleTd.appendChild(toggleBtn);
   tr.appendChild(titleTd);
   const vTd = el("td"); vTd.appendChild(pill(f.verdict)); tr.appendChild(vTd);
   const sevTd = el("td"); if (f.severity) sevTd.appendChild(pill(f.severity)); tr.appendChild(sevTd);
@@ -652,7 +679,7 @@ function findingRow(f, scanId, state) {
   // Labels for the stacked (phone-width) layout, where the header row is hidden.
   const cells = Array.from(tr.children).slice(state ? 1 : 0);
   cells.forEach((td, i) => { td.dataset.label = FINDING_HEADERS[i]; });
-  titleTd.addEventListener("click", () => toggleDetail(tr, f, scanId, state));
+  toggleBtn.addEventListener("click", () => toggleDetail(tr, f, scanId, state));
   return tr;
 }
 
@@ -778,7 +805,7 @@ function reportsPanel(scanId) {
       const p = await getJSON(api.scan(scanId) + "/reports/preview" + q);
       if (seq !== previewSeq) return; // a newer request superseded this one
       previewTotal = p.total_findings;
-      preview.textContent = "Will include " + p.total_findings + " of " + p.scan_findings + " finding(s): " + verdictBreakdown(p.by_verdict) + "."
+      preview.textContent = "Will include " + (p.total_findings || 0) + " of " + (p.scan_findings || 0) + " finding(s): " + verdictBreakdown(p.by_verdict) + "."
         + (p.total_findings === 0 ? " Nothing matches this mode yet." : "");
     } catch (e) {
       if (seq === previewSeq) { previewTotal = null; preview.textContent = "Could not compute the report preview."; }
@@ -833,9 +860,389 @@ function reportsPanel(scanId) {
 }
 
 // ---------------------------------------------------------------------------
+// Readiness and coverage (what the server can do, and what this scan tested)
+// ---------------------------------------------------------------------------
+function capChip(label, value, cls, title) {
+  const c = el("span", undefined, "chip " + cls);
+  c.appendChild(el("b", label)); c.appendChild(document.createTextNode(value));
+  if (title) c.title = title;
+  return c;
+}
+
+// readinessChips states what this server can do. caps === null means the
+// capabilities could not be read; say that rather than guessing "on".
+function readinessChips() {
+  const box = el("div", undefined, "readiness");
+  box.id = "readiness";
+  const c = ctx.caps;
+  if (!c) { box.appendChild(capChip("Server", "capabilities unknown", "warn", "Could not read /api/capabilities.")); return box; }
+  box.append(
+    capChip("Browser engine", c.browser_enabled ? "on" : "OFF", c.browser_enabled ? "ok" : "bad",
+      c.browser_enabled ? "DOM XSS probes and browser confirmation run." : "DOM XSS probes are skipped and nothing can be confirmed in a browser. Start the server with -browser."),
+    capChip("Browser sandbox", c.browser_enabled ? (c.browser_sandbox ? "on" : "off") : "n/a", c.browser_enabled && !c.browser_sandbox ? "warn" : "", "Chromium sandbox (disabled with -browser-no-sandbox)."),
+    capChip("State-changing methods", c.state_changing_allowed ? "allowed" : "blocked", c.state_changing_allowed ? "warn" : "",
+      c.state_changing_allowed ? "POST/PUT/PATCH/DELETE candidates are sent." : "POST/PUT/PATCH/DELETE endpoints are skipped (-allow-state-changing is off)."),
+    capChip("Interactive login", c.interactive_login ? "available" : "unavailable", ""),
+  );
+  return box;
+}
+
+// readinessBanner is the modal's pre-Start warning. null when nothing to warn about.
+function readinessBanner() {
+  const c = ctx.caps;
+  if (c && c.browser_enabled) return null;
+  const b = el("div", undefined, "banner bad"); b.id = "readinessBanner";
+  b.appendChild(el("strong", c ? "Browser engine is OFF on this server" : "Server capabilities could not be read"));
+  b.appendChild(document.createTextNode(c
+    ? "A scan can still run, but DOM XSS probes are skipped and no finding can be confirmed in a browser. Zero findings will not mean the target is clean. Start the server with -browser to enable them."
+    : "Browser verification may not be available. Check the Coverage tab after the scan."));
+  return b;
+}
+
+// coverageBanner renders a coverage response's warnings. null when the scan has
+// nothing to flag (the all-clear is a statement the UI should only make once).
+function coverageBanner(cov, scanId) {
+  if (!cov || !cov.warnings || !cov.warnings.length) return null;
+  const wrap = el("div"); wrap.className = "coverage-warnings";
+  cov.warnings.forEach((w) => {
+    const b = el("div", undefined, "banner" + (w.severity === "high" ? " bad" : ""));
+    b.dataset.code = w.code;
+    b.appendChild(el("strong", w.severity === "high" ? "Not fully tested" : "Partly tested"));
+    b.appendChild(document.createTextNode(w.message));
+    if ((w.code === "parameters_untested" || w.code === "dom_sources_untested") && scanId) {
+      b.appendChild(document.createTextNode(" "));
+      b.appendChild(link("Show them →", "#/scans/" + encodeURIComponent(scanId) + "/endpoints"));
+    }
+    wrap.appendChild(b);
+  });
+  return wrap;
+}
+
+// loadCoverage fetches /coverage, which walks every test case of the scan (about
+// 1.5s at 18k tests). The Overview is rebuilt on each live refresh, so reuse the
+// answer for a short while, keyed by scan AND state: when the scan's state
+// changes the verdict is recomputed at once, never shown stale. force bypasses
+// the cache (first load of the Coverage tab).
+const COVERAGE_TTL_MS = 10000;
+const coverageCache = { key: "", at: 0, data: null, pending: null };
+function loadCoverage(scanId, state, force) {
+  const c = coverageCache, key = scanId + "|" + state;
+  if (!force && c.key === key && c.data && Date.now() - c.at < COVERAGE_TTL_MS) return Promise.resolve(c.data);
+  if (c.pending && c.key === key) return c.pending;
+  c.key = key; c.data = null;
+  const p = getJSON(api.scan(scanId) + "/coverage").then((d) => { if (c.key === key) { c.data = d; c.at = Date.now(); } return d; });
+  c.pending = p;
+  const done = () => { if (c.pending === p) c.pending = null; };
+  p.then(done, done);
+  return p;
+}
+
+// coverageBannerHost returns a placeholder that fills in once coverage loads.
+function coverageBannerHost(scanId, state) {
+  const host = el("div"); host.id = "coverageHost";
+  loadCoverage(scanId, state).then((cov) => {
+    const b = coverageBanner(cov, scanId);
+    if (b) host.replaceChildren(b, link("See what was skipped and why →", "#/scans/" + encodeURIComponent(scanId) + "/coverage"));
+  }).catch(() => {});
+  return host;
+}
+
+const TEST_FILTERS = [
+  ["all", "All", {}],
+  ["tested", "Tested", { status: "completed" }],
+  ["skipped", "Skipped", { status: "skipped" }],
+  ["errors", "Errors / timeouts", { outcome: "error,timeout" }],
+];
+const TESTS_PAGE = 50;
+
+function resultLabel(t) { return t.status === "skipped" ? "skipped" : (t.outcome || t.status); }
+
+function coveragePanel(scanId, state) {
+  const wrap = el("div");
+  const summary = card("Coverage", el("div", "loading…", "hint"));
+  const logHead = el("div"); const logBody = el("div");
+  wrap.append(summary, card("Tests", logHead, logBody));
+  const st = { filter: "all", reason: "", offset: 0 };
+
+  let summarySig = null;
+  async function loadSummary(force) {
+    let cov;
+    try { cov = await loadCoverage(scanId, state, force); }
+    catch (e) { summarySig = null; summary.replaceChildren(el("h2", "Coverage"), el("div", "Could not load coverage.", "err")); return; }
+    const sig = JSON.stringify(cov);
+    if (sig === summarySig) return; // nothing changed: do not rebuild (a rebuild drops keyboard focus)
+    summarySig = sig;
+    const ended = ["completed", "failed", "canceled"].includes(cov.state);
+    const head = el("div", undefined, "coverage-summary " + (cov.coverage_gaps ? "gaps" : (ended && cov.tests.total ? "clean" : "")));
+    head.appendChild(el("strong", cov.coverage_gaps ? "Coverage gaps — zero findings does not mean clean"
+      : !cov.tests.total ? "No tests recorded yet"
+      : ended ? "No coverage gaps flagged" : "No gaps so far (the scan is still running)"));
+    head.appendChild(el("span", cov.tests.completed + " tested · " + cov.tests.skipped + " skipped · " + cov.tests.failed + " errored" + (cov.tests.incomplete ? " · " + cov.tests.incomplete + " unfinished" : ""), "hint"));
+    const kids = [el("h2", "Coverage"), readinessChips(), head];
+    if (cov.parameters && cov.parameters.total) {
+      const p = cov.parameters;
+      head.appendChild(el("span", p.total + " parameters: " + p.tested + " tested · " + p.skipped + " skipped · " + p.errored + " errored · " + p.not_run + " not run" + (p.partial ? " · " + p.partial + " partial" : "") + (p.pending ? " · " + p.pending + " pending" : ""), "hint"));
+    }
+    const banner = coverageBanner(cov, scanId);
+    if (banner) kids.push(banner);
+    if (cov.reasons.length) {
+      const rows = cov.reasons.map((r) => {
+        const tr = el("tr");
+        const sev = el("td"); sev.appendChild(pill(r.severity === "info" ? "skipped" : r.severity)); sev.firstChild.textContent = r.severity; sev.dataset.label = "Impact";
+        const what = el("td"); what.dataset.label = "Why it was skipped";
+        what.appendChild(el("div", r.title)); what.appendChild(el("div", r.advice, "hint"));
+        if (r.examples && r.examples.length) what.appendChild(el("div", "e.g. " + r.examples.join(", "), "hint mono"));
+        const n = cell(String(r.count), "c-ident"); n.dataset.label = "Tests";
+        const act = el("td"); act.dataset.label = "";
+        act.appendChild(button("Show these", () => { st.filter = "skipped"; st.reason = r.code; st.offset = 0; loadLog(); logHead.scrollIntoView({ block: "nearest" }); }, "small"));
+        tr.append(sev, what, n, act);
+        return tr;
+      });
+      const t = table(["Impact", "Why it was skipped", "Tests", ""], rows, "", "reasonsBody");
+      t.classList.add("tests-table");
+      kids.push(t);
+    }
+    summary.replaceChildren(...kids);
+  }
+
+  function buildFilterBar() {
+    const bar = el("div", undefined, "filter-bar"); bar.setAttribute("role", "group"); bar.setAttribute("aria-label", "Filter tests");
+    TEST_FILTERS.forEach(([key, label]) => {
+      const b = button(label, () => { st.filter = key; st.reason = ""; st.offset = 0; loadLog(); }, "small");
+      b.setAttribute("aria-pressed", String(st.filter === key && !st.reason)); b.dataset.filter = key;
+      bar.appendChild(b);
+    });
+    if (st.reason) {
+      const chip = button("reason: " + st.reason + "  ✕", () => { st.reason = ""; st.offset = 0; loadLog(); }, "small");
+      chip.setAttribute("aria-pressed", "true"); chip.title = "Clear the reason filter";
+      bar.appendChild(chip);
+    }
+    return bar;
+  }
+
+  let logSeq = 0, logSig = null;
+  async function loadLog(live) {
+    const f = TEST_FILTERS.find((x) => x[0] === st.filter)[2];
+    const q = new URLSearchParams({ limit: String(TESTS_PAGE), offset: String(st.offset) });
+    Object.entries(f).forEach(([k, v]) => q.set(k, v));
+    if (st.reason) q.set("reason", st.reason);
+    const seq = ++logSeq;
+    if (!live) logHead.replaceChildren(buildFilterBar());
+    let data;
+    try { data = await getJSON(api.scan(scanId) + "/tests?" + q.toString()); }
+    catch (e) { if (seq === logSeq) { logSig = null; logBody.replaceChildren(el("div", "Could not load the test log.", "err")); } return; }
+    if (seq !== logSeq) return; // a newer request (filter, page, refresh) superseded this one
+    const sig = q.toString() + "|" + JSON.stringify(data);
+    if (live && sig === logSig) return;
+    logSig = sig;
+    const rows = data.items.map((t) => {
+      const tr = el("tr");
+      const cells = [
+        [t.vuln_class || "", "c-ident c-words", "Class"],
+        [null, "", "Result"],
+        [(t.method ? t.method + " " : "") + (t.url || ""), "mono c-url", "URL"],
+        [t.note || t.error || "", "c-why", "Why / note"],
+        [t.http_status ? String(t.http_status) : "", "c-ident", "HTTP"],
+      ];
+      cells.forEach(([text, cls, label]) => { const td = cell(text, cls); td.dataset.label = label; tr.appendChild(td); });
+      tr.children[1].appendChild(pill(resultLabel(t)));
+      return tr;
+    });
+    const tbl = table(["Class", "Result", "URL", "Why / note", "HTTP"], rows, st.filter === "all" && !st.reason ? "No tests recorded yet." : "No tests match this filter.", "testsBody");
+    tbl.classList.add("tests-table");
+    const nodes = [tbl];
+    const shownTo = Math.min(data.offset + data.items.length, data.total);
+    const foot = el("div", undefined, "more-row");
+    foot.appendChild(el("span", data.total ? (data.offset + 1) + "–" + shownTo + " of " + data.total : "0 tests", "hint"));
+    if (data.offset > 0) foot.appendChild(button("← Newer", () => { st.offset = Math.max(0, st.offset - TESTS_PAGE); loadLog(); }, "small"));
+    if (shownTo < data.total) foot.appendChild(button("Older →", () => { st.offset += TESTS_PAGE; loadLog(); }, "small"));
+    nodes.push(foot);
+    logBody.replaceChildren(...nodes);
+  }
+
+  loadSummary(true); loadLog();
+  wrap.live = singleFlight(() => Promise.all([loadSummary(false), loadLog(true)]));
+  return wrap;
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint / parameter explorer: what discovery FOUND, and whether it was tested
+// ---------------------------------------------------------------------------
+const REASON_TEXT = {
+  no_job: "no test job was ever created for it",
+  job_queued: "queued, but the scan ended before it ran",
+  job_leased: "claimed by a worker, but the scan ended before it ran",
+  job_running: "was still running when the scan ended",
+  job_dead: "its job failed permanently",
+  job_failed: "its job failed",
+  job_canceled: "its job was canceled",
+  no_test_recorded: "its job finished but recorded no test",
+  cancelled: "interrupted by cancel or shutdown",
+  error: "the request failed",
+  timeout: "the request timed out",
+  browser_unavailable: "the browser engine is not enabled",
+  state_changing_disabled: "state-changing methods are disabled",
+  verification_unsupported: "browser verification does not support this request shape",
+  source_not_applicable: "nothing of this kind to test on the endpoint",
+  other: "skipped (see the test log)",
+};
+function reasonText(code) { return code ? (REASON_TEXT[code] || code) : ""; }
+const EXPLORER_PAGE = 50;
+
+function endpointsPanel(scanId) {
+  const wrap = el("div");
+  const summary = card("Endpoints & parameters", el("div", "loading…", "hint"));
+  const listHead = el("div"); const listBody = el("div");
+  wrap.append(summary, card(null, listHead, listBody));
+  const st = { gaps: false, q: "", offset: 0, expanded: new Set() };
+  let searchTimer = null;
+
+  function statusPill(s) { const p = pill(s); p.textContent = s.replace("_", " "); return p; }
+
+  const plural = (n, one, many) => n + " " + (n === 1 ? one : many);
+  function paramCell(e) {
+    const n = e.parameters.length;
+    if (!n) return "none";
+    const by = {};
+    e.parameters.forEach((p) => { by[p.status] = (by[p.status] || 0) + 1; });
+    const rest = Object.keys(by).filter((k) => k !== "tested").map((k) => by[k] + " " + k.replace("_", " "));
+    return plural(n, "parameter", "parameters") + " · " + (rest.length ? rest.join(", ") : "all tested");
+  }
+  function domCell(e) {
+    if (!e.dom.length) return "not probed (not a GET page)";
+    const gaps = e.dom.filter((d) => d.gap).length, pend = e.dom.filter((d) => d.status === "pending").length;
+    return plural(e.dom.length, "source", "sources") + (gaps ? " · " + plural(gaps, "gap", "gaps") : pend ? " · " + pend + " pending" : " · all tested");
+  }
+
+  function detailEl(e) {
+    const box = el("div", undefined, "endpoint-detail");
+    if (e.parameters.length) {
+      const rows = e.parameters.map((p) => {
+        const tr = el("tr");
+        const cells = [
+          [p.name, "mono c-ident", "Parameter"], [p.location, "c-ident", "Where"], [null, "", "Status"],
+          [reasonText(p.reason_code), "c-why", "Why"],
+          [p.tests.total ? p.tests.completed + " done · " + p.tests.skipped + " skipped · " + p.tests.failed + " failed" : "no tests", "c-words", "Tests"],
+          [p.example || "", "mono c-why", "Example value"],
+        ];
+        cells.forEach(([text, cls, label]) => { const td = cell(text, cls); td.dataset.label = label; tr.appendChild(td); });
+        tr.children[2].appendChild(statusPill(p.status));
+        if (p.location === "fragment") tr.children[1].title = "Read only by the DOM XSS location.hash probe, never sent over HTTP.";
+        return tr;
+      });
+      const t = table(["Parameter", "Where", "Status", "Why", "Tests", "Example value"], rows, "", null);
+      t.classList.add("endpoints-table");
+      box.appendChild(el("h3", "Parameters"));
+      box.appendChild(t);
+    } else {
+      box.appendChild(el("div", "No parameters were discovered on this endpoint.", "hint"));
+    }
+    if (e.dom.length) {
+      const rows = e.dom.map((d) => {
+        const tr = el("tr");
+        [[d.source, "mono c-ident", "DOM source"], [null, "", "Status"], [reasonText(d.reason_code), "c-why", "Why"],
+         [d.tests.total ? d.tests.completed + " done · " + d.tests.skipped + " skipped · " + d.tests.failed + " failed" : "no tests", "c-words", "Tests"]]
+          .forEach(([text, cls, label]) => { const td = cell(text, cls); td.dataset.label = label; tr.appendChild(td); });
+        tr.children[1].appendChild(statusPill(d.status));
+        return tr;
+      });
+      const t = table(["DOM source", "Status", "Why", "Tests"], rows, "", null);
+      t.classList.add("endpoints-table");
+      box.appendChild(el("h3", "DOM XSS sources (per page, not per parameter)"));
+      box.appendChild(t);
+    }
+    return box;
+  }
+
+  function row(e) {
+    const tr = el("tr"); tr.dataset.endpointId = e.id;
+    const m = cell(e.method || "GET", "c-ident"); m.dataset.label = "Method";
+    const u = cell(null, "mono c-url"); u.dataset.label = "URL";
+    const btn = el("button", e.url, "row-toggle"); btn.type = "button"; btn.setAttribute("aria-expanded", "false");
+    u.appendChild(btn);
+    const s = cell(null, ""); s.dataset.label = "Status"; s.appendChild(statusPill(e.status));
+    const p = cell(paramCell(e), "c-words"); p.dataset.label = "Parameters";
+    const d = cell(domCell(e), "c-words"); d.dataset.label = "DOM XSS";
+    tr.append(m, u, s, p, d);
+    btn.addEventListener("click", () => toggle(tr, e));
+    return tr;
+  }
+  function toggle(tr, e, forceOpen) {
+    const btn = tr.querySelector("button.row-toggle");
+    if (tr._detail) {
+      if (forceOpen) return;
+      tr._detail.remove(); tr._detail = null; st.expanded.delete(e.id); btn.setAttribute("aria-expanded", "false"); return;
+    }
+    const dr = el("tr", undefined, "detail-row"); const td = el("td"); td.colSpan = tr.children.length;
+    td.appendChild(detailEl(e)); dr.appendChild(td); tr.after(dr); tr._detail = dr;
+    st.expanded.add(e.id); btn.setAttribute("aria-expanded", "true");
+  }
+
+  function buildControls() {
+    const bar = el("div", undefined, "filter-bar"); bar.setAttribute("role", "group"); bar.setAttribute("aria-label", "Filter endpoints");
+    [[false, "All"], [true, "With gaps only"]].forEach(([val, label]) => {
+      const b = button(label, () => { st.gaps = val; st.offset = 0; load(); }, "small");
+      b.setAttribute("aria-pressed", String(st.gaps === val)); b.dataset.filter = val ? "gaps" : "all";
+      bar.appendChild(b);
+    });
+    const search = el("input"); search.type = "search"; search.id = "endpointSearch"; search.value = st.q;
+    search.placeholder = "filter by URL"; search.setAttribute("aria-label", "Filter endpoints by URL"); search.style.width = "220px";
+    search.addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => { st.q = search.value.trim(); st.offset = 0; load(true); }, 250);
+    });
+    bar.appendChild(search);
+    return bar;
+  }
+
+  let controlsBuilt = false, loadSeq = 0, listSig = null;
+  async function load(keepFocus) {
+    const seq = ++loadSeq;
+    if (!controlsBuilt || !keepFocus) { listHead.replaceChildren(buildControls()); controlsBuilt = true; }
+    else listHead.querySelectorAll("button[data-filter]").forEach((b) => b.setAttribute("aria-pressed", String((b.dataset.filter === "gaps") === st.gaps)));
+    const q = new URLSearchParams({ limit: String(EXPLORER_PAGE), offset: String(st.offset) });
+    if (st.gaps) q.set("gaps", "1");
+    if (st.q) q.set("q", st.q);
+    let data;
+    try { data = await getJSON(api.scan(scanId) + "/explorer?" + q.toString()); }
+    catch (e) { if (seq === loadSeq) { listSig = null; listBody.replaceChildren(el("div", "Could not load endpoints.", "err")); } return; }
+    if (seq !== loadSeq) return; // superseded by a newer filter/search/refresh
+    const sig = q.toString() + "|" + JSON.stringify(data);
+    if (keepFocus && sig === listSig) return; // unchanged live tick: keep focus and open rows as they are
+    listSig = sig;
+
+    const sm = data.summary, by = sm.by_status || {};
+    const head = el("div", undefined, "coverage-summary " + (sm.endpoints_with_gaps ? "gaps" : "clean"));
+    const pend = sm.endpoints_pending || 0;
+    head.appendChild(el("strong", sm.endpoints_with_gaps ? sm.endpoints_with_gaps + " of " + plural(sm.endpoints, "endpoint", "endpoints") + " have something untested"
+      : pend ? "Testing in progress: " + pend + " of " + plural(sm.endpoints, "endpoint", "endpoints") + " still pending"
+      : sm.endpoints ? "Every discovered endpoint was tested" : "Nothing discovered yet"));
+    head.appendChild(el("span", plural(sm.parameters, "parameter", "parameters") + ": " + (by.tested || 0) + " tested · " + (by.skipped || 0) + " skipped · " + (by.errored || 0) + " errored · " + (by.not_run || 0) + " not run" + (by.partial ? " · " + by.partial + " partial" : "") + (by.pending ? " · " + by.pending + " pending" : "") + (sm.dom_gaps ? " · " + sm.dom_gaps + " DOM XSS source(s) not tested" : ""), "hint"));
+    summary.replaceChildren(el("h2", "Endpoints & parameters"), head,
+      el("div", "Discovery found these; reflected tests are per parameter, DOM XSS probes are per page. A gap means something found was skipped, errored or never run. Zero findings only covers what was tested.", "hint"));
+
+    const rows = data.items.map(row);
+    const tbl = table(["Method", "URL", "Status", "Parameters", "DOM XSS"], rows, st.gaps || st.q ? "No endpoints match this filter." : "No endpoints discovered yet.", "endpointsBody");
+    tbl.classList.add("endpoints-table");
+    const foot = el("div", undefined, "more-row");
+    const shownTo = Math.min(data.offset + data.items.length, data.total);
+    foot.appendChild(el("span", data.total ? (data.offset + 1) + "–" + shownTo + " of " + data.total : "0 endpoints", "hint"));
+    if (data.offset > 0) foot.appendChild(button("← Previous", () => { st.offset = Math.max(0, st.offset - EXPLORER_PAGE); load(); }, "small"));
+    if (shownTo < data.total) foot.appendChild(button("Next →", () => { st.offset += EXPLORER_PAGE; load(); }, "small"));
+    listBody.replaceChildren(tbl, foot);
+    // Re-open what the operator had open before this (re)render.
+    rows.forEach((tr, i) => { if (st.expanded.has(data.items[i].id)) toggle(tr, data.items[i], true); });
+  }
+
+  load();
+  wrap.live = singleFlight(() => load(true));
+  return wrap;
+}
+
+// ---------------------------------------------------------------------------
 // Scan detail view (tabs)
 // ---------------------------------------------------------------------------
-const SCAN_TABS = ["overview", "discovery", "jobs", "findings", "evidence", "reports"];
+const SCAN_TABS = ["overview", "coverage", "endpoints", "discovery", "jobs", "findings", "evidence", "reports"];
 
 async function renderScanDetail(params, view) {
   const scanId = params[0];
@@ -860,6 +1267,14 @@ async function renderScanDetail(params, view) {
   const head = pageHead(s.name || "(unnamed scan)", headActions);
   head.querySelector("h1").prepend(/* state pill before title */ (function () { const sp = pill(s.state); sp.style.marginRight = "10px"; return sp; })());
   view.appendChild(head);
+  // A finished scan with zero findings must not read as "clean" when probes were
+  // skipped or errored: badge the header, fed by the same coverage the tab shows.
+  loadCoverage(scanId, s.state).then((cov) => {
+    if (!cov.coverage_gaps || !head.isConnected) return;
+    const b = el("a", "coverage gaps", "pill skipped gap-badge"); b.href = "#/scans/" + encodeURIComponent(scanId) + "/coverage";
+    b.title = "Some probes did not run or errored. Open Coverage for the reasons.";
+    head.querySelector("h1").appendChild(b);
+  }).catch(() => {});
 
   const tabsNav = el("nav", undefined, "tabs");
   SCAN_TABS.forEach((name) => {
@@ -888,13 +1303,22 @@ async function renderScanDetail(params, view) {
 
   // Live refresh of the active tab.
   return async () => {
-    try { const fresh = await getJSON(api.scan(scanId) + "/status"); await renderTab(fresh, true); } catch (e) { /* keep last */ }
+    try {
+      const fresh = await getJSON(api.scan(scanId) + "/status");
+      // The header (state pill, Pause/Cancel/Resume) was built from the first
+      // status. When the state moves on, rebuild the view instead of leaving
+      // a "running" header over a completed overview.
+      if (fresh.scan.state !== s.state) { route(); return; }
+      await renderTab(fresh, true);
+    } catch (e) { /* keep last */ }
   };
 }
 
 function scanTabPanel(tab, st, scanId) {
   switch (tab) {
     case "overview": return overviewPanel(st, scanId);
+    case "coverage": return coveragePanel(scanId, st.scan.state);
+    case "endpoints": return endpointsPanel(scanId);
     case "discovery": return discoveryPanel(st);
     case "jobs": return jobsPanel(st);
     case "findings": return findingsTabPanel(scanId);
@@ -952,7 +1376,8 @@ function overviewPanel(st, scanId) {
       m.appendChild(metric("Re-authentication", "action needed", "awaiting_auth", "Capture a fresh session (interactive login), update the scan's state file, then Resume."));
     }
   }
-  wrap.appendChild(card("Overview", m));
+  const banner = coverageBannerHost(scanId, s.state);
+  wrap.appendChild(card("Overview", readinessChips(), banner, m));
 
   const dl = el("dl", undefined, "detail");
   const row = (k, v) => { if (v === undefined || v === null || v === "") return; dl.appendChild(el("dt", k)); dl.appendChild(el("dd", String(v))); };

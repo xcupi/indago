@@ -126,7 +126,7 @@ th { color: var(--muted); font-weight: 600; font-size: 12px; }
 .tabs a.active { color: var(--fg); border-bottom-color: var(--accent); }
 
 /* ---- forms ---- */
-button, select, input[type=text], input[type=url], input[type=number], textarea {
+button, select, input[type=text], input[type=url], input[type=number], input[type=search], textarea {
   background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px;
   padding: 6px 10px; font-size: 13px; font-family: inherit;
 }
@@ -206,15 +206,15 @@ td.c-title { min-width: 24ch; }
    (even empty report headers overflow with wider system fonts). Stack each
    row with labels instead; keep every value and action visible and wrapping. */
 @media (max-width: 720px) {
-  :is(.findings-table, .reports-table) thead { display: none; }
-  :is(.findings-table, .reports-table), :is(.findings-table, .reports-table) :is(tbody, tr, td) { display: block; }
-  :is(.findings-table, .reports-table) tr { border-bottom: 1px solid var(--border); padding: 8px 0; }
-  :is(.findings-table, .reports-table) td { border: 0; padding: 3px 6px; min-width: 0; max-width: none; }
-  :is(.findings-table, .reports-table) td[data-label]:not(:empty)::before {
+  :is(.findings-table, .reports-table, .tests-table, .endpoints-table) thead { display: none; }
+  :is(.findings-table, .reports-table, .tests-table, .endpoints-table), :is(.findings-table, .reports-table, .tests-table, .endpoints-table) :is(tbody, tr, td) { display: block; }
+  :is(.findings-table, .reports-table, .tests-table, .endpoints-table) tr { border-bottom: 1px solid var(--border); padding: 8px 0; }
+  :is(.findings-table, .reports-table, .tests-table, .endpoints-table) td { border: 0; padding: 3px 6px; min-width: 0; max-width: none; }
+  :is(.findings-table, .reports-table, .tests-table, .endpoints-table) td[data-label]:not(:empty)::before {
     content: attr(data-label); display: block; color: var(--muted); font-size: 11px;
     text-transform: uppercase; letter-spacing: .5px; font-family: inherit;
   }
-  :is(.findings-table, .reports-table) td[data-label]:empty { display: none; }
+  :is(.findings-table, .reports-table, .tests-table, .endpoints-table) td[data-label]:empty { display: none; }
 }
 .card, .detail, .metric { min-width: 0; }
 .card { overflow-x: auto; }
@@ -286,3 +286,48 @@ details.collapsible > table { margin: 0; }
 .findings-filters > div { min-width: 160px; }
 .findings-filters input[type=search] { width: 220px; }
 .findings-filters label { margin-top: 0; }
+
+/* ---- readiness, coverage and the keyboard-reachable finding toggle ---- */
+.readiness { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
+.chip { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+.chip b { color: var(--fg); font-weight: 600; margin-right: 4px; }
+.chip.ok { border-color: var(--ok); }
+.chip.warn { border-color: var(--warn); }
+.chip.bad { border-color: var(--bad); color: var(--bad); }
+.chip.bad b { color: var(--bad); }
+.banner { border: 1px solid var(--warn); border-left-width: 4px; border-radius: 8px; padding: 8px 12px; margin: 8px 0; font-size: 13px; background: rgba(224, 178, 76, 0.08); }
+.banner.bad { border-color: var(--bad); background: rgba(255, 123, 123, 0.08); }
+.banner strong { display: block; margin-bottom: 2px; }
+.coverage-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 6px; }
+.coverage-summary.gaps strong { color: var(--warn); }
+.coverage-summary.clean strong { color: var(--ok); }
+.warning-line { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; font-size: 13px; }
+.warning-line .pill { flex: none; margin-top: 1px; }
+.gap-badge { margin-left: 10px; vertical-align: middle; font-size: 11px; }
+.pill.skipped { color: var(--warn); border-color: var(--warn); background: rgba(224, 178, 76, 0.1); }
+.pill.success, .pill.completed { color: var(--ok); border-color: var(--ok); background: rgba(76, 175, 80, 0.1); }
+.pill.error, .pill.timeout { color: var(--bad); border-color: var(--bad); background: rgba(255, 123, 123, 0.1); }
+.pill.cancelled { color: var(--muted); }
+button.row-toggle { background: none; border: 0; padding: 0; margin: 0; width: auto; color: inherit; font: inherit; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+button.row-toggle:hover:not(:disabled) { color: var(--accent); border: 0; }
+button.row-toggle:focus-visible, button.small:focus-visible, .filter-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.filter-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 10px; }
+.filter-bar button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.tests-table td.c-url, .endpoints-table td.c-url { max-width: 48ch; }
+td.c-why { max-width: 60ch; }
+.more-row { margin-top: 8px; display: flex; gap: 12px; align-items: center; }
+details.collapsible.advanced-opts { margin-top: 12px; }
+
+/* The modal's action row stays reachable on short viewports instead of
+   sitting below a long form. */
+.modal-box .form-actions { position: sticky; bottom: 0; z-index: 1; background: var(--panel);
+  margin: 12px -20px -18px; padding: 10px 20px; border-top: 1px solid var(--border); border-radius: 0 0 12px 12px; }
+button.small { white-space: nowrap; }
+#coverageHost > a { display: inline-block; margin: 2px 0 12px; }
+
+/* ---- endpoint explorer ---- */
+.endpoint-detail { padding: 6px 4px 10px; }
+.endpoint-detail h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin: 10px 0 4px; }
+.pill.tested { color: var(--ok); border-color: var(--ok); background: rgba(76, 175, 80, 0.1); }
+.pill.errored, .pill.not_run, .pill.gap, .pill.partial { color: var(--bad); border-color: var(--bad); background: rgba(255, 123, 123, 0.1); }
+.pill.pending, .pill.no_inputs { color: var(--muted); }

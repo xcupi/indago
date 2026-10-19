@@ -292,7 +292,7 @@ async function renderFindings(_params, view) {
     const sectioned = all.filter((x) => pred(x.f));
     const rows = sectioned.filter((x) => matchesExtraFilters(x.f, extraFilters)).map(({ f, scan }) => {
       const tr = findingRow(f, scan.id, null);
-      const scanCell = el("td"); scanCell.appendChild(link(scan.name || "(unnamed)", "#/scans/" + encodeURIComponent(scan.id) + "/findings"));
+      const scanCell = el("td"); scanCell.dataset.label = "Scan"; scanCell.appendChild(link(scan.name || "(unnamed)", "#/scans/" + encodeURIComponent(scan.id) + "/findings"));
       tr.insertBefore(scanCell, tr.firstChild);
       return tr;
     });
@@ -302,7 +302,7 @@ async function renderFindings(_params, view) {
     if (sectioned.length && !rows.length) empty = "No findings in this view match the current severity/context/search filters.";
     body.replaceChildren(
       filterBar(counts, projectFindingsView, (name) => { projectFindingsView = name; render(); }),
-      table(["Scan", ...FINDING_HEADERS], rows, empty, null));
+      (() => { const t = table(["Scan", ...FINDING_HEADERS], rows, empty, null); t.classList.add("findings-table"); return t; })());
   };
   render();
 }
@@ -384,7 +384,7 @@ async function init() {
   $("modal").addEventListener("click", (e) => { if (e.target === $("modal")) closeModal(); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
   window.addEventListener("hashchange", route);
-  await loadProjects();
+  await Promise.all([loadProjects(), loadCapabilities()]);
   route();
   // Keep the project list fresh for the header without disturbing the view.
   // Respects "Live off": no background polling at all then.

@@ -419,6 +419,7 @@ function showError(msg) {
 const api = {
   scan: (id) => "/api/scans/" + encodeURIComponent(id),
   project: (id) => "/api/projects/" + encodeURIComponent(id),
+  capabilities: "/api/capabilities",
 };
 
 // ---------------------------------------------------------------------------
@@ -475,7 +476,15 @@ async function refreshNow() {
 // ---------------------------------------------------------------------------
 // Project context (header selector)
 // ---------------------------------------------------------------------------
-const ctx = { projects: [], projectId: prefs.get("project", "") };
+// caps is what the server can actually do (browser engine, state-changing
+// methods, interactive login). null = not read yet or unreadable: the UI then
+// says so instead of assuming coverage it cannot vouch for.
+const ctx = { projects: [], projectId: prefs.get("project", ""), caps: null };
+
+async function loadCapabilities() {
+  try { ctx.caps = await getJSON(api.capabilities); } catch (e) { ctx.caps = null; }
+  return ctx.caps;
+}
 
 function currentProject() { return ctx.projects.find((p) => p.id === ctx.projectId) || null; }
 

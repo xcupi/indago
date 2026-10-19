@@ -70,6 +70,10 @@ type Server struct {
 
 	// metrics backs GET /metrics. Methods are nil-safe, so a zero Server works.
 	metrics *httpMetrics
+
+	// caps is what this instance can do (see SetCapabilities). The zero value
+	// reports everything off, never optimistic coverage.
+	caps Capabilities
 }
 
 // LoginFunc runs an interactive browser login: it opens a visible browser at
@@ -124,6 +128,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/version", s.handleVersion)
+	mux.HandleFunc("GET /api/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 
 	mux.HandleFunc("GET /api/projects", s.handleListProjects)
@@ -146,6 +151,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/scans/{id}/stats", s.handleScanStats)
 	mux.HandleFunc("GET /api/scans/{id}/endpoints", s.handleListEndpoints)
 	mux.HandleFunc("GET /api/scans/{id}/status", s.handleScanStatus)
+	mux.HandleFunc("GET /api/scans/{id}/coverage", s.handleScanCoverage)
+	mux.HandleFunc("GET /api/scans/{id}/tests", s.handleListScanTests)
+	mux.HandleFunc("GET /api/scans/{id}/explorer", s.handleScanExplorer)
 	mux.HandleFunc("GET /api/scans/{id}/findings", s.handleListFindings)
 	mux.HandleFunc("GET /api/scans/{id}/findings/{fid}", s.handleGetFinding)
 	mux.HandleFunc("GET /api/scans/{id}/findings/{fid}/poc", s.handleGetFindingPoC)

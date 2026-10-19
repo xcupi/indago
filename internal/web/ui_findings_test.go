@@ -171,7 +171,7 @@ func TestUIFindingsDefaultViewShowsConfirmedWithVerifiedCandidate(t *testing.T) 
 	// Detail: the verified candidate is the first and most prominent thing,
 	// with its own evidence; the rejected probe is an attempt below it; the
 	// baseline is evidence labelled as a reference.
-	u.eval(fmt.Sprintf(`(function(){document.querySelector('#findingsBody tr[data-finding-id=%q] td.clickable').click();return true;})()`, a.ID))
+	u.eval(fmt.Sprintf(`(function(){document.querySelector('#findingsBody tr[data-finding-id=%q] td.c-title button.row-toggle').click();return true;})()`, a.ID))
 	u.waitUI("detail open", `document.querySelector('#findingsBody tr.detail-row .verified pre.payload')`)
 	if got := u.evalStr(`document.querySelector('#findingsBody tr.detail-row .verified pre.payload').textContent`); got != "<svg onload=inda>" {
 		t.Fatalf("verified payload box = %q", got)
@@ -191,12 +191,12 @@ func TestUIFindingsDefaultViewShowsConfirmedWithVerifiedCandidate(t *testing.T) 
 	if !u.evalBool(`document.querySelectorAll('#findingsBody tr.detail-row li.baseline').length===1 && /baseline reference — the unmodified request, not a payload/.test(document.querySelector('#findingsBody tr.detail-row li.baseline').textContent)`) {
 		t.Fatal("baseline evidence is not labelled as a non-payload reference")
 	}
-	u.eval(fmt.Sprintf(`(function(){document.querySelector('#findingsBody tr[data-finding-id=%q] td.clickable').click();return true;})()`, a.ID)) // collapse
+	u.eval(fmt.Sprintf(`(function(){document.querySelector('#findingsBody tr[data-finding-id=%q] td.c-title button.row-toggle').click();return true;})()`, a.ID)) // collapse
 
 	// Diagnostics view: the rejected finding, labelled not-a-vulnerability when opened.
 	u.click("view_diagnostic")
 	u.waitUI("diagnostics view", u.rows()+`.length===1 && /\/c\?q/.test(document.getElementById('findingsBody').textContent)`)
-	u.eval(`(function(){document.querySelector('#findingsBody td.clickable').click();return true;})()`)
+	u.eval(`(function(){document.querySelector('#findingsBody td.c-title button.row-toggle').click();return true;})()`)
 	u.waitUI("diagnostic note", `/Not a vulnerability/.test(document.querySelector('#findingsBody tr.detail-row').textContent) && !document.querySelector('#findingsBody tr.detail-row .verified')`)
 	u.click("view_review")
 	u.waitUI("needs-review view", u.rows()+`.length===1 && /\/d\?q/.test(document.getElementById('findingsBody').textContent)`)
@@ -256,7 +256,7 @@ func TestUIFindingsSelectionAcrossFiltersRerendersAndReportModes(t *testing.T) {
 	u.waitUI("one selected, indeterminate", `document.getElementById('selectionCount').textContent==='1 of 2 selected' && document.getElementById('selectAllBox').indeterminate && !document.getElementById('selectAllBox').checked`)
 
 	// Open a detail row; selection AND the open row survive several live ticks.
-	u.eval(fmt.Sprintf(`(function(){document.querySelector('#findingsBody tr[data-finding-id=%q] td.clickable').click();return true;})()`, f1.ID))
+	u.eval(fmt.Sprintf(`(function(){document.querySelector('#findingsBody tr[data-finding-id=%q] td.c-title button.row-toggle').click();return true;})()`, f1.ID))
 	u.waitUI("detail open", `document.querySelector('#findingsBody tr.detail-row .verified')`)
 	time.Sleep(2 * time.Second) // ≥3 refresh ticks at 500ms
 	if !u.evalBool(`document.getElementById('selectionCount').textContent==='1 of 2 selected' && document.querySelectorAll('#findingsBody input.finding-select:checked').length===1 && document.querySelector('#findingsBody tr.detail-row .verified')`) {
