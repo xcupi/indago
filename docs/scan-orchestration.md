@@ -205,11 +205,14 @@ Consequence: the rate counts requests, not jobs. A test job that sends several
 requests (baseline, reflection, candidate) now consumes several permits; before
 this, the rate applied per job and could be exceeded by that factor.
 
-Not paced (documented exceptions): subresources, XHR/fetch and WebSocket traffic
-that a loaded page issues on its own (one permit covers the navigation, not each
-subresource — the browser's own request interception would have to block on the
-limiter); and interactive/auto login, which runs when a session is established,
-before any scan execution exists, so no scan limiter applies to it.
+Not paced (documented exceptions): subresources, XHR/fetch traffic that a loaded
+page issues on its own (one permit covers the navigation, not each subresource —
+the browser's own request interception would have to block on the limiter); and
+interactive/auto login, which runs when a session is established, before any scan
+execution exists, so no scan limiter applies to it. WebSocket traffic is closed
+in scope-gated browser contexts rather than paced; service workers are blocked,
+and popup creation via `window.open`, targeted links/forms, or direct form
+submission to a non-self context is suppressed there for scope safety.
 
 ## 2. Scope is enforced at five points (fail closed)
 
@@ -230,13 +233,21 @@ check 5). `cmd/indago` does this.
 The **executor** and discovery share one scope-enforcing engine per scan.
 
 **Browser-network discovery** (`Options.Browser`, `indago serve -browser`) is
-scope-gated in two layers: the browser **aborts every out-of-scope request before
-it is sent** (page loads, subresources, XHR/fetch, redirect hops — so no
-third-party traffic is generated), and the discovery source re-checks each
-observation before it reaches the collector, so nothing out of scope is persisted
-or enqueued. Aborted requests are reported as `Blocked`, never as observations.
-Limitation: WebSocket and service-worker traffic is not intercepted. It is off by
-default (it needs Chromium).
+scope-gated in two layers: the browser **aborts every out-of-scope HTTP(S)
+request before it is sent** (page loads, subresources, XHR/fetch and redirect
+hops), and the discovery source re-checks each observation before it reaches the
+collector, so nothing out of scope is persisted or enqueued. Aborted requests are
+reported as `Blocked`, never as observations.
+
+Scoped browser contexts also close every WebSocket, block service-worker
+execution before its script is fetched, and suppress `window.open`, targeted
+links/forms, and direct form submission to non-self contexts before page scripts
+can initiate those popup navigations. These are deliberate fail-closed
+restrictions because WebSocket and service-worker traffic can bypass ordinary
+page routing, while a popup can begin navigating before its page target is
+available for a redirect gate. They can impair applications that depend on these
+features; alternate popup-creation mechanisms are not simulated or independently
+verified.
 
 ## 3. Pause, resume, cancel
 
@@ -417,10 +428,11 @@ already fixed in code and have been removed: live discovery concurrency
   interrupted N times and then failing transiently can go `dead` sooner than
   one that was never interrupted. Its TestCases record the interruptions
   (`cancelled`, "interrupted by restart").
-- **WebSocket and service-worker traffic is not intercepted** by browser
-  discovery's scope gate (§2). This is deferred, and not a production blocker:
-  `-browser` is opt-in, and every observation is still re-checked against scope
-  before anything is persisted.
+- **Restricted browser flows:** service workers and all WebSockets are blocked,
+  while `window.open`, targeted links/forms, and direct form submission to
+  non-self contexts are suppressed before navigation. Applications depending on
+  these features may behave differently; alternate popup-creation mechanisms
+  are not independently validated.
 
 ## Authenticated raw-HTTP cookie scope
 

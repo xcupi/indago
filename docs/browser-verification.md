@@ -76,9 +76,13 @@ activates it on passive page load, so it must never read as confirmed.
    automatic redirects, and `Location`/`Refresh` is removed before the response
    is fulfilled as a document. No redirect is followed, even to an in-scope URL;
    a redirected destination is therefore not verified in this phase.
-4. These redirect checks apply to pages managed by the browser manager. Popup
-   and service-worker initiated redirect chains are not covered by the current
-   integration tests and must not be claimed as verified.
+4. The response-stage redirect checks are verified for explicitly managed pages
+   (main navigations and subresources). Scoped contexts suppress `window.open`,
+   targeted links/forms, and direct form submission to non-self targets before
+   those popup requests start. Service workers are blocked before their script is
+   fetched, and all WebSocket connections are closed. These restrictions can
+   change application behavior; alternate popup-creation mechanisms are not
+   independently verified.
 5. The page is waited for `load` (a real browser event, not an arbitrary
    sleep), then its console errors, uncaught exceptions, and rendered HTML are
    read back.

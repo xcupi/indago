@@ -71,6 +71,12 @@ type pwBrowser struct{ b pw.Browser }
 
 func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(string) bool) (contextHandle, error) {
 	opts := pw.BrowserNewContextOptions{}
+	if allow != nil {
+		// Service workers can initiate requests outside Playwright's page route
+		// plumbing, so scoped scan contexts block them rather than risk leaking
+		// a request that cannot be checked.
+		opts.ServiceWorkers = pw.ServiceWorkerPolicyBlock
+	}
 	if storageStatePath != "" {
 		opts.StorageStatePath = pw.String(storageStatePath)
 	}
@@ -84,16 +90,67 @@ func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeader
 	if err != nil {
 		return nil, err
 	}
-	pc := &pwContext{c: c, allow: allow}
+	pc := &pwContext{c: c, allow: allow, scopeSessions: make(map[pw.Page]pw.CDPSession)}
 	if allow != nil {
+		// Do not let target code create a popup before the new page's CDP
+		// redirect guard can attach. The scanner does not simulate popup user
+		// interactions, so scoped contexts deliberately suppress window.open.
+		if err := c.AddInitScript(pw.Script{Content: pw.String(`(() => {
+			const popupTarget = (target) => {
+				const base = document.querySelector('base[target]');
+				const value = target || (base && base.target) || '';
+				return value !== '' && value.toLowerCase() !== '_self';
+			};
+			const blockTargetedLink = (event) => {
+				const link = event.target && event.target.closest && event.target.closest('a[href], area[href]');
+				if (link && popupTarget(link.target)) event.preventDefault();
+			};
+			document.addEventListener('click', blockTargetedLink, true);
+			document.addEventListener('auxclick', blockTargetedLink, true);
+			document.addEventListener('submit', (event) => {
+				const form = event.target;
+				const submitter = event.submitter;
+				const target = submitter && submitter.hasAttribute('formtarget') ? submitter.formTarget : form && form.target;
+				if (popupTarget(target)) event.preventDefault();
+			}, true);
+			const nativeSubmit = HTMLFormElement.prototype.submit;
+			HTMLFormElement.prototype.submit = function() {
+				if (popupTarget(this.target)) return;
+				return Reflect.apply(nativeSubmit, this, arguments);
+			};
+			Object.defineProperty(window, 'open', {value: function(){ return null; }, configurable: false, writable: false});
+		})()`)}); err != nil {
+			_ = c.Close()
+			return nil, fmt.Errorf("install scoped popup restriction: %w", err)
+		}
 		// Abort directly disallowed requests before they leave the browser.
 		// Playwright's route callback only sees the original request in an HTTP
-		// redirect chain, so each managed page also installs a CDP response-stage
-		// gate that checks Location before Chromium follows any redirect.
+		// redirect chain. Explicit pages install a CDP response-stage gate before
+		// navigation; new targets get one at their earliest page event. Popup
+		// creation via window.open is separately suppressed because target events
+		// may race the popup's first redirect response.
 		if err := c.Route("**/*", pc.onRoute); err != nil {
 			_ = c.Close()
 			return nil, fmt.Errorf("install scope gate and request override: %w", err)
 		}
+		// The scanner does not inspect WebSocket protocols. Close them rather
+		// than allow an unobservable connection to leave the declared scope.
+		if err := c.RouteWebSocket("**/*", func(route pw.WebSocketRoute) { route.Close() }); err != nil {
+			_ = c.Close()
+			return nil, fmt.Errorf("install WebSocket scope restriction: %w", err)
+		}
+		c.OnPage(func(page pw.Page) {
+			if err := pc.ensureRedirectScopeGate(page); err != nil {
+				// Fail closed on popups/pages for which the response-stage guard
+				// could not be installed.
+				_ = page.Close()
+			}
+		})
+		c.OnPageClose(func(page pw.Page) {
+			pc.scopeMu.Lock()
+			delete(pc.scopeSessions, page)
+			pc.scopeMu.Unlock()
+		})
 	}
 	return pc, nil
 }
@@ -115,6 +172,29 @@ type pwContext struct {
 
 	mu           sync.Mutex
 	jsonOverride *jsonNavigationOverride
+
+	scopeMu       sync.Mutex
+	scopeSessions map[pw.Page]pw.CDPSession
+}
+
+func (c *pwContext) ensureRedirectScopeGate(page pw.Page) error {
+	if c.allow == nil {
+		return nil
+	}
+	c.scopeMu.Lock()
+	defer c.scopeMu.Unlock()
+	if _, ok := c.scopeSessions[page]; ok {
+		return nil
+	}
+	cdp, err := c.c.NewCDPSession(page)
+	if err != nil {
+		return fmt.Errorf("create redirect scope observer: %w", err)
+	}
+	if err := enableRedirectScopeGate(cdp, c.allow); err != nil {
+		return err
+	}
+	c.scopeSessions[page] = cdp
+	return nil
 }
 
 func (c *pwContext) onRoute(route pw.Route) {
@@ -228,6 +308,10 @@ func (c *pwContext) NewPage() (pageHandle, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := c.ensureRedirectScopeGate(p); err != nil {
+		_ = p.Close()
+		return nil, fmt.Errorf("install page redirect scope gate: %w", err)
+	}
 	return &pwPage{p: p, ctx: c}, nil
 }
 
@@ -273,7 +357,13 @@ func (c *pwContext) SaveStorageState(path string) error {
 	return err
 }
 
-func (c *pwContext) Close() error { return c.c.Close() }
+func (c *pwContext) Close() error {
+	err := c.c.Close()
+	c.scopeMu.Lock()
+	c.scopeSessions = make(map[pw.Page]pw.CDPSession)
+	c.scopeMu.Unlock()
+	return err
+}
 
 type pwPage struct {
 	p   pw.Page
@@ -593,11 +683,6 @@ func (p *pwPage) OnRequest(fn func(NetworkEvent), allow func(string) bool) error
 		// The owning Context.NewPage path closes the page target on observer
 		// setup failure; that also detaches this CDP session without a wait.
 		return fmt.Errorf("enable bounded CDP request observer: %w", err)
-	}
-	if allow != nil {
-		if err := enableRedirectScopeGate(cdp, allow); err != nil {
-			return err
-		}
 	}
 	p.cdp = cdp
 	return nil

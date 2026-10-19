@@ -413,6 +413,176 @@ func TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect(t *testing.T) {
 	}
 }
 
+func TestIntegrationScopeGateBlocksWebSocketTraffic(t *testing.T) {
+	var websocketHits atomic.Int64
+	websocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		websocketHits.Add(1)
+		http.Error(w, "unexpected websocket request", http.StatusBadRequest)
+	}))
+	defer websocketServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(websocketServer.URL, "http") + "/socket"
+
+	inside := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = fmt.Fprintf(w, `<!doctype html><script>new WebSocket(%q)</script>`, wsURL)
+	}))
+	defer inside.Close()
+	m := newManagerOrSkip(t, browser.DefaultConfig())
+	defer m.Close()
+	if _, err := m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{WaitUntil: browser.WaitLoad}); err != nil {
+		t.Fatalf("render unscoped WebSocket control: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if websocketHits.Load() == 0 {
+		t.Fatal("WebSocket fixture did not reach its loopback server in the unscoped control")
+	}
+	websocketHits.Store(0)
+	_, err := m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{
+		WaitUntil:    browser.WaitLoad,
+		AllowRequest: func(raw string) bool { return strings.HasPrefix(raw, inside.URL+"/api/") },
+	})
+	if err != nil {
+		t.Fatalf("render scoped websocket fixture: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if websocketHits.Load() != 0 {
+		t.Fatalf("out-of-scope WebSocket handshake reached the target %d times", websocketHits.Load())
+	}
+}
+
+func TestIntegrationScopeGateBlocksServiceWorkerTraffic(t *testing.T) {
+	var outsideHits atomic.Int64
+	outside := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		outsideHits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer outside.Close()
+	var serviceWorkerScriptHits atomic.Int64
+	inside := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/page":
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<!doctype html><body>service worker scope control</body>`)
+		case "/api/sw.js":
+			serviceWorkerScriptHits.Add(1)
+			w.Header().Set("Content-Type", "application/javascript")
+			_, _ = fmt.Fprintf(w, `self.addEventListener('install',event=>event.waitUntil(fetch(%q,{mode:'no-cors'})));`, outside.URL+"/outside")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer inside.Close()
+
+	m := newManagerOrSkip(t, browser.DefaultConfig())
+	defer m.Close()
+	registerScript := `(async () => {
+		try {
+			await navigator.serviceWorker.register('/api/sw.js');
+			return 'registered';
+		} catch (_) { return 'blocked'; }
+	})()`
+
+	// Prove that the fixture would create service-worker traffic without the
+	// scoped-context restriction, so a quiet scoped run is a meaningful control.
+	controlCtx, err := m.NewContext(context.Background(), browser.ContextOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlPage, err := controlCtx.NewPage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlPage.Navigate(context.Background(), inside.URL+"/api/page", browser.NavOptions{WaitUntil: browser.WaitLoad}); err != nil {
+		t.Fatalf("navigate unscoped service worker control: %v", err)
+	}
+	controlResult, err := controlPage.Evaluate(context.Background(), registerScript)
+	if err != nil {
+		t.Fatalf("register unscoped service worker control: %v", err)
+	}
+	if controlResult != "registered" {
+		t.Fatalf("service worker control did not register: result=%v", controlResult)
+	}
+	if _, err := controlPage.Evaluate(context.Background(), `navigator.serviceWorker.ready.then(() => true)`); err != nil {
+		t.Fatalf("wait for unscoped service worker activation: %v", err)
+	}
+	if serviceWorkerScriptHits.Load() == 0 || outsideHits.Load() == 0 {
+		t.Fatalf("service worker control did not activate: script=%d outside=%d", serviceWorkerScriptHits.Load(), outsideHits.Load())
+	}
+	if err := controlCtx.Close(); err != nil {
+		t.Fatal(err)
+	}
+	baselineScriptHits, baselineOutsideHits := serviceWorkerScriptHits.Load(), outsideHits.Load()
+
+	ctx, err := m.NewContext(context.Background(), browser.ContextOptions{AllowRequest: func(raw string) bool {
+		return strings.HasPrefix(raw, inside.URL+"/api/")
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ctx.Close()
+	page, err := ctx.NewPage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer page.Close()
+	if _, err := page.Navigate(context.Background(), inside.URL+"/api/page", browser.NavOptions{WaitUntil: browser.WaitLoad}); err != nil {
+		t.Fatalf("navigate service worker fixture: %v", err)
+	}
+	evalCtx, cancelEval := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelEval()
+	result, err := page.Evaluate(evalCtx, registerScript)
+	if err != nil {
+		t.Fatalf("attempt service worker registration: %v", err)
+	}
+	if serviceWorkerScriptHits.Load() != baselineScriptHits || outsideHits.Load() != baselineOutsideHits {
+		t.Fatalf("scope-gated service worker escaped: result=%v script=%d/%d outside=%d/%d", result, serviceWorkerScriptHits.Load(), baselineScriptHits, outsideHits.Load(), baselineOutsideHits)
+	}
+}
+
+func TestIntegrationScopeGateBlocksPopupRedirect(t *testing.T) {
+	var popupHits, outsideHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/page":
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<!doctype html><a id="popup" target="_blank" href="/api/popup-start">open</a><form id="popup-form" target="_blank" action="/api/popup-start"><input name="q" value="x"></form><form id="override-form" action="/api/popup-start"><button id="formtarget" type="submit" formtarget="_blank">submit</button></form>`)
+		case "/api/popup-start":
+			popupHits.Add(1)
+			http.Redirect(w, r, "/outside", http.StatusFound)
+		case "/outside":
+			outsideHits.Add(1)
+			fmt.Fprint(w, "outside")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	m := newManagerOrSkip(t, browser.DefaultConfig())
+	defer m.Close()
+	ctx, err := m.NewContext(context.Background(), browser.ContextOptions{AllowRequest: func(raw string) bool {
+		return strings.HasPrefix(raw, srv.URL+"/api/")
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ctx.Close()
+	page, err := ctx.NewPage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer page.Close()
+	if _, err := page.Navigate(context.Background(), srv.URL+"/api/page", browser.NavOptions{WaitUntil: browser.WaitLoad}); err != nil {
+		t.Fatalf("navigate scoped popup fixture: %v", err)
+	}
+	if _, err := page.Evaluate(context.Background(), `document.querySelector('#popup').click(); document.querySelector('#popup-form').submit(); document.querySelector('#formtarget').click(); window.open('/api/popup-start', 'popup'); true`); err != nil {
+		t.Fatalf("trigger scoped popup paths: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if popupHits.Load() != 0 || outsideHits.Load() != 0 {
+		t.Fatalf("scoped context allowed popup traffic: popup=%d out-of-scope=%d", popupHits.Load(), outsideHits.Load())
+	}
+}
+
 // The scope gate must stop out-of-scope requests from LEAVING the browser, not
 // merely hide them from the observations.
 func TestIntegrationScopeGateBlocksRequestsRealBrowser(t *testing.T) {

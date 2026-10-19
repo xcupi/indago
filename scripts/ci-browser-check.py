@@ -30,6 +30,9 @@ required = {
     "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect",
     "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect",
     "TestIntegrationScopeGateBlocksBackslashPathRedirect",
+    "TestIntegrationScopeGateBlocksWebSocketTraffic",
+    "TestIntegrationScopeGateBlocksServiceWorkerTraffic",
+    "TestIntegrationScopeGateBlocksPopupRedirect",
 }
 if not shutil.which("node"):
     raise SystemExit("required Node.js unavailable")

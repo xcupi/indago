@@ -16,7 +16,7 @@ func TestCIRuntimeRejectsMissingSkippedFailedRootsAndDescendants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots := []string{"TestIntegrationRenderRealBrowser", "TestIntegrationRenderCapturesJSONPostDataForDiscovery", "TestIntegrationRequestObserverDoesNotWaitForResponse", "TestIntegrationNetworkJSONBodyDiscovery", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestIntegrationVerifyReflectionOnlyIsRejected", "TestE2E_FullPipelineAgainstCorpus", "TestUINavigation", "TestUICooldownClock", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix", "TestIntegrationDefaultConfigRendererIsSandboxed", "TestIntegrationDisableSandboxIsExplicitOptOut", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "TestDOMXSSFragmentRouteCapturesPostLoadSink", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "TestIntegrationScopeGateAllowsInScopeRedirect", "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect", "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect", "TestIntegrationScopeGateBlocksBackslashPathRedirect"}
+	roots := []string{"TestIntegrationRenderRealBrowser", "TestIntegrationRenderCapturesJSONPostDataForDiscovery", "TestIntegrationRequestObserverDoesNotWaitForResponse", "TestIntegrationNetworkJSONBodyDiscovery", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestIntegrationVerifyReflectionOnlyIsRejected", "TestE2E_FullPipelineAgainstCorpus", "TestUINavigation", "TestUICooldownClock", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix", "TestIntegrationDefaultConfigRendererIsSandboxed", "TestIntegrationDisableSandboxIsExplicitOptOut", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "TestDOMXSSFragmentRouteCapturesPostLoadSink", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "TestIntegrationScopeGateAllowsInScopeRedirect", "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect", "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect", "TestIntegrationScopeGateBlocksBackslashPathRedirect", "TestIntegrationScopeGateBlocksWebSocketTraffic", "TestIntegrationScopeGateBlocksServiceWorkerTraffic", "TestIntegrationScopeGateBlocksPopupRedirect"}
 	for _, tc := range []struct {
 		name, root, action, child string
 		wantPass                  bool
@@ -59,6 +59,15 @@ func TestCIRuntimeRejectsMissingSkippedFailedRootsAndDescendants(t *testing.T) {
 		{"scope-backslash-redirect-missing", "TestIntegrationScopeGateBlocksBackslashPathRedirect", "missing", "", false},
 		{"scope-backslash-redirect-skip", "TestIntegrationScopeGateBlocksBackslashPathRedirect", "skip", "", false},
 		{"scope-backslash-redirect-fail", "TestIntegrationScopeGateBlocksBackslashPathRedirect", "fail", "", false},
+		{"scope-websocket-missing", "TestIntegrationScopeGateBlocksWebSocketTraffic", "missing", "", false},
+		{"scope-websocket-skip", "TestIntegrationScopeGateBlocksWebSocketTraffic", "skip", "", false},
+		{"scope-websocket-fail", "TestIntegrationScopeGateBlocksWebSocketTraffic", "fail", "", false},
+		{"scope-serviceworker-missing", "TestIntegrationScopeGateBlocksServiceWorkerTraffic", "missing", "", false},
+		{"scope-serviceworker-skip", "TestIntegrationScopeGateBlocksServiceWorkerTraffic", "skip", "", false},
+		{"scope-serviceworker-fail", "TestIntegrationScopeGateBlocksServiceWorkerTraffic", "fail", "", false},
+		{"scope-popup-missing", "TestIntegrationScopeGateBlocksPopupRedirect", "missing", "", false},
+		{"scope-popup-skip", "TestIntegrationScopeGateBlocksPopupRedirect", "skip", "", false},
+		{"scope-popup-fail", "TestIntegrationScopeGateBlocksPopupRedirect", "fail", "", false},
 		{"fragment-route-missing", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "missing", "", false},
 		{"fragment-route-skip", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "skip", "", false},
 		{"fragment-route-fail", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "fail", "", false},

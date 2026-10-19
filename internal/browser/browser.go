@@ -130,8 +130,11 @@ type ContextOptions struct {
 	// Disallowed requests are ABORTED before they leave the browser — no traffic
 	// reaches the host — and are recorded as blocked rather than as network
 	// observations. nil allows everything (the caller then owns scope).
-	//
-	// Limitation: WebSocket and service-worker traffic is not intercepted.
+	// Scoped contexts also block service workers, close WebSockets, and suppress
+	// common popup paths (`window.open`, targeted links, and targeted forms),
+	// because these can initiate traffic outside ordinary page-route checks.
+	// These restrictions can change application behavior; alternate popup
+	// creation mechanisms are not independently verified.
 	AllowRequest func(url string) bool
 	// StorageStatePath, when set, seeds the context with previously saved session
 	// material (cookies + localStorage), yielding a persistent authenticated
