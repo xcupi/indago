@@ -336,10 +336,10 @@ See `docs/scan-orchestration.md` §10.
 - **Accepted:** at-least-once job execution, and crash-interrupted
   attempts counting toward `MaxAttempts`.
 - **Restricted in scoped browser contexts:** service workers and all WebSockets
-  are blocked; `window.open`, targeted links/forms, and direct form submission to
-  non-self contexts are suppressed before navigation. This avoids traffic outside
-  ordinary page-route checks but can alter applications that rely on these
-  features. Alternate popup-creation mechanisms are not independently validated.
+  are blocked. Unmanaged popup HTTP(S) requests are now denied at the context's
+  pre-network boundary (including early requests with no frame), replacing the
+  earlier target-page JS suppression. In-scope popup flows are unsupported too;
+  see [browser-scope-boundary.md](browser-scope-boundary.md).
 - **Unchanged by design (AGENTS.md §3):** Password, Interactive, and MFA
   auth, DOM XSS, and Stored XSS remain stubs. They are now rejected at scan
   creation instead of failing at Start.

@@ -130,11 +130,15 @@ type ContextOptions struct {
 	// Disallowed requests are ABORTED before they leave the browser — no traffic
 	// reaches the host — and are recorded as blocked rather than as network
 	// observations. nil allows everything (the caller then owns scope).
-	// Scoped contexts also block service workers, close WebSockets, and suppress
-	// common popup paths (`window.open`, targeted links, and targeted forms),
-	// because these can initiate traffic outside ordinary page-route checks.
-	// These restrictions can change application behavior; alternate popup
-	// creation mechanisms are not independently verified.
+	// Scoped contexts also block service workers and close WebSockets. Context
+	// routing rejects requests without an approved managed page (including a
+	// popup's first request with no frame yet) BEFORE network dispatch. Only
+	// Context.NewPage registers a page, after installing its redirect guard;
+	// child frames of managed pages remain supported. Popups are unsupported:
+	// even in-scope popup requests are aborted, independent of target-page JS.
+	// Frame-less worker traffic is also refused. Non-network blank targets can
+	// exist until context close; this is not an OS-wide network firewall.
+	// These restrictions intentionally change application behavior.
 	AllowRequest func(url string) bool
 	// StorageStatePath, when set, seeds the context with previously saved session
 	// material (cookies + localStorage), yielding a persistent authenticated

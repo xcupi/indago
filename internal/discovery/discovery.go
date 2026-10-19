@@ -68,6 +68,21 @@ type Sink interface {
 	AddParameter(ctx context.Context, param ParamCandidate) error
 }
 
+// fetchGuard is an optional Sink capability: veto a request BEFORE it is sent.
+// Registering an endpoint is not the same as requesting it, and a request to a
+// session-terminating URL is itself the harm on an authenticated scan, so a
+// Source must ask first whenever it is about to GET a URL it discovered.
+type fetchGuard interface {
+	AllowFetch(rawURL string, source domain.DiscoverySource) bool
+}
+
+// allowFetch reports whether a Source may request rawURL. A Sink without the
+// guard capability never vetoes.
+func allowFetch(sink Sink, rawURL string, source domain.DiscoverySource) bool {
+	g, ok := sink.(fetchGuard)
+	return !ok || g.AllowFetch(rawURL, source)
+}
+
 // Input is the per-scan context a Source runs within.
 type Input struct {
 	ScanID    domain.ID

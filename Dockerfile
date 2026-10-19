@@ -13,6 +13,7 @@ COPY --from=runtime-base /usr/local/bin/node /usr/local/bin/node
 ENV PLAYWRIGHT_NODEJS_PATH=/usr/local/bin/node \
     PLAYWRIGHT_DRIVER_PATH=/opt/playwright
 COPY go.mod go.sum ./
+COPY third_party/playwright-go/ ./third_party/playwright-go/
 RUN go mod download && go mod verify
 RUN module_version=$(go list -m -f '{{.Version}}' github.com/mxschmitt/playwright-go) \
     && go run "github.com/mxschmitt/playwright-go/cmd/playwright@$module_version" --version
@@ -30,6 +31,7 @@ RUN groupadd --gid 10001 indago && useradd --uid 10001 --gid 10001 \
     && install -d -o 10001 -g 10001 -m 0750 /var/lib/indago /var/cache/indago
 COPY --from=build /src/bin/indago /usr/local/bin/indago
 COPY --from=build /opt/playwright/ /opt/playwright/
+COPY --from=build /src/third_party/playwright-go/LICENSE /usr/share/licenses/indago/playwright-go.LICENSE
 COPY --chmod=0755 deploy/docker/healthcheck.sh /usr/local/bin/indago-healthcheck
 ENV HOME=/var/cache/indago \
     XDG_CACHE_HOME=/var/cache/indago \

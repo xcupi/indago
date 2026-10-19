@@ -254,11 +254,17 @@ func domXSSHarnessScript(marker string) string {
 const domXSSHarnessTemplate = `(() => {
   const MARKER = %s;
   const PREFIX = %s;
+  // Capture the natives before any page script runs. A page (many production
+  // builds do) that neutralizes console.log or JSON.stringify later must not be
+  // able to silence the reports, which would read as "no sink reachable".
+  const LOG = (function () { try { return console.log.bind(console); } catch (e) { return function () {}; } })();
+  const STRINGIFY = JSON.stringify.bind(JSON);
+  const TOSTRING = String;
   function report(sink, value, connected) {
     try {
-      var v = String(value);
+      var v = TOSTRING(value);
       if (v.indexOf(MARKER) === -1) return;
-      console.log(PREFIX + JSON.stringify({ sink: sink, value: v.slice(0, 500), connected: connected === true }));
+      LOG(PREFIX + STRINGIFY({ sink: sink, value: v.slice(0, 500), connected: connected === true }));
     } catch (e) {}
   }
   function hookProp(proto, prop) {
@@ -494,7 +500,10 @@ func jsEncodeURIComponent(s string) string {
 // part of the identity, so localStorage and sessionStorage never collide.
 func domXSSFindingDedupKey(endpointID domain.ID, source detection.DOMXSSSource, sink detection.DOMXSSSink, parameter string) string {
 	key := string(endpointID) + "\x00dom_xss\x00" + string(source) + "\x00" + string(sink)
-	if source == detection.DOMSourceQuery || source == detection.DOMSourceLocalStorage || source == detection.DOMSourceSessionStorage {
+	// A hash source carries a selector only for fragment-route parameters; the
+	// plain whole-fragment probe has none and keeps its single finding.
+	if source == detection.DOMSourceQuery || source == detection.DOMSourceLocalStorage || source == detection.DOMSourceSessionStorage ||
+		(source == detection.DOMSourceHash && parameter != "") {
 		key += fmt.Sprintf("\x00parameter:%d:%s", len(parameter), parameter)
 	}
 	return key
@@ -711,7 +720,11 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	source := dj.Source
 	marker := detection.NewProbe(job.ScanID, ep.ID).Token
 	sessionStatePath := e.sessionStatePathFor(ctx, job.ScanID)
-	bctx, err := e.browser.NewContext(ctx, browser.ContextOptions{AllowRequest: allow, StorageStatePath: sessionStatePath, ProxyServer: e.nextProxy()})
+	proxy := e.nextProxy() // one proxy per job, shared by every per-selector context below
+	newContext := func() (*browser.Context, error) {
+		return e.browser.NewContext(ctx, browser.ContextOptions{AllowRequest: allow, StorageStatePath: sessionStatePath, ProxyServer: proxy})
+	}
+	bctx, err := newContext()
 	if err != nil {
 		tc := e.newTestCase(ctx, job, ep.URL)
 		e.finishTestCase(ctx, tc, err, "open browser context")
@@ -775,12 +788,30 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 		selectors = []string{""}
 	}
 
+	// Every selector gets a context of its own. Origin storage, cookies and
+	// service state written while probing one selector (for example a storage
+	// key's payload) must never be visible to the next selector's attempt, or
+	// execution caused by the first is attributed to the second.
 	for _, selector := range selectors {
-		if err := e.probeDOMXSSCandidate(ctx, bctx, job, ep, source, selector, marker); err != nil {
+		if err := e.probeSelectorInFreshContext(ctx, newContext, job, ep, source, selector, marker); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (e *domXSSExecutor) probeSelectorInFreshContext(ctx context.Context, newContext func() (*browser.Context, error), job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, marker string) error {
+	sctx, err := newContext()
+	if err != nil {
+		tc := e.newTestCase(ctx, job, ep.URL)
+		e.finishTestCase(ctx, tc, err, "open browser context for "+domXSSSelectorLabel(source, selector))
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+	defer sctx.Close()
+	return e.probeDOMXSSCandidate(ctx, sctx, job, ep, source, selector, marker)
 }
 
 // queryParamNames returns every distinct discovered LocationQuery parameter
@@ -844,8 +875,11 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	canary := detection.DOMXSSCanary(marker)
 
 	// --- Phase 1: reachability ---
-	console, _, _, _, canaryNavURL, navErr := e.navigateSource(ctx, bctx, source, ep, selector, marker, canary)
+	obs1, canaryNavURL, navErr := e.navigateSource(ctx, bctx, source, ep, selector, marker, canary)
 	reachTC := e.newTestCase(ctx, job, canaryNavURL)
+	if navErr == nil {
+		navErr = requireDOMXSSProvenance(obs1)
+	}
 	if navErr != nil {
 		e.finishTestCase(ctx, reachTC, navErr, "reachability probe for "+label)
 		if ctx.Err() != nil {
@@ -853,7 +887,17 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 		}
 		return navErr
 	}
-	reachable := parseDOMXSSReachability(console, marker)
+	// Reachability comes only from reports the harness itself emitted: a page
+	// calling console.log with the harness prefix is not a hooked sink.
+	reachable := parseDOMXSSReachability(domXSSHarnessMessages(obs1.Runtime), marker)
+	if len(reachable) == 0 && len(parseDOMXSSReachability(obs1.Console, marker)) > 0 {
+		// The page printed harness-shaped reports for this marker but none was
+		// traced to the installed harness: forged output or an instrumentation
+		// mismatch. Either way this is untested, not a negative.
+		err := errors.New("harness-shaped console reports were not attributable to the installed harness; sink reachability is untested")
+		e.finishTestCase(ctx, reachTC, err, "reachability probe for "+label)
+		return err
+	}
 	if len(reachable) == 0 {
 		e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("no implemented DOM-XSS sink reachable from %s (negative result)", label))
 		return nil
@@ -877,35 +921,42 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 		return nil
 	}
 
-	// --- Phase 2: verification (the EXACT SAME deterministic bare-marker
-	// signal Reflected XSS verification already uses) ---
-	console2, pageErrs2, html2, screenshot2, payloadNavURL, verr := e.navigateSource(ctx, bctx, source, ep, selector, marker, cand.Value)
+	// --- Phase 2: verification ---
+	// Execution is attributed by the browser engine (the paused instruction
+	// is the bare marker identifier, in the main frame), never by matching
+	// page-controlled error or console text.
+	obs2, payloadNavURL, verr := e.navigateSource(ctx, bctx, source, ep, selector, marker, cand.Value)
 	verifyTC := e.newTestCase(ctx, job, payloadNavURL)
+	if verr == nil {
+		verr = requireDOMXSSProvenance(obs2)
+	}
 	if verr != nil {
 		e.finishTestCase(ctx, verifyTC, verr, "verification navigation for "+label)
 		return nil // the finding stays Pending; a later retry can still verify it
 	}
 
+	harness2 := domXSSHarnessMessages(obs2.Runtime)
 	var consoleErrs []string
-	for _, cm := range console2 {
+	for _, cm := range obs2.Console {
 		if cm.Type == "error" {
 			consoleErrs = append(consoleErrs, cm.Text)
 		}
 	}
-	// Console output is evidence only: even a runtime-shaped application log
-	// cannot confirm DOM execution without the browser's page-error channel.
-	_, sigText, matched := verification.MatchExecutionSignal(marker, pageErrs2, nil)
-	fragmentNotInserted := sink == detection.DOMSinkCreateContextualFragment && !hasConnectedDOMXSSFragment(console2, marker)
+	_, sigText, matched := verification.MatchRuntimeExecution(marker, obs2.Runtime)
+	fragmentNotInserted := sink == detection.DOMSinkCreateContextualFragment && !hasConnectedDOMXSSFragment(harness2, marker)
 	if fragmentNotInserted {
 		matched = false
 	}
-	markerInDOM := strings.Contains(html2, marker)
-	verdict, confidence, notes := verification.Decide(matched, markerInDOM)
+	markerInDOM := strings.Contains(obs2.HTML, marker)
+	verdict, confidence, notes := verification.DecideWithProvenance(marker, matched, markerInDOM, obs2.Runtime)
 	if fragmentNotInserted {
 		notes += "; target insertion of the parsed fragment was not observed; detached-fragment runtime errors alone do not confirm this sink"
 	}
 	if matched && sigText != "" {
 		notes = notes + " (" + sigText + ")"
+	}
+	if matched {
+		notes += domXSSAttributionNotes(source, sink, parseDOMXSSReachability(harness2, marker))
 	}
 	if source == detection.DOMSourceLocalStorage || source == detection.DOMSourceSessionStorage {
 		notes += "; attacker-relevant ability to write or poison this storage key is not established by this isolated probe and requires manual exploitability review unless the target flow demonstrates it"
@@ -913,21 +964,113 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 
 	var evidenceIDs []domain.ID
 	if e.evidence != nil {
-		logLines := append(append([]string(nil), consoleErrs...), pageErrs2...)
-		if sink == detection.DOMSinkCreateContextualFragment || sink == detection.DOMSinkSetTimeout || sink == detection.DOMSinkSetInterval {
-			for _, message := range console2 {
-				if strings.HasPrefix(message.Text, domXSSConsolePrefix) {
-					logLines = append(logLines, message.Text)
-				}
-			}
+		logLines := append(append([]string(nil), consoleErrs...), obs2.PageErrors...)
+		for _, message := range harness2 {
+			logLines = append(logLines, message.Text)
 		}
-		evidenceIDs = e.persistDOMXSSEvidence(ctx, job.ScanID, verifyTC.ID, screenshot2, html2, logLines)
+		if raw, err := json.Marshal(obs2.Runtime); err == nil {
+			logLines = append(logLines, "__INDAGO_RUNTIME_PROVENANCE__"+string(raw))
+		}
+		evidenceIDs = e.persistDOMXSSEvidence(ctx, job.ScanID, verifyTC.ID, obs2.Screenshot, obs2.HTML, logLines)
 	}
 	verifyTC.EvidenceIDs = evidenceIDs
 	e.finishTestCase(ctx, verifyTC, nil, notes)
 
 	e.correlateDOMXSSVerification(ctx, finding.ID, cand, verdict, confidence, notes, verifyTC.ID, evidenceIDs, payloadNavURL)
 	return nil
+}
+
+// requireDOMXSSProvenance turns missing engine-level provenance into a visible
+// probe error. Without it the attempt can be neither a trustworthy negative nor
+// a trustworthy positive, so it must not be recorded as either.
+func requireDOMXSSProvenance(obs domXSSObservation) error {
+	if obs.Runtime.Available {
+		return nil
+	}
+	note := obs.Runtime.Note
+	if note == "" {
+		note = "driver reported no runtime provenance"
+	}
+	return fmt.Errorf("runtime provenance unavailable: %s", note)
+}
+
+// domXSSHarnessMessages returns the sink-hook reports whose console call the
+// engine traced back to the exact installed init script. Page-authored console
+// text that merely imitates the prefix is absent from Runtime.Reports.
+func domXSSHarnessMessages(rt browser.RuntimeObservations) []browser.ConsoleMessage {
+	out := make([]browser.ConsoleMessage, 0, len(rt.Reports))
+	for _, report := range rt.Reports {
+		out = append(out, browser.ConsoleMessage{Type: "log", Text: report.Text})
+	}
+	return out
+}
+
+// domXSSAttributionNotes states what a confirmed DOM-XSS verdict does and does
+// not establish. Execution is proven by the engine; the sink label is the
+// first hooked sink that received the canary, and the source delivery is the
+// scanner's own, so both caveats are recorded instead of implied.
+func domXSSAttributionNotes(source detection.DOMXSSSource, sink detection.DOMXSSSink, observed []detection.DOMXSSSink) string {
+	var notes string
+	switch {
+	case len(observed) > 1:
+		notes += fmt.Sprintf("; sink attribution is ambiguous: %d hooked sinks received the payload (%s), execution is proven but not tied to %s", len(observed), joinSinks(observed), sink)
+	case len(observed) == 0:
+		notes += fmt.Sprintf("; no hooked sink reported the payload in this run, execution is proven but not tied to %s", sink)
+	default:
+		notes += fmt.Sprintf("; execution is proven by the engine, the sink label (%s) is the hooked sink that received the payload and is not proven to be the executing code path", sink)
+	}
+	if source == detection.DOMSourcePostMessage {
+		notes += "; the sender is a scanner-created sandboxed child frame, so a handler that trusts a specific event.source or origin may not be attacker-deliverable, confirm delivery manually"
+	}
+	return notes
+}
+
+func joinSinks(sinks []detection.DOMXSSSink) string {
+	names := make([]string, 0, len(sinks))
+	for _, sink := range sinks {
+		names = append(names, string(sink))
+	}
+	return strings.Join(names, ", ")
+}
+
+// domXSSObservation is everything one probe navigation observed. Runtime is
+// the engine-attributed execution record (paused V8 position plus verified
+// harness reports); Console and PageErrors are page-controlled text, kept as
+// evidence only and never as a verdict or reachability authority.
+type domXSSObservation struct {
+	Console    []browser.ConsoleMessage
+	PageErrors []string
+	HTML       string
+	Screenshot []byte
+	Runtime    browser.RuntimeObservations
+}
+
+// openObservedPage opens a fresh page, installs the sink-hook harness BEFORE
+// any navigation and starts engine-level runtime provenance for the same
+// script. Provenance failure is an error, never a silent downgrade: a probe
+// that cannot attribute execution must surface as an errored test case, not as
+// a negative "not reachable" or "not vulnerable" result.
+func (e *domXSSExecutor) openObservedPage(ctx context.Context, bctx *browser.Context, marker string) (*browser.Page, error) {
+	page, err := bctx.NewPage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	script := domXSSHarnessScript(marker)
+	if err := page.AddInitScript(ctx, script); err != nil {
+		page.Close()
+		return nil, err
+	}
+	if err := page.EnableRuntimeProvenance(marker, script); err != nil {
+		page.Close()
+		return nil, fmt.Errorf("enable runtime provenance: %w", err)
+	}
+	return page, nil
+}
+
+func observePage(ctx context.Context, page *browser.Page) domXSSObservation {
+	html, _ := page.Content(ctx)
+	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
+	return domXSSObservation{Console: page.ConsoleMessages(), PageErrors: page.PageErrors(), HTML: html, Screenshot: shot, Runtime: page.RuntimeObservations()}
 }
 
 // navigateSource performs ONE phase's navigation for source, injecting
@@ -945,28 +1088,23 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 // the source-side injection mechanism is new per source" boundary
 // docs/dom-xss.md describes; the sink-hook harness and the phase-2
 // verification signal are identical for all four.
-func (e *domXSSExecutor) navigateSource(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, ep *domain.Endpoint, queryParam, marker, value string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, navURL string, err error) {
+func (e *domXSSExecutor) navigateSource(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, ep *domain.Endpoint, queryParam, marker, value string) (obs domXSSObservation, navURL string, err error) {
 	switch source {
 	case detection.DOMSourceQuery:
 		navURL = domXSSQueryURL(ep.URL, queryParam, value)
-		console, pageErrs, html, screenshot, err = e.navigate(ctx, bctx, navURL, marker)
-		return console, pageErrs, html, screenshot, navURL, err
+		obs, err = e.navigate(ctx, bctx, navURL, marker)
 	case detection.DOMSourceWindowName:
 		navURL = ep.URL
-		console, pageErrs, html, screenshot, err = e.navigateWithWindowName(ctx, bctx, navURL, marker, value)
-		return console, pageErrs, html, screenshot, navURL, err
+		obs, err = e.navigateWithWindowName(ctx, bctx, navURL, marker, value)
 	case detection.DOMSourcePostMessage:
 		navURL = ep.URL
-		console, pageErrs, html, screenshot, err = e.navigateWithPostMessage(ctx, bctx, navURL, marker, value)
-		return console, pageErrs, html, screenshot, navURL, err
+		obs, err = e.navigateWithPostMessage(ctx, bctx, navURL, marker, value)
 	case detection.DOMSourceReferrer:
 		navURL = ep.URL
-		console, pageErrs, html, screenshot, err = e.navigateWithReferrer(ctx, bctx, navURL, marker, value)
-		return console, pageErrs, html, screenshot, navURL, err
+		obs, err = e.navigateWithReferrer(ctx, bctx, navURL, marker, value)
 	case detection.DOMSourceLocalStorage, detection.DOMSourceSessionStorage:
 		navURL = ep.URL
-		console, pageErrs, html, screenshot, err = e.navigateWithStorage(ctx, bctx, source, navURL, queryParam, marker, value)
-		return console, pageErrs, html, screenshot, navURL, err
+		obs, err = e.navigateWithStorage(ctx, bctx, source, navURL, queryParam, marker, value)
 	default: // detection.DOMSourceHash
 		navURL = domXSSHashURL(ep.URL, value)
 		if queryParam != "" {
@@ -974,9 +1112,9 @@ func (e *domXSSExecutor) navigateSource(ctx context.Context, bctx *browser.Conte
 				navURL = routeURL
 			}
 		}
-		console, pageErrs, html, screenshot, err = e.navigate(ctx, bctx, navURL, marker)
-		return console, pageErrs, html, screenshot, navURL, err
+		obs, err = e.navigate(ctx, bctx, navURL, marker)
 	}
+	return obs, navURL, err
 }
 
 // sessionStatePathFor returns the scan's saved authenticated session
@@ -1026,24 +1164,19 @@ func waitForDOMXSSURLSourceObservationWindow(ctx context.Context, navURL string)
 // work, and returns the page's observations. One page per navigation, never
 // reused — mirrors BrowserVerifier.Verify's own discipline of never
 // attributing a signal to the wrong navigation.
-func (e *domXSSExecutor) navigate(ctx context.Context, bctx *browser.Context, navURL, marker string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, err error) {
-	page, err := bctx.NewPage(ctx)
+func (e *domXSSExecutor) navigate(ctx context.Context, bctx *browser.Context, navURL, marker string) (domXSSObservation, error) {
+	page, err := e.openObservedPage(ctx, bctx, marker)
 	if err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
 	defer page.Close()
-	if err := page.AddInitScript(ctx, domXSSHarnessScript(marker)); err != nil {
-		return nil, nil, "", nil, err
-	}
 	if _, err := page.Navigate(ctx, navURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
 	if err := waitForDOMXSSURLSourceObservationWindow(ctx, navURL); err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
-	html, _ = page.Content(ctx)
-	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
-	return page.ConsoleMessages(), page.PageErrors(), html, shot, nil
+	return observePage(ctx, page), nil
 }
 
 // navigateWithWindowName implements the ONE genuinely different mechanical
@@ -1067,27 +1200,22 @@ func (e *domXSSExecutor) navigate(ctx context.Context, bctx *browser.Context, na
 //     exactly reproducing the real-world legacy attack (an attacker page
 //     sets window.name on a tab it controls, then redirects that SAME tab
 //     to the victim page).
-func (e *domXSSExecutor) navigateWithWindowName(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, err error) {
-	page, err := bctx.NewPage(ctx)
+func (e *domXSSExecutor) navigateWithWindowName(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (domXSSObservation, error) {
+	page, err := e.openObservedPage(ctx, bctx, marker)
 	if err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
 	defer page.Close()
-	if err := page.AddInitScript(ctx, domXSSHarnessScript(marker)); err != nil {
-		return nil, nil, "", nil, err
-	}
 	if _, err := page.Navigate(ctx, "about:blank", browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
 	if _, err := page.Evaluate(ctx, setWindowNameScript(value)); err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
 	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
-	html, _ = page.Content(ctx)
-	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
-	return page.ConsoleMessages(), page.PageErrors(), html, shot, nil
+	return observePage(ctx, page), nil
 }
 
 // setWindowNameScript builds the Evaluate script that sets window.name to
@@ -1115,24 +1243,19 @@ func setWindowNameScript(value string) string {
 // are read back. Since the target itself remains the top-level document,
 // existing Page console/error/hook observations and DOM evidence still
 // describe the target page directly.
-func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, err error) {
-	page, err := bctx.NewPage(ctx)
+func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (domXSSObservation, error) {
+	page, err := e.openObservedPage(ctx, bctx, marker)
 	if err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
 	defer page.Close()
-	if err := page.AddInitScript(ctx, domXSSHarnessScript(marker)); err != nil {
-		return nil, nil, "", nil, err
-	}
 	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
 	if _, err := page.Evaluate(ctx, postMessageScript(value)); err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
-	html, _ = page.Content(ctx)
-	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
-	return page.ConsoleMessages(), page.PageErrors(), html, shot, nil
+	return observePage(ctx, page), nil
 }
 
 // postMessageScript creates an opaque-origin sandboxed srcdoc sender and
@@ -1323,21 +1446,16 @@ func domXSSRefererURL(fragmentValue string) string {
 // page's own document.referrer (see domXSSRefererURL's doc comment for
 // why the value must be wrapped in a synthetic absolute URL rather than
 // passed raw).
-func (e *domXSSExecutor) navigateWithReferrer(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, err error) {
-	page, err := bctx.NewPage(ctx)
+func (e *domXSSExecutor) navigateWithReferrer(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (domXSSObservation, error) {
+	page, err := e.openObservedPage(ctx, bctx, marker)
 	if err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
 	defer page.Close()
-	if err := page.AddInitScript(ctx, domXSSHarnessScript(marker)); err != nil {
-		return nil, nil, "", nil, err
-	}
 	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad, Referer: domXSSRefererURL(value)}); err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
-	html, _ = page.Content(ctx)
-	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
-	return page.ConsoleMessages(), page.PageErrors(), html, shot, nil
+	return observePage(ctx, page), nil
 }
 
 // navigateWithStorage implements BOTH the localStorage and sessionStorage
@@ -1360,21 +1478,18 @@ func (e *domXSSExecutor) navigateWithReferrer(ctx context.Context, bctx *browser
 //     needed) under this exact, previously discovered key;
 //  4. THEN navigate (same page) to targetURL — the write from step 3 is
 //     now visible since both navigations share the same origin.
-func (e *domXSSExecutor) navigateWithStorage(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, targetURL, key, marker, value string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, err error) {
-	page, err := bctx.NewPage(ctx)
+func (e *domXSSExecutor) navigateWithStorage(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, targetURL, key, marker, value string) (domXSSObservation, error) {
+	page, err := e.openObservedPage(ctx, bctx, marker)
 	if err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
 	defer page.Close()
-	if err := page.AddInitScript(ctx, domXSSHarnessScript(marker)); err != nil {
-		return nil, nil, "", nil, err
-	}
 	originURL, err := domXSSOriginURL(targetURL)
 	if err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
 	if _, err := page.Navigate(ctx, originURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
 	if source == detection.DOMSourceSessionStorage {
 		err = page.SetSessionStorage(ctx, key, value)
@@ -1382,14 +1497,12 @@ func (e *domXSSExecutor) navigateWithStorage(ctx context.Context, bctx *browser.
 		err = page.SetLocalStorage(ctx, key, value)
 	}
 	if err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
 	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
-		return nil, nil, "", nil, err
+		return domXSSObservation{}, err
 	}
-	html, _ = page.Content(ctx)
-	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
-	return page.ConsoleMessages(), page.PageErrors(), html, shot, nil
+	return observePage(ctx, page), nil
 }
 
 // newTestCase creates and persists a running TestCase for one navigation

@@ -520,6 +520,16 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 			switch {
 			case injected:
 				q.Set(p.Name, val) // override the observed value with the marker
+			case isDynamicTokenName(p.Name) && val != "":
+				// A rotating anti-CSRF value. refreshDynamicParams put the
+				// server's CURRENT token in Example, so it must replace a stale
+				// copy the endpoint URL still carries; keeping the URL's copy
+				// sends a rejected token and the request never reaches the code
+				// under test. If the refresh failed, Example is the discovery-time
+				// value, exactly as stale as the URL's, so nothing is lost. An empty
+				// value (a hidden field a script fills in later) never erases a
+				// token the URL already carries.
+				q.Set(p.Name, val)
 			case !q.Has(p.Name): // a value already in the URL is the observed one
 				q.Set(p.Name, val)
 			}

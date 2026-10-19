@@ -33,7 +33,7 @@ func TestCIContract(t *testing.T) {
 			t.Errorf("action not SHA-pinned: %s", pin[0])
 		}
 	}
-	requireText(t, "scripts/ci-browser-check.py", "TestIntegrationRenderRealBrowser", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestUINavigation", "TestUICooldownClock", "TestE2E_FullPipelineAgainstCorpus", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix", "TestIntegrationDefaultConfigRendererIsSandboxed", "TestIntegrationDisableSandboxIsExplicitOptOut", "TestIntegrationScopeGateAllowsInScopeRedirect", "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect", "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect", "TestIntegrationScopeGateBlocksBackslashPathRedirect", "TestIntegrationScopeGateBlocksWebSocketTraffic", "TestIntegrationScopeGateBlocksServiceWorkerTraffic", "TestIntegrationScopeGateBlocksPopupRedirect", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "browser_integration", "skip", "raise SystemExit", "INDAGO_CHROMIUM_PATH")
+	requireText(t, "scripts/ci-browser-check.py", "TestIntegrationRenderRealBrowser", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestUINavigation", "TestUICooldownClock", "TestE2E_FullPipelineAgainstCorpus", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix", "TestIntegrationDefaultConfigRendererIsSandboxed", "TestIntegrationDisableSandboxIsExplicitOptOut", "TestIntegrationScopeGateAllowsInScopeRedirect", "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect", "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect", "TestIntegrationScopeGateBlocksBackslashPathRedirect", "TestIntegrationScopeGateBlocksWebSocketTraffic", "TestIntegrationScopeGateBlocksServiceWorkerTraffic", "TestIntegrationScopeGateBlocksPopupRedirect", "TestIntegrationScopeGateRejectsUnmanagedTargets", "TestIntegrationScopeGateManagedFramesAndSubresources", "TestIntegrationScopeGatePreservesBodyReplay", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "browser_integration", "skip", "raise SystemExit", "INDAGO_CHROMIUM_PATH")
 }
 
 func TestDockerContract(t *testing.T) {
@@ -41,6 +41,10 @@ func TestDockerContract(t *testing.T) {
 	if strings.Contains(s, "allow-plaintext-remote") {
 		t.Error("image must not downgrade remote TLS")
 	}
-	requireText(t, ".dockerignore", "data/", ".git", ".env", "sessions/", "*.key", "bin/", "*.log")
+	requireText(t, ".dockerignore", "!third_party/", "!third_party/playwright-go/", "!third_party/playwright-go/**", "data/", ".git", ".env", "sessions/", "*.key", "bin/", "*.log")
 	requireText(t, "deploy/docker/healthcheck.sh", "--cacert", "INDAGO_HEALTH_CA", "https://127.0.0.1:8750/healthz")
+	runtime := strings.SplitN(s, "FROM runtime-base AS runtime", 2)
+	if len(runtime) != 2 || !strings.Contains(runtime[1], "COPY --from=build /src/third_party/playwright-go/LICENSE /usr/share/licenses/indago/playwright-go.LICENSE") {
+		t.Error("final runtime image must retain the patched Playwright runtime's MIT license")
+	}
 }

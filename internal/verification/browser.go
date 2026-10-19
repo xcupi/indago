@@ -33,16 +33,17 @@ import (
 // attempt. The caller marshals it into TestCase.Detail, mirroring how
 // detection.ReflectionReport is persisted.
 type Report struct {
-	Engine      string              `json:"engine"` // "browser-verification"
-	Candidate   detection.Candidate `json:"candidate"`
-	FinalURL    string              `json:"final_url"`
-	Status      int                 `json:"status,omitempty"`
-	Signal      Signal              `json:"signal"`
-	SignalText  string              `json:"signal_text,omitempty"`
-	MarkerInDOM bool                `json:"marker_in_dom"`
-	DOMExcerpt  string              `json:"dom_excerpt,omitempty"`
-	NavigatedAt time.Time           `json:"navigated_at"`
-	ObservedAt  time.Time           `json:"observed_at"`
+	Provenance  browser.RuntimeObservations `json:"provenance"`
+	Engine      string                      `json:"engine"` // "browser-verification"
+	Candidate   detection.Candidate         `json:"candidate"`
+	FinalURL    string                      `json:"final_url"`
+	Status      int                         `json:"status,omitempty"`
+	Signal      Signal                      `json:"signal"`
+	SignalText  string                      `json:"signal_text,omitempty"`
+	MarkerInDOM bool                        `json:"marker_in_dom"`
+	DOMExcerpt  string                      `json:"dom_excerpt,omitempty"`
+	NavigatedAt time.Time                   `json:"navigated_at"`
+	ObservedAt  time.Time                   `json:"observed_at"`
 }
 
 // BrowserVerifierConfig tunes the verifier.
@@ -143,6 +144,7 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 		return nil, classifyBrowserErr(ctx, err)
 	}
 	defer page.Close()
+	provenanceErr := page.EnableRuntimeProvenance(in.Marker, "")
 
 	// Baseline the page's own observation channels BEFORE navigating, so the
 	// signal below is attributable to THIS navigation only. A page is brand new
@@ -195,12 +197,18 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	dialogs := sinceIndex(page.DialogMessages(), baseDialogs)
 
 	token := in.Marker
-	sig, sigText, matched := matchExecutionSignal(token, pageErrs, consoleErrs)
+	provenance := page.RuntimeObservations()
+	sig, sigText, matched := MatchRuntimeExecution(token, provenance)
 	markerInDOM := containsToken(html, token)
 
-	verdict, confidence, notes := decide(matched, markerInDOM)
+	verdict, confidence, notes := DecideWithProvenance(token, matched, markerInDOM, provenance)
+	if provenanceErr != nil {
+		verdict, confidence = domain.VerdictInconclusive, domain.ConfidenceLow
+		notes = "execution provenance could not be enabled: " + provenanceErr.Error() + "; replay manually"
+	}
 
 	rep := &Report{
+		Provenance:  provenance,
 		Engine:      "browser-verification",
 		Candidate:   in.Candidate,
 		FinalURL:    nav.FinalURL,

@@ -45,7 +45,8 @@ per scan:
   stored on every endpoint/parameter and surfaced in status.
 - **Session-terminating links are skipped on authenticated scans.** When the
   scan carries a session (`RunParams.SessionStatePath` non-empty), the
-  Collector refuses to register a crawler-style-discovered (not
+  Collector (`AllowFetch`) refuses to register **or request** — the crawler and
+  content discovery ask before sending — a crawler-style-discovered (not
   `user_provided`) endpoint whose path looks like a logout/sign-out
   endpoint (`internal/discovery/safety.go`: `looksSessionTerminating`,
   matched word-bounded against `logout`/`log-off`/`sign-out` and
@@ -211,8 +212,8 @@ the browser's own request interception would have to block on the limiter); and
 interactive/auto login, which runs when a session is established, before any scan
 execution exists, so no scan limiter applies to it. WebSocket traffic is closed
 in scope-gated browser contexts rather than paced; service workers are blocked,
-and popup creation via `window.open`, targeted links/forms, or direct form
-submission to a non-self context is suppressed there for scope safety.
+and all requests from unmanaged popup targets are aborted at the context's
+pre-network route boundary, not by target-page event suppression.
 
 ## 2. Scope is enforced at five points (fail closed)
 
@@ -240,14 +241,13 @@ collector, so nothing out of scope is persisted or enqueued. Aborted requests ar
 reported as `Blocked`, never as observations.
 
 Scoped browser contexts also close every WebSocket, block service-worker
-execution before its script is fetched, and suppress `window.open`, targeted
-links/forms, and direct form submission to non-self contexts before page scripts
-can initiate those popup navigations. These are deliberate fail-closed
-restrictions because WebSocket and service-worker traffic can bypass ordinary
-page routing, while a popup can begin navigating before its page target is
-available for a redirect gate. They can impair applications that depend on these
-features; alternate popup-creation mechanisms are not simulated or independently
-verified.
+execution before its script is fetched, and abort requests from every unmanaged
+target at context routing, including first popup requests with no frame yet.
+Only explicitly created managed pages are approved after installing their
+redirect guard; page events never authorize popups. Child frames remain
+supported. These deliberate restrictions impair popup-dependent apps, even if
+all popup URLs are in scope. See [browser-scope-boundary.md](browser-scope-boundary.md)
+for the early-frame race patch, positive controls, and limits.
 
 ## 3. Pause, resume, cancel
 
@@ -428,11 +428,10 @@ already fixed in code and have been removed: live discovery concurrency
   interrupted N times and then failing transiently can go `dead` sooner than
   one that was never interrupted. Its TestCases record the interruptions
   (`cancelled`, "interrupted by restart").
-- **Restricted browser flows:** service workers and all WebSockets are blocked,
-  while `window.open`, targeted links/forms, and direct form submission to
-  non-self contexts are suppressed before navigation. Applications depending on
-  these features may behave differently; alternate popup-creation mechanisms
-  are not independently validated.
+- **Restricted browser flows:** service workers and all WebSockets are blocked.
+  Unmanaged popup targets cannot send HTTP(S) requests, even in scope; missing
+  early request frames fail closed. Blank targets can still exist until context
+  close. See [browser-scope-boundary.md](browser-scope-boundary.md).
 
 ## Authenticated raw-HTTP cookie scope
 

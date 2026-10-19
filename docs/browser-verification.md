@@ -27,14 +27,14 @@ it's synchronous page parsing. So "was `TOKEN` evaluated as code" and "did the
 browser report an exception naming `TOKEN`" are the same question.
 
 This is why the signal needs no payload, no timing heuristic, and no simulated
-user action: `internal/verification/signal.go`'s `matchExecutionSignal` just
-scans the browser's own uncaught-exception (`page_error`) and console-error
-channels for the exact marker-specific ReferenceError signature, after
-navigation reaches `load`. Generic application output (for example,
-`console.error(userControlledValue)`) is not evidence merely because it
-contains the marker. Chromium's Playwright page-error event omits the error
-class but reports an unresolved bare marker as `playwright: TOKEN is not
-defined`; the matcher accepts that exact form only on the page-error channel.
+user action. The verdict authority is the engine's own exception record
+(`internal/verification/provenance.go`, `internal/browser/provenance_playwright.go`):
+the paused instruction must be the bare marker identifier in the main frame.
+Page-controlled text (`console.*`, `pageerror` strings, `Error.stack`) is not
+evidence merely because it names the marker, and a page that throws or logs a
+forged `ReferenceError: TOKEN is not defined` is `Inconclusive`, not
+`Confirmed`. `matchExecutionSignal` remains only as a diagnostic matcher for
+legacy log text. See [verdict-provenance.md](verdict-provenance.md).
 Nothing is executed *by* the verifier — the candidate either reaches an
 evaluated position or it doesn't, and the browser reports the difference on
 its own.
@@ -76,13 +76,14 @@ activates it on passive page load, so it must never read as confirmed.
    automatic redirects, and `Location`/`Refresh` is removed before the response
    is fulfilled as a document. No redirect is followed, even to an in-scope URL;
    a redirected destination is therefore not verified in this phase.
-4. The response-stage redirect checks are verified for explicitly managed pages
-   (main navigations and subresources). Scoped contexts suppress `window.open`,
-   targeted links/forms, and direct form submission to non-self targets before
-   those popup requests start. Service workers are blocked before their script is
-   fetched, and all WebSocket connections are closed. These restrictions can
-   change application behavior; alternate popup-creation mechanisms are not
-   independently verified.
+4. Scoped contexts abort every request from an unapproved target at the context
+   route boundary, including the popup's first request when its frame is not yet
+   available. Only explicitly managed pages are approved after their CDP redirect
+   gate is installed. Child frames and managed subresources remain supported;
+   popup HTTP(S) flows are unsupported even when in scope. Service workers stay
+   blocked and WebSockets stay closed. No mutable target-page JS listener is the
+   authorization boundary. See [browser-scope-boundary.md](browser-scope-boundary.md)
+   for compatibility, local dependency race patch, and limits.
 5. The page is waited for `load` (a real browser event, not an arbitrary
    sleep), then its console errors, uncaught exceptions, and rendered HTML are
    read back.

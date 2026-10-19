@@ -98,14 +98,15 @@ func TestDOMStringTimerSourceMatrix(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer bc.Close()
-				console, pageErrors, html, _, _, err := ex.navigateSource(ctx, bc, detection.DOMXSSSource(sc.source), ep, "", marker, marker)
+				obs, _, err := ex.navigateSource(ctx, bc, detection.DOMXSSSource(sc.source), ep, "", marker, marker)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(parseDOMXSSReachability(console, marker)) != 0 {
+				html := obs.HTML
+				if len(parseDOMXSSReachability(domXSSHarnessMessages(obs.Runtime), marker)) != 0 {
 					t.Fatal("non-string/rejected sender produced reachability")
 				}
-				if _, _, matched := verification.MatchExecutionSignal(marker, pageErrors, nil); matched {
+				if _, _, matched := verification.MatchRuntimeExecution(marker, obs.Runtime); matched {
 					t.Fatal("negative executed marker")
 				}
 				if sc.control == "callback" && !strings.Contains(html, `data-callback="true"`) {

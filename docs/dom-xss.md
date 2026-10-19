@@ -22,8 +22,10 @@ contracts exercise both timers using comparable ordered spy/init scripts.
 
 Timer verification uses only the **bare marker JavaScript expression**, not the
 HTML image payload (which stays unchanged for HTML sinks). Confirmation still
-requires the exact marker-specific **page error**; console reports are evidence
-only, even when formatted as an exact runtime ReferenceError. Timer evidence
+requires the engine-attributed execution of the bare marker identifier in the
+main frame (see [verdict-provenance.md](verdict-provenance.md)); console reports
+and page-error text are evidence only, even when formatted as an exact runtime
+ReferenceError. Timer evidence
 retains the actual selected sink and string payload report as well as runtime,
 DOM and screenshot attribution. Canceled, CSP-blocked and delayed calls can reach
 a string sink without execution and must not confirm. Callback-only and rejected
@@ -116,9 +118,10 @@ redesigned by this bounded change.
 
 The existing inert-canary → benign `<img src=x onerror=MARKER>` phases and
 strict marker-specific runtime matcher are retained. DOM confirmation requires
-the browser page-error channel; console output is stored as evidence only.
-Logging a canary/payload or even a forged `ReferenceError: MARKER is not defined`
-via `console.error` cannot confirm DOM execution.
+engine-attributed execution (the paused V8 instruction is the marker identifier
+in the main frame); console output and page-error text are stored as evidence
+only. Logging a canary/payload, `console.error`, or throwing a forged
+`ReferenceError: MARKER is not defined` cannot confirm DOM execution.
 
 **Fragment creation is not insertion.** Indago never inserts returned
 fragments. Chromium can raise an image `onerror` ReferenceError even while an
@@ -810,17 +813,18 @@ a deliberate scope boundary for this first slice, not an oversight.
    evidence, never confirm without a real deterministic signal".
 3. The engine navigates AGAIN — a fresh page, same harness installed
    before navigation — to `endpointURL#<percent-encoded payload>`.
-4. Confirmation uses the **EXACT SAME deterministic signal** Reflected XSS
-   verification already uses, literally the same code:
-   `verification.MatchExecutionSignal` and `verification.Decide` (both new,
-   trivial exported wrappers around the existing, private
-   `matchExecutionSignal`/`decide` in `internal/verification`) — scanning
-   the page's own uncaught-exception (`page_error`) and console-error
-   channels for the exact marker token. `MARKER` is a bare, unquoted JS
+4. Confirmation uses the **EXACT SAME deterministic rule** Reflected XSS
+   verification uses, literally the same code:
+   `verification.MatchRuntimeExecution` and
+   `verification.DecideWithProvenance` — consulting the engine's own record of
+   the uncaught exception (paused instruction, script, frame) rather than
+   scanning page-error or console text, which a page can forge
+   ([verdict-provenance.md](verdict-provenance.md)). `MARKER` is a bare, unquoted JS
    identifier the `onerror` handler evaluates; referencing an undeclared
    identifier as code does exactly one thing in JavaScript: the engine
    throws `Uncaught ReferenceError: MARKER is not defined` the moment it
-   is evaluated. Observing this (page_error or console_error) → Confirmed.
+   is evaluated. Observing this at the marker identifier in the main frame →
+   Confirmed.
    The marker reaching the DOM but no signal → Rejected (e.g. CSP blocking
    inline event handlers, or a downstream sanitizer). Neither → Inconclusive.
 5. Verification attribution follows the same anti-false-positive

@@ -100,17 +100,18 @@ func TestDOMHTMLSourceMatrix(t *testing.T) {
 				}
 				defer bc.Close()
 				cand, _ := detection.DOMXSSPayloadFor(detection.DOMSourcePostMessage, detection.DOMXSSSink(sc.sink), marker)
-				console, pageErrors, html, _, _, err := ex.navigateSource(ctx, bc, detection.DOMSourcePostMessage, ep, "", marker, cand.Value)
+				obs, _, err := ex.navigateSource(ctx, bc, detection.DOMSourcePostMessage, ep, "", marker, cand.Value)
 				if err != nil {
 					t.Fatal(err)
 				}
+				html := obs.HTML
 				if !strings.Contains(html, `data-sender-origin="null"`) || !strings.Contains(html, `data-source-is-window="false"`) || !strings.Contains(html, `data-rejected="true"`) {
 					t.Fatalf("opaque non-self sender did not actually reach rejecting handler: %s", html)
 				}
-				if len(parseDOMXSSReachability(console, marker)) != 0 {
+				if len(parseDOMXSSReachability(domXSSHarnessMessages(obs.Runtime), marker)) != 0 {
 					t.Fatal("rejected sender reached sink")
 				}
-				if _, _, matched := verification.MatchExecutionSignal(marker, pageErrors, nil); matched {
+				if _, _, matched := verification.MatchRuntimeExecution(marker, obs.Runtime); matched {
 					t.Fatal("rejected sender executed marker")
 				}
 				return

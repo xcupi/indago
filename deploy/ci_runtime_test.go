@@ -16,7 +16,7 @@ func TestCIRuntimeRejectsMissingSkippedFailedRootsAndDescendants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots := []string{"TestIntegrationRenderRealBrowser", "TestIntegrationRenderCapturesJSONPostDataForDiscovery", "TestIntegrationRequestObserverDoesNotWaitForResponse", "TestIntegrationNetworkJSONBodyDiscovery", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestIntegrationVerifyReflectionOnlyIsRejected", "TestE2E_FullPipelineAgainstCorpus", "TestUINavigation", "TestUICooldownClock", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix", "TestIntegrationDefaultConfigRendererIsSandboxed", "TestIntegrationDisableSandboxIsExplicitOptOut", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "TestDOMXSSFragmentRouteCapturesPostLoadSink", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "TestIntegrationScopeGateAllowsInScopeRedirect", "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect", "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect", "TestIntegrationScopeGateBlocksBackslashPathRedirect", "TestIntegrationScopeGateBlocksWebSocketTraffic", "TestIntegrationScopeGateBlocksServiceWorkerTraffic", "TestIntegrationScopeGateBlocksPopupRedirect"}
+	roots := []string{"TestIntegrationRenderRealBrowser", "TestIntegrationRenderCapturesJSONPostDataForDiscovery", "TestIntegrationRequestObserverDoesNotWaitForResponse", "TestIntegrationNetworkJSONBodyDiscovery", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestIntegrationVerifyReflectionOnlyIsRejected", "TestE2E_FullPipelineAgainstCorpus", "TestUINavigation", "TestUICooldownClock", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix", "TestIntegrationDefaultConfigRendererIsSandboxed", "TestIntegrationDisableSandboxIsExplicitOptOut", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "TestDOMXSSFragmentRouteCapturesPostLoadSink", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "TestIntegrationScopeGateAllowsInScopeRedirect", "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect", "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect", "TestIntegrationScopeGateBlocksBackslashPathRedirect", "TestIntegrationScopeGateBlocksWebSocketTraffic", "TestIntegrationScopeGateBlocksServiceWorkerTraffic", "TestIntegrationScopeGateBlocksPopupRedirect", "TestIntegrationScopeGateRejectsUnmanagedTargets", "TestIntegrationScopeGateManagedFramesAndSubresources", "TestIntegrationScopeGatePreservesBodyReplay", "TestIntegrationRejectFabricatedMarkerException", "TestIntegrationRejectConsoleOnlyMarker", "TestDOMXSSGenuineInnerHTMLExecutionIsStillConfirmed", "TestDOMXSSForgedSignalsAreNotConfirmed", "TestDOMXSSStorageKeysAreIsolatedPerAttempt", "TestDOMXSSFragmentRouteSelectorsAreSeparateFindings", "TestIntegrationRejectCarriageReturnLineMappingForgery", "TestIntegrationConfirmsDespiteErrorAndScriptFlood", "TestDOMXSSSurvivesPageNeutralizingConsoleAndJSON", "TestDOMXSSStringTimerThrowingEveryTickStillConfirms"}
 	for _, tc := range []struct {
 		name, root, action, child string
 		wantPass                  bool
@@ -65,6 +65,19 @@ func TestCIRuntimeRejectsMissingSkippedFailedRootsAndDescendants(t *testing.T) {
 		{"scope-serviceworker-missing", "TestIntegrationScopeGateBlocksServiceWorkerTraffic", "missing", "", false},
 		{"scope-serviceworker-skip", "TestIntegrationScopeGateBlocksServiceWorkerTraffic", "skip", "", false},
 		{"scope-serviceworker-fail", "TestIntegrationScopeGateBlocksServiceWorkerTraffic", "fail", "", false},
+		{"scope-unmanaged-missing", "TestIntegrationScopeGateRejectsUnmanagedTargets", "missing", "", false},
+		{"scope-unmanaged-skip", "TestIntegrationScopeGateRejectsUnmanagedTargets", "skip", "", false},
+		{"scope-unmanaged-fail", "TestIntegrationScopeGateRejectsUnmanagedTargets", "fail", "", false},
+		{"scope-unmanaged-child-skip", "TestIntegrationScopeGateRejectsUnmanagedTargets", "skip", "/late-anchor-target", false},
+		{"scope-unmanaged-child-fail", "TestIntegrationScopeGateRejectsUnmanagedTargets", "fail", "/closed-shadow-anchor", false},
+		{"scope-frames-missing", "TestIntegrationScopeGateManagedFramesAndSubresources", "missing", "", false},
+		{"scope-frames-skip", "TestIntegrationScopeGateManagedFramesAndSubresources", "skip", "", false},
+		{"scope-frames-fail", "TestIntegrationScopeGateManagedFramesAndSubresources", "fail", "", false},
+		{"scope-replay-missing", "TestIntegrationScopeGatePreservesBodyReplay", "missing", "", false},
+		{"scope-replay-skip", "TestIntegrationScopeGatePreservesBodyReplay", "skip", "", false},
+		{"scope-replay-fail", "TestIntegrationScopeGatePreservesBodyReplay", "fail", "", false},
+		{"scope-replay-child-skip", "TestIntegrationScopeGatePreservesBodyReplay", "skip", "/form", false},
+		{"scope-replay-child-fail", "TestIntegrationScopeGatePreservesBodyReplay", "fail", "/json", false},
 		{"scope-popup-missing", "TestIntegrationScopeGateBlocksPopupRedirect", "missing", "", false},
 		{"scope-popup-skip", "TestIntegrationScopeGateBlocksPopupRedirect", "skip", "", false},
 		{"scope-popup-fail", "TestIntegrationScopeGateBlocksPopupRedirect", "fail", "", false},
@@ -77,6 +90,38 @@ func TestCIRuntimeRejectsMissingSkippedFailedRootsAndDescendants(t *testing.T) {
 		{"script-literal-missing", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "missing", "", false},
 		{"script-literal-skip", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "skip", "", false},
 		{"script-literal-fail", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "fail", "", false},
+		{"reflected-forged-exception-missing", "TestIntegrationRejectFabricatedMarkerException", "missing", "", false},
+		{"reflected-forged-exception-skip", "TestIntegrationRejectFabricatedMarkerException", "skip", "", false},
+		{"reflected-forged-exception-fail", "TestIntegrationRejectFabricatedMarkerException", "fail", "", false},
+		{"reflected-forged-console-missing", "TestIntegrationRejectConsoleOnlyMarker", "missing", "", false},
+		{"reflected-forged-console-skip", "TestIntegrationRejectConsoleOnlyMarker", "skip", "", false},
+		{"reflected-forged-console-fail", "TestIntegrationRejectConsoleOnlyMarker", "fail", "", false},
+		{"dom-positive-control-missing", "TestDOMXSSGenuineInnerHTMLExecutionIsStillConfirmed", "missing", "", false},
+		{"dom-positive-control-skip", "TestDOMXSSGenuineInnerHTMLExecutionIsStillConfirmed", "skip", "", false},
+		{"dom-positive-control-fail", "TestDOMXSSGenuineInnerHTMLExecutionIsStillConfirmed", "fail", "", false},
+		{"dom-forged-signals-missing", "TestDOMXSSForgedSignalsAreNotConfirmed", "missing", "", false},
+		{"dom-forged-signals-skip", "TestDOMXSSForgedSignalsAreNotConfirmed", "skip", "", false},
+		{"dom-forged-signals-fail", "TestDOMXSSForgedSignalsAreNotConfirmed", "fail", "", false},
+		{"dom-storage-isolation-missing", "TestDOMXSSStorageKeysAreIsolatedPerAttempt", "missing", "", false},
+		{"dom-storage-isolation-skip", "TestDOMXSSStorageKeysAreIsolatedPerAttempt", "skip", "", false},
+		{"dom-storage-isolation-fail", "TestDOMXSSStorageKeysAreIsolatedPerAttempt", "fail", "", false},
+		{"dom-fragment-selectors-missing", "TestDOMXSSFragmentRouteSelectorsAreSeparateFindings", "missing", "", false},
+		{"dom-fragment-selectors-skip", "TestDOMXSSFragmentRouteSelectorsAreSeparateFindings", "skip", "", false},
+		{"dom-fragment-selectors-fail", "TestDOMXSSFragmentRouteSelectorsAreSeparateFindings", "fail", "", false},
+		{"dom-forged-signals-child-skip", "TestDOMXSSForgedSignalsAreNotConfirmed", "skip", "/thrown_ReferenceError_naming_the_marker_on_a_safe_sink", false},
+		{"dom-forged-signals-child-fail", "TestDOMXSSForgedSignalsAreNotConfirmed", "fail", "/execution_inside_a_child_frame_on_a_safe_top-level_sink", false},
+		{"reflected-cr-forgery-missing", "TestIntegrationRejectCarriageReturnLineMappingForgery", "missing", "", false},
+		{"reflected-cr-forgery-skip", "TestIntegrationRejectCarriageReturnLineMappingForgery", "skip", "", false},
+		{"reflected-cr-forgery-fail", "TestIntegrationRejectCarriageReturnLineMappingForgery", "fail", "", false},
+		{"reflected-flood-missing", "TestIntegrationConfirmsDespiteErrorAndScriptFlood", "missing", "", false},
+		{"reflected-flood-skip", "TestIntegrationConfirmsDespiteErrorAndScriptFlood", "skip", "", false},
+		{"reflected-flood-fail", "TestIntegrationConfirmsDespiteErrorAndScriptFlood", "fail", "", false},
+		{"dom-neutralized-console-missing", "TestDOMXSSSurvivesPageNeutralizingConsoleAndJSON", "missing", "", false},
+		{"dom-neutralized-console-skip", "TestDOMXSSSurvivesPageNeutralizingConsoleAndJSON", "skip", "", false},
+		{"dom-neutralized-console-fail", "TestDOMXSSSurvivesPageNeutralizingConsoleAndJSON", "fail", "", false},
+		{"dom-timer-every-tick-missing", "TestDOMXSSStringTimerThrowingEveryTickStillConfirms", "missing", "", false},
+		{"dom-timer-every-tick-skip", "TestDOMXSSStringTimerThrowingEveryTickStillConfirms", "skip", "", false},
+		{"dom-timer-every-tick-fail", "TestDOMXSSStringTimerThrowingEveryTickStillConfirms", "fail", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

@@ -12,8 +12,8 @@ checks and the distinction between local and GitHub validation.
 `.github/workflows/ci.yml` runs on pushes, pull requests and manual dispatch;
 it has read-only contents permissions and never deploys/releases. It provisions
 Go from `go.mod`, Node 24, the documented Playwright driver and runner system
-Chrome. `scripts/ci-browser-check.py` requires sixteen actual passing runtime roots
-(no skips): `TestIntegrationRenderRealBrowser`,
+Chrome. `scripts/ci-browser-check.py` requires actual passing runtime roots
+(the script is the authoritative inventory; no skips): `TestIntegrationRenderRealBrowser`,
 `TestIntegrationRenderCapturesJSONPostDataForDiscovery`,
 `TestIntegrationRequestObserverDoesNotWaitForResponse`,
 `TestIntegrationNetworkJSONBodyDiscovery`,
@@ -24,13 +24,30 @@ Chrome. `scripts/ci-browser-check.py` requires sixteen actual passing runtime ro
 `TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms`,
 `TestDOMXSSFragmentRouteCapturesPostLoadSink`,
 `TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource`,
-`TestIntegrationDefaultConfigRendererIsSandboxed`, and
-`TestIntegrationDisableSandboxIsExplicitOptOut`. The JSON body tests prove bounded
+`TestIntegrationDefaultConfigRendererIsSandboxed`,
+`TestIntegrationDisableSandboxIsExplicitOptOut`,
+`TestIntegrationScopeGateAllowsInScopeRedirect`,
+`TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect`,
+`TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect`,
+`TestIntegrationScopeGateBlocksBackslashPathRedirect`,
+`TestIntegrationScopeGateBlocksWebSocketTraffic`,
+`TestIntegrationScopeGateBlocksServiceWorkerTraffic`,
+`TestIntegrationScopeGateBlocksPopupRedirect`,
+`TestIntegrationScopeGateRejectsUnmanagedTargets`,
+`TestIntegrationScopeGateManagedFramesAndSubresources`, and
+`TestIntegrationScopeGatePreservesBodyReplay`. The scope roots require actual
+loopback destination counters for first-request popup denial, ordinary managed
+redirects, child frames/subresources, and exact cookie-bearing POST form/JSON
+replay. Missing early popup frames fail closed without target-page JS guards;
+see [browser-scope-boundary.md](browser-scope-boundary.md) for unsupported popup
+flows and the pinned runtime race patch. The JSON body tests prove bounded
 in-scope request capture, that a pending response does not stall observation, raw
 field discovery/replay setup and an asynchronous loopback API request through
 Chromium. The delayed-sink test covers the post-load fragment route regression; the
 fragment-route test includes an escaped `textContent` control; the script-literal
-test covers the discovered `default` parameter and a safe control. All browser roots use `browser_integration`; missing/skipped/failed roots and skipped/failed descendants
+test covers the discovered `default` parameter and a safe control. The preflight runs
+with `-tags browser_integration` (some browser roots also run by default);
+missing/skipped/failed roots and skipped/failed descendants
 of any required root fail the check. The workflow then runs clean-test-cache
 `make check` and `make build`. Failure logs are retained for seven days. Locally set
 `INDAGO_CHROMIUM_PATH` to your installed Chrome and follow the same commands.

@@ -218,6 +218,14 @@ func (c *Collector) Counts() (endpoints, params, jobs int) {
 	return c.endpointCount, c.paramCount, c.jobCount
 }
 
+// AllowFetch implements fetchGuard: on an authenticated scan a discovered URL
+// that looks like it ends the session must be neither registered nor
+// requested. An operator-provided seed is explicit intent and always allowed;
+// an unauthenticated scan has no session to lose.
+func (c *Collector) AllowFetch(rawURL string, source domain.DiscoverySource) bool {
+	return !(c.authenticated && source != domain.SourceUserProvided && looksSessionTerminating(rawURL))
+}
+
 // AddEndpoint implements Sink.
 func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (domain.ID, error) {
 	info, err := Normalize(ep.URL)
@@ -243,7 +251,7 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 	// explicit intent (e.g. deliberately testing the logout endpoint
 	// itself), not an accidental link-follow. Unauthenticated scans have no
 	// session to lose, so nothing is skipped for them either.
-	if c.authenticated && ep.Source != domain.SourceUserProvided && looksSessionTerminating(info.Canonical) {
+	if !c.AllowFetch(info.Canonical, ep.Source) {
 		c.log.Debug("discovery: skipping likely session-terminating link", "url", info.Canonical, "source", ep.Source)
 		return "", nil
 	}

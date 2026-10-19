@@ -265,9 +265,11 @@ func (p *fakePage) OnRequest(fn func(NetworkEvent), _ func(string) bool) error {
 	p.reqFn = fn
 	return nil
 }
-func (p *fakePage) OnConsole(fn func(ConsoleMessage)) { p.conFn = fn }
-func (p *fakePage) OnDialog(fn func(string))          { p.dlgFn = fn }
-func (p *fakePage) OnPageError(fn func(string))       { p.errFn = fn }
+func (p *fakePage) OnConsole(fn func(ConsoleMessage))                       { p.conFn = fn }
+func (p *fakePage) OnDialog(fn func(string))                                { p.dlgFn = fn }
+func (p *fakePage) OnPageError(fn func(string))                             { p.errFn = fn }
+func (p *fakePage) EnableRuntimeProvenance(marker, initScript string) error { return nil }
+func (p *fakePage) RuntimeObservations() RuntimeObservations                { return RuntimeObservations{} }
 
 func (p *fakePage) WaitForURL(glob string, timeout time.Duration) error {
 	if p.gotoDelay > 0 {

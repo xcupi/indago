@@ -237,8 +237,18 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 		if err != nil || !in.Scope.Permits(info.Canonical).Allowed {
 			continue
 		}
-		if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: info.Canonical, Method: domain.MethodGET, Source: domain.SourceCrawler}); err != nil {
+		// Ask before queueing: a link queued for the next level is requested
+		// by fetchPage before the sink ever sees it, so a registration refusal
+		// alone would still send the request.
+		if !allowFetch(sink, info.Canonical, domain.SourceCrawler) {
+			continue
+		}
+		id, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: info.Canonical, Method: domain.MethodGET, Source: domain.SourceCrawler})
+		if err != nil {
 			return nil, err
+		}
+		if id == "" {
+			continue // refused by the sink (out of scope, malformed): never follow it
 		}
 		nextLinks = append(nextLinks, info.Canonical)
 	}
@@ -297,6 +307,17 @@ func (s *sitemapSource) Run(ctx context.Context, in Input, sink Sink) error {
 func (s *sitemapSource) process(ctx context.Context, in Input, sink Sink, sitemapURL string, depth int) error {
 	if depth > 3 { // bound sitemap-index recursion
 		return nil
+	}
+	if depth > 0 {
+		// A nested sitemap URL comes from document content, so it is untrusted:
+		// it must be in scope and must not be a session-terminating endpoint
+		// before it is requested. The top-level /sitemap.xml is built from the
+		// operator's seed origin.
+		info, err := Normalize(sitemapURL)
+		if err != nil || !in.Scope.Permits(info.Canonical).Allowed || !allowFetch(sink, info.Canonical, domain.SourceSitemap) {
+			return nil
+		}
+		sitemapURL = info.Canonical
 	}
 	if err := in.wait(ctx); err != nil {
 		return err
@@ -460,6 +481,9 @@ func (c *contentSource) Run(ctx context.Context, in Input, sink Sink) error {
 			info, err := Normalize(candidate)
 			if err != nil || !in.Scope.Permits(info.Canonical).Allowed {
 				continue
+			}
+			if !allowFetch(sink, info.Canonical, domain.SourceContentDiscovery) {
+				continue // probing the path is itself the request that ends the session
 			}
 			resp, err := c.engine.Do(ctx, &httpengine.Request{Method: "GET", URL: info.Canonical})
 			if err != nil {

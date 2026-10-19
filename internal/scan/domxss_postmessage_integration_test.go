@@ -29,12 +29,13 @@ func TestDOMXSSPostMessageFromOpaqueCrossOriginSenderReachesAndConfirms(t *testi
 	marker := "indagopostmsgpositive"
 	exec := &domXSSExecutor{}
 	canary := detection.DOMXSSCanary(marker)
-	console, pageErrors, targetHTML, _, err := exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/vulnerable"), marker, canary)
+	obs, err := exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/vulnerable"), marker, canary)
 	if err != nil {
 		t.Fatalf("deliver canary from opaque sandboxed sender: %v", err)
 	}
+	console, pageErrors, targetHTML := obs.Console, obs.PageErrors, obs.HTML
 	assertOpaqueSenderMessage(t, console, targetHTML)
-	if sinks := parseDOMXSSReachability(console, marker); len(sinks) == 0 {
+	if sinks := parseDOMXSSReachability(domXSSHarnessMessages(obs.Runtime), marker); len(sinks) == 0 {
 		t.Fatalf("cross-origin sender canary did not reach an HTML sink; console=%v pageErrors=%v", console, pageErrors)
 	}
 
@@ -42,14 +43,14 @@ func TestDOMXSSPostMessageFromOpaqueCrossOriginSenderReachesAndConfirms(t *testi
 	if !ok {
 		t.Fatal("could not create DOM-XSS verification candidate")
 	}
-	console, pageErrors, targetHTML, _, err = exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/vulnerable"), marker, candidate.Value)
+	obs, err = exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/vulnerable"), marker, candidate.Value)
 	if err != nil {
 		t.Fatalf("deliver verification payload from opaque sandboxed sender: %v", err)
 	}
+	console, pageErrors, targetHTML = obs.Console, obs.PageErrors, obs.HTML
 	assertOpaqueSenderMessage(t, console, targetHTML)
-	consoleErrors := postMessageConsoleErrors(console)
-	if _, _, confirmed := verification.MatchExecutionSignal(marker, pageErrors, consoleErrors); !confirmed {
-		t.Fatalf("real browser execution signal was not captured from the target page; pageErrors=%v console=%v", pageErrors, console)
+	if _, _, confirmed := verification.MatchRuntimeExecution(marker, obs.Runtime); !confirmed {
+		t.Fatalf("engine-attributed execution was not captured from the target page; pageErrors=%v console=%v runtime=%+v", pageErrors, console, obs.Runtime)
 	}
 	if got := scoped.Load(); got < 2 {
 		t.Fatalf("scope gate checked only %d network requests, want both target navigations", got)
@@ -67,12 +68,13 @@ func TestDOMXSSPostMessageRejectsOpaqueCrossOriginSender(t *testing.T) {
 	marker := "indagopostmsgnegative"
 	exec := &domXSSExecutor{}
 	canary := detection.DOMXSSCanary(marker)
-	console, pageErrors, targetHTML, _, err := exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/validated"), marker, canary)
+	obs, err := exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/validated"), marker, canary)
 	if err != nil {
 		t.Fatalf("deliver canary from opaque sandboxed sender: %v", err)
 	}
+	console, targetHTML := obs.Console, obs.HTML
 	assertOpaqueSenderMessage(t, console, targetHTML)
-	if sinks := parseDOMXSSReachability(console, marker); len(sinks) != 0 {
+	if sinks := parseDOMXSSReachability(domXSSHarnessMessages(obs.Runtime), marker); len(sinks) != 0 {
 		t.Fatalf("origin/source-validated handler unexpectedly reached an HTML sink: %v; console=%v", sinks, console)
 	}
 
@@ -80,12 +82,13 @@ func TestDOMXSSPostMessageRejectsOpaqueCrossOriginSender(t *testing.T) {
 	if !ok {
 		t.Fatal("could not create DOM-XSS verification candidate")
 	}
-	console, pageErrors, targetHTML, _, err = exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/validated"), marker, candidate.Value)
+	obs, err = exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/validated"), marker, candidate.Value)
 	if err != nil {
 		t.Fatalf("deliver verification payload from opaque sandboxed sender: %v", err)
 	}
+	console, targetHTML = obs.Console, obs.HTML
 	assertOpaqueSenderMessage(t, console, targetHTML)
-	if signal, text, confirmed := verification.MatchExecutionSignal(marker, pageErrors, postMessageConsoleErrors(console)); confirmed {
+	if signal, text, confirmed := verification.MatchRuntimeExecution(marker, obs.Runtime); confirmed {
 		t.Fatalf("sender-validated handler produced a Confirmed-capable browser signal %s: %q", signal, text)
 	}
 	if got := scoped.Load(); got < 2 {

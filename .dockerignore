@@ -2,6 +2,9 @@
 **
 !go.mod
 !go.sum
+!third_party/
+!third_party/playwright-go/
+!third_party/playwright-go/**
 !Makefile
 !cmd/
 !cmd/**

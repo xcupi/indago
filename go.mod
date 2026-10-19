@@ -4,6 +4,10 @@ module github.com/indago/indago
 // the pinned driver modernc.org/sqlite requires >= 1.26.0.
 go 1.26.0
 
+// The pinned runtime needs synchronized publication of early popup frames.
+// See third_party/playwright-go/INDAGO-PATCH.md; driver version stays 1.62.1.
+replace github.com/mxschmitt/playwright-go => ./third_party/playwright-go
+
 require (
 	github.com/mxschmitt/playwright-go v0.6201.1
 	golang.org/x/net v0.59.0

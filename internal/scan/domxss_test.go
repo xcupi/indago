@@ -676,3 +676,17 @@ func TestQueryStringDOMXSSFindingDoesNotCollideWithReflectedXSSOnSameParameter(t
 		t.Fatalf("expected one of each vuln class, findings=%+v", findings)
 	}
 }
+
+func TestDOMXSSFindingDedupKeySeparatesFragmentRouteSelectors(t *testing.T) {
+	ep := domain.ID("ep1")
+	a := domXSSFindingDedupKey(ep, detection.DOMSourceHash, detection.DOMSinkInnerHTML, "a")
+	b := domXSSFindingDedupKey(ep, detection.DOMSourceHash, detection.DOMSinkInnerHTML, "b")
+	whole := domXSSFindingDedupKey(ep, detection.DOMSourceHash, detection.DOMSinkInnerHTML, "")
+	if a == b || a == whole || b == whole {
+		t.Fatalf("fragment route parameters and the whole-fragment probe must not share a finding: a=%q b=%q whole=%q", a, b, whole)
+	}
+	// Sources that carry no selector keep collapsing per sink.
+	if domXSSFindingDedupKey(ep, detection.DOMSourceWindowName, detection.DOMSinkInnerHTML, "x") != domXSSFindingDedupKey(ep, detection.DOMSourceWindowName, detection.DOMSinkInnerHTML, "y") {
+		t.Fatal("selector-less sources must not fan out by parameter")
+	}
+}

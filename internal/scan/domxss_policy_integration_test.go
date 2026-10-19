@@ -50,7 +50,7 @@ func TestDOMPolicyEveryNavigationSharesScanPacing(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer cancel()
 			before := arrivals.Load()
-			_, _, _, _, _, err := ex.navigateSource(ctx, bc, source, ep, "key", "POLICY_MARKER", "inert")
+			_, _, err := ex.navigateSource(ctx, bc, source, ep, "key", "POLICY_MARKER", "inert")
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("navigation bypassed shared pacing: %v", err)
 			}

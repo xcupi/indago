@@ -44,9 +44,6 @@ func matchExecutionSignal(token string, pageErrors, consoleErrors []string) (Sig
 	if text, ok := firstMarkerReferenceError(token, pageErrors, true); ok {
 		return SignalPageError, text, true
 	}
-	if text, ok := firstMarkerReferenceError(token, consoleErrors, false); ok {
-		return SignalConsoleError, text, true
-	}
 	return SignalNone, "", false
 }
 

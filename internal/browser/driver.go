@@ -42,6 +42,8 @@ type contextHandle interface {
 
 // pageHandle is a single page/tab within a context.
 type pageHandle interface {
+	EnableRuntimeProvenance(marker, initScript string) error
+	RuntimeObservations() RuntimeObservations
 	// Goto navigates to url and returns the HTTP status and final URL.
 	// referer, when non-empty, overrides the Referer HTTP header sent with
 	// this navigation (Playwright's own PageGotoOptions.Referer) — used by

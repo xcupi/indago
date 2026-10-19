@@ -33,6 +33,19 @@ required = {
     "TestIntegrationScopeGateBlocksWebSocketTraffic",
     "TestIntegrationScopeGateBlocksServiceWorkerTraffic",
     "TestIntegrationScopeGateBlocksPopupRedirect",
+    "TestIntegrationScopeGateRejectsUnmanagedTargets",
+    "TestIntegrationScopeGateManagedFramesAndSubresources",
+    "TestIntegrationScopeGatePreservesBodyReplay",
+    "TestIntegrationRejectFabricatedMarkerException",
+    "TestIntegrationRejectConsoleOnlyMarker",
+    "TestDOMXSSGenuineInnerHTMLExecutionIsStillConfirmed",
+    "TestDOMXSSForgedSignalsAreNotConfirmed",
+    "TestDOMXSSStorageKeysAreIsolatedPerAttempt",
+    "TestDOMXSSFragmentRouteSelectorsAreSeparateFindings",
+    "TestIntegrationRejectCarriageReturnLineMappingForgery",
+    "TestIntegrationConfirmsDespiteErrorAndScriptFlood",
+    "TestDOMXSSSurvivesPageNeutralizingConsoleAndJSON",
+    "TestDOMXSSStringTimerThrowingEveryTickStillConfirms",
 }
 if not shutil.which("node"):
     raise SystemExit("required Node.js unavailable")

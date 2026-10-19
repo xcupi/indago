@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pw "github.com/mxschmitt/playwright-go"
@@ -92,43 +93,10 @@ func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeader
 	}
 	pc := &pwContext{c: c, allow: allow, scopeSessions: make(map[pw.Page]pw.CDPSession)}
 	if allow != nil {
-		// Do not let target code create a popup before the new page's CDP
-		// redirect guard can attach. The scanner does not simulate popup user
-		// interactions, so scoped contexts deliberately suppress window.open.
-		if err := c.AddInitScript(pw.Script{Content: pw.String(`(() => {
-			const popupTarget = (target) => {
-				const base = document.querySelector('base[target]');
-				const value = target || (base && base.target) || '';
-				return value !== '' && value.toLowerCase() !== '_self';
-			};
-			const blockTargetedLink = (event) => {
-				const link = event.target && event.target.closest && event.target.closest('a[href], area[href]');
-				if (link && popupTarget(link.target)) event.preventDefault();
-			};
-			document.addEventListener('click', blockTargetedLink, true);
-			document.addEventListener('auxclick', blockTargetedLink, true);
-			document.addEventListener('submit', (event) => {
-				const form = event.target;
-				const submitter = event.submitter;
-				const target = submitter && submitter.hasAttribute('formtarget') ? submitter.formTarget : form && form.target;
-				if (popupTarget(target)) event.preventDefault();
-			}, true);
-			const nativeSubmit = HTMLFormElement.prototype.submit;
-			HTMLFormElement.prototype.submit = function() {
-				if (popupTarget(this.target)) return;
-				return Reflect.apply(nativeSubmit, this, arguments);
-			};
-			Object.defineProperty(window, 'open', {value: function(){ return null; }, configurable: false, writable: false});
-		})()`)}); err != nil {
-			_ = c.Close()
-			return nil, fmt.Errorf("install scoped popup restriction: %w", err)
-		}
-		// Abort directly disallowed requests before they leave the browser.
-		// Playwright's route callback only sees the original request in an HTTP
-		// redirect chain. Explicit pages install a CDP response-stage gate before
-		// navigation; new targets get one at their earliest page event. Popup
-		// creation via window.open is separately suppressed because target events
-		// may race the popup's first redirect response.
+		// Context routing pauses even a popup's first request before network
+		// dispatch. Only pages explicitly created and guarded by NewPage may
+		// continue. A page event is too late to authorize a new target's first
+		// redirect, and target-controlled DOM listeners are not a scope boundary.
 		if err := c.Route("**/*", pc.onRoute); err != nil {
 			_ = c.Close()
 			return nil, fmt.Errorf("install scope gate and request override: %w", err)
@@ -139,13 +107,6 @@ func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeader
 			_ = c.Close()
 			return nil, fmt.Errorf("install WebSocket scope restriction: %w", err)
 		}
-		c.OnPage(func(page pw.Page) {
-			if err := pc.ensureRedirectScopeGate(page); err != nil {
-				// Fail closed on popups/pages for which the response-stage guard
-				// could not be installed.
-				_ = page.Close()
-			}
-		})
 		c.OnPageClose(func(page pw.Page) {
 			pc.scopeMu.Lock()
 			delete(pc.scopeSessions, page)
@@ -181,11 +142,9 @@ func (c *pwContext) ensureRedirectScopeGate(page pw.Page) error {
 	if c.allow == nil {
 		return nil
 	}
-	c.scopeMu.Lock()
-	defer c.scopeMu.Unlock()
-	if _, ok := c.scopeSessions[page]; ok {
-		return nil
-	}
+	// Called only for the fresh about:blank page owned by NewPage, before it
+	// is returned to callers. Never hold scopeMu across protocol commands:
+	// close/route events may need it while the dispatcher delivers replies.
 	cdp, err := c.c.NewCDPSession(page)
 	if err != nil {
 		return fmt.Errorf("create redirect scope observer: %w", err)
@@ -193,14 +152,31 @@ func (c *pwContext) ensureRedirectScopeGate(page pw.Page) error {
 	if err := enableRedirectScopeGate(cdp, c.allow); err != nil {
 		return err
 	}
+	c.scopeMu.Lock()
 	c.scopeSessions[page] = cdp
+	c.scopeMu.Unlock()
 	return nil
+}
+
+// requestHasManagedPage is a pre-network authorization check, not popup
+// detection. Playwright can have no frame yet for a new target's first request;
+// that is an unapproved request, never a reason to continue optimistically.
+// Child frames share the owning page's already-installed redirect guard.
+func (c *pwContext) requestHasManagedPage(req pw.Request) bool {
+	frame := req.Frame()
+	if frame == nil {
+		return false
+	}
+	c.scopeMu.Lock()
+	_, managed := c.scopeSessions[frame.Page()]
+	c.scopeMu.Unlock()
+	return managed
 }
 
 func (c *pwContext) onRoute(route pw.Route) {
 	req := route.Request()
 	rawURL := req.URL()
-	if c.allow != nil && isNetworkURL(rawURL) && !c.allow(rawURL) {
+	if c.allow != nil && (!c.requestHasManagedPage(req) || (isNetworkURL(rawURL) && !c.allow(rawURL))) {
 		_ = route.Abort("blockedbyclient")
 		return
 	}
@@ -366,9 +342,14 @@ func (c *pwContext) Close() error {
 }
 
 type pwPage struct {
-	p   pw.Page
-	cdp pw.CDPSession
-	ctx *pwContext
+	provenanceMu sync.Mutex
+	provenance   RuntimeObservations
+	// provInflight counts CDP pause/console events whose handler has started
+	// but not finished, so a read can wait for an observation that is mid-write.
+	provInflight atomic.Int64
+	p            pw.Page
+	cdp          pw.CDPSession
+	ctx          *pwContext
 
 	bodyMu                 sync.Mutex
 	capturedJSONBodyBytes  int
