@@ -132,9 +132,10 @@ right now** and must remain stubs/interfaces (job handlers are no-ops):
   payload libraries, no simulated user activation (e.g. clicking a
   `javascript:` link) to force execution. State-changing methods still require
   the explicit opt-in, for both candidate execution and verification.
-- ❌ POST/body-carrying candidates are not browser-verified (navigation carries
-  no request body); those findings stay Pending. Stored XSS/additional engines
-  remain designed-for, not built.
+- ⚠️ POST/JSON candidates may be browser-verified only with the explicit
+  state-changing opt-in, through a bounded top-level document replay. Other
+  body-carrying methods remain unsupported and their findings stay Pending.
+  Stored XSS/additional engines remain designed-for, not built.
 
 Implemented so far (infrastructure and **discovery**):
 
