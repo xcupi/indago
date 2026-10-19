@@ -11,6 +11,38 @@ import (
 	"github.com/indago/indago/internal/ratelimit"
 )
 
+func (p *fakePage) GotoJSON(rawURL string, body []byte, contentType, waitUntil string, timeout time.Duration) (int, string, error) {
+	return 200, rawURL, nil
+}
+
+func TestPageNavigateJSONHonoursLimiter(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+	ctx := context.Background()
+	c, err := m.NewContext(ctx, ContextOptions{AllowRequest: func(string) bool { return true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	page, err := c.NewPage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	l := ratelimit.New(2) // 500ms interval; consume the first permit.
+	if err := l.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, err := page.NavigateJSON(ctx, "https://target.example/api", []byte(`{"q":"x"}`), "application/json", NavOptions{Limiter: l}); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed < 450*time.Millisecond {
+		t.Fatalf("JSON navigation took %v after reserving the previous permit; want limiter delay near 500ms", elapsed)
+	}
+}
+
 func TestPageNavigateHonoursLimiter(t *testing.T) {
 	d := &fakeDriver{}
 	m := newFakeManager(t, Config{PoolSize: 1}, d)

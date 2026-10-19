@@ -26,6 +26,45 @@ func newCollector(t *testing.T, cfg discovery.Config) (*discovery.Collector, *me
 	return c, st, q, scanID
 }
 
+// A crawler-found SPA route carries query names inside the fragment. They must
+// be registered from AddEndpoint itself because link discovery does not call
+// AddParameter for a fragment, and they must remain DOM-only (no HTTP job).
+func TestCollectorAddEndpointRegistersFragmentParametersAsDOMOnly(t *testing.T) {
+	c, st, _, scanID := newCollector(t, discovery.DefaultConfig())
+	ctx := context.Background()
+	id, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{
+		URL: "http://example.com/#/search?q=hello&lang=en", Method: domain.MethodGET, Source: domain.SourceCrawler,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == "" {
+		t.Fatal("in-scope crawler link was unexpectedly skipped")
+	}
+	params, err := st.Parameters().ListByEndpoint(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, p := range params {
+		if p.Location == domain.LocationFragment && p.Source == domain.SourceCrawler {
+			got[p.Name] = true
+		}
+	}
+	if !got["q"] || !got["lang"] {
+		t.Fatalf("fragment params registered = %v, want q and lang", got)
+	}
+	ips, err := st.InjectionPoints().ListByScan(ctx, scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ip := range ips {
+		if ip.Location == domain.LocationFragment {
+			t.Fatalf("fragment parameter produced an HTTP injection point: %+v", ip)
+		}
+	}
+}
+
 // newAuthenticatedCollector is newCollector's counterpart for tests of the
 // session-terminating-link skip, which only applies to an authenticated scan.
 func newAuthenticatedCollector(t *testing.T, cfg discovery.Config) (*discovery.Collector, *memory.Store, *queue.Memory, domain.ID) {
@@ -537,7 +576,54 @@ func TestCollectorHydrateRegistersMissingQueryParams(t *testing.T) {
 	}
 }
 
-// A parameter persisted without its injection point gets one (and its job).
+// Fragment parameter names present in a persisted canonical endpoint must be
+// recovered by Hydrate after an interruption, without creating HTTP injection points.
+func TestCollectorHydrateRegistersMissingFragmentParamsAsDOMOnly(t *testing.T) {
+	st := memory.New()
+	q := queue.NewMemory()
+	scanID := domain.NewID()
+	scope := domain.Scope{IncludeHosts: []string{"example.com"}}
+	ctx := context.Background()
+	info, err := discovery.Normalize("http://example.com/#/search?q=hello&lang=en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := &domain.Endpoint{ID: domain.NewID(), ScanID: scanID, URL: info.Canonical, Method: domain.MethodGET,
+		Source: domain.SourceCrawler, Fingerprint: discovery.EndpointKey(domain.MethodGET, info)}
+	if err := st.Endpoints().Create(ctx, ep); err != nil {
+		t.Fatal(err)
+	}
+	c := discovery.NewCollector(st, q, scanID, scope, false, discovery.DefaultConfig(), quiet())
+	if err := c.Hydrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Hydrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	params, err := st.Parameters().ListByScan(ctx, scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragment := map[string]bool{}
+	for _, p := range params {
+		if p.Location == domain.LocationFragment {
+			fragment[p.Name] = true
+		}
+	}
+	if !fragment["q"] || !fragment["lang"] {
+		t.Fatalf("fragment params after hydrate = %v, want q and lang", fragment)
+	}
+	ips, err := st.InjectionPoints().ListByScan(ctx, scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ip := range ips {
+		if ip.Location == domain.LocationFragment {
+			t.Fatalf("hydrate created an HTTP injection point for fragment: %+v", ip)
+		}
+	}
+}
+
 func TestCollectorHydrateCreatesMissingInjectionPoint(t *testing.T) {
 	st := memory.New()
 	q := queue.NewMemory()

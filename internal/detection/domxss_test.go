@@ -35,6 +35,17 @@ func TestDOMXSSCanaryContainsMarker(t *testing.T) {
 	}
 }
 
+func TestDOMXSSDocumentWriteCandidateUsesScriptBodyWithoutReservedAttributes(t *testing.T) {
+	marker := "indxssdw1"
+	cand, ok := detection.DOMXSSPayloadFor(detection.DOMSourceQuery, detection.DOMSinkDocumentWrite, marker)
+	if !ok {
+		t.Fatal("expected document.write candidate")
+	}
+	if want := "<script>" + marker + "</script>"; cand.Value != want {
+		t.Fatalf("document.write candidate = %q, want %q for decodeURI + select context", cand.Value, want)
+	}
+}
+
 func TestDOMXSSPayloadForEachSink(t *testing.T) {
 	marker := "indxyz789"
 	for _, sink := range []detection.DOMXSSSink{detection.DOMSinkInnerHTML, detection.DOMSinkOuterHTML, detection.DOMSinkDocumentWrite} {

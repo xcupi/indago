@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -464,6 +465,21 @@ func putEvidenceBlob(ctx context.Context, st store.Store, ev evidence.Store, sca
 // request construction
 // ---------------------------------------------------------------------------
 
+// observedJSONContentType preserves an observed JSON media type only when it is
+// valid JSON (application/json or a +json subtype); otherwise it uses the
+// standard application/json fallback.
+func observedJSONContentType(raw string) string {
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return "application/json"
+	}
+	mediaType = strings.ToLower(mediaType)
+	if mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") {
+		return raw
+	}
+	return "application/json"
+}
+
 // buildRequest builds the baseline request for an endpoint: its URL with every
 // known query parameter present at its observed value, and — for body-carrying
 // methods — a form or JSON body of the known form/JSON parameters at their
@@ -485,7 +501,7 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 
 	q := u.Query()
 	form := url.Values{}
-	jsonBody := map[string]string{}
+	jsonBody := map[string]json.RawMessage{}
 	var headerOverride map[string]string
 	var cookieOverride []*http.Cookie
 	for _, p := range sorted {
@@ -510,7 +526,17 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 		case domain.LocationForm:
 			form.Set(p.Name, val)
 		case domain.LocationJSON:
-			jsonBody[p.Name] = val
+			if !injected && p.Source == domain.SourceBrowserNetwork && json.Valid([]byte(p.Example)) {
+				// Network discovery stores a bounded raw JSON value in Example so
+				// non-focused fields keep their original JSON type/shape.
+				jsonBody[p.Name] = json.RawMessage(p.Example)
+			} else {
+				raw, err := json.Marshal(val)
+				if err != nil {
+					return nil, err
+				}
+				jsonBody[p.Name] = raw
+			}
 		case domain.LocationHeader:
 			// Only the mutated/candidate request overrides a header — the
 			// baseline must never disturb any header the scan relies on
@@ -569,7 +595,7 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 			return nil, err
 		}
 		req.Body = b
-		req.ContentType = "application/json"
+		req.ContentType = observedJSONContentType(ep.ContentType)
 	}
 	return req, nil
 }
@@ -583,19 +609,16 @@ func isSafeMethod(m domain.HTTPMethod) bool {
 	}
 }
 
-// canBrowserVerify reports whether method+location is something the browser
-// verifier can replay as a real navigation: ordinary GET/HEAD, or POST with a
-// form-encoded (application/x-www-form-urlencoded) body — replayed as a real
-// <form> submission (see browser.Page.NavigateForm) so a POST/form candidate
-// gets the same chance to execute on page load a GET one already gets.
-// POST+JSON has no browser-navigable form (an HTML form cannot carry
-// application/json) and stays unsupported — that Finding stays Pending.
+// canBrowserVerify reports whether method+location has an in-scope browser
+// document replay: ordinary GET/HEAD, POST/form via a real form submission, or
+// POST/JSON via a one-shot top-level navigation request override. Other
+// body-carrying methods remain unsupported and their Findings stay Pending.
 func canBrowserVerify(method domain.HTTPMethod, loc domain.ParamLocation) bool {
 	switch method {
 	case domain.MethodGET, domain.MethodHEAD, "":
 		return true
 	case domain.MethodPOST:
-		return loc == domain.LocationForm
+		return loc == domain.LocationForm || loc == domain.LocationJSON
 	default:
 		return false
 	}

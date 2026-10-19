@@ -136,10 +136,27 @@ type Registry struct { /* register/get/names by source */ }
 
 - ✅ Real sources via `NewRealRegistry(engine, browser, cfg)`: seed, crawler (links,
   forms, query/form parameters, param wordlist), sitemap, robots, content
-  wordlist, and browser network (when a browser is supplied). A `Collector` (the
-  `Sink`) normalizes, **scope-checks**, deduplicates, persists, and enqueues a test
-  job per new endpoint/injection point; `Hydrate` rebuilds its dedup state after a
-  restart. A `Manager` runs sources concurrently behind a pause `Gate`.
+  wordlist, and browser network (when a browser is supplied). Browser-observed
+  in-scope JSON bodies are eligible only for POST/PUT/PATCH/DELETE. Chromium's
+  CDP Network domain sets `maxPostDataSize` to 64 KiB + 1; method, media type and
+  scope are checked before inspecting event `postData`. Only non-empty values up
+  to 64 KiB are retained; larger included values are rejected, and CDP may omit
+  oversized `postData`. At most 64 top-level fields are registered as raw typed
+  `LocationJSON` examples for replay. Automatic `/favicon.ico` requests are excluded
+  to avoid meaningless header injection points. Each page retains at most 16
+  JSON bodies and 256 KiB total; after exhaustion the application stops reading
+  and retaining `postData` but continues reporting request metadata. This bounds
+  retained bodies, not aggregate CDP transfer: each request event may still carry
+  up to the per-event cap. A bounded 250 ms post-load observation window catches
+  scheduled API requests without waiting indefinitely for network idle. Full
+  bodies remain ephemeral and are excluded from event JSON; valid observed
+  `+json` media types are retained for replay. A `Collector` (the `Sink`) normalizes,
+  persists, and enqueues a test job per new endpoint/injection point; `Hydrate`
+  rebuilds its dedup state after a restart.
+  A `Manager` runs sources concurrently behind a pause `Gate`. Bounded
+  POST/JSON candidates can now be replayed for browser verification when the
+  state-changing opt-in is enabled; unsupported body-carrying methods remain
+  Pending (see `docs/browser-verification.md`).
 - The `Sink` streaming contract is what lets **discovery and testing run in
   parallel** — a source emits endpoints/parameters as it finds them.
 

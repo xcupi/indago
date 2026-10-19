@@ -98,12 +98,16 @@ const (
 	LocationHeader ParamLocation = "header" // request header
 	LocationCookie ParamLocation = "cookie" // cookie value
 	LocationPath   ParamLocation = "path"   // path segment
+	// LocationFragment is a query parameter carried inside a single-page-app
+	// route fragment (e.g. "q" in "#/search?q=..."). It is never an HTTP
+	// injection point: only the DOM-XSS engine reads it.
+	LocationFragment ParamLocation = "fragment"
 )
 
 // IsValid reports whether the location is a known value.
 func (l ParamLocation) IsValid() bool {
 	switch l {
-	case LocationQuery, LocationForm, LocationJSON, LocationHeader, LocationCookie, LocationPath:
+	case LocationQuery, LocationForm, LocationJSON, LocationHeader, LocationCookie, LocationPath, LocationFragment:
 		return true
 	default:
 		return false
@@ -123,13 +127,16 @@ const (
 	SourceRobots           DiscoverySource = "robots"
 	SourceContentDiscovery DiscoverySource = "content_discovery"
 	SourceParamDiscovery   DiscoverySource = "param_discovery"
+	// SourceScriptLiteral: a parameter name a page's own inline script reads
+	// as a string literal (see discovery.ExtractScriptParamNames).
+	SourceScriptLiteral DiscoverySource = "script_literal"
 )
 
 // IsValid reports whether the source is a known value.
 func (d DiscoverySource) IsValid() bool {
 	switch d {
 	case SourceUserProvided, SourceCrawler, SourceForm, SourceBrowserNetwork,
-		SourceSitemap, SourceRobots, SourceContentDiscovery, SourceParamDiscovery:
+		SourceSitemap, SourceRobots, SourceContentDiscovery, SourceParamDiscovery, SourceScriptLiteral:
 		return true
 	default:
 		return false

@@ -391,12 +391,11 @@ working PoC would be worse than no PoC at all. For public static requests,
 the displayed details/curl are exact; if auth or refresh dependencies exist,
 the heading changes to “Request template” and the stale values are redacted.
 
-A POST+JSON override can never actually reach `GeneratePoC` on a real
-Confirmed finding in the first place — see AGENTS.md §3 and
-`docs/browser-verification.md`: browser navigation carries no request
-body, so a POST+JSON candidate can never be browser-verified and so can
-never be `Confirmed`. `GeneratePoC` still handles it defensively (no
-one-click artifact, explicit explanation, curl fallback).
+A POST+JSON override can now reach `GeneratePoC` after deterministic browser
+verification, but it still cannot produce a one-click HTML PoC: an HTML form
+cannot carry `application/json`. The artifact therefore gives an explicit
+explanation and curl fallback rather than pretending it can submit the exact
+request. Auth/session and dynamic-token constraints still apply as above.
 
 ### Reachable from all three surfaces
 

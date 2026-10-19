@@ -54,26 +54,50 @@ activates it on passive page load, so it must never read as confirmed.
 
 ## What actually happens (`BrowserVerifier.Verify`)
 
-1. The candidate's exact URL (GET/HEAD only — browser navigation carries no
-   request body; POST/body-carrying reflections stay `pending`) is checked
-   against scope and, if it passes, navigated to in a fresh, isolated browser
-   context — seeded with the scan's saved session (`domain.Session.StatePath`)
-   when one exists, so verification runs authenticated exactly like the rest of
-   the scan.
-2. Every request the page itself makes (subresources, redirects) is gated by
-   the same `AllowRequest` scope check the HTTP engine uses — nothing
-   out-of-scope ever leaves the browser.
-3. The page is waited for `load` (a real browser event, not an arbitrary
+1. The candidate URL is checked against scope and replayed in a fresh,
+   isolated browser context — seeded with the scan's saved session
+   (`domain.Session.StatePath`) when one exists. Supported replays are GET/HEAD,
+   POST/form via a real HTML form, and POST/JSON via a bounded (128 KiB)
+   top-level document replay preserving the observed JSON media type and body.
+   POST/JSON remains behind the state-changing opt-in; invalid, oversized, or
+   unsupported bodies are not attempted. For POST/JSON, Playwright submits the
+   body through `Route.Fetch` with redirects disabled, then fulfills the
+   top-level document response for Chromium to parse and execute.
+2. Direct browser requests are checked by the same `AllowRequest` scope gate.
+   Playwright only routes the original request in an HTTP redirect chain, so
+   each managed page also has a CDP response-stage gate: it resolves every 3xx
+   `Location` against the responding URL and fails the redirect before Chromium
+   follows it when the destination is outside scope. Raw backslash characters in
+   `Location` are rejected because Chromium's WHATWG URL parser and Go's
+   `net/url` can interpret them differently. In-scope redirects continue
+   normally; real-browser tests cover multi-hop navigation and subresource
+   redirects.
+3. POST/JSON is intentionally stricter: its Playwright route fetch disables
+   automatic redirects, and `Location`/`Refresh` is removed before the response
+   is fulfilled as a document. No redirect is followed, even to an in-scope URL;
+   a redirected destination is therefore not verified in this phase.
+4. These redirect checks apply to pages managed by the browser manager. Popup
+   and service-worker initiated redirect chains are not covered by the current
+   integration tests and must not be claimed as verified.
+5. The page is waited for `load` (a real browser event, not an arbitrary
    sleep), then its console errors, uncaught exceptions, and rendered HTML are
    read back.
-4. The decision above is applied, and a screenshot, the rendered DOM, and the
+6. The decision above is applied, and a screenshot, the rendered DOM, and the
    combined browser log are captured as evidence.
+
+**POST/JSON interpretation boundary:** `Confirmed` means the exact candidate
+marker executed in Chromium while parsing the response as a top-level document.
+It does not emulate the application's fetch/XHR or DOM-sink flow and does not
+prove that an attacker can cause the cross-origin request (for example, through
+CORS/CSRF constraints). Treat it as deterministic response-execution evidence,
+not complete proof of attacker delivery.
 
 ## Pipeline wiring (`internal/scan/verify.go`)
 
-A candidate `JobTest` that reflects (and whose method is GET/HEAD) does two
-things before it completes: creates a `Finding` at `VerdictPending`, and
-enqueues a `JobVerify` job carrying that candidate and the Finding's ID. A
+A candidate `JobTest` that reflects does two things before it completes:
+creates a `Finding` at `VerdictPending`, and enqueues a `JobVerify` job carrying
+that candidate and the Finding's ID when its method/body combination is
+supported (GET/HEAD, POST/form, or bounded POST/JSON). A
 `JobVerify` job (handled by `verifyExecutor`, its own worker group —
 `BrowserConcurrency`) resolves the target exactly like a test job, re-applies
 the state-changing safeguard, calls the `Verifier`, and on completion:

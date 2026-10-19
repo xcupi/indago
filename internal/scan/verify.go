@@ -12,9 +12,8 @@ package scan
 //   - Scope is enforced for every verification request via the same
 //     domain.Scope the HTTP engine uses, passed straight through to the browser's
 //     AllowRequest gate.
-//   - Browser navigation carries no request body, so only a GET/HEAD-navigable
-//     candidate is verified (enforced by the caller in executor.go and, as
-//     defense in depth, inside verification.BrowserVerifier itself).
+//   - Browser document replay supports GET/HEAD, POST/form and bounded POST/JSON;
+//     other body-carrying methods stay unsupported and Pending.
 //   - No LLM, no new payloads: the candidate's Value is replayed unchanged.
 
 import (
@@ -69,14 +68,15 @@ func parseVerifyJob(job *domain.TestJob) (verifyJob, error) {
 // enqueueVerification correlates a candidate that reflected into a Finding
 // (creating one at VerdictPending, or absorbing this candidate into an
 // existing finding at the same site — see upsertPendingFinding) and, only when
-// the endpoint's method is browser-navigable, enqueues the JobVerify job that
-// will confirm or reject it.
+// the method/location can be replayed as a browser document, enqueues the
+// JobVerify job that will confirm or reject it.
 //
 // The Finding is created UNCONDITIONALLY: a POST/body-carrying reflection is
 // just as real a candidate as a GET one, and the operator should see it even
-// though browser navigation has no request body and so cannot verify it —
-// that finding simply stays Pending (see docs/scan-orchestration.md). Only the
-// verify-job enqueue is gated on the method.
+// when its method/body representation is not supported for browser replay —
+// that finding simply stays Pending. The verify-job enqueue is gated on the
+// method/location capability, with POST/JSON replay available only under the
+// same state-changing opt-in as candidate execution.
 //
 // Best-effort throughout: failures are logged, not fatal — the candidate's own
 // TestCase result (already persisted) is unaffected either way.
@@ -362,6 +362,16 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 				in.FormValues = fv
 			}
 		}
+		if req.Method == "POST" && focus.Location == domain.LocationJSON {
+			in.JSONBody = append([]byte(nil), req.Body...)
+			in.ContentType = req.ContentType
+			for name, value := range req.Headers {
+				if strings.EqualFold(name, "Content-Type") {
+					in.ContentType = value
+					break
+				}
+			}
+		}
 		// Header/Cookie candidates don't show up in req.URL or req.Body —
 		// the override must be carried separately so the verifying browser
 		// context applies it BEFORE navigation (see verification.Input and
@@ -393,14 +403,14 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 		return verifyResult{outcome: domain.OutcomeError, permanent: true, err: err, note: note}
 	}
 	if !canBrowserVerify(ep.Method, focus.Location) {
-		return verifyResult{skipped: true, note: note + ": browser verification supports GET/HEAD navigation, or POST with a form-encoded (application/x-www-form-urlencoded) body, only in this phase"}
+		return verifyResult{skipped: true, note: note + ": browser verification supports GET/HEAD, POST/form, or bounded POST/JSON document replay only in this phase"}
 	}
 	if verifyErr != nil {
 		switch {
 		case errors.Is(verifyErr, verification.ErrNotImplemented):
 			return verifyResult{skipped: true, note: note + ": browser verification unavailable (no browser configured for this scan)"}
 		case errors.Is(verifyErr, verification.ErrUnsupportedMethod):
-			return verifyResult{skipped: true, note: note + ": browser verification supports GET/HEAD-navigable candidates only"}
+			return verifyResult{skipped: true, note: note + ": request method or body representation is not supported for browser document replay"}
 		case ctx.Err() != nil:
 			return verifyResult{outcome: domain.OutcomeCancelled, err: ctx.Err(), note: note}
 		case errors.Is(verifyErr, context.DeadlineExceeded) || isNetTimeout(verifyErr):

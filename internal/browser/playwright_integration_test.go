@@ -8,9 +8,11 @@ package browser_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -93,6 +95,107 @@ func TestIntegrationRenderRealBrowser(t *testing.T) {
 	}
 }
 
+func TestIntegrationRenderCapturesJSONPostDataForDiscovery(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<script>
+fetch('/api/search', {method:'POST', headers:{'Content-Type':'application/vnd.api+json; charset=utf-8'}, body:JSON.stringify({query:'api-xss-input', page:2})});
+fetch('/api/large', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({large:'x'.repeat(70 * 1024)})});
+</script>`)
+	})
+	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	})
+	mux.HandleFunc("/api/large", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	m := newManagerOrSkip(t, browser.DefaultConfig())
+	defer m.Close()
+	res, err := m.Render(context.Background(), srv.URL+"/", browser.RenderOptions{
+		WaitUntil:    browser.WaitNetworkIdle,
+		AllowRequest: func(raw string) bool { return strings.HasPrefix(raw, srv.URL) },
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	var observed *browser.NetworkEvent
+	for i := range res.Network {
+		if res.Network[i].URL == srv.URL+"/api/search" {
+			observed = &res.Network[i]
+			break
+		}
+	}
+	if observed == nil {
+		t.Fatalf("JSON API request not observed: %#v", res.Network)
+	}
+	if observed.Method != "POST" || observed.ContentType != "application/vnd.api+json; charset=utf-8" || observed.PostData != `{"query":"api-xss-input","page":2}` {
+		t.Fatalf("observed JSON request = %#v", *observed)
+	}
+	encoded, err := json.Marshal(*observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "api-xss-input") {
+		t.Fatalf("ephemeral JSON body escaped through NetworkEvent serialization: %s", encoded)
+	}
+	var oversized *browser.NetworkEvent
+	for i := range res.Network {
+		if res.Network[i].URL == srv.URL+"/api/large" {
+			oversized = &res.Network[i]
+			break
+		}
+	}
+	if oversized == nil || oversized.PostData != "" {
+		t.Fatalf("oversized request body should be discarded, event=%#v", oversized)
+	}
+}
+
+func TestIntegrationRequestObserverDoesNotWaitForResponse(t *testing.T) {
+	unblock := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<script>fetch('/api/pending', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{"query":"response-pending"}'});</script>`)
+	})
+	mux.HandleFunc("/api/pending", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-unblock:
+		case <-r.Context().Done():
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	defer close(unblock)
+
+	m := newManagerOrSkip(t, browser.DefaultConfig())
+	defer m.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := m.Render(ctx, srv.URL+"/", browser.RenderOptions{
+		WaitUntil:    browser.WaitLoad,
+		AllowRequest: func(raw string) bool { return strings.HasPrefix(raw, srv.URL) },
+	})
+	if err != nil {
+		t.Fatalf("load page while JSON response remains pending: %v", err)
+	}
+	for _, event := range res.Network {
+		if event.URL == srv.URL+"/api/pending" {
+			if event.PostData != `{"query":"response-pending"}` {
+				t.Fatalf("captured body = %q, want bounded request body", event.PostData)
+			}
+			return
+		}
+	}
+	t.Fatalf("pending JSON request was not observed: %#v", res.Network)
+}
+
 func TestIntegrationContextIsolationReal(t *testing.T) {
 	m := newManagerOrSkip(t, browser.DefaultConfig())
 	defer m.Close()
@@ -151,6 +254,162 @@ func TestIntegrationCancellationReal(t *testing.T) {
 	defer cancel()
 	if _, err := p.Navigate(ctx, srv.URL, browser.NavOptions{}); err == nil {
 		t.Fatal("expected navigation to be canceled")
+	}
+}
+
+func TestIntegrationNavigateJSONRedirectScopeGate(t *testing.T) {
+	var outsideHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/outside" {
+			outsideHits.Add(1)
+			return
+		}
+		http.Redirect(w, r, "/outside", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	m := newManagerOrSkip(t, browser.DefaultConfig())
+	defer m.Close()
+	ctx, err := m.NewContext(context.Background(), browser.ContextOptions{AllowRequest: func(raw string) bool {
+		u, err := url.Parse(raw)
+		return err == nil && strings.HasPrefix(u.Path, "/api/")
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ctx.Close()
+	page, err := ctx.NewPage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer page.Close()
+
+	_, _ = page.NavigateJSON(context.Background(), srv.URL+"/api/search", []byte(`{"q":"marker"}`), "application/json", browser.NavOptions{})
+	if outsideHits.Load() != 0 {
+		t.Fatalf("scope-violating redirect reached the target %d times", outsideHits.Load())
+	}
+}
+
+func TestIntegrationScopeGateBlocksBackslashPathRedirect(t *testing.T) {
+	var insideHits, outsideHits atomic.Int64
+	const location = `\outside`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/start":
+			insideHits.Add(1)
+			w.Header().Set("Location", location)
+			w.WriteHeader(http.StatusFound)
+		case "/outside":
+			outsideHits.Add(1)
+			fmt.Fprint(w, "outside")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	m := newManagerOrSkip(t, browser.DefaultConfig())
+	defer m.Close()
+	_, _ = m.Render(context.Background(), srv.URL+"/api/start", browser.RenderOptions{
+		AllowRequest: func(raw string) bool { return strings.HasPrefix(raw, srv.URL+"/api/") },
+	})
+	if insideHits.Load() == 0 {
+		t.Fatal("the in-scope redirect response was never reached")
+	}
+	if outsideHits.Load() != 0 {
+		t.Fatalf("browser-normalized backslash redirect reached out-of-scope path %d times (Location=%q)", outsideHits.Load(), location)
+	}
+}
+
+func TestIntegrationScopeGateAllowsInScopeRedirect(t *testing.T) {
+	var finalHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/start" {
+			http.Redirect(w, r, "/api/final", http.StatusFound)
+			return
+		}
+		if r.URL.Path == "/api/final" {
+			finalHits.Add(1)
+			fmt.Fprint(w, "in scope")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	m := newManagerOrSkip(t, browser.DefaultConfig())
+	defer m.Close()
+	res, err := m.Render(context.Background(), srv.URL+"/api/start", browser.RenderOptions{
+		AllowRequest: func(raw string) bool { return strings.HasPrefix(raw, srv.URL+"/api/") },
+	})
+	if err != nil {
+		t.Fatalf("render in-scope redirect: %v", err)
+	}
+	if finalHits.Load() != 1 || res.FinalURL != srv.URL+"/api/final" {
+		t.Fatalf("in-scope redirect result: hits=%d finalURL=%q", finalHits.Load(), res.FinalURL)
+	}
+}
+
+func TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect(t *testing.T) {
+	var insideHits, outsideHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/start" {
+			insideHits.Add(1)
+			http.Redirect(w, r, "/api/middle", http.StatusFound)
+			return
+		}
+		if r.URL.Path == "/api/middle" {
+			insideHits.Add(1)
+			http.Redirect(w, r, "/outside", http.StatusFound)
+			return
+		}
+		if r.URL.Path == "/outside" {
+			outsideHits.Add(1)
+			fmt.Fprint(w, "outside")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	m := newManagerOrSkip(t, browser.DefaultConfig())
+	defer m.Close()
+	_, _ = m.Render(context.Background(), srv.URL+"/api/start", browser.RenderOptions{
+		AllowRequest: func(raw string) bool { return strings.HasPrefix(raw, srv.URL+"/api/") },
+	})
+	if insideHits.Load() != 2 {
+		t.Fatalf("in-scope redirect chain reached the server %d times, want both in-scope hops", insideHits.Load())
+	}
+	if outsideHits.Load() != 0 {
+		t.Fatalf("out-of-scope navigation redirect reached the target %d times", outsideHits.Load())
+	}
+}
+
+func TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect(t *testing.T) {
+	var outsideHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/page":
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<!doctype html><img src="/api/redirect-image">`)
+		case "/api/redirect-image":
+			http.Redirect(w, r, "/outside/image", http.StatusFound)
+		case "/outside/image":
+			outsideHits.Add(1)
+			fmt.Fprint(w, "outside")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	m := newManagerOrSkip(t, browser.DefaultConfig())
+	defer m.Close()
+	_, err := m.Render(context.Background(), srv.URL+"/api/page", browser.RenderOptions{
+		WaitUntil:    browser.WaitNetworkIdle,
+		AllowRequest: func(raw string) bool { return strings.HasPrefix(raw, srv.URL+"/api/") },
+	})
+	if err != nil {
+		t.Fatalf("render in-scope page: %v", err)
+	}
+	if outsideHits.Load() != 0 {
+		t.Fatalf("out-of-scope subresource redirect reached the target %d times", outsideHits.Load())
 	}
 }
 

@@ -89,8 +89,9 @@ type verificationAttempt struct {
 	// candidate the passive verifier can never confirm itself (an
 	// interaction-only trigger: onmouseover, javascript: href, …) — see
 	// ReviewInteractionOnly in internal/report/view.go. Empty for a
-	// non-GET-navigable attempt (POST+JSON, state-changing without the
-	// operator's AllowStateChanging opt-in) that never actually navigated.
+	// non-GET-navigable attempt (unsupported body representation, invalid or
+	// oversized POST/JSON, or state-changing without the operator's
+	// AllowStateChanging opt-in) that never actually navigated.
 	URL         string            `json:"url,omitempty"`
 	Verdict     domain.Verdict    `json:"verdict"`
 	Confidence  domain.Confidence `json:"confidence,omitempty"`

@@ -16,12 +16,21 @@ func TestCIRuntimeRejectsMissingSkippedFailedRootsAndDescendants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots := []string{"TestIntegrationRenderRealBrowser", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestIntegrationVerifyReflectionOnlyIsRejected", "TestE2E_FullPipelineAgainstCorpus", "TestUINavigation", "TestUICooldownClock", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix", "TestIntegrationDefaultConfigRendererIsSandboxed", "TestIntegrationDisableSandboxIsExplicitOptOut"}
+	roots := []string{"TestIntegrationRenderRealBrowser", "TestIntegrationRenderCapturesJSONPostDataForDiscovery", "TestIntegrationRequestObserverDoesNotWaitForResponse", "TestIntegrationNetworkJSONBodyDiscovery", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestIntegrationVerifyReflectionOnlyIsRejected", "TestE2E_FullPipelineAgainstCorpus", "TestUINavigation", "TestUICooldownClock", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix", "TestIntegrationDefaultConfigRendererIsSandboxed", "TestIntegrationDisableSandboxIsExplicitOptOut", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "TestDOMXSSFragmentRouteCapturesPostLoadSink", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "TestIntegrationScopeGateAllowsInScopeRedirect", "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect", "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect", "TestIntegrationScopeGateBlocksBackslashPathRedirect"}
 	for _, tc := range []struct {
 		name, root, action, child string
 		wantPass                  bool
 	}{
 		{"all-pass", "", "", "", true},
+		{"json-capture-missing", "TestIntegrationRenderCapturesJSONPostDataForDiscovery", "missing", "", false},
+		{"json-capture-skip", "TestIntegrationRenderCapturesJSONPostDataForDiscovery", "skip", "", false},
+		{"json-capture-fail", "TestIntegrationRenderCapturesJSONPostDataForDiscovery", "fail", "", false},
+		{"json-no-response-missing", "TestIntegrationRequestObserverDoesNotWaitForResponse", "missing", "", false},
+		{"json-no-response-skip", "TestIntegrationRequestObserverDoesNotWaitForResponse", "skip", "", false},
+		{"json-no-response-fail", "TestIntegrationRequestObserverDoesNotWaitForResponse", "fail", "", false},
+		{"json-discovery-missing", "TestIntegrationNetworkJSONBodyDiscovery", "missing", "", false},
+		{"json-discovery-skip", "TestIntegrationNetworkJSONBodyDiscovery", "skip", "", false},
+		{"json-discovery-fail", "TestIntegrationNetworkJSONBodyDiscovery", "fail", "", false},
 		{"timer-missing", "TestDOMStringTimerSourceMatrix", "missing", "", false},
 		{"timer-root-skip", "TestDOMStringTimerSourceMatrix", "skip", "", false},
 		{"timer-root-fail", "TestDOMStringTimerSourceMatrix", "fail", "", false},
@@ -38,6 +47,27 @@ func TestCIRuntimeRejectsMissingSkippedFailedRootsAndDescendants(t *testing.T) {
 		{"sandbox-optout-skip", "TestIntegrationDisableSandboxIsExplicitOptOut", "skip", "", false},
 		{"sandbox-optout-missing", "TestIntegrationDisableSandboxIsExplicitOptOut", "missing", "", false},
 		{"sandbox-optout-fail", "TestIntegrationDisableSandboxIsExplicitOptOut", "fail", "", false},
+		{"scope-allow-redirect-missing", "TestIntegrationScopeGateAllowsInScopeRedirect", "missing", "", false},
+		{"scope-allow-redirect-skip", "TestIntegrationScopeGateAllowsInScopeRedirect", "skip", "", false},
+		{"scope-allow-redirect-fail", "TestIntegrationScopeGateAllowsInScopeRedirect", "fail", "", false},
+		{"scope-navigation-redirect-missing", "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect", "missing", "", false},
+		{"scope-navigation-redirect-skip", "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect", "skip", "", false},
+		{"scope-navigation-redirect-fail", "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect", "fail", "", false},
+		{"scope-subresource-redirect-missing", "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect", "missing", "", false},
+		{"scope-subresource-redirect-skip", "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect", "skip", "", false},
+		{"scope-subresource-redirect-fail", "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect", "fail", "", false},
+		{"scope-backslash-redirect-missing", "TestIntegrationScopeGateBlocksBackslashPathRedirect", "missing", "", false},
+		{"scope-backslash-redirect-skip", "TestIntegrationScopeGateBlocksBackslashPathRedirect", "skip", "", false},
+		{"scope-backslash-redirect-fail", "TestIntegrationScopeGateBlocksBackslashPathRedirect", "fail", "", false},
+		{"fragment-route-missing", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "missing", "", false},
+		{"fragment-route-skip", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "skip", "", false},
+		{"fragment-route-fail", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "fail", "", false},
+		{"fragment-postload-missing", "TestDOMXSSFragmentRouteCapturesPostLoadSink", "missing", "", false},
+		{"fragment-postload-skip", "TestDOMXSSFragmentRouteCapturesPostLoadSink", "skip", "", false},
+		{"fragment-postload-fail", "TestDOMXSSFragmentRouteCapturesPostLoadSink", "fail", "", false},
+		{"script-literal-missing", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "missing", "", false},
+		{"script-literal-skip", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "skip", "", false},
+		{"script-literal-fail", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "fail", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

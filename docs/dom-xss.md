@@ -43,6 +43,55 @@ See [`p23-string-timers-validation.md`](p23-string-timers-validation.md) for act
 TDD, native contracts, CLI/controller outcomes, evidence hashes, gates and cleanup.
 P2.2 below remains historical HTML evidence, not a timer claim.
 
+## Fragment-route parameters and script-literal query discovery (validation in progress)
+
+Hash-routed URLs such as `/#/search?q=hello` are canonicalized as the route
+endpoint `/#/search?q=` (the parameter names with blank values; the original
+values are removed) plus DOM-only `q` parameter metadata (`location.hash` source).
+Fragment parameters never create HTTP injection points. Both operator-provided
+seeds and crawler-discovered links register their fragment parameter names;
+distinct names remain distinct in endpoint identity while value permutations
+collapse. Hash-source probes preserve the route and place the canary/candidate
+in `q`; ordinary hashes with no route query continue to use whole-fragment
+probing. The selected parameter is currently tested without carrying other
+fragment-query values.
+
+The crawler also records a bounded set of literal candidates from inline scripts
+that resemble URL parameter reads (`indexOf("name=")`, `.get("name")`, or
+`getParameterByName("name")`). The `.get()` matcher is lexical: it only follows
+a variable initialized with `URLSearchParams` (or a direct `URLSearchParams(...).get`),
+but it is not a JavaScript parser. A match only proposes a discovery candidate;
+it is not evidence of URL control or XSS. This supports names such as DVWA's
+`default` that do not occur in a form or URL already. It only runs on HTML pages
+the crawler actually fetches; it cannot infer names from an unvisited page or an
+external script bundle. The matcher is literal-only, not a JS parser. Script-derived
+parameters are ordinary query injection points, still subject to browser verification.
+
+Local regressions: disabling the fragment-route placement makes the real-Chromium
+route regression produce zero findings; disabling script-literal registration
+makes the discovery regression fail to find `default`. The positive synthetic
+route test and safe `textContent` control pass. A direct authenticated DVWA scan
+records `default` as `script_literal` at all four security levels. At `low`, the
+independent oracle executes a script through `document.write` and Indago now
+confirms it. Root cause: the page embeds the query value in `<option>` markup and
+uses `decodeURI(location.href)`; the old generic image candidate depended on
+reserved `=` and `/` that stayed percent-encoded. Query-sourced `document.write`
+now uses a benign `<script>MARKER</script>` candidate, and only the selected
+query value leaves `/` literal while keeping query separators escaped. The
+medium scan remains `Inconclusive`, not a clean negative; high/impossible are
+not Confirmed.
+
+The real Juice Shop search oracle also executes, and a latest-build exact-route
+scan now confirms the DOM-XSS through the already-supported `innerHTML` sink.
+Root cause: its hash-router fetches search data after `load` and reaches the sink
+roughly 0.5–0.75 seconds later under four concurrent browser contexts. The DOM
+engine now waits up to one second after load for hash-route query pages (250 ms
+for other URL-source pages), with cancellation support. A 600 ms delayed-sink
+Chromium regression fails before that wait and passes after it; the `textContent`
+control remains unconfirmed. No new sink category was added. These fixes close
+the two measured false negatives on their exact targets, but the 29-unit
+benchmark remains a small, narrow corpus—not production-wide coverage.
+
 ## P2.1: exactly two additional HTML sink methods
 
 Current HTML sinks: `innerHTML`, `outerHTML`, `document.write`/`writeln`,

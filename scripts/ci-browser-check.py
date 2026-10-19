@@ -11,6 +11,9 @@ import subprocess
 
 required = {
     "TestIntegrationRenderRealBrowser",
+    "TestIntegrationRenderCapturesJSONPostDataForDiscovery",
+    "TestIntegrationRequestObserverDoesNotWaitForResponse",
+    "TestIntegrationNetworkJSONBodyDiscovery",
     "TestIntegrationVerifyExecutableCandidateIsConfirmed",
     "TestIntegrationVerifyReflectionOnlyIsRejected",
     "TestE2E_FullPipelineAgainstCorpus",
@@ -18,8 +21,15 @@ required = {
     "TestUICooldownClock",
     "TestDOMHTMLSourceMatrix",
     "TestDOMStringTimerSourceMatrix",
+    "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms",
+    "TestDOMXSSFragmentRouteCapturesPostLoadSink",
+    "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource",
     "TestIntegrationDefaultConfigRendererIsSandboxed",
     "TestIntegrationDisableSandboxIsExplicitOptOut",
+    "TestIntegrationScopeGateAllowsInScopeRedirect",
+    "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect",
+    "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect",
+    "TestIntegrationScopeGateBlocksBackslashPathRedirect",
 }
 if not shutil.which("node"):
     raise SystemExit("required Node.js unavailable")
@@ -28,7 +38,7 @@ if not chrome or not os.access(chrome, os.X_OK):
     raise SystemExit("required INDAGO_CHROMIUM_PATH is not executable")
 command = [
     "go", "test", "-tags", "browser_integration", "-race", "-p", "1", "-count=1", "-json",
-    "./internal/browser", "./internal/verification", "./internal/scan", "./internal/web",
+    "./internal/browser", "./internal/discovery", "./internal/verification", "./internal/scan", "./internal/web",
     "-run", "^(" + "|".join(sorted(required)) + ")$",
 ]
 proc = subprocess.Popen(command, stdout=subprocess.PIPE, text=True)

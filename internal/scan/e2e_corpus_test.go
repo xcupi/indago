@@ -387,9 +387,9 @@ func TestE2E_FullPipelineAgainstCorpus(t *testing.T) {
 // actually sent and reflected (unlike the main test above, which exercises the
 // DEFAULT — off — behavior where they are skipped entirely). The POST+FORM
 // candidate now also gets real browser verification (replayed as a <form>
-// submission, see browser.Page.NavigateForm) — the SAME chance at Confirmed a
-// GET candidate already gets. POST+JSON still cannot: no HTML form carries an
-// application/json body, so that finding can only ever reach Pending.
+// submission, see browser.Page.NavigateForm). Bounded POST+JSON is also replayed
+// as a top-level browser document request; unsupported body methods remain
+// Pending.
 func TestE2E_StateChangingAllowedSendsPostCandidates(t *testing.T) {
 	ctx := context.Background()
 	c := newCorpus(t)
@@ -437,16 +437,20 @@ func TestE2E_StateChangingAllowedSendsPostCandidates(t *testing.T) {
 	if !foundConfirmed {
 		t.Errorf("/form: verdicts = %v, want at least one Confirmed", formVs)
 	}
-	// /json has no browser-navigable form (application/json) and can only ever
-	// stay Pending.
+	// /json is application/json and reflects unescaped: it is replayed as a
+	// bounded top-level POST document and should now browser-confirm like /form.
 	jsonVs, ok := byPath["/json"]
 	if !ok {
-		t.Error("/json: no finding, want a Pending one now that POST is allowed to be sent")
+		t.Error("/json: no finding, want a browser-verified one after POST/JSON opt-in")
 	}
+	jsonConfirmed := false
 	for _, v := range jsonVs {
-		if v != domain.VerdictPending {
-			t.Errorf("/json: verdict = %s, want pending (POST+JSON can never be browser-verified)", v)
+		if v == domain.VerdictConfirmed {
+			jsonConfirmed = true
 		}
+	}
+	if !jsonConfirmed {
+		t.Errorf("/json: verdicts = %v, want at least one Confirmed POST/JSON finding", jsonVs)
 	}
 	if st, _ := q.Stats(ctx, sc.ID); st.Dead+st.Succeeded == 0 {
 		t.Fatal("expected the POST candidate jobs to have actually run")

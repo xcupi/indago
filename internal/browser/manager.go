@@ -236,6 +236,15 @@ func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*
 	if err != nil {
 		return nil, err
 	}
+	if opts.ObservationWindow > 0 {
+		timer := time.NewTimer(opts.ObservationWindow)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 
 	res := &RenderResult{
 		FinalURL:       nav.FinalURL,
@@ -501,7 +510,11 @@ func (c *Context) NewPage(ctx context.Context) (*Page, error) {
 	if err != nil {
 		return nil, fmt.Errorf("browser: new page: %w", err)
 	}
-	p := newPage(c, ph)
+	p, err := newPage(c, ph)
+	if err != nil {
+		_ = ph.Close()
+		return nil, fmt.Errorf("browser: observe new page: %w", err)
+	}
 
 	c.mu.Lock()
 	if c.closed {
@@ -560,22 +573,29 @@ func (c *Context) forget(p *Page) {
 // Page
 // ---------------------------------------------------------------------------
 
+const (
+	maxObservedJSONBodyBytesPerPage  = 256 << 10
+	maxObservedJSONBodyEventsPerPage = 16
+)
+
 // Page is a single page within a context. It accumulates observed console
 // messages, dialogs, and network events.
 type Page struct {
 	ctxp   *Context
 	handle pageHandle
 
-	mu       sync.Mutex
-	console  []ConsoleMessage
-	dialogs  []string
-	pageErrs []string
-	network  []NetworkEvent
-	blocked  []string
-	closed   bool
+	mu                    sync.Mutex
+	console               []ConsoleMessage
+	dialogs               []string
+	pageErrs              []string
+	network               []NetworkEvent
+	networkJSONBodyBytes  int
+	networkJSONBodyEvents int
+	blocked               []string
+	closed                bool
 }
 
-func newPage(c *Context, ph pageHandle) *Page {
+func newPage(c *Context, ph pageHandle) (*Page, error) {
 	p := &Page{ctxp: c, handle: ph}
 	ph.OnConsole(func(m ConsoleMessage) {
 		p.mu.Lock()
@@ -592,7 +612,7 @@ func newPage(c *Context, ph pageHandle) *Page {
 		p.pageErrs = append(p.pageErrs, msg)
 		p.mu.Unlock()
 	})
-	ph.OnRequest(func(ev NetworkEvent) {
+	if err := ph.OnRequest(func(ev NetworkEvent) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		// Scope the observation itself, independent of the driver: a disallowed
@@ -602,9 +622,20 @@ func newPage(c *Context, ph pageHandle) *Page {
 			p.blocked = append(p.blocked, ev.URL)
 			return
 		}
+		if len(ev.PostData) > 0 {
+			bodyBytes := len(ev.PostData)
+			if !isJSONRequestContentType(ev.ContentType) || p.networkJSONBodyEvents >= maxObservedJSONBodyEventsPerPage || p.networkJSONBodyBytes+bodyBytes > maxObservedJSONBodyBytesPerPage {
+				ev.PostData = ""
+			} else {
+				p.networkJSONBodyEvents++
+				p.networkJSONBodyBytes += bodyBytes
+			}
+		}
 		p.network = append(p.network, ev)
-	})
-	return p
+	}, c.allow); err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 // Navigate loads url with the given options.
@@ -681,6 +712,59 @@ func (p *Page) NavigateForm(ctx context.Context, method, url string, fields map[
 	})
 	if err != nil {
 		return nil, fmt.Errorf("browser: navigate form: %w", err)
+	}
+	return &NavResult{Status: r.status, FinalURL: r.finalURL}, nil
+}
+
+// ErrJSONPostUnsupported is returned when the driver cannot turn the initial
+// document navigation into a bounded POST/JSON request.
+var ErrJSONPostUnsupported = errors.New("browser: this driver cannot submit a JSON POST navigation")
+
+// ErrInvalidJSONPostBody is returned when a JSON navigation body is empty,
+// malformed, oversized, or paired with a non-JSON media type.
+var ErrInvalidJSONPostBody = errors.New("browser: invalid or oversized JSON POST body")
+
+type jsonPoster interface {
+	GotoJSON(url string, body []byte, contentType, waitUntil string, timeout time.Duration) (status int, finalURL string, err error)
+}
+
+// NavigateJSON replays a candidate JSON request as a real top-level POST
+// navigation. The concrete browser driver rewrites only that first, scope-gated
+// navigation request; Chromium parses the response as the document, so marker
+// execution is observed by the normal verifier. State-changing policy remains
+// the caller's responsibility.
+func (p *Page) NavigateJSON(ctx context.Context, url string, body []byte, contentType string, opts NavOptions) (*NavResult, error) {
+	if len(body) == 0 || len(body) > MaxJSONNavigationBodyBytes || !json.Valid(body) || !isJSONRequestContentType(contentType) {
+		return nil, ErrInvalidJSONPostBody
+	}
+	if p.ctxp.allow == nil {
+		return nil, errors.New("browser: JSON POST navigation requires an explicit scope gate")
+	}
+	jp, ok := p.handle.(jsonPoster)
+	if !ok {
+		return nil, ErrJSONPostUnsupported
+	}
+	if err := opts.Limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = p.ctxp.mgr.cfg.NavigationTimeout
+	}
+	wait := opts.WaitUntil
+	if wait == "" {
+		wait = WaitLoad
+	}
+	type nav struct {
+		status   int
+		finalURL string
+	}
+	r, err := callCtx(ctx, func() (nav, error) {
+		s, u, err := jp.GotoJSON(url, append([]byte(nil), body...), contentType, wait, timeout)
+		return nav{s, u}, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("browser: navigate JSON: %w", err)
 	}
 	return &NavResult{Status: r.status, FinalURL: r.finalURL}, nil
 }

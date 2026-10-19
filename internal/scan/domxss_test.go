@@ -188,15 +188,50 @@ func TestDomXSSQueryURLNoExistingQuery(t *testing.T) {
 	}
 }
 
-func TestDomXSSQueryURLUsesFormEncodingNotJSEncoding(t *testing.T) {
-	// Unlike the hash source (jsEncodeURIComponent), the query-string
-	// source deliberately uses Go's standard net/url form encoding —
-	// URLSearchParams decodes "+" as a space per the WHATWG spec, so a
-	// literal space in the raw query string should round-trip as "+",
-	// not "%20". See domXSSQueryURL's doc comment.
+func TestDomXSSQueryURLPercentEncodesSpacesForRawHrefReaders(t *testing.T) {
+	// A real page may read location.href with indexOf()/substring() and then
+	// decodeURIComponent(). That path does NOT decode '+' as a space, so a
+	// payload containing spaces must use %20. URLSearchParams also decodes
+	// %20 as a space, so this encoding works for both readers.
 	got := domXSSQueryURL("https://target.example/page", "q", "a b")
-	if !strings.Contains(got, "q=a+b") {
-		t.Fatalf("got %q, want a form-encoded space (a+b)", got)
+	if !strings.Contains(got, "q=a%20b") {
+		t.Fatalf("got %q, want a percent-encoded space (a%%20b)", got)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Query().Get("q") != "a b" {
+		t.Fatalf("URLSearchParams-compatible decoded value = %q, want %q", u.Query().Get("q"), "a b")
+	}
+}
+
+func TestDomXSSQueryURLLeavesReservedSlashVisibleToDecodeURI(t *testing.T) {
+	payload := "<script>indagoMarker</script>"
+	got := domXSSQueryURL("http://127.0.0.1:18080/vulnerabilities/xss_d/", "default", payload)
+	if !strings.Contains(got, "%3Cscript%3EindagoMarker%3C/script%3E") {
+		t.Fatalf("URL = %q, want encoded markup but literal slash for decodeURI", got)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Query().Get("default") != payload {
+		t.Fatalf("query value = %q, want original payload %q", u.Query().Get("default"), payload)
+	}
+}
+
+func TestDomXSSQueryURLPreservesLiteralPlusAndFragment(t *testing.T) {
+	got := domXSSQueryURL("https://target.example/page?keep=a%2Bb#frag", "q", "a+b")
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("result is not a valid URL: %v (%q)", err, got)
+	}
+	if u.Query().Get("keep") != "a+b" || u.Query().Get("q") != "a+b" {
+		t.Fatalf("literal plus values changed: query=%v", u.Query())
+	}
+	if u.Fragment != "frag" {
+		t.Fatalf("fragment = %q, want frag", u.Fragment)
 	}
 }
 

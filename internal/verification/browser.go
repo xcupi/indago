@@ -2,7 +2,9 @@ package verification
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"mime"
 	"net"
 	"strings"
 	"time"
@@ -90,7 +92,8 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 		method = "GET"
 	}
 	isFormPost := method == "POST" && in.Location == domain.LocationForm && in.FormValues != nil
-	if method != "GET" && method != "HEAD" && !isFormPost {
+	isJSONPost := method == "POST" && in.Location == domain.LocationJSON && validJSONPost(in.JSONBody, in.ContentType)
+	if method != "GET" && method != "HEAD" && !isFormPost && !isJSONPost {
 		return nil, ErrUnsupportedMethod
 	}
 	if in.URL == "" {
@@ -159,6 +162,12 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 			Timeout:   v.cfg.NavigationTimeout,
 			Limiter:   in.Limiter,
 		})
+	} else if isJSONPost {
+		nav, err = page.NavigateJSON(ctx, in.URL, in.JSONBody, in.ContentType, browser.NavOptions{
+			WaitUntil: browser.WaitLoad,
+			Timeout:   v.cfg.NavigationTimeout,
+			Limiter:   in.Limiter,
+		})
 	} else {
 		nav, err = page.Navigate(ctx, in.URL, browser.NavOptions{
 			WaitUntil: browser.WaitLoad,
@@ -220,6 +229,18 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 			BrowserLog: append(append(append([]string(nil), consoleErrs...), pageErrs...), dialogs...),
 		},
 	}, nil
+}
+
+func validJSONPost(body []byte, contentType string) bool {
+	if len(body) == 0 || len(body) > browser.MaxJSONNavigationBodyBytes || !json.Valid(body) {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || (mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json")) {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	return json.Unmarshal(body, &fields) == nil && len(fields) > 0
 }
 
 // containsToken reports whether the rendered HTML contains the marker token.

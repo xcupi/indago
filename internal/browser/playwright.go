@@ -2,9 +2,13 @@ package browser
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	pw "github.com/mxschmitt/playwright-go"
@@ -80,35 +84,151 @@ func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeader
 	if err != nil {
 		return nil, err
 	}
+	pc := &pwContext{c: c, allow: allow}
 	if allow != nil {
-		// Abort disallowed requests before they leave the browser. Redirect hops
-		// are routed as requests of their own, so each is checked too.
-		err := c.Route("**/*", func(route pw.Route) {
-			u := route.Request().URL()
-			if isNetworkURL(u) && !allow(u) {
-				_ = route.Abort("blockedbyclient")
-				return
-			}
-			_ = route.Continue()
-		})
-		if err != nil {
+		// Abort directly disallowed requests before they leave the browser.
+		// Playwright's route callback only sees the original request in an HTTP
+		// redirect chain, so each managed page also installs a CDP response-stage
+		// gate that checks Location before Chromium follows any redirect.
+		if err := c.Route("**/*", pc.onRoute); err != nil {
 			_ = c.Close()
-			return nil, fmt.Errorf("install scope gate: %w", err)
+			return nil, fmt.Errorf("install scope gate and request override: %w", err)
 		}
 	}
-	return &pwContext{c: c}, nil
+	return pc, nil
 }
 
 func (b *pwBrowser) Close() error { return b.b.Close() }
 
-type pwContext struct{ c pw.BrowserContext }
+type jsonNavigationOverride struct {
+	url         string
+	body        []byte
+	contentType string
+	timeout     time.Duration
+	applied     bool
+	err         error
+}
+
+type pwContext struct {
+	c     pw.BrowserContext
+	allow func(string) bool
+
+	mu           sync.Mutex
+	jsonOverride *jsonNavigationOverride
+}
+
+func (c *pwContext) onRoute(route pw.Route) {
+	req := route.Request()
+	rawURL := req.URL()
+	if c.allow != nil && isNetworkURL(rawURL) && !c.allow(rawURL) {
+		_ = route.Abort("blockedbyclient")
+		return
+	}
+	override := c.takeJSONNavigationOverride(req)
+	if override == nil {
+		_ = route.Continue()
+		return
+	}
+	headers, err := req.AllHeaders()
+	if err != nil {
+		c.failJSONNavigationOverride(override, fmt.Errorf("read navigation headers: %w", err))
+		_ = route.Abort()
+		return
+	}
+	if headers == nil {
+		headers = map[string]string{}
+	}
+	delete(headers, "content-length")
+	delete(headers, "transfer-encoding")
+	if _, ok := headers["content-type"]; !ok {
+		headers["content-type"] = override.contentType
+	}
+	method := "POST"
+	maxRedirects := 0
+	timeoutMS := float64(override.timeout.Milliseconds())
+	response, err := route.Fetch(pw.RouteFetchOptions{
+		Method: &method, PostData: override.body, Headers: headers,
+		MaxRedirects: &maxRedirects, Timeout: &timeoutMS,
+	})
+	if err != nil {
+		c.failJSONNavigationOverride(override, fmt.Errorf("fetch JSON navigation response: %w", err))
+		_ = route.Abort()
+		return
+	}
+	defer func() { _ = response.Dispose() }()
+	status := response.Status()
+	body, err := response.Body()
+	if err != nil {
+		c.failJSONNavigationOverride(override, fmt.Errorf("read JSON navigation response: %w", err))
+		_ = route.Abort()
+		return
+	}
+	responseHeaders := response.Headers()
+	delete(responseHeaders, "content-length")
+	delete(responseHeaders, "content-encoding")
+	delete(responseHeaders, "transfer-encoding")
+	if status >= 300 && status < 400 {
+		// Playwright treats a request and its redirect chain as one route; the
+		// browser would follow Location without a second scope check. Fetch with
+		// MaxRedirects=0 above, then remove redirect controls when fulfilling so
+		// no redirect can leave the checked in-scope URL.
+		delete(responseHeaders, "location")
+		delete(responseHeaders, "refresh")
+	}
+	if err := route.Fulfill(pw.RouteFulfillOptions{Status: &status, Headers: responseHeaders, Body: body}); err != nil {
+		c.failJSONNavigationOverride(override, fmt.Errorf("fulfill JSON navigation response: %w", err))
+		_ = route.Abort()
+	}
+}
+
+func (c *pwContext) takeJSONNavigationOverride(req pw.Request) *jsonNavigationOverride {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	o := c.jsonOverride
+	if o == nil || o.applied || !req.IsNavigationRequest() || req.Method() != "GET" || req.URL() != o.url {
+		return nil
+	}
+	o.applied = true
+	return o
+}
+
+func (c *pwContext) failJSONNavigationOverride(o *jsonNavigationOverride, err error) {
+	c.mu.Lock()
+	if c.jsonOverride == o {
+		o.err = err
+	}
+	c.mu.Unlock()
+}
+
+func (c *pwContext) setJSONNavigationOverride(rawURL, contentType string, body []byte, timeout time.Duration) (*jsonNavigationOverride, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.allow == nil {
+		return nil, errors.New("browser: JSON POST navigation requires an explicit scope gate")
+	}
+	if c.jsonOverride != nil {
+		return nil, errors.New("browser: another JSON POST navigation is already pending")
+	}
+	o := &jsonNavigationOverride{url: rawURL, contentType: contentType, body: append([]byte(nil), body...), timeout: timeout}
+	c.jsonOverride = o
+	return o, nil
+}
+
+func (c *pwContext) finishJSONNavigationOverride(o *jsonNavigationOverride) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.jsonOverride == o {
+		c.jsonOverride = nil
+	}
+	return o.applied, o.err
+}
 
 func (c *pwContext) NewPage() (pageHandle, error) {
 	p, err := c.c.NewPage()
 	if err != nil {
 		return nil, err
 	}
-	return &pwPage{p: p}, nil
+	return &pwPage{p: p, ctx: c}, nil
 }
 
 func (c *pwContext) AddCookies(cookies []Cookie) error {
@@ -155,7 +275,15 @@ func (c *pwContext) SaveStorageState(path string) error {
 
 func (c *pwContext) Close() error { return c.c.Close() }
 
-type pwPage struct{ p pw.Page }
+type pwPage struct {
+	p   pw.Page
+	cdp pw.CDPSession
+	ctx *pwContext
+
+	bodyMu                 sync.Mutex
+	capturedJSONBodyBytes  int
+	capturedJSONBodyEvents int
+}
 
 func (p *pwPage) Goto(url, referer, waitUntil string, timeout time.Duration) (int, string, error) {
 	opts := pw.PageGotoOptions{}
@@ -178,6 +306,31 @@ func (p *pwPage) Goto(url, referer, waitUntil string, timeout time.Duration) (in
 		status = resp.Status()
 	}
 	return status, p.p.URL(), nil
+}
+
+// GotoJSON performs one top-level POST navigation after the context route
+// converts the initial GET request into the exact bounded JSON request. The
+// context route continues to run its scope check before applying the override.
+func (p *pwPage) GotoJSON(rawURL string, body []byte, contentType, waitUntil string, timeout time.Duration) (int, string, error) {
+	if p.ctx == nil {
+		return 0, "", ErrJSONPostUnsupported
+	}
+	override, err := p.ctx.setJSONNavigationOverride(rawURL, contentType, body, timeout)
+	if err != nil {
+		return 0, "", err
+	}
+	status, finalURL, navErr := p.Goto(rawURL, "", waitUntil, timeout)
+	applied, routeErr := p.ctx.finishJSONNavigationOverride(override)
+	if navErr != nil {
+		return 0, "", navErr
+	}
+	if routeErr != nil {
+		return 0, "", routeErr
+	}
+	if !applied {
+		return 0, "", errors.New("browser: JSON POST navigation override was not applied")
+	}
+	return status, finalURL, nil
 }
 
 // GotoForm submits a real, top-level POST navigation by rendering a throwaway
@@ -262,15 +415,192 @@ func (p *pwPage) Evaluate(script string, arg any) (any, error) {
 	return p.p.Evaluate(script, arg)
 }
 
-func (p *pwPage) OnRequest(fn func(NetworkEvent)) {
-	p.p.OnRequest(func(r pw.Request) {
-		fn(NetworkEvent{
-			URL:          r.URL(),
-			Method:       r.Method(),
-			ResourceType: r.ResourceType(),
-			At:           time.Now(),
-		})
+const maxCapturedJSONPostDataBytes = 64 << 10
+
+func isJSONRequestContentType(raw string) bool {
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return false
+	}
+	mediaType = strings.ToLower(mediaType)
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+}
+
+func mayInspectJSONRequest(method, contentType, rawURL string, allow func(string) bool) bool {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" {
+		return false
+	}
+	return isJSONRequestContentType(contentType) && isNetworkURL(rawURL) && (allow == nil || allow(rawURL))
+}
+
+func boundedJSONRequestBodySize(bodySize int) bool {
+	return bodySize > 0 && bodySize <= maxCapturedJSONPostDataBytes
+}
+
+func shouldCaptureJSONRequestBody(method, contentType string, bodySize int, rawURL string, allow func(string) bool) bool {
+	return mayInspectJSONRequest(method, contentType, rawURL, allow) && boundedJSONRequestBodySize(bodySize)
+}
+
+func networkEventFromCDP(params map[string]interface{}, allow func(string) bool, captureBody bool, bodyBudget int) (NetworkEvent, int, bool) {
+	request, ok := params["request"].(map[string]interface{})
+	if !ok {
+		return NetworkEvent{}, 0, false
+	}
+	url, _ := request["url"].(string)
+	method, _ := request["method"].(string)
+	resourceType, _ := params["type"].(string)
+	headers, _ := request["headers"].(map[string]interface{})
+	contentType := ""
+	for name, value := range headers {
+		if strings.EqualFold(name, "content-type") {
+			contentType, _ = value.(string)
+			break
+		}
+	}
+	event := NetworkEvent{
+		URL: url, Method: method, ResourceType: strings.ToLower(resourceType),
+		ContentType: contentType, At: time.Now(),
+	}
+	// CDP may omit postData when a request exceeds maxPostDataSize. The
+	// one-byte sentinel lets us reject any included body above the retention
+	// limit; we never fetch an omitted body later.
+	observedBodyBytes := 0
+	if captureBody && bodyBudget > 0 && mayInspectJSONRequest(method, contentType, url, allow) {
+		if body, ok := request["postData"].(string); ok {
+			observedBodyBytes = len(body)
+			if boundedJSONRequestBodySize(observedBodyBytes) && observedBodyBytes <= bodyBudget {
+				event.PostData = body
+			}
+		}
+	}
+	return event, observedBodyBytes, true
+}
+
+func cdpNumber(value any) (int, bool) {
+	switch n := value.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case json.Number:
+		parsed, err := n.Int64()
+		return int(parsed), err == nil
+	default:
+		return 0, false
+	}
+}
+
+func cdpRedirectTarget(params map[string]interface{}) (target string, isRedirect, invalid bool) {
+	status, ok := cdpNumber(params["responseStatusCode"])
+	if !ok || status < 300 || status >= 400 || status == 304 {
+		return "", false, false
+	}
+	var location string
+	if entries, ok := params["responseHeaders"].([]interface{}); ok {
+		for _, entry := range entries {
+			header, ok := entry.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			name, _ := header["name"].(string)
+			if strings.EqualFold(name, "location") {
+				location, _ = header["value"].(string)
+				break
+			}
+		}
+	}
+	if location == "" {
+		return "", false, false
+	}
+	// WHATWG URL parsing treats backslashes as slashes for HTTP(S), while
+	// net/url preserves them as escaped path bytes. Reject them rather than
+	// compare two different interpretations of a redirect destination.
+	if strings.Contains(location, `\`) {
+		return "", true, true
+	}
+	request, ok := params["request"].(map[string]interface{})
+	if !ok {
+		return "", true, true
+	}
+	current, _ := request["url"].(string)
+	base, err := url.Parse(current)
+	if err != nil || current == "" {
+		return "", true, true
+	}
+	ref, err := url.Parse(location)
+	if err != nil {
+		return "", true, true
+	}
+	resolved := base.ResolveReference(ref)
+	if resolved == nil || (resolved.Scheme != "http" && resolved.Scheme != "https") {
+		return "", true, true
+	}
+	return resolved.String(), true, false
+}
+
+func enableRedirectScopeGate(cdp pw.CDPSession, allow func(string) bool) error {
+	cdp.On("Fetch.requestPaused", func(params map[string]interface{}) {
+		requestID, _ := params["requestId"].(string)
+		if requestID == "" {
+			return
+		}
+		method := "Fetch.continueRequest"
+		args := map[string]any{"requestId": requestID}
+		if target, redirect, invalid := cdpRedirectTarget(params); redirect && (invalid || !allow(target)) {
+			method = "Fetch.failRequest"
+			args["errorReason"] = "BlockedByClient"
+		}
+		// CDP event handlers run on the protocol dispatcher. Send the response
+		// asynchronously so waiting for the command reply cannot block delivery
+		// of that reply on the same dispatcher. If sending fails, the request
+		// remains paused rather than escaping the scope check.
+		go func() { _, _ = cdp.Send(method, args) }()
 	})
+	patterns := []any{map[string]any{"urlPattern": "*", "requestStage": "Response"}}
+	if _, err := cdp.Send("Fetch.enable", map[string]any{"patterns": patterns}); err != nil {
+		return fmt.Errorf("enable response-stage redirect scope gate: %w", err)
+	}
+	return nil
+}
+
+func (p *pwPage) OnRequest(fn func(NetworkEvent), allow func(string) bool) error {
+	cdp, err := p.p.Context().NewCDPSession(p.p)
+	if err != nil {
+		return fmt.Errorf("create CDP request observer: %w", err)
+	}
+	cdp.On("Network.requestWillBeSent", func(params map[string]interface{}) {
+		p.bodyMu.Lock()
+		bodyBudget := maxObservedJSONBodyBytesPerPage - p.capturedJSONBodyBytes
+		captureBody := p.capturedJSONBodyEvents < maxObservedJSONBodyEventsPerPage
+		event, observedBodyBytes, ok := networkEventFromCDP(params, allow, captureBody, bodyBudget)
+		if observedBodyBytes > 0 {
+			p.capturedJSONBodyEvents++
+			if observedBodyBytes >= bodyBudget {
+				p.capturedJSONBodyBytes = maxObservedJSONBodyBytesPerPage
+			} else {
+				p.capturedJSONBodyBytes += observedBodyBytes
+			}
+		}
+		p.bodyMu.Unlock()
+		if ok {
+			fn(event)
+		}
+	})
+	if _, err := cdp.Send("Network.enable", map[string]interface{}{"maxPostDataSize": maxCapturedJSONPostDataBytes + 1}); err != nil {
+		// The owning Context.NewPage path closes the page target on observer
+		// setup failure; that also detaches this CDP session without a wait.
+		return fmt.Errorf("enable bounded CDP request observer: %w", err)
+	}
+	if allow != nil {
+		if err := enableRedirectScopeGate(cdp, allow); err != nil {
+			return err
+		}
+	}
+	p.cdp = cdp
+	return nil
 }
 
 func (p *pwPage) OnConsole(fn func(ConsoleMessage)) {
@@ -306,4 +636,11 @@ func (p *pwPage) AddInitScript(script string) error {
 	return p.p.AddInitScript(pw.Script{Content: pw.String(script)})
 }
 
-func (p *pwPage) Close() error { return p.p.Close() }
+func (p *pwPage) Close() error {
+	// Closing the page target automatically detaches its CDP session. Avoid a
+	// synchronous Detach here: Playwright can wait indefinitely for the session
+	// response while an in-flight request is deliberately hanging.
+	err := p.p.Close()
+	p.cdp = nil
+	return err
+}

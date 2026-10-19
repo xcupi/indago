@@ -41,6 +41,11 @@ const (
 	WaitCommit           = "commit"
 )
 
+// MaxJSONNavigationBodyBytes bounds one browser-verification POST/JSON replay.
+// It is larger than the discovery per-body cap to allow a benign candidate to
+// expand an otherwise-maximal observed body without permitting unbounded data.
+const MaxJSONNavigationBodyBytes = 128 << 10
+
 // Config tunes the browser Manager.
 type Config struct {
 	// Headless runs Chromium without a visible window (default true). Interactive
@@ -100,11 +105,15 @@ type Cookie struct {
 	HTTPOnly bool   `json:"http_only,omitempty"`
 }
 
-// NetworkEvent is an observed network request.
+// NetworkEvent is an observed browser network request. PostData is ephemeral,
+// used only to discover bounded JSON request fields; it is omitted from
+// serialization so full request bodies cannot leak through NetworkEvent JSON.
 type NetworkEvent struct {
 	URL          string    `json:"url"`
 	Method       string    `json:"method"`
 	ResourceType string    `json:"resource_type"`
+	ContentType  string    `json:"content_type,omitempty"`
+	PostData     string    `json:"-"` // ephemeral JSON request body for discovery; never serialized
 	At           time.Time `json:"at"`
 }
 
@@ -230,6 +239,9 @@ type RenderOptions struct {
 	SessionStatePath string
 	// WaitUntil is a navigation readiness hint (one of the Wait* constants).
 	WaitUntil string
+	// ObservationWindow keeps a page alive for this bounded duration after
+	// navigation and content retrieval so asynchronous request events can settle.
+	ObservationWindow time.Duration
 	// Timeout overrides the Manager default navigation timeout.
 	Timeout time.Duration
 	// Screenshot requests a screenshot be captured.

@@ -24,10 +24,43 @@ One httptest server, `newCorpus`, with one handler per scenario:
 | `/outside` → `/outside/secret` | linked but out of scope | never requested |
 | `/form`, `/json` (POST) | state-changing reflection | skipped by default; sent (→ `pending`, see below) with the opt-in |
 
-`addJSONEndpoint` seeds the POST-JSON endpoint/parameter/injection-point
-directly — discovery has no JSON-body source (adding one would be a detection
-feature, out of scope here) — then lets the ordinary
-queue→reflection→…→finding chain run it exactly like a discovered endpoint.
+`addJSONEndpoint` still seeds the POST-JSON endpoint/parameters directly in this
+E2E corpus so it can isolate the executor and verification state machine. The
+production browser-network discovery path now also reads bounded JSON request
+objects observed from in-scope page activity: only body-carrying methods (POST,
+PUT, PATCH, DELETE) are eligible. Chromium's CDP `maxPostDataSize` is set to
+64 KiB + 1; the observer checks method, content type and scope before inspecting
+`postData`, retains only non-empty values up to 64 KiB, and rejects larger
+included values (CDP may omit oversized `postData`). The extractor then
+registers at most 64 top-level fields. Automatic `/favicon.ico` requests are
+excluded to avoid meaningless header injection points. Missing, empty, oversized
+or omitted bodies are skipped.
+Each page retains at most 16 bodies and 256 KiB total; after that, request
+metadata is still observed but JSON body bytes are not extracted or retained.
+This caps retained body data, not aggregate CDP transfer: each request event may
+still include up to the per-event cap.
+The source observes for a bounded 250 ms post-load window so script-scheduled API
+calls can be seen without waiting indefinitely for network idle. Each value stays
+raw JSON so replay can keep non-focused types and nested values intact. Full
+request bodies stay ephemeral in browser events and are excluded from their JSON
+serialization; field examples are persisted like other discovered parameter
+examples and may contain sensitive values, so protect scan data accordingly.
+Valid observed `+json` media types are reused for replay. See
+`TestNetworkSourceDiscoversTopLevelJSONBodyParams`,
+`TestManagerNetworkJSONBodyCreatesJSONInjectionPoints`,
+`TestIntegrationNetworkJSONBodyDiscovery`,
+`TestIntegrationRenderCapturesJSONPostDataForDiscovery` and
+`TestIntegrationRequestObserverDoesNotWaitForResponse`.
+
+State-changing methods still require the explicit opt-in. With it enabled,
+POST/JSON candidate bodies are replayed as bounded top-level browser document
+requests (up to 128 KiB, with the observed JSON media type preserved). The
+response is fetched with redirects disabled and fulfilled into Chromium as a
+document; no redirect is followed, including an in-scope one. A marker that
+executes in that document can be Confirmed; safely escaped reflection is not.
+This confirms response execution, not the target application's fetch/XHR or
+cross-origin attacker-delivery path. Other body-carrying methods remain
+unsupported and their findings stay `Pending`.
 
 Companion files: `e2e_recovery_test.go` (a `JobVerify` job interrupted
 mid-navigation, then a real restart with a **fresh** `browser.Manager`),
@@ -72,14 +105,12 @@ concurrently-running scan's requests even though the underlying transport is
 shared. See `internal/scan/scoped.go` and its tests.
 
 **A POST/JSON candidate that reflected produced no `Finding` at all.**
-`docs/scan-orchestration.md` already documented the intent — "a POST/body-
-carrying reflection has no browser-navigable form … and stays `pending`" —
-but the code gated Finding *creation* and the verify-job *enqueue* behind the
-same `isSafeMethod` check, so a POST candidate got neither: not even a
-`Pending` record the operator could see. `enqueueVerification` now always
-correlates a Finding when a candidate reflects; only the verify-job enqueue is
-gated on the method. See `TestEnqueueVerificationSkippedForStateChangingEndpoint`
-(updated) and `TestE2E_StateChangingAllowedSendsPostCandidates`.
+`docs/scan-orchestration.md` documented that a body-carrying reflection should
+remain visible as `Pending`, but the code gated Finding creation and verify-job
+enqueue behind the same safe-method check. Correlation now always creates or
+updates the Finding; browser verification is separately gated by supported
+method/body and the state-changing opt-in. Bounded POST/JSON now reaches a real
+Chromium replay; unsupported body methods still remain `Pending`.
 
 **A scan with `BrowserConcurrency: 0` could never complete.** That is a
 legitimate, already-supported configuration — "no browser available for this

@@ -57,7 +57,7 @@ type pageHandle interface {
 	// result (used for localStorage/sessionStorage access).
 	Evaluate(script string, arg any) (any, error)
 	// OnRequest registers a network-request observer (call before navigation).
-	OnRequest(func(NetworkEvent))
+	OnRequest(func(NetworkEvent), func(string) bool) error
 	// OnConsole registers a console observer.
 	OnConsole(func(ConsoleMessage))
 	// OnDialog registers a dialog observer; the driver dismisses the dialog after

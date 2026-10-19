@@ -72,10 +72,10 @@ func NewCollector(st store.Store, q queue.Queue, scanID domain.ID, scope domain.
 // run's sources rediscover the endpoint, hit the dedup check, and never
 // register its parameters or enqueue its jobs, so it is silently never tested
 // and the scan still completes. Hydrate therefore finishes every incomplete
-// sequence it finds: an endpoint with no endpoint-level job gets one, an
-// endpoint missing any of its own URL's query parameters gets them, a
-// parameter with no injection point gets one, and an injection point with no
-// test job gets one. Hydrate is idempotent.
+// registration sequence it finds: an endpoint with no endpoint-level job gets
+// one, an endpoint missing any query or fragment-route parameters from its own
+// URL gets them, a parameter with no injection point gets one, and an injection
+// point with no test job gets one. Hydrate is idempotent.
 func (c *Collector) Hydrate(ctx context.Context) error {
 	endpoints, err := c.store.Endpoints().ListByScan(ctx, c.scanID)
 	if err != nil {
@@ -170,6 +170,9 @@ func (c *Collector) reconcile(ctx context.Context, endpoints []*domain.Endpoint,
 		for _, name := range info.ParamNames {
 			c.registerParam(ctx, e.ID, e.Method, info, name, domain.LocationQuery, info.Query.Get(name), e.Source)
 		}
+		for _, name := range info.FragmentParams {
+			c.registerParam(ctx, e.ID, e.Method, info, name, domain.LocationFragment, "", e.Source)
+		}
 		// Header/Cookie/Path registration is also reconciled on every Hydrate
 		// pass — registerParam's own dedup makes this a no-op for anything
 		// already persisted, so this only fills in what a prior run (or a
@@ -180,6 +183,10 @@ func (c *Collector) reconcile(ctx context.Context, endpoints []*domain.Endpoint,
 	}
 
 	for _, p := range params {
+		if p.Location == domain.LocationFragment {
+			// DOM-only parameters must never be reconciled into HTTP injection points.
+			continue
+		}
 		ep, ok := endpointByID[p.EndpointID]
 		if !ok {
 			continue
@@ -284,6 +291,12 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 	for _, name := range info.ParamNames {
 		c.registerParam(ctx, id, method, info, name, domain.LocationQuery, info.Query.Get(name), ep.Source)
 	}
+	// Fragment route parameters are DOM-only selectors. Register them at the
+	// endpoint boundary so crawler-discovered links and operator seeds behave
+	// identically; registerParam deliberately creates no HTTP injection point.
+	for _, name := range info.FragmentParams {
+		c.registerParam(ctx, id, method, info, name, domain.LocationFragment, "", ep.Source)
+	}
 	// Header/Cookie/Path injection points (see extra_locations.go /
 	// path_segments.go) — location-agnostic coverage alongside Query/Form/JSON.
 	c.registerHeaderInjectionPoints(ctx, id, method, info, ep.Source)
@@ -367,6 +380,10 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 		return
 	}
 
+	if loc == domain.LocationFragment {
+		// DOM-only: no HTTP injection point, so no HTTP engine ever sends it.
+		return
+	}
 	ip := &domain.InjectionPoint{
 		ID:          domain.NewID(),
 		ScanID:      c.scanID,

@@ -380,15 +380,12 @@ func domXSSHashURL(endpointURL, fragmentValue string) string {
 
 // domXSSQueryURL builds the navigation URL with the query parameter named
 // param set to value, preserving every other existing query parameter and
-// the endpoint's own fragment (if any). Deliberately uses Go's net/url
-// query encoding (application/x-www-form-urlencoded semantics, "+" for
-// space) rather than jsEncodeURIComponent — unlike a URL FRAGMENT (read
-// raw via location.hash, which has no built-in decoding), the WHATWG URL
-// parser decodes a QUERY STRING's "+" as a space itself, and
-// URLSearchParams (the realistic way a page reads location.search, see
-// detection.DOMSourceQuery) implements exactly that spec behavior. So the
-// two sources need, and get, genuinely different encoders — this is not
-// an inconsistency to fix.
+// the endpoint's own fragment (if any). It uses percent-encoding for spaces
+// (%20), not form-encoding (+): pages that inspect location.href directly and
+// call decodeURIComponent do not translate plus to space. URLSearchParams also
+// decodes %20 correctly. For the selected value only, a reserved slash stays
+// literal so decodeURI-based readers can parse closing tags; query separators
+// remain escaped.
 func domXSSQueryURL(endpointURL, param, value string) string {
 	u, err := url.Parse(endpointURL)
 	if err != nil {
@@ -399,12 +396,39 @@ func domXSSQueryURL(endpointURL, param, value string) string {
 		if strings.Contains(endpointURL, "?") {
 			sep = "&"
 		}
-		return endpointURL + sep + param + "=" + url.QueryEscape(value)
+		return endpointURL + sep + param + "=" + strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
 	}
 	q := u.Query()
 	q.Set(param, value)
-	u.RawQuery = q.Encode()
+	u.RawQuery = encodeDOMXSSQuery(q, param)
 	return u.String()
+}
+
+// encodeDOMXSSQuery keeps the selected payload's reserved slash literal in
+// addition to percent-encoding ordinary query syntax. Some pages call
+// decodeURI(location.href); by spec that decoder leaves an encoded "%2F"
+// untouched, so markup such as a closing script tag would stay inert. Leaving
+// slash raw is safe inside a query value, while ampersands, hashes, and other
+// structure-changing characters remain escaped. URLSearchParams and
+// decodeURIComponent readers observe the same payload bytes.
+func encodeDOMXSSQuery(values url.Values, payloadParam string) string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var pairs []string
+	for _, key := range keys {
+		for _, value := range values[key] {
+			encoded := url.QueryEscape(value)
+			if key == payloadParam {
+				encoded = strings.ReplaceAll(encoded, "%2F", "/")
+			}
+			encoded = strings.ReplaceAll(encoded, "+", "%20")
+			pairs = append(pairs, url.QueryEscape(key)+"="+encoded)
+		}
+	}
+	return strings.Join(pairs, "&")
 }
 
 // domXSSOriginURL returns the scheme+host origin ROOT ("https://host/") of
@@ -482,6 +506,11 @@ func domXSSFindingTitle(ep *domain.Endpoint, source detection.DOMXSSSource, sink
 		return fmt.Sprintf("DOM XSS candidate: %s parameter %q reaches %s at %s %s", source, parameter, sink, ep.Method, endpointLabel(ep.URL))
 	case detection.DOMSourceLocalStorage, detection.DOMSourceSessionStorage:
 		return fmt.Sprintf("DOM XSS candidate: %s key %q reaches %s at %s %s", source, parameter, sink, ep.Method, endpointLabel(ep.URL))
+	case detection.DOMSourceHash:
+		if parameter != "" {
+			return fmt.Sprintf("DOM XSS candidate: %s parameter %q reaches %s at %s %s", source, parameter, sink, ep.Method, endpointLabel(ep.URL))
+		}
+		return fmt.Sprintf("DOM XSS candidate: %s reaches %s at %s %s", source, sink, ep.Method, endpointLabel(ep.URL))
 	default:
 		return fmt.Sprintf("DOM XSS candidate: %s reaches %s at %s %s", source, sink, ep.Method, endpointLabel(ep.URL))
 	}
@@ -509,7 +538,8 @@ func upsertDOMXSSFinding(ctx context.Context, st store.Store, scanID domain.ID, 
 	sink := detection.DOMXSSSink(cand.Context)
 	key := domXSSFindingDedupKey(ep.ID, source, sink, cand.Parameter)
 	parameterName := cand.Parameter
-	if source != detection.DOMSourceQuery && source != detection.DOMSourceLocalStorage && source != detection.DOMSourceSessionStorage {
+	if source != detection.DOMSourceQuery && source != detection.DOMSourceLocalStorage && source != detection.DOMSourceSessionStorage &&
+		!(source == detection.DOMSourceHash && cand.Parameter != "") {
 		parameterName = string(source)
 	}
 	now := time.Now()
@@ -730,6 +760,17 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 			discoveryNote += fmt.Sprintf("; skipped %d additional key(s)", skipped)
 		}
 		e.finishTestCase(ctx, discoveryTC, nil, discoveryNote)
+	case detection.DOMSourceHash:
+		selectors, err = e.paramNamesAt(ctx, ep.ID, domain.LocationFragment)
+		if err != nil {
+			tc := e.newTestCase(ctx, job, ep.URL)
+			e.finishTestCase(ctx, tc, err, "fragment-route parameter discovery")
+			return err
+		}
+		if len(selectors) == 0 {
+			// No route parameter: keep the whole-fragment probe for plain hashes.
+			selectors = []string{""}
+		}
 	default:
 		selectors = []string{""}
 	}
@@ -746,6 +787,12 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 // for endpointID in lexicographic name order. Sorting makes probe ordering
 // deterministic even when a store implementation does not preserve row order.
 func (e *domXSSExecutor) queryParamNames(ctx context.Context, endpointID domain.ID) ([]string, error) {
+	return e.paramNamesAt(ctx, endpointID, domain.LocationQuery)
+}
+
+// paramNamesAt returns every distinct discovered parameter name at loc for
+// endpointID, sorted (deterministic probe order).
+func (e *domXSSExecutor) paramNamesAt(ctx context.Context, endpointID domain.ID, loc domain.ParamLocation) ([]string, error) {
 	params, err := e.store.Parameters().ListByEndpoint(ctx, endpointID)
 	if err != nil {
 		return nil, err
@@ -753,7 +800,7 @@ func (e *domXSSExecutor) queryParamNames(ctx context.Context, endpointID domain.
 	seen := make(map[string]bool)
 	var names []string
 	for _, p := range params {
-		if p == nil || p.Location != domain.LocationQuery || p.Name == "" || seen[p.Name] {
+		if p == nil || p.Location != loc || p.Name == "" || seen[p.Name] {
 			continue
 		}
 		seen[p.Name] = true
@@ -775,6 +822,12 @@ func domXSSSelectorLabel(source detection.DOMXSSSource, selector string) string 
 }
 
 func domXSSCandidateForSelector(cand detection.Candidate, source detection.DOMXSSSource, selector string) detection.Candidate {
+	if source == detection.DOMSourceHash && selector != "" {
+		cand.Parameter = selector
+		cand.Location = domain.LocationFragment
+		cand.DedupKey += fmt.Sprintf("\x00selector:%d:%s", len(selector), selector)
+		return cand
+	}
 	if source != detection.DOMSourceQuery && source != detection.DOMSourceLocalStorage && source != detection.DOMSourceSessionStorage {
 		return cand
 	}
@@ -916,6 +969,11 @@ func (e *domXSSExecutor) navigateSource(ctx context.Context, bctx *browser.Conte
 		return console, pageErrs, html, screenshot, navURL, err
 	default: // detection.DOMSourceHash
 		navURL = domXSSHashURL(ep.URL, value)
+		if queryParam != "" {
+			if routeURL := domXSSFragmentRouteURL(ep.URL, queryParam, value); routeURL != "" {
+				navURL = routeURL
+			}
+		}
 		console, pageErrs, html, screenshot, err = e.navigate(ctx, bctx, navURL, marker)
 		return console, pageErrs, html, screenshot, navURL, err
 	}
@@ -932,12 +990,42 @@ func (e *domXSSExecutor) sessionStatePathFor(ctx context.Context, scanID domain.
 	return sess.StatePath
 }
 
+// domXSSURLSourceObservationWindow gives hash/query-driven pages a short
+// post-load settling window. Hash-router pages get a larger bounded window:
+// the route handler commonly starts an API request after load, and the result
+// may not reach a sink until that request completes.
+const (
+	domXSSURLSourceObservationWindow     = 250 * time.Millisecond
+	domXSSFragmentRouteObservationWindow = time.Second
+)
+
+func domXSSURLSourceObservationDelay(navURL string) time.Duration {
+	if i := strings.IndexByte(navURL, '#'); i >= 0 {
+		fragment := navURL[i+1:]
+		if strings.HasPrefix(fragment, "/") && strings.Contains(fragment, "?") {
+			return domXSSFragmentRouteObservationWindow
+		}
+	}
+	return domXSSURLSourceObservationWindow
+}
+
+func waitForDOMXSSURLSourceObservationWindow(ctx context.Context, navURL string) error {
+	timer := time.NewTimer(domXSSURLSourceObservationDelay(navURL))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // navigate opens a fresh page in bctx, installs the init-script harness
 // BEFORE navigating (see domXSSHarnessScript's doc comment), navigates to
-// navURL, waits for load, and returns the page's observations. One page
-// per navigation, never reused — mirrors BrowserVerifier.Verify's own
-// discipline of never attributing a signal to the wrong navigation (here
-// trivially true since every page is brand new, but kept explicit).
+// navURL, allows a bounded post-load observation window for hash/query SPA
+// work, and returns the page's observations. One page per navigation, never
+// reused — mirrors BrowserVerifier.Verify's own discipline of never
+// attributing a signal to the wrong navigation.
 func (e *domXSSExecutor) navigate(ctx context.Context, bctx *browser.Context, navURL, marker string) (console []browser.ConsoleMessage, pageErrs []string, html string, screenshot []byte, err error) {
 	page, err := bctx.NewPage(ctx)
 	if err != nil {
@@ -948,6 +1036,9 @@ func (e *domXSSExecutor) navigate(ctx context.Context, bctx *browser.Context, na
 		return nil, nil, "", nil, err
 	}
 	if _, err := page.Navigate(ctx, navURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
+		return nil, nil, "", nil, err
+	}
+	if err := waitForDOMXSSURLSourceObservationWindow(ctx, navURL); err != nil {
 		return nil, nil, "", nil, err
 	}
 	html, _ = page.Content(ctx)

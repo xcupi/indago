@@ -111,15 +111,16 @@ baseline:
   evidence, but **does not re-plan** (no recursion). The state-changing opt-in is
   re-checked, so a breakout never reaches a state-changing endpoint unless the
   operator allowed it.
-- A candidate that **reflects via GET/HEAD** is **correlated into a `Finding`**
+- A candidate that reflects is **correlated into a `Finding`**
   (`internal/scan/finding.go`'s `upsertPendingFinding` — see
   [`finding-correlation.md`](finding-correlation.md)): the same injection point
   producing the same candidate category+context absorbs into one existing
   `Finding` rather than minting a near-duplicate, with every distinct
   candidate's TestCase ID preserved as raw evidence regardless. A genuinely
-  new site creates one at `VerdictPending`. Either way, a **browser-verify
-  job** (section 1c) is then enqueued. A POST/body-carrying reflection has no
-  browser-navigable form in this phase and stays `pending`.
+  new site creates one at `VerdictPending`. A **browser-verify job** (section
+  1c) is then enqueued for GET/HEAD, POST/form, and bounded POST/JSON candidates;
+  other body-carrying methods remain unsupported and their findings stay
+  `Pending`.
 - The `detection.ReflectionReport` (reflection + context + plan; for a candidate
   job, reflection + context + the executed `candidate`) is stored in `TestCase.Detail`; evidence
   references the shared baseline (request+response) and the mutated
@@ -139,10 +140,10 @@ concurrency, `BrowserConcurrency`), via `verifyExecutor`
 signal and the confirmed/rejected/inconclusive decision rule in full.
 
 In orchestration terms: it resolves the job's target exactly like a test job,
-re-applies the state-changing safeguard, and — only for a GET/HEAD candidate —
-calls the Verifier with the scan's scope (for the browser's `AllowRequest`
-gate) and the scan's saved session (`domain.Session.StatePath`, for an
-authenticated context). On success it persists the verification report into
+re-applies the state-changing safeguard, and — only for a supported method/body
+combination (GET/HEAD, POST/form, or bounded POST/JSON) — calls the Verifier
+with the scan's scope (for the browser's `AllowRequest` gate) and the scan's
+saved session (`domain.Session.StatePath`, for an authenticated context). On success it persists the verification report into
 `TestCase.Detail`, stores the screenshot/rendered-DOM/browser-log as evidence,
 and **correlates** the result into the Finding (`finding.go`'s
 `correlateVerification` — see [`finding-correlation.md`](finding-correlation.md)):

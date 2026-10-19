@@ -1,8 +1,10 @@
 package detection
 
 // This file is the pure seven-source DOM-XSS candidate model. HTML sinks
-// receive the unchanged marker image; primitive-string timers receive only a
-// bare marker JavaScript expression. See docs/dom-xss.md for bounded coverage.
+// normally receive the unchanged marker image; query-sourced document.write
+// uses a benign script body for targets whose decodeURI reader preserves
+// reserved attributes/closing-tag escapes. Primitive-string timers receive a
+// bare marker expression. See docs/dom-xss.md for bounded coverage.
 // A DOM-XSS site is identified by (client-side source, sink) at an Endpoint,
 // not a server-side injection point. In particular, fragments never reach the
 // server-response-based Reflected XSS pipeline.
@@ -153,15 +155,12 @@ func DOMXSSCanary(marker string) string {
 
 // DOMXSSPayloadFor returns the deterministic verification Candidate for a
 // REACHABLE (source, sink) pair found during phase one. Pure,
-// deterministic, benign-marker-only — mirrors candidate.go's html_text
-// onLoad templates (e.g. "<svg onload=M>" / "<img src=x onerror=M>"),
-// adapted for a value assigned WHOLESALE to an HTML-injection sink rather
-// than reflected into EXISTING HTML markup: being assigned to
-// .innerHTML/.outerHTML, or passed to document.write, is actually a
-// SIMPLER context than reflected HTML text, since there is no existing
-// tag/attribute context to break out of first — a bare
-// "<img src=x onerror=M>" string parses and fires as-is the moment the
-// sink sets/writes it.
+// deterministic, benign-marker-only — HTML sinks usually receive a broken-image
+// event candidate, which is effective for standalone wholesale HTML insertion.
+// Query-sourced document.write instead uses a script body: a page can wrap the
+// value inside option/select markup and read location.href through decodeURI,
+// which preserves encoded reserved slashes and equals signs; the candidate and
+// query URL encoding must account for both behaviors.
 //
 // Primitive-string timer candidates instead contain ONLY the bare marker
 // expression: native timers evaluate JavaScript, not HTML. No string-literal
@@ -183,6 +182,13 @@ func DOMXSSPayloadFor(source DOMXSSSource, sink DOMXSSSink, marker string) (Cand
 		return Candidate{}, false
 	}
 	value := "<img src=x onerror=" + marker + ">"
+	if source == DOMSourceQuery && sink == DOMSinkDocumentWrite {
+		// A query payload may be read via decodeURI(location.href), which
+		// intentionally leaves escaped reserved slashes such as %2F intact.
+		// Use a script body (no attribute equals sign) and let the query URL
+		// builder keep its closing-tag slash literal for that reader.
+		value = "<script>" + marker + "</script>"
+	}
 	if sink == DOMSinkSetTimeout || sink == DOMSinkSetInterval {
 		value = marker // A timer evaluates JavaScript, not HTML.
 	}
@@ -245,6 +251,9 @@ func domXSSRationale(source DOMXSSSource, sink DOMXSSSink) string {
 	}
 	if sink == DOMSinkSetTimeout || sink == DOMSinkSetInterval {
 		return how + " reaches the primitive-string handler of native " + string(sink) + "; the browser alone schedules and evaluates the benign bare marker expression, subject to native delay, cancellation, CSP and Trusted Types; confirmation requires the exact marker-specific page error within the bounded observation window" + storageControlCaveat
+	}
+	if source == DOMSourceQuery && sink == DOMSinkDocumentWrite {
+		return how + " reaches " + string(sink) + "; the verification uses a benign script element containing only the marker because decodeURI preserves encoded reserved slashes and document.write may wrap the value inside option/select markup" + storageControlCaveat
 	}
 	if sink == DOMSinkCreateContextualFragment {
 		return how + " is parsed by " + string(sink) + "; confirmation additionally requires observed target insertion of a returned node and the marker-specific browser runtime signal; Indago never inserts the fragment" + storageControlCaveat

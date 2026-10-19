@@ -12,13 +12,25 @@ checks and the distinction between local and GitHub validation.
 `.github/workflows/ci.yml` runs on pushes, pull requests and manual dispatch;
 it has read-only contents permissions and never deploys/releases. It provisions
 Go from `go.mod`, Node 24, the documented Playwright driver and runner system
-Chrome. `scripts/ci-browser-check.py` requires eight actual passing runtime roots
+Chrome. `scripts/ci-browser-check.py` requires sixteen actual passing runtime roots
 (no skips): `TestIntegrationRenderRealBrowser`,
+`TestIntegrationRenderCapturesJSONPostDataForDiscovery`,
+`TestIntegrationRequestObserverDoesNotWaitForResponse`,
+`TestIntegrationNetworkJSONBodyDiscovery`,
 `TestIntegrationVerifyExecutableCandidateIsConfirmed`,
 `TestIntegrationVerifyReflectionOnlyIsRejected`, `TestE2E_FullPipelineAgainstCorpus`,
 `TestUINavigation`, `TestUICooldownClock`, `TestDOMHTMLSourceMatrix` (46 scenarios),
-and `TestDOMStringTimerSourceMatrix` (52 scenarios). Both matrices use
-`browser_integration`; missing/skipped/failed roots and skipped/failed descendants
+`TestDOMStringTimerSourceMatrix` (52 scenarios),
+`TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms`,
+`TestDOMXSSFragmentRouteCapturesPostLoadSink`,
+`TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource`,
+`TestIntegrationDefaultConfigRendererIsSandboxed`, and
+`TestIntegrationDisableSandboxIsExplicitOptOut`. The JSON body tests prove bounded
+in-scope request capture, that a pending response does not stall observation, raw
+field discovery/replay setup and an asynchronous loopback API request through
+Chromium. The delayed-sink test covers the post-load fragment route regression; the
+fragment-route test includes an escaped `textContent` control; the script-literal
+test covers the discovered `default` parameter and a safe control. All browser roots use `browser_integration`; missing/skipped/failed roots and skipped/failed descendants
 of any required root fail the check. The workflow then runs clean-test-cache
 `make check` and `make build`. Failure logs are retained for seven days. Locally set
 `INDAGO_CHROMIUM_PATH` to your installed Chrome and follow the same commands.

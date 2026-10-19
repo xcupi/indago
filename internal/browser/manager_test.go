@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -260,7 +261,10 @@ func (p *fakePage) Evaluate(script string, arg any) (any, error) {
 	return string(b), nil
 }
 
-func (p *fakePage) OnRequest(fn func(NetworkEvent))   { p.reqFn = fn }
+func (p *fakePage) OnRequest(fn func(NetworkEvent), _ func(string) bool) error {
+	p.reqFn = fn
+	return nil
+}
 func (p *fakePage) OnConsole(fn func(ConsoleMessage)) { p.conFn = fn }
 func (p *fakePage) OnDialog(fn func(string))          { p.dlgFn = fn }
 func (p *fakePage) OnPageError(fn func(string))       { p.errFn = fn }
@@ -316,6 +320,109 @@ func newFakeManager(t *testing.T, cfg Config, d *fakeDriver) *Manager {
 		t.Fatalf("newManager: %v", err)
 	}
 	return m
+}
+
+func TestShouldCaptureJSONRequestBodyRequiresBoundedInScopeSize(t *testing.T) {
+	allowInScope := func(raw string) bool { return raw == "http://in-scope.test/api" }
+	for _, tc := range []struct {
+		name, method, contentType, url string
+		bodySize                       int
+		want                           bool
+	}{
+		{"bounded vendor JSON", "POST", "application/vnd.api+json; charset=utf-8", "http://in-scope.test/api", 65536, true},
+		{"missing size", "POST", "application/json", "http://in-scope.test/api", -1, false},
+		{"oversize", "POST", "application/json", "http://in-scope.test/api", 65537, false},
+		{"zero size", "POST", "application/json", "http://in-scope.test/api", 0, false},
+		{"out of scope", "POST", "application/json", "https://outside.test/api", 8, false},
+		{"safe method", "GET", "application/json", "http://in-scope.test/api", 8, false},
+		{"options has no JSON body discovery", "OPTIONS", "application/json", "http://in-scope.test/api", 8, false},
+		{"non-JSON type", "POST", "text/plain", "http://in-scope.test/api", 8, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldCaptureJSONRequestBody(tc.method, tc.contentType, tc.bodySize, tc.url, allowInScope); got != tc.want {
+				t.Fatalf("shouldCaptureJSONRequestBody() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCDPNetworkEventCapturesBoundedScopedJSONBody(t *testing.T) {
+	body := `{"query":"safe-marker","page":2}`
+	allow := func(raw string) bool { return strings.HasPrefix(raw, "http://in-scope.test/") }
+	requestEvent := func(rawURL, contentType, postData string) map[string]interface{} {
+		return map[string]interface{}{
+			"type": "Fetch",
+			"request": map[string]interface{}{
+				"url": rawURL, "method": "POST", "headers": map[string]interface{}{"Content-Type": contentType}, "postData": postData,
+			},
+		}
+	}
+
+	got, observedBodyBytes, ok := networkEventFromCDP(requestEvent("http://in-scope.test/api", "application/vnd.api+json", body), allow, true, 256<<10)
+	if !ok || observedBodyBytes != len(body) || got.Method != "POST" || got.ResourceType != "fetch" || got.PostData != body {
+		t.Fatalf("in-scope JSON event = %#v, ok=%v", got, ok)
+	}
+	budgeted, observedBodyBytes, ok := networkEventFromCDP(requestEvent("http://in-scope.test/api", "application/json", body), allow, true, len(body)-1)
+	if !ok || observedBodyBytes != len(body) || budgeted.PostData != "" {
+		t.Fatalf("body exceeded remaining aggregate budget: %#v, ok=%v", budgeted, ok)
+	}
+	metadataOnly, observedBodyBytes, ok := networkEventFromCDP(requestEvent("http://in-scope.test/api", "application/json", body), allow, false, 256<<10)
+	if !ok || observedBodyBytes != 0 || metadataOnly.PostData != "" {
+		t.Fatalf("body retained after capture budget was exhausted: %#v, ok=%v", metadataOnly, ok)
+	}
+	exactLimit := `"` + strings.Repeat("x", maxCapturedJSONPostDataBytes-2) + `"`
+	atLimit, observedBodyBytes, ok := networkEventFromCDP(requestEvent("http://in-scope.test/api", "application/json", exactLimit), allow, true, 256<<10)
+	if !ok || observedBodyBytes != maxCapturedJSONPostDataBytes || len(atLimit.PostData) != maxCapturedJSONPostDataBytes {
+		t.Fatalf("request body at cap was not retained: size=%d ok=%v", len(atLimit.PostData), ok)
+	}
+	outOfScope, observedBodyBytes, ok := networkEventFromCDP(requestEvent("https://outside.test/api", "application/json", body), allow, true, 256<<10)
+	if !ok || observedBodyBytes != 0 || outOfScope.PostData != "" {
+		t.Fatalf("out-of-scope request body was captured: %#v, ok=%v", outOfScope, ok)
+	}
+	oversize, observedBodyBytes, ok := networkEventFromCDP(requestEvent("http://in-scope.test/api", "application/json", strings.Repeat("x", maxCapturedJSONPostDataBytes+1)), allow, true, 256<<10)
+	if !ok || observedBodyBytes != maxCapturedJSONPostDataBytes+1 || oversize.PostData != "" {
+		t.Fatalf("oversize request body was captured: len=%d ok=%v", len(oversize.PostData), ok)
+	}
+}
+
+func TestPageNetworkJSONBodyRetentionBudgetPreservesRequestMetadata(t *testing.T) {
+	fake := &fakePage{}
+	page, err := newPage(&Context{}, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `"` + strings.Repeat("x", (64<<10)-2) + `"`
+	for i := 0; i < 5; i++ {
+		fake.reqFn(NetworkEvent{
+			URL: fmt.Sprintf("http://in-scope.test/api/%d", i), Method: "POST",
+			ResourceType: "fetch", ContentType: "application/json", PostData: body,
+		})
+	}
+	events := page.NetworkEvents()
+	if len(events) != 5 {
+		t.Fatalf("retained %d request events, want all 5 metadata records", len(events))
+	}
+	for i := 0; i < 4; i++ {
+		if len(events[i].PostData) != 64<<10 {
+			t.Fatalf("body %d retained %d bytes, want 64 KiB", i, len(events[i].PostData))
+		}
+	}
+	if events[4].PostData != "" || events[4].URL != "http://in-scope.test/api/4" {
+		t.Fatalf("over-budget request should retain metadata but drop body: %#v", events[4])
+	}
+
+	countFake := &fakePage{}
+	countPage, err := newPage(&Context{}, countFake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxObservedJSONBodyEventsPerPage+1; i++ {
+		countFake.reqFn(NetworkEvent{URL: fmt.Sprintf("http://in-scope.test/small/%d", i), Method: "POST", ContentType: "application/json", PostData: `{"q":1}`})
+	}
+	countEvents := countPage.NetworkEvents()
+	if len(countEvents) != maxObservedJSONBodyEventsPerPage+1 || countEvents[len(countEvents)-1].PostData != "" {
+		t.Fatalf("event-count budget did not preserve metadata and drop the excess body: len=%d last=%#v", len(countEvents), countEvents[len(countEvents)-1])
+	}
 }
 
 func TestManagerLifecycle(t *testing.T) {

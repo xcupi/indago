@@ -7,9 +7,11 @@ package verification_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -152,6 +154,180 @@ func TestIntegrationVerifyExecutableCandidateIsConfirmed(t *testing.T) {
 	}
 	if res.Evidence.DOMHTML == "" {
 		t.Fatal("expected rendered DOM to be captured")
+	}
+}
+
+func TestIntegrationVerifyJSONPOSTCandidateIsConfirmed(t *testing.T) {
+	m := marker(t)
+	candidateValue := "<svg onload=" + m + ">"
+	encodedValue, err := json.Marshal(candidateValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"filters":{"sort":"newest"},"page":2,"q":` + string(encodedValue) + `}`)
+	type capturedRequest struct {
+		method      string
+		contentType string
+		body        []byte
+	}
+	captured := make(chan capturedRequest, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/search" || r.Method != http.MethodPost {
+			return
+		}
+		gotBody, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			t.Errorf("read JSON body: %v", readErr)
+			return
+		}
+		captured <- capturedRequest{method: r.Method, contentType: r.Header.Get("Content-Type"), body: gotBody}
+		var payload struct {
+			Query string `json:"q"`
+		}
+		if err := json.Unmarshal(gotBody, &payload); err != nil {
+			t.Errorf("decode JSON body: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = fmt.Fprintf(w, "<!doctype html><html><body>%s</body></html>", payload.Query)
+	}))
+	defer srv.Close()
+
+	mgr := newManagerOrSkip(t)
+	defer mgr.Close()
+	v := verification.NewBrowserVerifier(mgr, verification.BrowserVerifierConfig{})
+
+	res, err := v.Verify(context.Background(), verification.Input{
+		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: candidateValue},
+		Marker:    m, Method: http.MethodPost, URL: srv.URL + "/api/search", Location: domain.LocationJSON,
+		ContentType: "application/vnd.api+json; charset=utf-8", JSONBody: body,
+		Scope: openScope(),
+	})
+	if err != nil {
+		t.Fatalf("verify POST/JSON: %v", err)
+	}
+	if res.Verdict != domain.VerdictConfirmed {
+		t.Fatalf("verdict = %s, want confirmed; report=%+v; log=%q", res.Verdict, res.Report, res.Evidence.BrowserLog)
+	}
+	select {
+	case got := <-captured:
+		if got.method != http.MethodPost || got.contentType != "application/vnd.api+json; charset=utf-8" || string(got.body) != string(body) {
+			t.Fatalf("browser request = method %q content-type %q body %s; want POST %q %s", got.method, got.contentType, got.body, "application/vnd.api+json; charset=utf-8", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the browser did not send the JSON POST")
+	}
+}
+
+func TestIntegrationVerifyJSONPOSTEscapedReflectionIsRejected(t *testing.T) {
+	m := marker(t)
+	candidateValue := `"><svg onload=` + m + `>`
+	encodedValue, err := json.Marshal(candidateValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"q":` + string(encodedValue) + `}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.Header.Get("Content-Type"), "+json") {
+			t.Errorf("request method/content-type = %q/%q", r.Method, r.Header.Get("Content-Type"))
+		}
+		gotBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read JSON body: %v", err)
+			return
+		}
+		var payload struct {
+			Query string `json:"q"`
+		}
+		if err := json.Unmarshal(gotBody, &payload); err != nil {
+			t.Errorf("decode JSON body: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = fmt.Fprintf(w, "<!doctype html><html><body><p>%s</p></body></html>", html.EscapeString(payload.Query))
+	}))
+	defer srv.Close()
+
+	mgr := newManagerOrSkip(t)
+	defer mgr.Close()
+	v := verification.NewBrowserVerifier(mgr, verification.BrowserVerifierConfig{})
+	res, err := v.Verify(context.Background(), verification.Input{
+		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLAttr, Value: candidateValue},
+		Marker:    m, Method: http.MethodPost, URL: srv.URL + "/api/search", Location: domain.LocationJSON,
+		ContentType: "application/vnd.search+json", JSONBody: body, Scope: openScope(),
+	})
+	if err != nil {
+		t.Fatalf("verify escaped POST/JSON: %v", err)
+	}
+	if res.Verdict != domain.VerdictRejected || !res.Report.MarkerInDOM || res.Report.Signal != verification.SignalNone {
+		t.Fatalf("safe escaped response verdict/report = %s/%+v", res.Verdict, res.Report)
+	}
+}
+
+func TestIntegrationVerifyJSONPOSTDoesNotFollowInScopeRedirect(t *testing.T) {
+	m := marker(t)
+	value := "<svg onload=" + m + ">"
+	encodedValue, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"q":` + string(encodedValue) + `}`)
+	var finalHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/final" {
+			finalHits.Add(1)
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = fmt.Fprintf(w, "<!doctype html><html><body>%s</body></html>", value)
+			return
+		}
+		http.Redirect(w, r, "/api/final", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	mgr := newManagerOrSkip(t)
+	defer mgr.Close()
+	v := verification.NewBrowserVerifier(mgr, verification.BrowserVerifierConfig{})
+	res, err := v.Verify(context.Background(), verification.Input{
+		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: value},
+		Marker:    m, Method: http.MethodPost, URL: srv.URL + "/api/search", Location: domain.LocationJSON,
+		ContentType: "application/json", JSONBody: body, Scope: openScope(),
+	})
+	if err != nil {
+		t.Fatalf("verify POST/JSON redirect response: %v", err)
+	}
+	if res.Verdict == domain.VerdictConfirmed {
+		t.Fatalf("a redirected response must not be followed and confirmed, report=%+v", res.Report)
+	}
+	if finalHits.Load() != 0 {
+		t.Fatalf("followed in-scope redirect %d times despite conservative no-redirect policy", finalHits.Load())
+	}
+}
+
+func TestIntegrationVerifyJSONPOSTRedirectRemainsScopeGated(t *testing.T) {
+	var outsideHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/outside" {
+			outsideHits.Add(1)
+			return
+		}
+		http.Redirect(w, r, "/outside", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	mgr := newManagerOrSkip(t)
+	defer mgr.Close()
+	v := verification.NewBrowserVerifier(mgr, verification.BrowserVerifierConfig{})
+	res, err := v.Verify(context.Background(), verification.Input{
+		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: "<svg onload=marker>"},
+		Marker:    "marker", Method: http.MethodPost, URL: srv.URL + "/api/search", Location: domain.LocationJSON,
+		ContentType: "application/json", JSONBody: []byte(`{"q":"<svg onload=marker>"}`),
+		Scope: domain.Scope{IncludeHosts: []string{"127.0.0.1"}, IncludePathPrefixes: []string{"/api/"}},
+	})
+	if err == nil && res.Verdict == domain.VerdictConfirmed {
+		t.Fatalf("a blocked out-of-scope redirect must not confirm, result=%+v", res.Report)
+	}
+	if outsideHits.Load() != 0 {
+		t.Fatalf("scope-violating redirect reached the server %d times", outsideHits.Load())
 	}
 }
 
@@ -377,6 +553,77 @@ func TestIntegrationVerifyUsesAuthenticatedSession(t *testing.T) {
 	}
 	if !sawCookie.Load() {
 		t.Fatal("the authenticated session's cookie never reached the server")
+	}
+}
+
+func TestIntegrationVerifyJSONPOSTUsesAuthenticatedSession(t *testing.T) {
+	m := marker(t)
+	value := "<svg onload=" + m + ">"
+	encodedValue, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"q":` + string(encodedValue) + `}`)
+	var sawAuthenticatedRequest atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("session")
+		if err != nil || cookie.Value != "json-authed" {
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("authenticated JSON replay = %s %q", r.Method, r.Header.Get("Content-Type"))
+			return
+		}
+		gotBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read authenticated JSON body: %v", err)
+			return
+		}
+		var payload struct {
+			Query string `json:"q"`
+		}
+		if err := json.Unmarshal(gotBody, &payload); err != nil {
+			t.Errorf("decode authenticated JSON body: %v", err)
+			return
+		}
+		sawAuthenticatedRequest.Store(true)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = fmt.Fprintf(w, "<!doctype html><html><body>%s</body></html>", payload.Query)
+	}))
+	defer srv.Close()
+
+	mgr := newManagerOrSkip(t)
+	defer mgr.Close()
+	statePath := filepath.Join(t.TempDir(), "json-session.json")
+	seedCtx, err := mgr.NewContext(context.Background(), browser.ContextOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seedCtx.SetCookies(context.Background(), []browser.Cookie{{Name: "session", Value: "json-authed", URL: srv.URL}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedCtx.SaveStorageState(context.Background(), statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedCtx.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	v := verification.NewBrowserVerifier(mgr, verification.BrowserVerifierConfig{})
+	res, err := v.Verify(context.Background(), verification.Input{
+		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: value},
+		Marker:    m, Method: http.MethodPost, URL: srv.URL + "/api/search", Location: domain.LocationJSON,
+		ContentType: "application/json", JSONBody: body, Scope: openScope(), SessionStatePath: statePath,
+	})
+	if err != nil {
+		t.Fatalf("verify authenticated POST/JSON: %v", err)
+	}
+	if res.Verdict != domain.VerdictConfirmed {
+		t.Fatalf("authenticated POST/JSON verdict=%s report=%+v", res.Verdict, res.Report)
+	}
+	if !sawAuthenticatedRequest.Load() {
+		t.Fatal("saved browser session cookie never reached the POST/JSON endpoint")
 	}
 }
 

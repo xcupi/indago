@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"mime"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/indago/indago/internal/browser"
 	"github.com/indago/indago/internal/domain"
@@ -195,6 +198,10 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 		return nil, nil // only parse HTML
 	}
 	body := string(resp.Body)
+	for _, name := range ExtractScriptParamNames(body) {
+		_ = sink.AddParameter(ctx, ParamCandidate{EndpointURL: pageURL, EndpointMethod: domain.MethodGET,
+			Name: name, Location: domain.LocationQuery, Source: domain.SourceScriptLiteral})
+	}
 
 	// Forms.
 	for _, f := range ExtractForms(body) {
@@ -536,10 +543,11 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 		// (so no third-party traffic is generated), and every observation is
 		// re-checked below before it reaches the sink.
 		res, err := n.browser.Render(ctx, info.Canonical, browser.RenderOptions{
-			Limiter:          n.cfg.Limiter,
-			WaitUntil:        browser.WaitLoad,
-			AllowRequest:     func(u string) bool { return in.Scope.Permits(u).Allowed },
-			SessionStatePath: in.SessionStatePath,
+			Limiter:           n.cfg.Limiter,
+			WaitUntil:         browser.WaitLoad,
+			ObservationWindow: 250 * time.Millisecond,
+			AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
+			SessionStatePath:  in.SessionStatePath,
 		})
 		if err != nil {
 			if errors.Is(err, browser.ErrNotImplemented) {
@@ -554,19 +562,54 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			if !in.Scope.Permits(ev.URL).Allowed {
 				continue // never persist or enqueue an out-of-scope observation
 			}
+			if isAutomaticFaviconRequest(ev.URL) {
+				continue // browsers request favicon.ico automatically; it is not a useful XSS input surface
+			}
 			method := domain.HTTPMethod(strings.ToUpper(ev.Method))
 			if !method.IsValid() {
 				method = domain.MethodGET
 			}
-			if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: ev.URL, Method: method, Source: domain.SourceBrowserNetwork}); err != nil {
+			if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: ev.URL, Method: method, Source: domain.SourceBrowserNetwork, ContentType: ev.ContentType}); err != nil {
 				if errors.Is(err, ErrLimitReached) {
 					return nil
 				}
 				return err
 			}
+			if ev.PostData == "" || !isJSONContentType(ev.ContentType) {
+				continue
+			}
+			for _, field := range ExtractJSONBodyParams(ev.PostData) {
+				if err := in.wait(ctx); err != nil {
+					return err
+				}
+				if err := sink.AddParameter(ctx, ParamCandidate{
+					EndpointURL: ev.URL, EndpointMethod: method,
+					Name: field.Name, Location: domain.LocationJSON,
+					Example: field.RawValue, Source: domain.SourceBrowserNetwork,
+				}); err != nil {
+					if errors.Is(err, ErrLimitReached) {
+						return nil
+					}
+					return err
+				}
+			}
 		}
 	}
 	return nil
+}
+
+func isAutomaticFaviconRequest(raw string) bool {
+	info, err := Normalize(raw)
+	return err == nil && strings.EqualFold(path.Base(info.Path), "favicon.ico")
+}
+
+func isJSONContentType(raw string) bool {
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return false
+	}
+	mediaType = strings.ToLower(mediaType)
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
 }
 
 // ---------------------------------------------------------------------------
