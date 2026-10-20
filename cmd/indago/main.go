@@ -304,6 +304,7 @@ func cmdServe(args []string) error {
 			statePath := filepath.Join(sessionsDir, "login-"+string(domain.NewID())+".json")
 			res, err := bm.InteractiveLogin(ctx, browser.LoginOptions{
 				LoginURL:         p.LoginURL,
+				AllowRequest:     p.AllowRequest,
 				SuccessURLGlob:   p.SuccessURL,
 				StorageStatePath: statePath,
 			})

@@ -280,6 +280,12 @@ func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*
 // This requires a display; on a headless host it will fail to launch — that is
 // expected, as interactive login is an operator action.
 func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*LoginResult, error) {
+	if opts.AllowRequest == nil {
+		return nil, fmt.Errorf("browser: login requires a project scope gate")
+	}
+	if !opts.AllowRequest(opts.LoginURL) {
+		return nil, fmt.Errorf("browser: login URL is outside project scope; explicitly include authorized SSO hosts and paths in project scope")
+	}
 	if opts.LoginURL == "" || opts.StorageStatePath == "" {
 		return nil, fmt.Errorf("browser: interactive login requires LoginURL and StorageStatePath")
 	}
@@ -302,7 +308,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", nil, nil) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
+	ch, err := b.NewContext("", "", nil, opts.AllowRequest) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}
@@ -401,6 +407,12 @@ const autoLoginScript = `(arg) => {
 // for this one in-memory JS evaluation call; Indago never logs, persists,
 // or returns them anywhere.
 func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginResult, error) {
+	if opts.AllowRequest == nil {
+		return nil, fmt.Errorf("browser: login requires a project scope gate")
+	}
+	if !opts.AllowRequest(opts.LoginURL) {
+		return nil, fmt.Errorf("browser: login URL is outside project scope; explicitly include authorized SSO hosts and paths in project scope")
+	}
 	if opts.LoginURL == "" || opts.StorageStatePath == "" || opts.Username == "" || opts.Password == "" {
 		return nil, fmt.Errorf("browser: auto login requires LoginURL, Username, Password, and StorageStatePath")
 	}
@@ -427,7 +439,7 @@ func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginR
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", nil, nil) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
+	ch, err := b.NewContext("", "", nil, opts.AllowRequest) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}

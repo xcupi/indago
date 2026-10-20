@@ -183,12 +183,18 @@ func TestInteractiveLoginEndpoint(t *testing.T) {
 	b := newAPIWith(t, nil, func(srv *web.Server) {
 		srv.SetLoginFunc(func(_ context.Context, p web.LoginParams) (string, string, error) {
 			gotURL, gotSuccess = p.LoginURL, p.SuccessURL
+			if p.AllowRequest == nil || !p.AllowRequest(p.LoginURL) || p.AllowRequest("https://outside.example/login") {
+				t.Fatal("project scope gate not forwarded")
+			}
 			return "/data/sessions/login-abc.json", "https://app.example.com/dashboard", nil
 		})
 	})
+	pid, _ := setupScan(b, "http://127.0.0.1/")
+	b.mustJSON(b.do("PUT", "/api/projects/"+pid+"/scope", map[string]any{"include_hosts": []string{"app.example.com"}}), 200, nil)
 	var out map[string]string
 	b.mustJSON(b.do("POST", "/api/auth/login", map[string]string{
-		"login_url": "https://app.example.com/login", "success_url": "**/dashboard",
+		"project_id": pid,
+		"login_url":  "https://app.example.com/login", "success_url": "**/dashboard",
 	}), 200, &out)
 	if gotURL != "https://app.example.com/login" || gotSuccess != "**/dashboard" {
 		t.Fatalf("login params not forwarded: url=%q success=%q", gotURL, gotSuccess)

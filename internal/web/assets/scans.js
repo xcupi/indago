@@ -87,7 +87,7 @@ async function openNewScanModal() {
   customCfg.classList.add("hidden");
   const stopNWrap = field("N confirmed", stopN); stopNWrap.classList.add("hidden");
   const authWrap = el("div");
-  const loginBtn = button("Interactive login…", () => openLoginModal((p) => { authState.value = p; }), "");
+  const loginBtn = button("Interactive login…", () => openLoginModal((p) => { authState.value = p; }, project.id), "");
   const existingFields = el("div");
   existingFields.append(field("Session state file (absolute server-side path)", authState),
     el("div", "Capture one with interactive login, or point at a Playwright storage-state file. Its contents are never shown.", "hint"),
@@ -208,19 +208,20 @@ function numOrZero(inputEl) { const v = parseInt(inputEl.value, 10); return Numb
 // ---------------------------------------------------------------------------
 // Interactive login modal
 // ---------------------------------------------------------------------------
-function openLoginModal(onPath) {
+function openLoginModal(onPath, projectID) {
   const body = el("div");
   const loginURL = input("l_url", "url", "https://app.example.com/login");
   const success = input("l_success", "text", "**/dashboard"); success.className = "mono";
-  const status = el("div", undefined, "hint");
+  const status = el("div", "Login uses this project’s scope. Explicitly include authorized login/SSO hosts and paths in Projects → Scope. Popup-based SSO is blocked; use a same-tab flow.", "hint");
   const run = button("Open browser & wait", async () => {
     const u = loginURL.value.trim();
+    if (!projectID) { status.textContent = "Select a project and configure Projects → Scope before login. Explicitly include authorized SSO hosts."; return; }
     if (!u) { status.textContent = "Enter the login page URL first."; return; }
     run.disabled = true;
     status.textContent = "Opening a browser window on the server… log in there (complete any MFA). Waiting for success…";
-    const res = await mutate("POST", "/api/auth/login", { login_url: u, success_url: success.value.trim() });
+    const res = await mutate("POST", "/api/auth/login", { project_id: projectID, login_url: u, success_url: success.value.trim() });
     run.disabled = false;
-    if (!res.ok) { status.textContent = errMsg(res, "interactive login failed"); return; }
+    if (!res.ok) { status.textContent = errMsg(res, "interactive login failed") + " Check Projects → Scope: all authorized login/SSO hosts and paths must be explicitly included. Popup-based SSO is blocked; use a same-tab flow."; return; }
     onPath(res.data.state_path || "");
     status.textContent = "Login captured. The saved session path has been filled in. Its contents are never shown.";
     setTimeout(closeModal, 1200);

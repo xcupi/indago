@@ -732,6 +732,7 @@ func TestInteractiveLogin(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "auth.json")
 	res, err := m.InteractiveLogin(context.Background(), LoginOptions{
 		LoginURL:         "https://app/login",
+		AllowRequest:     func(string) bool { return true },
 		SuccessURLGlob:   "**/dashboard",
 		StorageStatePath: statePath,
 		Timeout:          time.Second,

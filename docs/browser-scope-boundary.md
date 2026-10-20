@@ -26,6 +26,46 @@ pages. See [the patch inventory](../third_party/playwright-go/INDAGO-PATCH.md)
 and its upstream SHA256 manifest. This does not change the Playwright driver
 version, Chromium flags, or process sandbox policy.
 
+## Login flows (B1)
+
+Password auto-login and interactive/MFA login now require a non-nil
+`AllowRequest` gate. Both reject an initial login URL denied by that gate
+**before launching a login browser**, and pass the gate to the fresh context.
+The scan controller derives it from the project's actual `domain.Scope.Permits`,
+including host/path exclusions; it checks the login URL before credentials are
+read or login is launched. There is no separate authentication allowlist.
+
+Standalone `POST /api/auth/login` now requires `project_id`. Missing/unknown
+projects, absent/empty scope, and out-of-scope login URLs return 400 without
+calling the login driver. The dashboard passes the selected project's ID;
+CLI callers must use `auth login -project PID -login-url URL` (optional
+`-success-url GLOB`). The server loads that project's scope, not a scope
+supplied by the client. A browser-disabled server still returns 501.
+
+All login requests use the existing context enforcement described above:
+redirects, subresources, same-tab form submissions and popup requests are not
+exempt. Explicitly add **only authorized** SSO/identity-provider hosts and
+required paths through Projects → Scope before login. Scope is never expanded
+from a redirect, success glob, or login URL. This also authorizes those hosts
+for normal project scanning; do not add an identity provider you lack permission
+to test. Popup-dependent SSO is unsupported (even in-scope popups are denied);
+use a same-tab flow. Service workers remain blocked and WebSockets closed.
+
+`TestIntegrationLoginScopeBoundary` exercises real Chromium against loopback
+servers: initial denial, canonical cross-host redirect denial, credential form
+submission denial, subresource/popup denial, successful scoped login, and an
+explicitly included SSO host. Server-side request and dummy-credential counters
+are the assertions. Interactive/MFA policy plumbing uses fake-driver tests;
+no real operator MFA challenge is exercised. `TestUILoginCarriesProjectScope`
+checks the dashboard request in Chromium. `TestIntegrationCreateScanLoginScope`
+checks the real controller-to-password-login path without starting a scan.
+All three real-browser roots are required by the CI preflight, including
+rejection of skipped/failed descendants.
+
+This B1 change does **not** modify `cdpRedirectTarget` or resolve finding B2
+(redirect URL parser discrepancies). Tests use canonical absolute `Location`
+values to isolate policy plumbing. Existing browser/protocol limits still apply.
+
 ## Compatibility and deliberate limits
 
 - Main managed-page navigation, same-page forms, child frames, fetch/XHR,

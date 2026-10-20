@@ -86,8 +86,10 @@ type LoginFunc func(ctx context.Context, p LoginParams) (statePath, finalURL str
 
 // LoginParams are the inputs to an interactive login.
 type LoginParams struct {
-	LoginURL   string // page to open for the operator to log in on
-	SuccessURL string // optional glob; login is considered done when the browser reaches it
+	// AllowRequest carries the selected project scope; mandatory for browser login.
+	AllowRequest func(string) bool
+	LoginURL     string // page to open for the operator to log in on
+	SuccessURL   string // optional glob; login is considered done when the browser reaches it
 }
 
 // SetLoginFunc installs the interactive-login implementation. A nil fn (the

@@ -400,7 +400,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	if !mode.IsValid() {
 		mode = domain.AuthAnonymous
 	}
-	statePath, err := c.resolveAuth(ctx, mode, p)
+	statePath, err := c.resolveAuth(ctx, mode, p, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -741,10 +741,16 @@ func (c *Controller) Shutdown() {
 // (blocking CreateScan until it finishes, times out, or the context is
 // canceled, the same contract web.LoginFunc's standalone /api/auth/login
 // endpoint already has). Returns the state path to persist on the Session.
-func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p CreateScanParams) (string, error) {
+func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p CreateScanParams, scope domain.Scope) (string, error) {
 	statePath := strings.TrimSpace(p.AuthStatePath)
 	loginURL := strings.TrimSpace(p.LoginURL)
 	successURL := strings.TrimSpace(p.SuccessURL)
+	allow := func(raw string) bool { return scope.Permits(raw).Allowed }
+	if mode == domain.AuthPassword || mode == domain.AuthInteractive || mode == domain.AuthMFA {
+		if loginURL != "" && !allow(loginURL) {
+			return "", fmt.Errorf("%w: login_url must be permitted by project scope; explicitly include authorized SSO hosts and paths in Projects → Scope", ErrOutOfScope)
+		}
+	}
 
 	switch mode {
 	case domain.AuthAnonymous:
@@ -786,7 +792,7 @@ func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p Cr
 		if err != nil {
 			return "", fmt.Errorf("%w: build session state path: %w", ErrAuth, err)
 		}
-		res, err := mgr.InteractiveLogin(ctx, browser.LoginOptions{LoginURL: loginURL, SuccessURLGlob: successURL, StorageStatePath: path})
+		res, err := mgr.InteractiveLogin(ctx, browser.LoginOptions{AllowRequest: allow, LoginURL: loginURL, SuccessURLGlob: successURL, StorageStatePath: path})
 		if err != nil {
 			return "", fmt.Errorf("%w: interactive login: %w", ErrAuth, err)
 		}
@@ -821,7 +827,8 @@ func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p Cr
 			return "", fmt.Errorf("%w: build session state path: %w", ErrAuth, err)
 		}
 		res, err := mgr.AutoLogin(ctx, browser.AutoLoginOptions{
-			LoginURL: loginURL, Username: user, Password: pass, SuccessURLGlob: successURL, StorageStatePath: path,
+			AllowRequest: allow,
+			LoginURL:     loginURL, Username: user, Password: pass, SuccessURLGlob: successURL, StorageStatePath: path,
 			UsernameSelector: p.LoginUsernameSelector, PasswordSelector: p.LoginPasswordSelector, SubmitSelector: p.LoginSubmitSelector,
 		})
 		if err != nil {

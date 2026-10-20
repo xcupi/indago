@@ -191,6 +191,8 @@ type ScreenshotOptions struct {
 
 // LoginOptions configure interactive login/MFA.
 type LoginOptions struct {
+	// AllowRequest is mandatory: use the project's Scope.Permits for all login traffic.
+	AllowRequest     func(string) bool
 	LoginURL         string        // page to open for the operator to log in
 	SuccessURLGlob   string        // navigation to this URL glob signals success
 	StorageStatePath string        // where to save the authenticated session
@@ -211,9 +213,11 @@ type LoginResult struct {
 // boundary, which is specifically about never faking interaction to force
 // an XSS candidate to execute (see AGENTS.md §2.2).
 type AutoLoginOptions struct {
-	LoginURL string
-	Username string
-	Password string
+	// AllowRequest is mandatory: use the project's Scope.Permits for all login traffic.
+	AllowRequest func(string) bool
+	LoginURL     string
+	Username     string
+	Password     string
 	// UsernameSelector/PasswordSelector/SubmitSelector are CSS selectors
 	// that override the built-in heuristic (see autoLoginScript) for a
 	// login form it can't guess correctly. Empty uses the heuristic.

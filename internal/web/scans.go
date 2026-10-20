@@ -387,8 +387,9 @@ func (s *Server) handleReconfigureScan(w http.ResponseWriter, r *http.Request) {
 
 // loginReq is the interactive-login request.
 type loginReq struct {
-	LoginURL   string `json:"login_url"`
-	SuccessURL string `json:"success_url"`
+	ProjectID  domain.ID `json:"project_id"`
+	LoginURL   string    `json:"login_url"`
+	SuccessURL string    `json:"success_url"`
 }
 
 // handleInteractiveLogin drives a visible-browser login and returns the saved
@@ -411,7 +412,33 @@ func (s *Server) handleInteractiveLogin(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "login_url must be an absolute http(s) URL")
 		return
 	}
-	statePath, finalURL, err := s.login(r.Context(), LoginParams{LoginURL: u.String(), SuccessURL: strings.TrimSpace(req.SuccessURL)})
+	if req.ProjectID == "" {
+		writeError(w, http.StatusBadRequest, "project_id is required for login; select a project and configure Projects → Scope, including explicitly authorized SSO hosts")
+		return
+	}
+	if _, err := s.store.Projects().Get(r.Context(), req.ProjectID); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.writeInternalError(w, "login project", err)
+			return
+		}
+		writeError(w, http.StatusBadRequest, "login project not found; select an existing project")
+		return
+	}
+	scope, err := s.store.Scopes().GetByProject(r.Context(), req.ProjectID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.writeInternalError(w, "login scope", err)
+			return
+		}
+		writeError(w, http.StatusBadRequest, "login requires project scope; configure Projects → Scope, including explicitly authorized SSO hosts")
+		return
+	}
+	if !scope.Permits(u.String()).Allowed {
+		writeError(w, http.StatusBadRequest, "login_url is outside project scope; explicitly include authorized login/SSO hosts and paths in Projects → Scope")
+		return
+	}
+	allow := func(raw string) bool { return scope.Permits(raw).Allowed }
+	statePath, finalURL, err := s.login(r.Context(), LoginParams{AllowRequest: allow, LoginURL: u.String(), SuccessURL: strings.TrimSpace(req.SuccessURL)})
 	if err != nil {
 		if r.Context().Err() != nil {
 			// Operator navigated away / canceled: not a server fault.

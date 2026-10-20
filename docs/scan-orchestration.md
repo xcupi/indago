@@ -369,7 +369,7 @@ so all three always agree:
 | start / pause / resume / cancel | `POST /api/scans/{id}/{action}` | `indago scan start\|pause\|resume\|cancel ID` |
 | runtime concurrency / rate (`requests_per_second` paces all target-facing traffic of the scan) | `POST /api/scans/{id}/config` (the four runtime fields; crawl extent preserved) | `indago scan config ID [-discovery N] [-http N] [-browser N] [-rate N]` |
 | status (state, discovery, jobs, findings, request rate, live workers, 429/5xx, redacted session) | `GET /api/scans/{id}/status` | `indago scan status ID [-json]` |
-| interactive login (capture a session file for `existing` mode; needs `-browser`) | `POST /api/auth/login` | (dashboard only) |
+| interactive login (capture a session file for `existing` mode; needs `-browser` and explicit project scope) | `POST /api/auth/login` (`project_id`, `login_url`, optional `success_url`) | `auth login -project PID -login-url URL [-success-url GLOB]` |
 
 The CLI is a thin client over the running server's API (so only the server opens
 the SQLite file); scan IDs may be given as a unique prefix. The bundled web

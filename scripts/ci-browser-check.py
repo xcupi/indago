@@ -10,6 +10,9 @@ import shutil
 import subprocess
 
 required = {
+    "TestIntegrationCreateScanLoginScope",
+    "TestIntegrationLoginScopeBoundary",
+    "TestUILoginCarriesProjectScope",
     "TestIntegrationRenderRealBrowser",
     "TestIntegrationRenderCapturesJSONPostDataForDiscovery",
     "TestIntegrationRequestObserverDoesNotWaitForResponse",

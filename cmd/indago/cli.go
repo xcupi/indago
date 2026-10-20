@@ -778,19 +778,20 @@ func (c *cli) auth(sub string, args []string) error {
 
 func (c *cli) authLogin(args []string) error {
 	fs := c.newFlags("auth login")
+	project := fs.String("project", "", "project ID whose scope authorizes login and SSO traffic (required)")
 	loginURL := fs.String("login-url", "", "login page to open in a real, visible browser")
 	successURL := fs.String("success-url", "", "URL glob the browser must reach before the login counts as done (optional, but a login with none saves state IMMEDIATELY with no wait at all)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
-	if *loginURL == "" {
-		return errors.New("usage: indago auth login -login-url URL [-success-url GLOB]")
+	if strings.TrimSpace(*project) == "" || *loginURL == "" {
+		return errors.New("usage: indago auth login -project PID -login-url URL [-success-url GLOB]; explicitly include authorized SSO hosts in project scope")
 	}
 	var out struct {
 		StatePath string `json:"state_path"`
 		FinalURL  string `json:"final_url"`
 	}
-	if err := c.call("POST", "/api/auth/login", map[string]string{"login_url": *loginURL, "success_url": *successURL}, &out); err != nil {
+	if err := c.call("POST", "/api/auth/login", map[string]string{"project_id": *project, "login_url": *loginURL, "success_url": *successURL}, &out); err != nil {
 		return err
 	}
 	fmt.Fprintf(c.out, "saved session: %s\n", out.StatePath)
