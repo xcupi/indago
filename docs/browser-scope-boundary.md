@@ -62,9 +62,34 @@ checks the real controller-to-password-login path without starting a scan.
 All three real-browser roots are required by the CI preflight, including
 rejection of skipped/failed descendants.
 
-This B1 change does **not** modify `cdpRedirectTarget` or resolve finding B2
-(redirect URL parser discrepancies). Tests use canonical absolute `Location`
-values to isolate policy plumbing. Existing browser/protocol limits still apply.
+## Redirect `Location` parsing (B2)
+
+The CDP redirect gate resolves each 3xx `Location` with Go's `net/url` and asks
+the scope about the result. Chromium parses it with the WHATWG algorithm, which
+for a special scheme skips any run of slashes before the authority:
+`Location: ///host/x` is `http://host/x` to Chromium but a path on the current
+host to `net/url`. A real-Chromium test showed the browser reaching an
+out-of-scope host through that form while the gate allowed it.
+
+`cdpRedirectTarget` now fails closed (the request is aborted) on every form where
+the two readings can differ: backslashes, leading/trailing whitespace, any
+control character (WHATWG removes tab/CR/LF anywhere), opaque references
+(`http:host/x`, `mailto:`), a scheme with no host (`http:///host/x`) and a
+scheme-less reference whose path starts with `//` after parsing (`///host/x`).
+Ordinary redirects are unchanged: plain paths, queries, `../` references,
+`//host/x` network-path references and absolute `http(s)://host/...`.
+
+`TestIntegrationScopeGateBlocksParserDifferentialRedirects` asserts a hit counter
+on a second host name (`localhost` against the in-scope `127.0.0.1`) for each
+shape, and `TestIntegrationParserDifferentialControlReachesTheSecondHost` proves
+an ungated browser does reach that host, so a zero is meaningful. Unit tests pin
+both the rejected forms and the forms that must keep working. Both integration
+roots are required by the CI preflight.
+
+Not covered: only the `Location` header of a 3xx is examined. `Refresh` headers
+and `<meta http-equiv=refresh>` are not examined here and have no dedicated test
+(reasoned, not verified: they should be new navigations that reach the route
+gate), and redirects inside cross-site iframes or workers are still unverified.
 
 ## Compatibility and deliberate limits
 

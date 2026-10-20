@@ -592,6 +592,22 @@ func cdpRedirectTarget(params map[string]interface{}) (target string, isRedirect
 	if strings.Contains(location, `\`) {
 		return "", true, true
 	}
+	// The same differential exists beyond backslashes. WHATWG parsing strips
+	// leading/trailing C0 controls and spaces and removes tab/CR/LF anywhere,
+	// and for a special scheme it skips ANY run of slashes before the authority,
+	// so "///evil.example/x" is http://evil.example/x in Chromium while net/url
+	// reads it as a path on the current host. Rather than model the browser,
+	// reject every form where the two readings can differ and keep only
+	// unambiguous ones (absolute http(s) with a host, network-path "//host",
+	// and plain path/query references).
+	if strings.TrimSpace(location) != location {
+		return "", true, true
+	}
+	for _, r := range location {
+		if r < 0x20 || r == 0x7f {
+			return "", true, true
+		}
+	}
 	request, ok := params["request"].(map[string]interface{})
 	if !ok {
 		return "", true, true
@@ -604,6 +620,14 @@ func cdpRedirectTarget(params map[string]interface{}) (target string, isRedirect
 	ref, err := url.Parse(location)
 	if err != nil {
 		return "", true, true
+	}
+	switch {
+	case ref.Opaque != "":
+		return "", true, true // "http:host/x", "mailto:…": no agreed reading
+	case ref.Scheme != "" && ref.Host == "":
+		return "", true, true // "http:///host/x": Chromium skips the slashes, Go sees an empty host
+	case ref.Scheme == "" && ref.Host == "" && strings.HasPrefix(ref.EscapedPath(), "//"):
+		return "", true, true // "///host/x": a path to Go, an authority to Chromium
 	}
 	resolved := base.ResolveReference(ref)
 	if resolved == nil || (resolved.Scheme != "http" && resolved.Scheme != "https") {

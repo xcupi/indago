@@ -39,6 +39,8 @@ required = {
     "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect",
     "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect",
     "TestIntegrationScopeGateBlocksBackslashPathRedirect",
+    "TestIntegrationScopeGateBlocksParserDifferentialRedirects",
+    "TestIntegrationParserDifferentialControlReachesTheSecondHost",
     "TestIntegrationScopeGateBlocksWebSocketTraffic",
     "TestIntegrationScopeGateBlocksServiceWorkerTraffic",
     "TestIntegrationScopeGateBlocksPopupRedirect",
