@@ -27,6 +27,8 @@ required = {
     "TestUINewScanActionsStayReachableOnShortViewport",
     "TestUIEndpointsTabShowsFoundButUntestedParameters",
     "TestUIScopeFormRefusesEntriesThatCanNeverMatch",
+    "TestIntegrationResourceHintControlsOpenConnectionsWhereExpected",
+    "TestIntegrationResourceHintsDoNotReachAnOutOfScopeHost",
     "TestUIEndpointsLiveRefreshKeepsKeyboardFocus",
     "TestUIFailedScanOverviewWarnsEvenThoughEverythingRecordedPassed",
     "TestDOMHTMLSourceMatrix",

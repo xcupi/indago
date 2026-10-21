@@ -115,6 +115,27 @@ host that is in scope is requested wherever its name points (code, reasoned):
   link-local address if its hostname is in scope.
 - With a proxy, the dial goes to the proxy, so the IP check sees the proxy's
   address and DNS happens at the proxy (reasoned from the transport wiring).
+- **Resource hints** (`<link rel=preconnect|dns-prefetch|prefetch>`, and the
+  `Link:` response header) can contact a host without a request the gate sees:
+  - `prefetch` is a real request. The gate stops it (measured: an ungated render
+    opens a connection to the second host, a gated one opens none).
+  - `preconnect` is **not** stopped by the gate. It is inert today because
+    Indago's contexts are fresh and off-the-record and Chromium does not
+    preconnect there. Measured: a plain Chrome loading the same page opens a
+    connection for the tag, the `crossorigin` form and the `Link:` header; the
+    Indago render opens none (`TestIntegrationResourceHint*`). The same Chrome
+    with `--incognito` drops from 1 connection to 0 while `prefetch` stays at 1.
+    This is an implicit browser property, not a control Indago enforces; the test
+    is a canary for it.
+  - `dns-prefetch` opens no connection, so the tests cannot see it. In a Chrome
+    net-log, the hint made the browser resolve the host name in a normal profile
+    and did not in an `--incognito` one (a plain `<img>` resolved it in both, so
+    the instrument works). It was **not** measured through Indago's own launch,
+    which has no hook to pass `--log-net-log`; that Indago's contexts behave like
+    the incognito run is inferred from the preconnect result.
+  - A future change to a persistent profile, a different Chromium build, or a
+    different launch flag could change all of this without any Indago code
+    changing; only the canary would notice, and only for the shapes it covers.
 
 If your engagement needs "never touch private ranges", enforce it outside
 Indago (network egress rules); the scope does not provide it.
@@ -156,3 +177,9 @@ Chromium would parse a `Location` differently are rejected outright
   engine. Its interaction with proxies is reasoned, not tested.
 - The absence of an IP check in the browser is from searching the source; no
   test makes Chromium connect to a link-local address.
+- Resource hints: only the shapes in `resource_hint_integration_test.go` were
+  tried (tag, `crossorigin`, `Link:` header, `prefetch`), against one Chrome
+  build (155) on loopback names. The canary has not been mutation-tested,
+  because losing the property needs a production change (a non-incognito
+  context); the plain-Chrome control is what shows it can discriminate. Early
+  Hints (103), `prerender`/speculation rules, and `<a ping>` were not tried.
