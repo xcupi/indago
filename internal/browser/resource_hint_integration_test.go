@@ -15,6 +15,12 @@ package browser_test
 //     (non-incognito) Chrome run is the control that proves preconnect would
 //     open a connection in this very environment, so a zero from Indago's
 //     contexts is meaningful and a future change that loses the property fails.
+//   - A preconnect delivered as a Link: response header is deliberately NOT
+//     asserted. In a plain Chrome it opened a connection locally (155.0.8059.39,
+//     4 of 4) but not on the CI runner (155.0.8059.84, 1 of 1), while the tag and
+//     crossorigin forms did in both. A control that cannot be relied on across
+//     environments cannot make the gated zero mean anything, so it is left out
+//     rather than loosened.
 //   - dns-prefetch opens no TCP connection and so cannot be seen here; see
 //     docs/scope-semantics.md for how it was measured.
 
@@ -63,13 +69,11 @@ type hintShape struct {
 	name       string
 	preconnect bool // true: a plain Chrome opens a connection, a gate cannot see it
 	head       func(out string) string
-	linkHeader func(out string) string
 }
 
 var hintShapes = []hintShape{
 	{name: "preconnect-tag", preconnect: true, head: func(o string) string { return `<link rel="preconnect" href="http://` + o + `/">` }},
 	{name: "preconnect-crossorigin", preconnect: true, head: func(o string) string { return `<link rel="preconnect" href="http://` + o + `/" crossorigin>` }},
-	{name: "preconnect-link-header", preconnect: true, head: func(string) string { return "" }, linkHeader: func(o string) string { return `<http://` + o + `/>; rel=preconnect` }},
 	{name: "prefetch-tag", head: func(o string) string { return `<link rel="prefetch" href="http://` + o + `/pf">` }},
 }
 
@@ -77,9 +81,6 @@ func (s hintShape) page(t *testing.T, outHost string, inHits *atomic.Int64) *htt
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		inHits.Add(1)
-		if s.linkHeader != nil {
-			rw.Header().Set("Link", s.linkHeader(outHost))
-		}
 		rw.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(rw, "<!doctype html><html><head>"+s.head(outHost)+"</head><body>hint page</body></html>")
 	}))

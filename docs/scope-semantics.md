@@ -122,7 +122,7 @@ host that is in scope is requested wherever its name points (code, reasoned):
   - `preconnect` is **not** stopped by the gate. It is inert today because
     Indago's contexts are fresh and off-the-record and Chromium does not
     preconnect there. Measured: a plain Chrome loading the same page opens a
-    connection for the tag, the `crossorigin` form and the `Link:` header; the
+    connection for the tag and the `crossorigin` form; the
     Indago render opens none (`TestIntegrationResourceHint*`). The same Chrome
     with `--incognito` drops from 1 connection to 0 while `prefetch` stays at 1.
     This is an implicit browser property, not a control Indago enforces; the test
@@ -177,9 +177,13 @@ Chromium would parse a `Location` differently are rejected outright
   engine. Its interaction with proxies is reasoned, not tested.
 - The absence of an IP check in the browser is from searching the source; no
   test makes Chromium connect to a link-local address.
-- Resource hints: only the shapes in `resource_hint_integration_test.go` were
-  tried (tag, `crossorigin`, `Link:` header, `prefetch`), against one Chrome
-  build (155) on loopback names. The canary has not been mutation-tested,
+- Resource hints: only the shapes in `resource_hint_integration_test.go` are
+  asserted (tag, `crossorigin`, `prefetch`), against Chrome 155 on loopback
+  names. A preconnect sent as a `Link:` response header is **not** asserted: a
+  plain Chrome opened a connection for it locally (155.0.8059.39, 4 of 4) but not
+  on the CI runner (155.0.8059.84, 1 of 1), so its control was unreliable and the
+  CI run caught it. Whether that is flakiness or a build difference was not
+  established; treat the header form as unmeasured. The canary has not been mutation-tested,
   because losing the property needs a production change (a non-incognito
   context); the plain-Chrome control is what shows it can discriminate. Early
   Hints (103), `prerender`/speculation rules, and `<a ping>` were not tried.
