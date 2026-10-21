@@ -91,6 +91,10 @@ and `<meta http-equiv=refresh>` are not examined here and have no dedicated test
 (reasoned, not verified: they should be new navigations that reach the route
 gate), and redirects inside cross-site iframes or workers are still unverified.
 
+What the scope matcher compares (hostname only; port and scheme ignored; loose
+path prefixes; no IP-level policy in the browser) is documented in
+[scope-semantics.md](scope-semantics.md).
+
 ## Compatibility and deliberate limits
 
 - Main managed-page navigation, same-page forms, child frames, fetch/XHR,
