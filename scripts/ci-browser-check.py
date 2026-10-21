@@ -29,6 +29,8 @@ required = {
     "TestUIScopeFormRefusesEntriesThatCanNeverMatch",
     "TestIntegrationResourceHintControlsOpenConnectionsWhereExpected",
     "TestIntegrationResourceHintsDoNotReachAnOutOfScopeHost",
+    "TestIntegrationRedirectSurfacesControlReachesTheSecondHost",
+    "TestIntegrationScopeGateStopsRedirectSurfaces",
     "TestUIEndpointsLiveRefreshKeepsKeyboardFocus",
     "TestUIFailedScanOverviewWarnsEvenThoughEverythingRecordedPassed",
     "TestDOMHTMLSourceMatrix",

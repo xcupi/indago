@@ -55,6 +55,14 @@ func (d *pwDriver) Launch(headless bool) (browserHandle, error) {
 	opts := pw.BrowserTypeLaunchOptions{
 		Headless:        pw.Bool(headless),
 		ChromiumSandbox: pw.Bool(!d.disableSandbox),
+		// A SharedWorker's network requests are not seen by the scope gate: the
+		// gated page, frame and dedicated-worker paths all hold, but a shared
+		// worker fetch reached an out-of-scope host every time (6 of 6, with a
+		// page that stays alive long enough for it to run). Playwright's route
+		// interception does not cover that target, so the surface is removed
+		// instead of patched with a script-level listener.
+		// TestIntegrationScopeGateStopsRedirectSurfaces/shared-worker is the check.
+		Args: []string{"--disable-blink-features=SharedWorker"},
 	}
 	if d.exe != "" {
 		opts.ExecutablePath = pw.String(d.exe)
