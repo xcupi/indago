@@ -113,6 +113,11 @@ host that is in scope is requested wherever its name points (code, reasoned):
 - **The browser has no IP-level check at all** (code: the only link-local check
   in the tree is in `httpengine`). A page can make Chromium connect to a
   link-local address if its hostname is in scope.
+- **The browser also connects to out-of-scope hosts for navigations.** The gate
+  refuses the request, but Chromium preconnects to a navigation target first
+  (TCP; for https a TLS ClientHello with the name in the SNI). Measured, with the
+  causes and limits in [browser-scope-boundary.md](browser-scope-boundary.md)
+  ("Known gap: connections").
 - With a proxy, the dial goes to the proxy, so the IP check sees the proxy's
   address and DNS happens at the proxy (reasoned from the transport wiring).
 - **Resource hints** (`<link rel=preconnect|dns-prefetch|prefetch>`, and the

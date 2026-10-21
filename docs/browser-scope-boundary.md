@@ -86,10 +86,74 @@ an ungated browser does reach that host, so a zero is meaningful. Unit tests pin
 both the rejected forms and the forms that must keep working. Both integration
 roots are required by the CI preflight.
 
-Not covered: only the `Location` header of a 3xx is examined. `Refresh` headers
-and `<meta http-equiv=refresh>` are not examined here and have no dedicated test
-(reasoned, not verified: they should be new navigations that reach the route
-gate), and redirects inside cross-site iframes or workers are still unverified.
+Other navigation and fetch surfaces, measured (`redirect_surfaces_integration_test.go`,
+15 shapes, each with an ungated control that must reach the second host):
+`Refresh` header, `<meta http-equiv=refresh>`, `location.href`, iframes (same-site
+and cross-site, the latter served from `127.0.0.2` so Chromium isolates the frame
+in its own process), a 3xx inside an iframe, and dedicated, shared and blob
+workers (`fetch`, `importScripts`, and a worker started from a cross-site frame).
+**No HTTP request reached the out-of-scope host in any of the 15 shapes, with one
+exception that was found by this work and fixed: `SharedWorker`.**
+
+**SharedWorker bypassed the gate (fixed).** A `fetch` from a shared worker reached
+the out-of-scope host with a real HTTP request, 6 of 6 times once the page was kept
+alive long enough for the worker to run (dedicated, blob, and cross-site-frame
+workers stayed clean 6 of 6 under the same conditions). It looked intermittent
+(2 of 8, then 2 of 4) only because the context sometimes closed before the worker
+ran; a pass in that state proves nothing. Playwright's route interception does not
+cover a shared worker's network traffic, so the surface is removed at launch with
+`--disable-blink-features=SharedWorker` (`pwDriver.Launch`), not patched with a
+script-level listener. Measured: with the flag the shape no longer reaches the
+second host even from a page with no gate (the interface is gone), and the gated
+test passes; without it the gated test fails 5 of 5. The shape's control therefore
+runs in a plain Chrome (it cannot run inside Indago any more). Consequences: pages
+that use `SharedWorker` lose that feature in every Indago-launched browser
+(including interactive login); `new SharedWorker(...)` throws. Other
+cross-process targets that a route cannot see were not enumerated and may exist.
+
+The earlier "reasoned, not verified" statement for `Refresh`, meta-refresh and
+cross-site iframes/workers is now measured for requests.
+
+**Known gap: connections.** The gate refuses *requests*; it does not prevent
+Chromium from opening a *connection*. For six shapes that start a navigation to an
+out-of-scope URL (`Refresh` header, meta-refresh, `location.href`, `<iframe src>`,
+meta-refresh inside an iframe, meta-refresh inside a cross-site iframe) the
+out-of-scope host still sees TCP connections while no request arrives:
+- `http://` target: one TCP connection, zero bytes sent (measured with a raw
+  listener).
+- `https://` target: two connections, each starting a TLS handshake. The first
+  bytes are a ClientHello (`0x16`), which carries the host name in the SNI in the
+  clear (measured with a raw listener on loopback; no real server was contacted).
+- A Chrome net-log shows the cause: an `HTTP_STREAM_JOB_CONTROLLER` with
+  `is_preconnect: true` for the navigation URL. It is a Chromium preconnect for the
+  navigation target and it happens regardless of the later `route.Abort`.
+- Not affected (zero connections, measured): a 3xx `Location` redirect, and every
+  subresource and worker fetch (`<img>`, `fetch`, `importScripts`, blob and shared
+  workers).
+- Seven launch flags and feature switches were tried and none changed it
+  (`--dns-prefetch-disable`, `--disable-quic`, `PreconnectFromKeyedService`,
+  `LoadingPredictorLimitPreconnectSocketCount`, `PreconnectManagerDirectFastPath`,
+  `NavigationPredictorPreconnectHoldback`, and a bundle of prediction/prefetch
+  features). This is not a proof that no switch exists; the cause was not traced to
+  a specific Chromium feature.
+
+What that means in practice: no request, cookie, path or payload reaches an
+out-of-scope host, but the host can see the scanner's address connect and, for
+https, can read its own name in the SNI. A page that embeds a third-party
+`<iframe src="https://…">` (embeds, ads, captchas) triggers this for each one. A
+person browsing the same page makes the same connections. If a program forbids
+*any* contact with out-of-scope infrastructure, the browser path does not meet
+that on its own: enforce it with egress filtering outside Indago, or a
+scope-enforcing proxy (not implemented). The test records the gap with
+`KNOWN GAP` log lines and asserts only what is true (zero requests everywhere,
+zero connections for non-navigations); if a future Chromium or a fix closes it,
+the log lines change and this section must be updated.
+
+Not covered: `Location` and the surfaces above are measured on loopback names with
+Chrome 155 only. Early Hints (103), speculation rules/prerender, `<a ping>`, Server-Sent
+Events/EventSource, WebTransport and service workers' own fetches (blocked, not
+re-measured here) were not tried, and the connection gap was observed only through
+Indago's launch, not traced inside Chromium.
 
 What the scope matcher compares (hostname only; port and scheme ignored; loose
 path prefixes; no IP-level policy in the browser) is documented in
