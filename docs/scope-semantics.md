@@ -25,10 +25,14 @@ authorized to test on another port, the scope cannot separate them.
 
 ## 2. Include entries must be bare hostnames
 
-Entries are trimmed of whitespace and otherwise stored as typed (`include_hosts`
-in `PUT /api/projects/{id}/scope`; nothing is validated). They are compared as
-lowercase strings against the URL's hostname. Anything else matches **nothing**,
-so the scope silently denies everything instead of the intended host (measured):
+Entries are trimmed of whitespace and compared as lowercase strings against the
+URL's hostname, so anything that is not a bare hostname would match **nothing**
+and the scope would silently deny the host the operator meant (measured).
+`PUT /api/projects/{id}/scope` therefore **rejects such entries with a 400** that
+names the field, the entry and how to write it, and stores nothing (the previous
+scope stays). Measured by `internal/domain/scope_validate_test.go` and
+`internal/web/scope_validation_test.go`; the form shows the rule beforehand
+(`ui_scope_test.go`). The same checks apply to `exclude_hosts`:
 
 | entry | result | write instead |
 |---|---|---|
@@ -39,7 +43,14 @@ so the scope silently denies everything instead of the intended host (measured):
 | `[::1]` | never matches | `::1` (IPv6 without brackets) |
 | `bücher.example` | a Unicode URL host does not match the punycode entry (measured); Chromium reports punycode hosts, so enter the punycode form (reasoned) | `xn--bcher-kva.example` |
 
-This fails closed, but the symptom is a confusing "host not in scope". Case does
+This fails closed, and since validation was added the operator is told at save
+time instead of discovering "host not in scope" later. The validator rejects
+exactly the shapes that cannot match; it does **not** reject entries that match
+more or less than they read (port ignored, path prefixes with no segment
+boundary, case-sensitive paths): those stay documented here. Path prefixes are
+validated too: they must start with `/` and contain no `?`, `#`, whitespace,
+`://` or dot-segment. Existing scopes saved before this check are not migrated;
+a bad entry in one still just matches nothing until it is re-saved. Case does
 not matter for hosts (measured).
 
 Other spellings of the same machine are **not** recognized as that host, so they

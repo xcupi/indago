@@ -227,6 +227,7 @@ async function renderScope(_params, view) {
 
   const form = el("div");
   form.append(
+    el("p", "Hosts are bare hostnames: no https://, port, path or *. Write app.example.com, or .example.com for the host and all its subdomains. The port is ignored, so a host is in scope on every port. Path prefixes start with / and are plain string prefixes (/app also matches /application).", "hint scope-host-hint"),
     rowOf(field("Include hosts (one per line)", incHosts), field("Exclude hosts (one per line)", excHosts)),
     rowOf(field("Include path prefixes (one per line)", incPaths), field("Exclude path prefixes (one per line)", excPaths)),
     labelInline(subs, "Allow subdomains of included hosts"),

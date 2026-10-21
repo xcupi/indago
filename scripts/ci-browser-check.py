@@ -26,6 +26,7 @@ required = {
     "TestUIScanHeaderFollowsStateChange",
     "TestUINewScanActionsStayReachableOnShortViewport",
     "TestUIEndpointsTabShowsFoundButUntestedParameters",
+    "TestUIScopeFormRefusesEntriesThatCanNeverMatch",
     "TestUIEndpointsLiveRefreshKeepsKeyboardFocus",
     "TestUIFailedScanOverviewWarnsEvenThoughEverythingRecordedPassed",
     "TestDOMHTMLSourceMatrix",

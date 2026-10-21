@@ -2,6 +2,7 @@ package web
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -127,14 +128,24 @@ func (s *Server) handlePutScope(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "include_hosts must contain at least one host")
 		return
 	}
+	exclude := cleanList(req.ExcludeHosts)
+	includePaths := cleanList(req.IncludePathPrefixes)
+	excludePaths := cleanList(req.ExcludePathPrefixes)
+	// An entry that can never match is not an error at match time: it just makes
+	// the scope silently deny the host the operator meant. Reject it here, before
+	// anything is stored, so a rejected replacement leaves the old scope intact.
+	if msg := validateScopeLists(include, exclude, includePaths, excludePaths); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
 	now := time.Now()
 	existing, err := s.store.Scopes().GetByProject(r.Context(), projectID)
 	switch {
 	case err == nil:
 		existing.IncludeHosts = include
-		existing.ExcludeHosts = cleanList(req.ExcludeHosts)
-		existing.IncludePathPrefixes = cleanList(req.IncludePathPrefixes)
-		existing.ExcludePathPrefixes = cleanList(req.ExcludePathPrefixes)
+		existing.ExcludeHosts = exclude
+		existing.IncludePathPrefixes = includePaths
+		existing.ExcludePathPrefixes = excludePaths
 		existing.AllowSubdomains = req.AllowSubdomains
 		existing.UpdatedAt = now
 		if err := s.store.Scopes().Update(r.Context(), existing); err != nil {
@@ -145,9 +156,9 @@ func (s *Server) handlePutScope(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrNotFound):
 		sc := &domain.Scope{
 			ID: domain.NewID(), ProjectID: projectID,
-			IncludeHosts: include, ExcludeHosts: cleanList(req.ExcludeHosts),
-			IncludePathPrefixes: cleanList(req.IncludePathPrefixes),
-			ExcludePathPrefixes: cleanList(req.ExcludePathPrefixes),
+			IncludeHosts: include, ExcludeHosts: exclude,
+			IncludePathPrefixes: includePaths,
+			ExcludePathPrefixes: excludePaths,
 			AllowSubdomains:     req.AllowSubdomains,
 			CreatedAt:           now, UpdatedAt: now,
 		}
@@ -499,6 +510,28 @@ func cleanList(in []string) []string {
 		}
 	}
 	return out
+}
+
+// validateScopeLists returns "" when every entry could match something, else a
+// message naming the first bad entry's field and how to fix it.
+func validateScopeLists(include, exclude, includePaths, excludePaths []string) string {
+	for _, f := range []struct {
+		name    string
+		entries []string
+		check   func(string) error
+	}{
+		{"include_hosts", include, domain.ValidateScopeHost},
+		{"exclude_hosts", exclude, domain.ValidateScopeHost},
+		{"include_path_prefixes", includePaths, domain.ValidateScopePathPrefix},
+		{"exclude_path_prefixes", excludePaths, domain.ValidateScopePathPrefix},
+	} {
+		for i, e := range f.entries {
+			if err := f.check(e); err != nil {
+				return fmt.Sprintf("%s[%d]: %v", f.name, i, err)
+			}
+		}
+	}
+	return ""
 }
 
 // nonNil returns an empty slice instead of nil so JSON encodes [] not null.
