@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/indago/indago/internal/domain"
@@ -28,6 +29,12 @@ type Data struct {
 	// scan.
 	Selection    domain.ReportSelection
 	ScanFindings int
+	// Completeness is how much of the scan actually ran. Every generator
+	// states it, so a report from a failed, canceled or still-running scan
+	// (or one with dead jobs / errored test cases) can never present missing
+	// coverage as "no findings". It is pure data supplied by the caller: the
+	// generators render it and make no security decision from it.
+	Completeness Completeness
 	// AISummary, when non-empty, is an advisory executive summary drafted
 	// by the AI Gateway (domain.AIDraftReport) — rendered prominently
 	// labeled as AI-generated and unverified, NEVER as part of the
@@ -36,6 +43,81 @@ type Data struct {
 	// all — see AGENTS.md §2.5: the scanner must work identically with AI
 	// disabled, and AI output is never authoritative.
 	AISummary string
+}
+
+// Completeness records the scan coverage a report was generated from: the
+// scan's lifecycle state plus the counts of work that did not complete. It
+// carries no verdict and no finding: it exists so a reader can tell a clean
+// result from a report over an unfinished scan.
+type Completeness struct {
+	State            domain.ScanState `json:"state"`
+	DeadJobs         int              `json:"dead_jobs"`
+	FailedJobs       int              `json:"failed_jobs"`
+	CanceledJobs     int              `json:"canceled_jobs"`
+	ErrorTestCases   int              `json:"error_test_cases"`
+	TimeoutTestCases int              `json:"timeout_test_cases"`
+}
+
+// HasJobGaps reports whether a job-level gap makes coverage incomplete: a
+// dead, failed or canceled job means work that should have run did not.
+func (c Completeness) HasJobGaps() bool {
+	return c.DeadJobs > 0 || c.FailedJobs > 0 || c.CanceledJobs > 0
+}
+
+// HasTestCaseGaps reports whether any test case ended in error or timeout.
+// On its own this is NOT an incomplete scan: the bounded worker retry may
+// have recovered it, which is why it is surfaced as a neutral note.
+func (c Completeness) HasTestCaseGaps() bool {
+	return c.ErrorTestCases > 0 || c.TimeoutTestCases > 0
+}
+
+// Complete reports whether the scan finished with no JOB-level coverage gap.
+// Test-case errors/timeouts alone do not make it incomplete — the job retry
+// may have recovered them; they render as a neutral coverage note instead.
+func (c Completeness) Complete() bool {
+	return c.State == domain.ScanCompleted && !c.HasJobGaps()
+}
+
+// NeedsCoverageNote reports tier 2: a complete scan (no job gaps) that still
+// recorded errored or timed-out test cases worth mentioning calmly.
+func (c Completeness) NeedsCoverageNote() bool {
+	return c.Complete() && c.HasTestCaseGaps()
+}
+
+// testCaseGapText describes the tier-2 counts for the neutral note.
+func (c Completeness) testCaseGapText() string {
+	return fmt.Sprintf("%d test case(s) ended in error and %d timed out", c.ErrorTestCases, c.TimeoutTestCases)
+}
+
+// coverageFor resolves the coverage metadata to render: the caller's
+// Completeness, falling back to the scan's own state for callers that only
+// populate Data.Scan.
+func coverageFor(data Data) Completeness {
+	c := data.Completeness
+	if c.State == "" {
+		c.State = data.Scan.State
+	}
+	return c
+}
+
+// incompleteEmptyText replaces the plain "No findings" sentence whenever the
+// scan did not cover the target. It never claims a vulnerability; it prevents
+// missing coverage from being read as a clean result.
+const incompleteEmptyText = "No findings recorded — coverage is incomplete, this does NOT mean the target is clean."
+
+// writeIncompleteBanner is the Markdown coverage banner: prominent, before the
+// summary, naming the scan state and every gap count.
+func writeIncompleteBanner(b *strings.Builder, c Completeness) {
+	fmt.Fprintf(b, "> **⚠ Incomplete scan — this report does NOT cover the whole target.**\n>\n")
+	fmt.Fprintf(b, "> Scan state: `%s` · Dead jobs: %d · Failed jobs: %d · Canceled jobs: %d · Error test cases: %d · Timeout test cases: %d\n\n",
+		nonEmpty(string(c.State), "unknown"), c.DeadJobs, c.FailedJobs, c.CanceledJobs, c.ErrorTestCases, c.TimeoutTestCases)
+}
+
+// writeCoverageNote is the tier-2 Markdown notice: a completed scan whose only
+// gap is a test case that may have been recovered by the worker retry. It is
+// deliberately neutral — not an "incomplete scan" warning.
+func writeCoverageNote(b *strings.Builder, c Completeness) {
+	fmt.Fprintf(b, "> **Coverage note:** %s; their jobs completed, so some may have been recovered by retry.\n\n", c.testCaseGapText())
 }
 
 // dataSummary is Summarize plus the report's own selection metadata.
@@ -92,13 +174,21 @@ type JSONGenerator struct{}
 func (JSONGenerator) Format() domain.ReportFormat { return domain.ReportJSON }
 
 type jsonReport struct {
-	Tool        string               `json:"tool"`
-	Version     string               `json:"version"`
-	GeneratedAt time.Time            `json:"generated_at"`
-	Project     domain.Project       `json:"project"`
-	Scan        domain.Scan          `json:"scan"`
-	Summary     domain.ReportSummary `json:"summary"`
-	Findings    []jsonFinding        `json:"findings"`
+	Tool         string               `json:"tool"`
+	Version      string               `json:"version"`
+	GeneratedAt  time.Time            `json:"generated_at"`
+	Project      domain.Project       `json:"project"`
+	Scan         domain.Scan          `json:"scan"`
+	Summary      domain.ReportSummary `json:"summary"`
+	Completeness jsonCompleteness     `json:"completeness"`
+	Findings     []jsonFinding        `json:"findings"`
+}
+
+// jsonCompleteness is the additive JSON shape: the counts plus the tier-1
+// completeness boolean (job-level gaps only), so consumers do not recompute it.
+type jsonCompleteness struct {
+	Completeness
+	IsComplete bool `json:"complete"`
 }
 
 // jsonFinding is the stored finding plus its presentation: section, the
@@ -119,14 +209,16 @@ func (JSONGenerator) Generate(w io.Writer, data Data) error {
 	for _, f := range findings {
 		out = append(out, jsonFinding{Finding: f, FindingView: NewFindingView(f, idx)})
 	}
+	cov := coverageFor(data)
 	rep := jsonReport{
-		Tool:        "indago",
-		Version:     data.ToolVersion,
-		GeneratedAt: data.GeneratedAt,
-		Project:     data.Project,
-		Scan:        data.Scan,
-		Summary:     dataSummary(data, findings),
-		Findings:    out,
+		Tool:         "indago",
+		Version:      data.ToolVersion,
+		GeneratedAt:  data.GeneratedAt,
+		Project:      data.Project,
+		Scan:         data.Scan,
+		Summary:      dataSummary(data, findings),
+		Completeness: jsonCompleteness{Completeness: cov, IsComplete: cov.Complete()},
+		Findings:     out,
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

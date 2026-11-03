@@ -97,6 +97,10 @@ type htmlView struct {
 	ScanID        string
 	Selection     string
 	AISummary     string
+	Incomplete    bool
+	CoverageNote  bool
+	CoverageState string
+	Coverage      Completeness
 	TotalFindings int
 	Confirmed     int
 	NeedsReview   int
@@ -116,6 +120,7 @@ func (HTMLGenerator) Generate(w io.Writer, data Data) error {
 	idx := EvidenceIndex(data.Evidence)
 	summary := dataSummary(data, findings)
 	counts := sectionCounts(findings)
+	coverage := coverageFor(data)
 
 	view := htmlView{
 		ToolVersion:   nonEmpty(data.ToolVersion, "dev"),
@@ -125,6 +130,10 @@ func (HTMLGenerator) Generate(w io.Writer, data Data) error {
 		ScanID:        string(data.Scan.ID),
 		Selection:     selectionLine(summary),
 		AISummary:     data.AISummary,
+		Incomplete:    !coverage.Complete(),
+		CoverageNote:  coverage.NeedsCoverageNote(),
+		CoverageState: nonEmpty(string(coverage.State), "unknown"),
+		Coverage:      coverage,
 		TotalFindings: summary.TotalFindings,
 		Confirmed:     summary.ConfirmedCount,
 		NeedsReview:   counts[SectionNeedsReview],
@@ -266,6 +275,9 @@ const htmlTemplateSrc = `<!doctype html>
   .note { color: #57606a; font-style: italic; }
   .baseline { color: #57606a; }
   .ai-summary { background: #fff8e6; border: 1px solid #d4a72c; border-radius: 6px; padding: 0.8rem 1rem; margin: 0.5rem 0 1.5rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .incomplete { background: #fff1f0; border: 1px solid #b42318; border-left: 6px solid #b42318; border-radius: 6px; padding: 0.8rem 1rem; margin: 0.5rem 0 1.5rem; }
+  .incomplete strong { color: #b42318; }
+  .coverage-note { background: #f6f8fa; border: 1px solid #d0d7de; border-left: 6px solid #57606a; border-radius: 6px; padding: 0.6rem 1rem; margin: 0.5rem 0 1.5rem; }
 </style>
 </head>
 <body>
@@ -276,6 +288,17 @@ const htmlTemplateSrc = `<!doctype html>
   <strong>Project:</strong> {{.ProjectName}}<br>
   <strong>Scan:</strong> {{.ScanName}} (<code>{{.ScanID}}</code>)
 </p>
+
+{{if .Incomplete}}
+<div class="incomplete">
+<p><strong>⚠ Incomplete scan — this report does NOT cover the whole target.</strong></p>
+<p>Scan state: <code>{{.CoverageState}}</code> · Dead jobs: {{.Coverage.DeadJobs}} · Failed jobs: {{.Coverage.FailedJobs}} · Canceled jobs: {{.Coverage.CanceledJobs}} · Error test cases: {{.Coverage.ErrorTestCases}} · Timeout test cases: {{.Coverage.TimeoutTestCases}}</p>
+</div>
+{{else if .CoverageNote}}
+<div class="coverage-note">
+<p><strong>Coverage note:</strong> {{.Coverage.ErrorTestCases}} test case(s) ended in error and {{.Coverage.TimeoutTestCases}} timed out; their jobs completed, so some may have been recovered by retry.</p>
+</div>
+{{end}}
 
 {{if .AISummary}}
 <h2>AI-generated advisory summary</h2>
@@ -302,7 +325,7 @@ const htmlTemplateSrc = `<!doctype html>
 {{range .ByVulnClass}}<tr><td>{{.Label}}</td><td>{{.Count}}</td></tr>
 {{end}}</table>{{end}}
 
-{{if not .Sections}}<h2>Findings</h2><p><em>No findings.</em></p>{{end}}
+{{if not .Sections}}<h2>Findings</h2>{{if .Incomplete}}<p><em>No findings recorded — coverage is incomplete, this does NOT mean the target is clean.</em></p>{{else if .CoverageNote}}<p><em>No findings recorded. {{.Coverage.ErrorTestCases}} test case(s) ended in error and {{.Coverage.TimeoutTestCases}} timed out (they may have been recovered by retry) — review before treating the target as clean.</em></p>{{else}}<p><em>No findings.</em></p>{{end}}{{end}}
 {{range .Sections}}
 <h2>{{.Title}}</h2>
 {{if .Note}}<p class="note">{{.Note}}</p>{{end}}
