@@ -62,6 +62,10 @@ required = {
     "TestIntegrationConfirmsDespiteErrorAndScriptFlood",
     "TestDOMXSSSurvivesPageNeutralizingConsoleAndJSON",
     "TestDOMXSSStringTimerThrowingEveryTickStillConfirms",
+    "TestDOMXSSMarkerWindowRetention",
+    "TestDOMXSSMarkerWindowSinkPaths",
+    "TestDOMXSSHarnessMarkerSnippetBounded",
+    "TestDOMXSSMarkerWindowExcerptNatives",
 }
 if not shutil.which("node"):
     raise SystemExit("required Node.js unavailable")

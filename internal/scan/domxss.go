@@ -260,11 +260,40 @@ const domXSSHarnessTemplate = `(() => {
   const LOG = (function () { try { return console.log.bind(console); } catch (e) { return function () {}; } })();
   const STRINGIFY = JSON.stringify.bind(JSON);
   const TOSTRING = String;
+  // Capture the native slice before any page script runs: the evidence bound
+  // must hold even on a page that later replaces String.prototype.slice.
+  const SLICE = String.prototype.slice;
+  // excerpt() must not read page-mutable globals either: a page replacing
+  // Math.floor or String.prototype.charCodeAt after load previously emptied
+  // the excerpt or made report() drop it, hiding a natively executing sink.
+  const FLOOR = Math.floor;
+  const CHARCODEAT = String.prototype.charCodeAt;
+  const VALUE_LIMIT = 500;
+  // Bounded value evidence. The parser downstream requires the REAL marker to
+  // survive the excerpt, so clip AROUND the marker. Clipping from offset 0 let
+  // a harmless prefix longer than VALUE_LIMIT push the marker out of the
+  // excerpt, so a genuinely executable sink looked unreachable.
+  function excerpt(v, at) {
+    if (v.length <= VALUE_LIMIT) return v;
+    if (MARKER.length > VALUE_LIMIT) return SLICE.call(v, at, at + VALUE_LIMIT);
+    var start = at - FLOOR((VALUE_LIMIT - MARKER.length) / 2);
+    if (start < 0) start = 0;
+    if (start + VALUE_LIMIT > v.length) start = v.length - VALUE_LIMIT;
+    var end = start + VALUE_LIMIT;
+    // Never split a surrogate pair at either edge. The marker is plain ASCII,
+    // so these trims can only remove harmless context around it.
+    if (start > 0 && CHARCODEAT.call(v, start) >= 0xDC00 && CHARCODEAT.call(v, start) <= 0xDFFF &&
+        CHARCODEAT.call(v, start - 1) >= 0xD800 && CHARCODEAT.call(v, start - 1) <= 0xDBFF) start++;
+    if (end < v.length && CHARCODEAT.call(v, end - 1) >= 0xD800 && CHARCODEAT.call(v, end - 1) <= 0xDBFF &&
+        CHARCODEAT.call(v, end) >= 0xDC00 && CHARCODEAT.call(v, end) <= 0xDFFF) end--;
+    return SLICE.call(v, start, end);
+  }
   function report(sink, value, connected) {
     try {
       var v = TOSTRING(value);
-      if (v.indexOf(MARKER) === -1) return;
-      LOG(PREFIX + STRINGIFY({ sink: sink, value: v.slice(0, 500), connected: connected === true }));
+      var at = v.indexOf(MARKER);
+      if (at === -1) return;
+      LOG(PREFIX + STRINGIFY({ sink: sink, value: excerpt(v, at), connected: connected === true }));
     } catch (e) {}
   }
   function hookProp(proto, prop) {
