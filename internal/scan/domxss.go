@@ -366,12 +366,12 @@ func domXSSHrefClickScript(marker string) string {
 func (e *domXSSExecutor) applyDOMXSSActivation(ctx context.Context, page *browser.Page, act domXSSActivation, marker, value string) (bool, error) {
 	switch act {
 	case domXSSActivateHashChange:
-		if _, err := page.Evaluate(ctx, domXSSHashChangeActivationScript(value)); err != nil {
+		if _, err := evaluateDOMXSSScript(ctx, page, domXSSHashChangeActivationScript(value), domXSSEvaluateBound); err != nil {
 			return false, fmt.Errorf("hash-change activation: %w", err)
 		}
 		return true, nil
 	case domXSSActivateHrefClick:
-		raw, err := page.Evaluate(ctx, domXSSHrefClickScript(marker))
+		raw, err := evaluateDOMXSSScript(ctx, page, domXSSHrefClickScript(marker), domXSSEvaluateBound)
 		if err != nil {
 			return false, fmt.Errorf("href-click activation: %w", err)
 		}
@@ -420,6 +420,43 @@ func (e *domXSSExecutor) finishSourceNavigation(ctx context.Context, page *brows
 // alphanumeric/underscore by construction — see detection.NewProbe and
 // domXSSConsolePrefix).
 func goQuoteJS(s string) string { return fmt.Sprintf("%q", s) }
+
+// domXSSEvaluateBound bounds one in-page script evaluation. Every script this
+// engine evaluates runs page-adjacent code, and page code can block the main
+// thread (a click handler that never returns) or sabotage the very timer a
+// script-level fallback relies on. Page.Evaluate already returns as soon as its
+// context is done (browser.callCtx), so giving each call its own deadline is a
+// hard, scan-side guarantee that a wedged page cannot hold a browser worker for
+// the worker pool's whole job deadline (15 minutes by default).
+const domXSSEvaluateBound = 10 * time.Second
+
+// errDOMXSSEvaluateDeadline marks an in-page script that outlived its
+// evaluation bound. It is deliberately not a verdict: the script may or may not
+// have had its effect.
+var errDOMXSSEvaluateDeadline = errors.New("dom-xss in-page script exceeded its evaluation bound")
+
+// evaluateDOMXSSScript runs one in-page script under its own deadline. A
+// deadline it imposed itself is reported as errDOMXSSEvaluateDeadline; the
+// caller's own cancellation is preserved unchanged, so a paused/cancelled scan
+// is never mistaken for a page failure.
+func evaluateDOMXSSScript(ctx context.Context, page *browser.Page, script string, bound time.Duration) (any, error) {
+	if bound <= 0 {
+		bound = domXSSEvaluateBound
+	}
+	ectx, cancel := context.WithTimeout(ctx, bound)
+	defer cancel()
+	raw, err := page.Evaluate(ectx, script)
+	if err == nil {
+		return raw, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if errors.Is(ectx.Err(), context.DeadlineExceeded) {
+		return nil, fmt.Errorf("%w (%s): %v", errDOMXSSEvaluateDeadline, bound, err)
+	}
+	return nil, err
+}
 
 // domXSSHarnessScript builds the init-script harness: monkey-patches
 // the implemented HTML and primitive-string timer sinks to
@@ -1168,6 +1205,17 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 		e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("%s not applicable for this endpoint: the loaded document has no attachable root element (no body and no documentElement), so nothing could receive this source's value here; no DOM-XSS coverage was exercised for it and this is not a clean negative", label))
 		return nil
 	}
+	if errors.Is(navErr, errDOMXSSPostMessageIndeterminate) {
+		// The delivery mechanism itself could not be observed working (see
+		// errDOMXSSPostMessageIndeterminate). Recording "no sink reachable"
+		// here would turn an unknown into a negative, so the outcome is its
+		// own explicit skip naming the missing coverage. The job is not
+		// retried: the probe has already spent its bounded wait once, and a
+		// page that refused the frame will refuse it again.
+		reachTC.Status = domain.TestCaseSkipped
+		e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("%s coverage could not be determined: the sender frame never reported load within the probe's %s bounded fallback, so whether the message was posted is unknown (the page may have removed or refused the sender frame, or the document may have changed mid-probe); this is not a delivery and not a clean negative", label, domXSSPostMessageFallback))
+		return nil
+	}
 	if navErr == nil {
 		navErr = requireDOMXSSProvenance(obs1)
 	}
@@ -1249,6 +1297,15 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 	if errors.Is(verr, errDOMXSSSourceNotApplicable) {
 		verifyTC.Status = domain.TestCaseSkipped
 		e.finishTestCase(ctx, verifyTC, nil, fmt.Sprintf("%s not applicable for this endpoint: the loaded document has no attachable root element, so this shape could not be delivered; not a clean negative", label))
+		return true, nil
+	}
+	if errors.Is(verr, errDOMXSSPostMessageIndeterminate) {
+		// The payload may never have been posted, so no execution signal
+		// could be attributable to it. Stopping without a verdict leaves the
+		// finding Pending (unknown) — never Confirmed, and never a Rejected
+		// derived from the absence of a signal that had no chance to appear.
+		verifyTC.Status = domain.TestCaseSkipped
+		e.finishTestCase(ctx, verifyTC, nil, fmt.Sprintf("%s verification could not be determined: the sender frame never reported load within the probe's %s bounded fallback, so whether the payload was delivered is unknown; the finding stays pending rather than being confirmed or rejected from an undelivered probe", label, domXSSPostMessageFallback))
 		return true, nil
 	}
 	if verr == nil {
@@ -1592,7 +1649,7 @@ func (e *domXSSExecutor) navigateWithWindowName(ctx context.Context, bctx *brows
 	if _, err := page.Navigate(ctx, "about:blank", browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
 		return domXSSObservation{}, err
 	}
-	if _, err := page.Evaluate(ctx, setWindowNameScript(value)); err != nil {
+	if _, err := evaluateDOMXSSScript(ctx, page, setWindowNameScript(value), domXSSEvaluateBound); err != nil {
 		return domXSSObservation{}, err
 	}
 	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
@@ -1644,12 +1701,32 @@ func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *brow
 	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
 		return domXSSObservation{}, err
 	}
-	status, err := page.Evaluate(ctx, postMessageScript(value))
+	// The script's own fallback settles first in every normal case. The
+	// per-call deadline is the second layer: a page that replaced the timer
+	// functions the fallback depends on, or blocked the main thread, still
+	// cannot hold this worker past domXSSPostMessageProbeBound.
+	status, err := evaluateDOMXSSScript(ctx, page, postMessageScript(value), domXSSPostMessageProbeBound)
+	if errors.Is(err, errDOMXSSEvaluateDeadline) {
+		return domXSSObservation{}, errDOMXSSPostMessageIndeterminate
+	}
 	if err != nil {
 		return domXSSObservation{}, err
 	}
-	if s, ok := status.(string); ok && s == domXSSPostMessageNoRoot {
+	outcome, ok := status.(string)
+	if !ok {
+		// The script's every path resolves a status string, so anything else
+		// means the probe's result cannot be trusted as delivery.
+		return domXSSObservation{}, fmt.Errorf("postMessage probe returned %T (%v) instead of a probe outcome: %w", status, status, errDOMXSSPostMessageIndeterminate)
+	}
+	switch outcome {
+	case domXSSPostMessageNoRoot:
 		return domXSSObservation{}, errDOMXSSSourceNotApplicable
+	case domXSSPostMessageSent:
+		// The sender frame reported load, so the message was posted.
+	case domXSSPostMessageIndeterminate:
+		return domXSSObservation{}, errDOMXSSPostMessageIndeterminate
+	default:
+		return domXSSObservation{}, fmt.Errorf("postMessage probe reported unknown outcome %q: %w", outcome, errDOMXSSPostMessageIndeterminate)
 	}
 	if err := e.finishSourceNavigation(ctx, page, act, marker, value); err != nil {
 		return domXSSObservation{}, err
@@ -1670,13 +1747,83 @@ func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *brow
 // response is an explicit NOT APPLICABLE answer rather than a crash. The
 // attachment itself is NOT wrapped in try/catch: a genuine failure on an
 // attachable document must still surface as an evaluation error.
+//
+// EVERY path settles. The only delivery signal is the sender frame's own
+// load event, and a frame can silently never fire it: the page can strip or
+// refuse it (a sanitizer, or an SPA that re-renders its body right after load),
+// the document can be replaced mid-probe, or the root can stop accepting
+// children. An unsettled promise blocks Page.Evaluate (browser.callCtx only
+// returns early on context cancellation, which a scan-level context does not
+// supply per call) until the worker pool's whole job deadline fires, freezing
+// one browser worker slot — with BrowserConcurrency: 1, the entire browser
+// group — for that whole bound. So a hard timer, armed before anything else and
+// independent of the job deadline, always settles the probe. If it fires
+// without frame-load evidence, the answer is domXSSPostMessageIndeterminate:
+// the message may never have been posted, so it must never be reported as
+// "sent".
+//
+// Known limit of that signal (measured, not assumed): a policy that lets the
+// frame LOAD but blocks the script inside it is indistinguishable from a
+// delivery here, so the probe reports "sent" and the sink observation is a
+// negative. Measured on Chromium 1.62 (playwright-go v0.6201.1): a
+// "frame-src 'none'" CSP does NOT stop a sandboxed srcdoc sender frame from
+// loading and posting, so a frame policy is not by itself a trigger for this
+// probe's failure modes.
 func postMessageScript(value string) string {
 	srcdoc := "<!doctype html><script>parent.postMessage(" + goQuoteJS(value) + ", '*');</script>"
-	return "(() => new Promise((resolve) => { const root = document.body || document.documentElement; if (!root) { resolve(" + goQuoteJS(domXSSPostMessageNoRoot) + "); return; } " +
-		"const sender = document.createElement('iframe'); sender.setAttribute('sandbox', 'allow-scripts'); " +
-		"sender.onload = () => setTimeout(() => resolve(" + goQuoteJS(domXSSPostMessageSent) + "), 300); " +
-		"sender.srcdoc = " + goQuoteJS(srcdoc) + "; root.appendChild(sender); }))();"
+	return fmt.Sprintf(domXSSPostMessageTemplate,
+		domXSSPostMessageFallback.Milliseconds(),
+		goQuoteJS(domXSSPostMessageSent),
+		goQuoteJS(domXSSPostMessageIndeterminate),
+		goQuoteJS(domXSSPostMessageNoRoot),
+		goQuoteJS(domXSSPostMessageSent),
+		goQuoteJS(domXSSPostMessageIndeterminate),
+		goQuoteJS(srcdoc),
+	)
 }
+
+const domXSSPostMessageTemplate = `(() => new Promise((resolve) => {
+  // Hard bound, armed before the root check so EVERY path is covered. It is
+  // deliberately independent of the worker's job deadline: this is the probe's
+  // own settle guarantee, not a scan-level timeout.
+  const FALLBACK_MS = %d;
+  const sender = document.createElement('iframe');
+  let settled = false;
+  let frameLoaded = false;
+  let fallback = null;
+  // One settle gate: every outcome resolves through it, and it removes every
+  // trace of the sender first (handlers, timer, DOM node) so a later probe in
+  // this same document — or the page's own scripts — never inherits a
+  // leftover frame, a live handler, or a pending timer.
+  const settle = (outcome) => {
+    if (settled) return;
+    settled = true;
+    if (fallback !== null) { clearTimeout(fallback); fallback = null; }
+    sender.onload = null;
+    sender.onerror = null;
+    if (sender.parentNode) sender.parentNode.removeChild(sender);
+    resolve(outcome);
+  };
+  fallback = setTimeout(() => {
+    // No load event means there is no evidence the message was ever posted.
+    // Reporting "sent" would fabricate delivery, so the honest answer is the
+    // distinct indeterminate outcome.
+    settle(frameLoaded ? %s : %s);
+  }, FALLBACK_MS);
+  const root = document.body || document.documentElement;
+  if (!root) { settle(%s); return; }
+  sender.setAttribute('sandbox', 'allow-scripts');
+  sender.onload = () => {
+    frameLoaded = true;
+    // Let the target's own asynchronous message handler finish before the
+    // caller reads observations back.
+    setTimeout(() => settle(%s), 300);
+  };
+  // A load failure is the same missing evidence as a load that never fires.
+  sender.onerror = () => { settle(%s); };
+  sender.srcdoc = %s;
+  root.appendChild(sender);
+}))();`
 
 const (
 	// domXSSPostMessageNoRoot is what postMessageScript resolves when the
@@ -1685,7 +1832,27 @@ const (
 	// domXSSPostMessageSent is what it resolves after the sender frame
 	// loaded and was given time to post.
 	domXSSPostMessageSent = "indago-domxss-postmessage-sent"
+	// domXSSPostMessageIndeterminate is what it resolves when the fallback
+	// bound fired (or the frame reported load failure) without evidence that
+	// the sender frame loaded. The message may never have been posted, so
+	// this is NOT a delivery: the engine records "could not determine
+	// postMessage reachability", never a Confirmed and never a negative.
+	domXSSPostMessageIndeterminate = "indago-domxss-postmessage-indeterminate"
 )
+
+// domXSSPostMessageFallback bounds how long the sender-frame probe may wait
+// for the frame's load event before reporting the indeterminate outcome. The
+// srcdoc frame is local (no network) and normally loads in milliseconds, so a
+// few seconds is generous; it must never grow to a job-scale timeout, because
+// a probe that cannot deliver is wasted scan time, not work in progress.
+const domXSSPostMessageFallback = 4 * time.Second
+
+// domXSSPostMessageProbeBound is the scan-side deadline for the ONE Evaluate
+// that runs the sender probe. It is the fallback plus a small margin, so the
+// script's own (more informative) fallback always reports first, while a page
+// that broke the timer functions, or blocked the main thread, still cannot hold
+// the browser worker past a few seconds.
+const domXSSPostMessageProbeBound = domXSSPostMessageFallback + 2*time.Second
 
 // errDOMXSSSourceNotApplicable reports that a source's injection mechanism
 // found nothing it could deliver into — today, a document with no attachable
@@ -1693,6 +1860,16 @@ const (
 // TestCase: no DOM-XSS coverage was exercised, and this is explicitly not a
 // clean negative.
 var errDOMXSSSourceNotApplicable = errors.New("dom-xss source not applicable to this document")
+
+// errDOMXSSPostMessageIndeterminate reports that the postMessage sender probe
+// could not establish whether the message was posted: its sender frame never
+// fired load (or fired onerror) within domXSSPostMessageFallback, which is what
+// a stripped or refused sender frame, a document replaced mid-probe, or a root
+// that stopped accepting children looks like from inside the page. It is
+// deliberately its own outcome: the delivery is unknown, so it must never be
+// read as "sent" (which would let an absent sink look like a clean negative) and
+// never as a Confirmed execution.
+var errDOMXSSPostMessageIndeterminate = errors.New("dom-xss postMessage probe indeterminate: the sender frame never reported load within the probe's bounded fallback, so whether the message was delivered is unknown")
 
 const domXSSStorageObserverPrefix = "__INDAGO_DOMXSS_STORAGE__"
 
@@ -1772,7 +1949,7 @@ func readDOMXSSStorageKeys(ctx context.Context, page *browser.Page, source detec
 	if err != nil {
 		return nil, err
 	}
-	raw, err := page.Evaluate(ctx, script)
+	raw, err := evaluateDOMXSSScript(ctx, page, script, domXSSEvaluateBound)
 	if err != nil {
 		return nil, fmt.Errorf("enumerate %s keys: %w", source, err)
 	}
