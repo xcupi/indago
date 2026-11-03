@@ -138,6 +138,17 @@ const (
 	DOMSinkCreateContextualFragment DOMXSSSink = "Range.createContextualFragment"
 	DOMSinkSetTimeout               DOMXSSSink = "setTimeout"
 	DOMSinkSetInterval              DOMXSSSink = "setInterval"
+	// DOMSinkAngularExpression is AngularJS's text-node interpolation: a
+	// value placed where Angular compiles a {{...}} expression, which Angular
+	// evaluates and writes back into the text node. It is NOT an HTML sink
+	// (nothing is parsed as markup) and NOT a JavaScript-identifier sink: an
+	// unknown identifier inside an Angular expression resolves to undefined
+	// rather than throwing, so confirmation comes from the evaluated RESULT
+	// appearing in rendered text, never from a ReferenceError. Only the
+	// classic double-brace interpolation is covered; attribute-expression
+	// injection (ng-focus="…" and friends), sandbox escapes and $eval/ng-bind-html
+	// chains are out of scope (see docs/dom-xss.md).
+	DOMSinkAngularExpression DOMXSSSink = "angular_expression"
 	// DOMSinkJQueryAttr is jQuery's Element attribute writer used for an
 	// <a href> (jQuery.fn.attr("href", value)). A javascript: URL written
 	// there executes only when the link is activated, so verification
@@ -155,7 +166,7 @@ const (
 // IsValid reports whether sink is one of this engine's implemented sinks.
 func (s DOMXSSSink) IsValid() bool {
 	switch s {
-	case DOMSinkInnerHTML, DOMSinkOuterHTML, DOMSinkDocumentWrite, DOMSinkInsertAdjacentHTML, DOMSinkCreateContextualFragment, DOMSinkSetTimeout, DOMSinkSetInterval, DOMSinkJQueryAttr, DOMSinkJQuerySelector:
+	case DOMSinkInnerHTML, DOMSinkOuterHTML, DOMSinkDocumentWrite, DOMSinkInsertAdjacentHTML, DOMSinkCreateContextualFragment, DOMSinkSetTimeout, DOMSinkSetInterval, DOMSinkJQueryAttr, DOMSinkJQuerySelector, DOMSinkAngularExpression:
 		return true
 	default:
 		return false
@@ -207,7 +218,51 @@ const (
 	// marker identifier. It is inert until the link is activated, so the
 	// engine performs exactly one click on the element it located.
 	domXSSShapeJQueryJavascriptURL = "jquery_javascript_url"
+	// domXSSShapeAngularInterpolation is the only shape Angular's text-node
+	// compiler accepts: a double-brace interpolation. The expression has no
+	// side effect at all — it concatenates two string literals into the
+	// benign marker identifier — so compiling it is the test, not a payload.
+	domXSSShapeAngularInterpolation = "angular_interpolation"
 )
+
+// domXSSAngularInterpolation builds the {{...}} candidate for marker. The
+// marker is split in half and reassembled by the expression itself:
+//
+//	marker = "MARKERTOKEN"  ->  {{'MARKER' + 'TOKEN' + ($id ? '' : '')}}
+//
+// This is the marker-specificity property the sink relies on: the candidate
+// bytes never contain the contiguous marker, so the contiguous marker
+// appearing in a rendered text node can only be the RESULT of Angular
+// evaluating the expression. A page that merely echoes the source (server
+// side or via textContent/innerHTML) keeps the literal, quotes and braces
+// included, and therefore cannot produce it.
+//
+// The trailing ($id ? … : …) reads Angular's always-present per-scope $id and
+// appends the empty string either way, so the result is still exactly the
+// marker. It is there because an expression made only of string literals is
+// compile-time-constant: Angular can fold it without its dynamic evaluator,
+// which would let a CSP that forbids eval still render the result. Referencing
+// a scope value forces Angular's real expression compiler to run at execution
+// time — so a document whose CSP refuses dynamic evaluation genuinely blocks
+// this candidate, which is what makes the csp_blocked outcome observable
+// instead of silently Confirmed. It is a scope property read, not a sandbox
+// escape and not a side effect.
+//
+// The result is a text node, not a ReferenceError: Angular resolves an
+// unknown identifier to undefined instead of throwing, so a bare identifier
+// would render as "undefined" — indistinguishable from ordinary text — and
+// could never be a marker-specific signal. A short marker is refused because
+// splitting it would produce meaningless fragments.
+func domXSSAngularInterpolation(marker string) (string, bool) {
+	if marker == "" {
+		return "", false
+	}
+	if len(marker) < 4 {
+		return "", false
+	}
+	cut := len(marker) / 2
+	return "{{'" + marker[:cut] + "' + '" + marker[cut:] + "' + ($id ? '' : '')}}", true
+}
 
 // DOMXSSPayloadFor returns the PRIMARY (first) verification Candidate for a
 // REACHABLE (source, sink) pair. It is the wholesale-markup shape, or the
@@ -266,6 +321,16 @@ func DOMXSSPayloadsFor(source DOMXSSSource, sink DOMXSSSink, marker string) []Ca
 		// makes its own parser create an element whose onerror references
 		// the bare marker.
 		return []Candidate{domXSSPayloadCandidate(source, sink, domXSSShapeMarkup, "<img src=x onerror="+marker+">", domXSSJQuerySelectorRationale(source, sink))}
+	}
+	if sink == DOMSinkAngularExpression {
+		// Angular evaluates the interpolation expression and writes the
+		// result into the text node; the split-literal construction is what
+		// makes the observed result marker-specific.
+		value, ok := domXSSAngularInterpolation(marker)
+		if !ok {
+			return nil
+		}
+		return []Candidate{domXSSPayloadCandidate(source, sink, domXSSShapeAngularInterpolation, value, domXSSAngularRationale(source, sink))}
 	}
 	value := "<img src=x onerror=" + marker + ">"
 	if source == DOMSourceQuery && sink == DOMSinkDocumentWrite {
@@ -2777,4 +2842,17 @@ func dxsKnownNonDOMGlobal(name string) bool {
 		return true
 	}
 	return false
+}
+// domXSSAngularRationale explains the interpolation shape. Two things must be
+// unambiguous to an operator reading a report: (1) what was evaluated, and
+// (2) why the observation is marker-specific rather than a reflection match.
+// Sandbox escape is deliberately absent — the first Angular labs differ only
+// in what the page permits AFTER compilation, so proving compilation is the
+// honest, bounded claim this engine makes.
+func domXSSAngularRationale(source DOMXSSSource, sink DOMXSSSink) string {
+	how, storageControlCaveat := domXSSSourceRoute(source)
+	return how + " is placed where AngularJS compiles a text-node interpolation: Angular's interpolate service evaluates the {{...}} expression and writes the RESULT back into that text node through the DOM's own text API. " +
+		"The candidate's only effect is to concatenate two string literals into the benign marker identifier, so compiling it is the detection signal and no sandbox escape, alert, cookie or network call is attempted. " +
+		"The candidate bytes never contain the marker contiguously ('MARK' + 'ER'), so observing the contiguous marker in rendered text cannot come from a page that merely echoes the source — it is the expression's evaluated result. " +
+		"Confirmation therefore requires that observed text result; a document whose Content-Security-Policy refuses dynamic evaluation is recorded as a distinct csp_blocked outcome, never as a rejection and never as a confirmation." + storageControlCaveat
 }

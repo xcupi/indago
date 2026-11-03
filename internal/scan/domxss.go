@@ -204,6 +204,103 @@ type domXSSSinkReport struct {
 	Sink      string `json:"sink"`
 	Value     string `json:"value"`
 	Connected bool   `json:"connected,omitempty"`
+	// Text marks the angular_expression report: the marker was observed as
+	// the content of a rendered text node after the page's load event, not
+	// as an argument to a hooked DOM setter. Count is how many such text
+	// nodes were seen (evidence only).
+	Text  bool `json:"text,omitempty"`
+	Count int  `json:"count,omitempty"`
+}
+
+// domXSSConsoleCSPPrefix tags a Content-Security-Policy violation the harness
+// observed during the page load. It is evidence about why a sink might not
+// have executed, and — for angular_expression only — the authority behind the
+// distinct csp_blocked outcome. It is never confirmation evidence.
+//
+// It MUST start with domXSSConsolePrefix: the browser layer only attributes a
+// console report to the installed init script when the first argument begins
+// with that exact prefix, and the rest of the message is then skipped by the
+// sink-report parser because it is not JSON.
+const domXSSConsoleCSPPrefix = domXSSConsolePrefix + "CSP:"
+
+// domXSSCSPViolation is the subset of a SecurityPolicyViolationEvent this
+// engine records. Blocked is "eval" for a blocked new Function/eval
+// (Chromium reports blockedURI "eval" and effectiveDirective "script-src"),
+// which is exactly how a CSP without 'unsafe-eval' stops AngularJS's
+// expression compiler.
+type domXSSCSPViolation struct {
+	Directive   string `json:"directive"`
+	Blocked     string `json:"blocked"`
+	Disposition string `json:"disposition"`
+	Sample      string `json:"sample"`
+}
+
+// parseDOMXSSCSPViolations returns the CSP violation reports the installed
+// harness emitted, in emission order. Duplicates (the harness listens on both
+// window and document) are collapsed by (directive, blocked, sample).
+func parseDOMXSSCSPViolations(msgs []browser.ConsoleMessage) []domXSSCSPViolation {
+	var out []domXSSCSPViolation
+	seen := map[string]bool{}
+	for _, m := range msgs {
+		if !strings.HasPrefix(m.Text, domXSSConsoleCSPPrefix) {
+			continue
+		}
+		var v domXSSCSPViolation
+		if json.Unmarshal([]byte(strings.TrimPrefix(m.Text, domXSSConsoleCSPPrefix)), &v) != nil {
+			continue
+		}
+		key := v.Directive + "\x00" + v.Blocked + "\x00" + v.Disposition + "\x00" + v.Sample
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, v)
+	}
+	return out
+}
+
+// domXSSEvalBlockedByCSP reports whether any observed violation blocked
+// dynamic script evaluation. Only an enforced eval refusal is meaningful here:
+// a report-only policy or an inline-script block does not explain a missing
+// interpolation result.
+func domXSSEvalBlockedByCSP(violations []domXSSCSPViolation) (bool, domXSSCSPViolation) {
+	for _, v := range violations {
+		if v.Blocked != "eval" {
+			continue
+		}
+		if v.Disposition != "" && v.Disposition != "enforce" {
+			continue
+		}
+		switch v.Directive {
+		case "script-src", "script-src-elem", "default-src":
+			return true, v
+		}
+	}
+	return false, domXSSCSPViolation{}
+}
+
+// hasDOMXSSAngularTextResult reports whether the installed harness observed
+// the marker as the content of a rendered text node. For the
+// angular_expression sink this is the confirmation signal: the candidate does
+// not contain the contiguous marker, so only evaluating the interpolation can
+// produce it.
+func hasDOMXSSAngularTextResult(msgs []browser.ConsoleMessage, marker string) bool {
+	if marker == "" {
+		return false
+	}
+	for _, m := range msgs {
+		if !strings.HasPrefix(m.Text, domXSSConsolePrefix) {
+			continue
+		}
+		var rep domXSSSinkReport
+		if json.Unmarshal([]byte(strings.TrimPrefix(m.Text, domXSSConsolePrefix)), &rep) != nil {
+			continue
+		}
+		if rep.Text && rep.Sink == string(detection.DOMSinkAngularExpression) && strings.Contains(rep.Value, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseDOMXSSReachability scans console messages the init-script harness
@@ -311,22 +408,48 @@ func (a domXSSActivation) describe() string {
 	}
 }
 
-// domXSSPrimarySink applies the engine's first-reachable-sink bound with one
-// attribution rule. jQuery's own HTML parsing assigns innerHTML INSIDE the
+// domXSSPrimarySink applies the engine's first-reachable-sink bound with two
+// attribution rules. jQuery's own HTML parsing assigns innerHTML INSIDE the
 // factory call, so a marker-carrying $(...) can legitimately report both
 // sinks; the page-authored jQuery.selector call is the site's identity, and
 // choosing innerHTML there would silently drop the activation that factory
-// call needs. Every other combination keeps the original first-seen order.
+// call needs. angular_expression's reachability is a PASSIVE text observation
+// taken at the load event, so it must never displace a sink the page's own
+// code actively reached (that would change every existing sink's attribution,
+// and a page that writes markup at its own load handler would lose its real
+// sink). It is therefore the fallback: chosen only when nothing else is
+// reachable. Every other combination keeps the original first-seen order.
 func domXSSPrimarySink(reachable []detection.DOMXSSSink) detection.DOMXSSSink {
 	for _, sink := range reachable {
 		if sink == detection.DOMSinkJQuerySelector {
 			return sink
 		}
 	}
+	for _, sink := range reachable {
+		if sink != detection.DOMSinkAngularExpression {
+			return sink
+		}
+	}
 	if len(reachable) == 0 {
 		return ""
 	}
-	return reachable[0]
+	return detection.DOMSinkAngularExpression
+}
+
+// withoutDOMXSSSink returns sinks without the given one (nil-safe). The
+// passive angular text observation is not a hooked sink call, so it must not
+// appear in another sink's "hooked sinks that received the payload" note.
+func withoutDOMXSSSink(sinks []detection.DOMXSSSink, drop detection.DOMXSSSink) []detection.DOMXSSSink {
+	if len(sinks) == 0 {
+		return sinks
+	}
+	out := make([]detection.DOMXSSSink, 0, len(sinks))
+	for _, sink := range sinks {
+		if sink != drop {
+			out = append(out, sink)
+		}
+	}
+	return out
 }
 
 // domXSSActivationForSink maps a reachable sink to its bounded activation.
@@ -466,12 +589,13 @@ func evaluateDOMXSSScript(ctx context.Context, page *browser.Page, script string
 // listener AFTER the page has already loaded would miss an onload-style
 // handler that already fired (see docs/dom-xss.md).
 func domXSSHarnessScript(marker string) string {
-	return fmt.Sprintf(domXSSHarnessTemplate, goQuoteJS(marker), goQuoteJS(domXSSConsolePrefix))
+	return fmt.Sprintf(domXSSHarnessTemplate, goQuoteJS(marker), goQuoteJS(domXSSConsolePrefix), goQuoteJS(domXSSConsoleCSPPrefix))
 }
 
 const domXSSHarnessTemplate = `(() => {
   const MARKER = %s;
   const PREFIX = %s;
+  const CSP_PREFIX = %s;
   // Capture the natives before any page script runs. A page (many production
   // builds do) that neutralizes console.log or JSON.stringify later must not be
   // able to silence the reports, which would read as "no sink reachable".
@@ -669,6 +793,98 @@ const domXSSHarnessTemplate = `(() => {
       if (current) wrapJQuery(current);
     } catch (e) {}
   });
+  // angular_expression sink: AngularJS's text-node interpolation writes the
+  // EVALUATED RESULT back into the text node, so there is no DOM setter call
+  // to hook (innerHTML/document.write never happen). The observation is the
+  // rendered text itself, taken at the page's load event and on every DOM
+  // mutation that brings the marker into text (MutationObserver, NOT a timer:
+  // the harness must not schedule anything a page or a native-contract test
+  // can observe). It is gated on AngularJS actually being present in the
+  // document: every page that displays a value as text looks identical from
+  // the DOM alone, so without that gate the engine would open a candidate on
+  // every reflected search page. Script/style/noscript/textarea/title text
+  // nodes are excluded (Angular does not interpolate there). The engine's
+  // candidate never contains the contiguous marker, so any hit on the
+  // verification navigation is the expression's evaluated result.
+  function angularPresent() {
+    try {
+      if (typeof window.angular !== 'undefined' && window.angular) return true;
+      return !!(document.querySelector('[ng-app],[data-ng-app],[x-ng-app],[ng\\:app],[data-ng\\:app],[x-ng\\:app],[ng-csp],[data-ng-csp],[ng-controller],[data-ng-controller]'));
+    } catch (e) { return false; }
+  }
+  function angularTextHits() {
+    try {
+      var root = document.body || document.documentElement;
+      if (!root) return 0;
+      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+      var hits = 0;
+      var node;
+      while ((node = walker.nextNode())) {
+        var parent = node.parentNode;
+        if (!parent) continue;
+        var tag = parent.nodeName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEXTAREA' || tag === 'TITLE') continue;
+        var data = node.nodeValue;
+        if (typeof data === 'string' && data.indexOf(MARKER) !== -1) hits++;
+      }
+      return hits;
+    } catch (e) { return 0; }
+  }
+  // One extra call frame for the same provenance reason as the CSP reporter:
+  // a console call whose only frame is the installed function is not
+  // attributed by the browser layer, and a load listener can be the top frame.
+  function emitAngularTextReport(hits) {
+    LOG(PREFIX + STRINGIFY({ sink: 'angular_expression', value: MARKER, text: true, count: hits }));
+  }
+  function reportAngularText() {
+    try {
+      if (!angularPresent()) return;
+      var hits = angularTextHits();
+      if (hits > 0) emitAngularTextReport(hits);
+    } catch (e) {}
+  }
+  try {
+    window.addEventListener('load', reportAngularText);
+    var angularObserver = new MutationObserver(function (records) {
+      try {
+        for (var i = 0; i < records.length; i++) {
+          var record = records[i];
+          var changed = record.type === 'characterData' ? record.target : null;
+          if (changed && typeof changed.nodeValue === 'string' && changed.nodeValue.indexOf(MARKER) !== -1) { reportAngularText(); return; }
+          var added = record.addedNodes || [];
+          for (var j = 0; j < added.length; j++) {
+            var node = added[j];
+            if (node.nodeType === 3 && typeof node.nodeValue === 'string' && node.nodeValue.indexOf(MARKER) !== -1) { reportAngularText(); return; }
+            if (node.nodeType === 1 && typeof node.textContent === 'string' && node.textContent.indexOf(MARKER) !== -1) { reportAngularText(); return; }
+          }
+        }
+      } catch (e) {}
+    });
+    angularObserver.observe(document, { childList: true, subtree: true, characterData: true });
+  } catch (e) {}
+  // CSP outcome evidence: a document whose policy refuses dynamic evaluation
+  // stops Angular's expression compiler before it can write any result. The
+  // report is engine-attributed (same init script) and is only used to turn a
+  // missing result into the distinct csp_blocked outcome, never to confirm
+  // anything. Both targets are listened to because the event is dispatched at
+  // the document in current Chromium.
+  function reportCSP(event) {
+    try {
+      emitCSP({
+        directive: TOSTRING(event.effectiveDirective || event.violatedDirective || ''),
+        blocked: TOSTRING(event.blockedURI || ''),
+        disposition: TOSTRING(event.disposition || ''),
+        sample: SLICE.call(TOSTRING(event.sample || ''), 0, 200)
+      });
+    } catch (e) {}
+  }
+  // One extra call frame: the browser layer attributes a report to the
+  // installed init script only when the console call has a caller frame
+  // beyond itself, and an event-listener invocation can otherwise be the
+  // top frame.
+  function emitCSP(payload) { LOG(CSP_PREFIX + STRINGIFY(payload)); }
+  try { window.addEventListener('securitypolicyviolation', reportCSP, true); } catch (e) {}
+  try { document.addEventListener('securitypolicyviolation', reportCSP, true); } catch (e) {}
 })();`
 
 // ---------------------------------------------------------------------------
@@ -1246,6 +1462,9 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	// factory is the one exception, explained on domXSSPrimarySink.
 	sink := domXSSPrimarySink(reachable)
 	reachNote := fmt.Sprintf("reachable sink: %s from %s (canary observed in the hooked setter/call)", sink, label)
+	if sink == detection.DOMSinkAngularExpression {
+		reachNote = fmt.Sprintf("reachable sink: %s from %s (the canary was observed as rendered text after the page's load event, the precondition for AngularJS text-node interpolation; this is reachability, not proof of compilation)", sink, label)
+	}
 	if hashActivated {
 		reachNote += "; the page only reached the sink after the engine's bounded hash change, because its own load-time scripts did not run the handler for the fragment the URL already carried"
 	}
@@ -1338,15 +1557,38 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 		matched = false
 	}
 	markerInDOM := strings.Contains(obs2.HTML, marker)
-	verdict, confidence, notes := verification.DecideWithProvenance(marker, matched, markerInDOM, obs2.Runtime)
+	var verdict domain.Verdict
+	var confidence domain.Confidence
+	var notes string
+	if sink == detection.DOMSinkAngularExpression {
+		// The ReferenceError channel cannot decide this sink: Angular resolves
+		// an unknown identifier to undefined, so the marker-specific signal is
+		// the evaluated RESULT appearing in rendered text (see
+		// detection.domXSSAngularInterpolation for why that cannot be a
+		// reflection match). A document that refused dynamic evaluation gets
+		// its own outcome instead of being read as a negative.
+		cspViolations := parseDOMXSSCSPViolations(harness2)
+		cspBlocked, violation := domXSSEvalBlockedByCSP(cspViolations)
+		compiled := hasDOMXSSAngularTextResult(harness2, marker)
+		verdict, confidence, notes = decideDOMXSSAngular(compiled, strings.Contains(obs2.HTML, cand.Value), cspBlocked, violation)
+	} else {
+		verdict, confidence, notes = verification.DecideWithProvenance(marker, matched, markerInDOM, obs2.Runtime)
+	}
 	if fragmentNotInserted {
 		notes += "; target insertion of the parsed fragment was not observed; detached-fragment runtime errors alone do not confirm this sink"
 	}
-	if matched && sigText != "" {
+	if sink != detection.DOMSinkAngularExpression && matched && sigText != "" {
 		notes = notes + " (" + sigText + ")"
 	}
 	if matched {
-		notes += domXSSAttributionNotes(source, sink, parseDOMXSSReachability(harness2, marker))
+		observed := parseDOMXSSReachability(harness2, marker)
+		if sink != detection.DOMSinkAngularExpression {
+			observed = withoutDOMXSSSink(observed, detection.DOMSinkAngularExpression)
+		}
+		notes += domXSSAttributionNotes(source, sink, observed)
+	}
+	if sink == detection.DOMSinkAngularExpression && verdict == domain.VerdictConfirmed {
+		notes += "; confirmation is the compiled interpolation RESULT, not a sandbox escape: no alert, cookie, network request or escape gadget was executed"
 	}
 	if source == detection.DOMSourceLocalStorage || source == detection.DOMSourceSessionStorage {
 		notes += "; attacker-relevant ability to write or poison this storage key is not established by this isolated probe and requires manual exploitability review unless the target flow demonstrates it"
@@ -1384,9 +1626,53 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 	return verdict == domain.VerdictConfirmed, nil
 }
 
-// requireDOMXSSProvenance turns missing engine-level provenance into a visible
-// probe error. Without it the attempt can be neither a trustworthy negative nor
-// a trustworthy positive, so it must not be recorded as either.
+// Angular-expression outcomes. These are recorded verbatim in the attempt
+// notes (and the verification TestCase note) so an operator — and any
+// downstream consumer — can tell a CSP refusal apart from a plain negative.
+// They are deliberately NOT new domain verdict values: the verdict lattice is
+// shared with every other engine and csp_blocked is honestly an Inconclusive
+// (the sink was reachable, but the compile was refused by policy before
+// execution could be observed).
+const (
+	domXSSAngularOutcomeCompiled   = "compiled"
+	domXSSAngularOutcomeCSPBlocked = "csp_blocked"
+	domXSSAngularOutcomeInertText  = "inert_text"
+	domXSSAngularOutcomeUnobserved = "unobserved"
+)
+
+// decideDOMXSSAngular is the angular_expression sink's single verdict rule. It
+// is a pure function of three observations:
+//
+//   - compiled: the marker — which the candidate never contains contiguously —
+//     was observed as the content of a rendered text node, so the expression
+//     was evaluated. This is Confirmed; nothing further is executed.
+//   - cspBlocked: the document's own CSP refused dynamic evaluation during
+//     this navigation and no result appeared. The compile could not happen,
+//     so the honest outcome is Inconclusive with its own token — never a
+//     silent Rejected and never a Confirmed.
+//   - payloadPresent: the candidate text is in the rendered page but compiled
+//     is false, so the page echoed it as inert text. Rejected.
+//
+// Anything else (the candidate could not even be re-observed) is
+// Inconclusive: the attempt had no chance to prove or disprove compilation.
+func decideDOMXSSAngular(compiled, payloadPresent, cspBlocked bool, violation domXSSCSPViolation) (domain.Verdict, domain.Confidence, string) {
+	switch {
+	case compiled:
+		return domain.VerdictConfirmed, domain.ConfidenceHigh,
+			"outcome=" + domXSSAngularOutcomeCompiled + ": AngularJS evaluated the double-brace interpolation and wrote its result into the rendered text node; the candidate never contains the marker contiguously, so the observed marker is the expression's evaluated result, not a reflection"
+	case cspBlocked:
+		return domain.VerdictInconclusive, domain.ConfidenceLow,
+			fmt.Sprintf("outcome=%s: the document's Content-Security-Policy refused dynamic script evaluation during this verification navigation (directive=%q blocked=%q), so AngularJS's expression compiler could not run and the marker result was never produced; the sink was reachable, so this is not a rejection, and no compilation was observed, so it is not a confirmation",
+				domXSSAngularOutcomeCSPBlocked, violation.Directive, violation.Blocked)
+	case payloadPresent:
+		return domain.VerdictRejected, domain.ConfidenceHigh,
+			"outcome=" + domXSSAngularOutcomeInertText + ": the interpolation candidate reached the page as inert text and Angular never evaluated it; a page that echoes the source as text cannot produce the contiguous marker"
+	default:
+		return domain.VerdictInconclusive, domain.ConfidenceLow,
+			"outcome=" + domXSSAngularOutcomeUnobserved + ": neither the interpolation candidate nor its evaluated result could be re-observed in the rendered page, so compilation could not be attempted or ruled out"
+	}
+}
+
 func requireDOMXSSProvenance(obs domXSSObservation) error {
 	if obs.Runtime.Available {
 		return nil

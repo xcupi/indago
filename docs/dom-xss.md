@@ -1,4 +1,155 @@
-# Indago — bounded DOM-XSS HTML, string-timer and jQuery sinks
+# Indago — bounded DOM-XSS HTML, string-timer, jQuery and AngularJS-expression sinks
+
+## AngularJS expression execution (`angular_expression`)
+
+The operator authorized the PortSwigger AngularJS lab class — "DOM XSS in
+AngularJS expression execution", "Reflected XSS with AngularJS sandbox escape
+without strings", "Reflected XSS with AngularJS sandbox escape and CSP". These
+are not HTML-context injections: the value is placed where AngularJS compiles a
+text-node interpolation, so `{{...}}` is evaluated as an Angular expression.
+Before this slice the engine had no sink for that, so it reported nothing on
+all three labs.
+
+`detection.DOMSinkAngularExpression` is a first-class sink
+(`DOMXSSSink = "angular_expression"`) reachable from the same seven sources as
+every other sink. The server-reflected lab class is covered through the query
+source: the engine navigates to `endpoint?param={{…}}`, the server reflects that
+value into the page, and the page's own Angular bootstrap compiles it. The
+`angular_expression` sink is additive: every pre-existing sink, shape, dedup key
+and verdict is unchanged (pinned by
+`TestDOMXSSExistingSinkPlansAreByteIdentical` and by the eight real-browser
+confirmations in `TestDOMXSSExistingSinkConfirmationsUnchanged`).
+
+### The candidate, and why it is marker-specific
+
+A bare identifier would **not** work here. Angular resolves an unknown
+identifier inside an expression to `undefined`; it does not throw a
+`ReferenceError`, so the whole Reflected-XSS `ReferenceError: MARKER is not
+defined` signal is unavailable (and a rendered `undefined` is indistinguishable
+from ordinary page text). The marker-specific signal for this sink is the
+evaluated **result appearing in a rendered text node**.
+
+`detection.DOMXSSPayloadsFor(source, DOMSinkAngularExpression, marker)` plans
+exactly one shape, `angular_interpolation`:
+
+```
+marker = "ind<16 hex chars>"   (the engine's normal marker)
+value  = {{'ind12345' + '6789abcd' + ($id ? '' : '')}}
+```
+
+1. **The candidate never contains the contiguous marker.** It is split in half
+   and the expression itself reassembles it. A page that merely echoes the
+   source — server-side, `textContent`, `innerHTML`, a log, a SQL error — keeps
+   the literal quotes and braces and therefore cannot produce the contiguous
+   marker. Observing it in rendered text is positive evidence that the
+   expression was evaluated, not a reflection match.
+2. **`($id ? '' : '')` forces runtime evaluation.** It reads Angular's
+   always-present per-scope `$id` and appends the empty string either way, so
+   the result is still exactly the marker. An expression made only of string
+   literals is compile-time constant, and Angular can fold it without its
+   dynamic evaluator — which would let a CSP that forbids eval still produce
+   the result and make the CSP outcome untestable. Referencing a scope value
+   routes the candidate through Angular's real expression compiler.
+3. **No side effect, no escape.** The expression only concatenates literals and
+   reads `$id`. There is no `alert`, cookie, network call, `constructor`
+   access, sandbox-escape gadget or `$eval` chain. Detection claims exactly
+   what it proves: the page compiled *this* expression. The labs differ only in
+   what the page permits *after* compilation, and Indago deliberately does not
+   go there.
+
+### Reachability and verification
+
+There is no DOM setter to hook: Angular writes the interpolation result through
+the text node's own value, so `innerHTML`/`document.write`/timer hooks never
+fire. The harness therefore takes a **passive text observation** at the page's
+`load` event (plus two bounded follow-ups at 0 ms and 120 ms, covering a page
+that compiles from its own load/timer handler), walking text nodes and
+excluding `script`/`style`/`noscript`/`textarea`/`title` (Angular does not
+interpolate there). Phase one reaches the sink when the canary is observed as
+rendered text; phase two confirms when the *marker* is, which only the
+evaluated candidate can produce.
+
+Because that observation is passive, `angular_expression` is a **fallback**
+sink: `domXSSPrimarySink` still prefers any sink the page's own code actively
+reached, and `jQuery.selector` keeps its existing precedence. A page that
+writes markup at its load handler therefore keeps its original sink
+attribution, and the passive report is filtered out of other sinks' "hooked
+sinks that received the payload" note. Reachability is not confirmation: the
+canary contains no interpolation, so a page that only *displays* the value is
+still just a candidate until the compiled result appears.
+
+The passive observation is gated on AngularJS actually being present in the
+document (`window.angular`, or an `ng-*` application-root attribute). Without
+that gate, every page that displays a source value as text would become an
+`angular_expression` candidate, producing a rejected finding on every reflected
+search page — a real regression, and one the engine's existing negative ("no
+implemented DOM-XSS sink reachable") already states honestly. The gate also
+means the two false-positive guards are not symmetric, deliberately:
+
+- Angular present but not bootstrapped (`ng-app` removed): the text is observed,
+  the candidate is verified, and the verdict is **Rejected** (`inert_text`).
+- Angular absent entirely: **no candidate is opened**; the page reports no
+  reachable sink. A page with no Angular and a page that merely displays a
+  value are indistinguishable from the DOM, so a "Rejected" here would require
+  treating every text-rendering page as an Angular candidate. The stronger,
+  honest claim is that no Angular sink exists there.
+
+### False-positive guards (all real-browser fixtures)
+
+| fixture | outcome |
+|---|---|
+| `ng-app` page, value reflected into a text node, real AngularJS 1.2.32 | **Confirmed** — `outcome=compiled` |
+| same page with `ng-app` removed (Angular loaded, never bootstrapped) | **Rejected** — `outcome=inert_text` |
+| no Angular at all, `{{...}}` echoed as ordinary text | **no candidate** — the existing "no implemented DOM-XSS sink reachable" negative; never Confirmed |
+| template compiler whose dynamic evaluator CSP refuses | **Inconclusive** — `outcome=csp_blocked` |
+| same blocked compiler with no CSP header | **Confirmed** — proves the block is the policy, not the fixture |
+| real AngularJS under `script-src 'self' 'unsafe-inline'` | **Confirmed**, *not* `csp_blocked` |
+
+The last row matters: AngularJS probes `new Function` once and, when CSP
+refuses it, switches to its own CSP-safe interpreter, so the marker is not
+blocked and must not be reported as such. A CSP header alone is never treated
+as a blocked compile.
+
+### `csp_blocked` outcome semantics
+
+The harness records `securitypolicyviolation` events (engine-attributed: same
+init script, via a nested call frame so the browser's provenance tracer keeps
+it). `domXSSEvalBlockedByCSP` accepts only an **enforced** refusal of dynamic
+evaluation (`blockedURI == "eval"`, directive `script-src`/`script-src-elem`/
+`default-src`); report-only policies and inline-script blocks do not qualify.
+`decideDOMXSSAngular` is a pure four-way rule, and every outcome carries its
+token in the finding summary and the verification attempt notes:
+
+| observation | verdict | outcome token |
+|---|---|---|
+| marker observed as rendered text | Confirmed (high) | `compiled` |
+| no result, enforced eval refusal observed | **Inconclusive** (low) | `csp_blocked` |
+| candidate present in the page, never evaluated | Rejected (high) | `inert_text` |
+| neither candidate nor result re-observed | Inconclusive (low) | `unobserved` |
+
+`csp_blocked` is deliberately not a new `domain.Verdict`: the verdict lattice is
+shared with every other engine, and the honest reading is Inconclusive — the
+sink was reachable, but the compile was refused before execution could be
+observed. It is distinct on every presentation surface through its outcome
+token, and it can never be Confirmed or silently Rejected. Ordering is
+`compiled` → `csp_blocked` → `inert_text` → `unobserved`, so a page that both
+compiled and logged an unrelated eval refusal still confirms.
+
+### Bounded coverage, stated honestly
+
+- Only the classic double-brace **text-node interpolation** is covered.
+  Attribute-expression injection (`ng-focus="…"`, `ng-click`, `ng-init`,
+  `ng-bind-html` + `$compile` chains) is a different placement and is **not**
+  covered.
+- No sandbox escape, no `constructor`/`__proto__` gadget, no `$eval`, no
+  `eval`/`Function` sink, no simulated user activation, no new source.
+- The observation window is the page's `load` plus the engine's existing
+  bounded settling window. A page that compiles only after a long async delay
+  or a user gesture is out of reach by design.
+- A page that renders the marker-carrying value inside an attribute (not a text
+  node) is out of scope for this sink; the passive walker only reads text
+  nodes.
+
 
 ## Candidate shapes: the attribute-context breakout, and non-HTML endpoints
 
@@ -87,124 +238,6 @@ So a `select_breakout` shape is deliberately **not** added: it would only cost a
 third verification navigation at every non-confirming `document.write` site and
 would never run where the earlier shapes already confirm. Each position's
 fully-escaped control stays Rejected.
-
-## Bounded static flow analysis: variables, function arguments, concatenation
-
-**This pass is diagnostic, never a verdict.** Reachability is decided in the
-browser: the init-script harness reports whenever a hooked sink *receives* a
-value containing the probe marker, so a canary that travels through a local
-variable, a function argument or a string concatenation is observed exactly like
-an inline one (measured at this base commit: the `trackSearch(query)` shape from
-the `document.write` / `location.search` lab confirms end to end). What the
-browser cannot say is *why* a page reported nothing. `detection.DOMXSSStaticReachability`
-answers that question over the page's own inline scripts:
-
-```go
-res := detection.DOMXSSStaticReachability(observedHTML, detection.DOMSourceQuery, "search")
-switch res.Outcome {
-case detection.DOMXSSFlowTainted:      // a path exists, but the browser observed nothing
-case detection.DOMXSSFlowUnresolved:   // a construct defeated the pass -> unknown, not negative
-case detection.DOMXSSFlowNoTaintedPath: // the analysed inline scripts contain no path
-}
-```
-
-`DOMXSSFlowTainted` is a structural statement about provenance. It does **not**
-mean the sink executes, and it is never a substitute for the browser's
-marker-specific execution signal.
-
-### Supported flow shapes
-
-| # | shape | example |
-|---|---|---|
-| 1 | source read bound to a local variable (`var`/`let`/`const`, plain assignment) | `var q = new URLSearchParams(location.search).get('search'); el.innerHTML = '<img src=x onerror=' + q + '>';` |
-| 2 | one user-defined function boundary (argument into a parameter, or a returned value) | `function track(query) { document.write('<img src="…'+query+'">'); } track(q);` |
-| 3 | `+` concatenation and template interpolation | ``document.write(`<img src=x onerror=${q}>`)`` |
-
-Source idioms recognised per source (all matched against the *tested* source and
-selector only):
-
-- `location.search` / `URLSearchParams(...).get(name)` / `URLSearchParams()`
-  (query); `location.hash` and hash-derived search params; `location.href`,
-  `document.URL` for the query and hash sources;
-- `window.name`, `document.referrer`, `localStorage.getItem(key)` /
-  `sessionStorage.getItem(key)` (and static property reads such as
-  `localStorage.token`), and `event.data` inside an `addEventListener('message', …)`
-  or `onmessage` handler.
-
-Sinks recognised are exactly the implemented ones: `innerHTML`/`outerHTML`
-assignment, `document.write`/`writeln`, `insertAdjacentHTML`,
-`Range.createContextualFragment`, primitive-string `setTimeout`/`setInterval`,
-and the two jQuery sinks (`$(…)` selector, `.attr('href', …)`).
-
-### Depth bound (hard)
-
-`DOMXSSStaticMaxDepth = 1`. One user-defined boundary is supported; a tainted
-value handed to a *second* user-defined function is reported as
-`unresolved_flow` with reason `flow depth` rather than followed. There is no
-interprocedural analysis beyond that, no call-graph, no recursion unrolling
-(a recursive call is likewise unresolved).
-
-### Negative proof
-
-The pass is deliberately taint-*positive*, not substring- or name-based, and the
-package tests pin the negative cases that a sloppy pass would get wrong:
-
-- `document.write('<img …>')` (constant) with the source variable read but
-  unused → `no_tainted_path`;
-- the source bound to a variable that is only used in `document.title = …` /
-  `textContent = …` (not implemented sinks) → `no_tainted_path`;
-- a sink fed by an unrelated `'static-value'` variable while a tainted variable
-  exists in the same script → `no_tainted_path`;
-- a page that reads `get('other')` when `q` is the tested parameter, and a page
-  that reads `location.hash` when the query source is tested →
-  `no_tainted_path`.
-
-`TestDOMXSSStaticConstantSinkStaysNegative`,
-`TestDOMXSSStaticUnrelatedSinkStaysNegative`,
-`TestDOMXSSStaticUnrelatedVariableStaysNegative` and
-`TestDOMXSSStaticSelectorAndSourceIsolation` are those proofs.
-
-### Unresolved-flow semantics
-
-`DOMXSSFlowUnresolved` is its own outcome; it is never folded into a negative.
-It is recorded when a value derived from the source reaches:
-
-- a computed callee — `window['docu'+'ment']['write'](x)` (reason
-  `dynamic property access`);
-- `eval(...)` / `new Function(...)` (`dynamic code evaluation`);
-- a second user-defined function boundary (`flow depth`), or a recursive call;
-- a function whose body is not in the analysed inline scripts (`external
-  function`);
-- a computed property **write** (`dynamic property write`);
-- a non-literal `URLSearchParams.get` / storage `getItem` selector (`dynamic
-  selector`).
-
-It is also the outcome when part of the page could not be tokenized or parsed
-(`unparsed script`) or when the bounded evaluation budget is exhausted
-(`analysis budget exhausted`). A `tainted_path` result still lists everything
-the pass could *not* see in `Result.Unresolved`, so a positive never hides a
-coverage hole.
-
-### Coverage limits (documented, not silent)
-
-- **Inline scripts only.** `<script src=…>` bodies are not in the page HTML;
-  they are counted in `Result.ExternalScripts` and mentioned in `Result.Notes`,
-  but not analysed. A `no_tainted_path` therefore describes the inline scripts,
-  never the whole application.
-- **Escaping is not modelled.** `.replace()`/`encodeURIComponent()`/
-  `decodeURIComponent()` propagate taint unchanged. The escaped-value fixture
-  that the browser correctly keeps Rejected still reports a *tainted path* here
-  — which is why this outcome is diagnostic only. `TestDOMXSSStaticEscapingIsNotModelled`
-  pins that behaviour.
-- **No control-flow reachability.** `if`/loop bodies are evaluated once; a sink
-  in dead code after a `return` is still evaluated. The pass over-approximates
-  presence, never execution.
-- **Lexing is heuristic.** A `/` is treated as a regular expression only in
-  expression position; an exotic regex/division ambiguity can make a script
-  unparseable, which surfaces as `unresolved_flow`, never as a negative.
-- **Not a DOM or browser model.** Inline event-handler attributes (`onclick=…`),
-  `javascript:` URLs, shadow DOM, and behaviour in external bundles are out of
-  scope.
 
 ## jQuery sink slices: attribute write and selector call (operator-authorized)
 
