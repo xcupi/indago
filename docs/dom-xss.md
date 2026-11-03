@@ -88,6 +88,124 @@ third verification navigation at every non-confirming `document.write` site and
 would never run where the earlier shapes already confirm. Each position's
 fully-escaped control stays Rejected.
 
+## Bounded static flow analysis: variables, function arguments, concatenation
+
+**This pass is diagnostic, never a verdict.** Reachability is decided in the
+browser: the init-script harness reports whenever a hooked sink *receives* a
+value containing the probe marker, so a canary that travels through a local
+variable, a function argument or a string concatenation is observed exactly like
+an inline one (measured at this base commit: the `trackSearch(query)` shape from
+the `document.write` / `location.search` lab confirms end to end). What the
+browser cannot say is *why* a page reported nothing. `detection.DOMXSSStaticReachability`
+answers that question over the page's own inline scripts:
+
+```go
+res := detection.DOMXSSStaticReachability(observedHTML, detection.DOMSourceQuery, "search")
+switch res.Outcome {
+case detection.DOMXSSFlowTainted:      // a path exists, but the browser observed nothing
+case detection.DOMXSSFlowUnresolved:   // a construct defeated the pass -> unknown, not negative
+case detection.DOMXSSFlowNoTaintedPath: // the analysed inline scripts contain no path
+}
+```
+
+`DOMXSSFlowTainted` is a structural statement about provenance. It does **not**
+mean the sink executes, and it is never a substitute for the browser's
+marker-specific execution signal.
+
+### Supported flow shapes
+
+| # | shape | example |
+|---|---|---|
+| 1 | source read bound to a local variable (`var`/`let`/`const`, plain assignment) | `var q = new URLSearchParams(location.search).get('search'); el.innerHTML = '<img src=x onerror=' + q + '>';` |
+| 2 | one user-defined function boundary (argument into a parameter, or a returned value) | `function track(query) { document.write('<img src="…'+query+'">'); } track(q);` |
+| 3 | `+` concatenation and template interpolation | ``document.write(`<img src=x onerror=${q}>`)`` |
+
+Source idioms recognised per source (all matched against the *tested* source and
+selector only):
+
+- `location.search` / `URLSearchParams(...).get(name)` / `URLSearchParams()`
+  (query); `location.hash` and hash-derived search params; `location.href`,
+  `document.URL` for the query and hash sources;
+- `window.name`, `document.referrer`, `localStorage.getItem(key)` /
+  `sessionStorage.getItem(key)` (and static property reads such as
+  `localStorage.token`), and `event.data` inside an `addEventListener('message', …)`
+  or `onmessage` handler.
+
+Sinks recognised are exactly the implemented ones: `innerHTML`/`outerHTML`
+assignment, `document.write`/`writeln`, `insertAdjacentHTML`,
+`Range.createContextualFragment`, primitive-string `setTimeout`/`setInterval`,
+and the two jQuery sinks (`$(…)` selector, `.attr('href', …)`).
+
+### Depth bound (hard)
+
+`DOMXSSStaticMaxDepth = 1`. One user-defined boundary is supported; a tainted
+value handed to a *second* user-defined function is reported as
+`unresolved_flow` with reason `flow depth` rather than followed. There is no
+interprocedural analysis beyond that, no call-graph, no recursion unrolling
+(a recursive call is likewise unresolved).
+
+### Negative proof
+
+The pass is deliberately taint-*positive*, not substring- or name-based, and the
+package tests pin the negative cases that a sloppy pass would get wrong:
+
+- `document.write('<img …>')` (constant) with the source variable read but
+  unused → `no_tainted_path`;
+- the source bound to a variable that is only used in `document.title = …` /
+  `textContent = …` (not implemented sinks) → `no_tainted_path`;
+- a sink fed by an unrelated `'static-value'` variable while a tainted variable
+  exists in the same script → `no_tainted_path`;
+- a page that reads `get('other')` when `q` is the tested parameter, and a page
+  that reads `location.hash` when the query source is tested →
+  `no_tainted_path`.
+
+`TestDOMXSSStaticConstantSinkStaysNegative`,
+`TestDOMXSSStaticUnrelatedSinkStaysNegative`,
+`TestDOMXSSStaticUnrelatedVariableStaysNegative` and
+`TestDOMXSSStaticSelectorAndSourceIsolation` are those proofs.
+
+### Unresolved-flow semantics
+
+`DOMXSSFlowUnresolved` is its own outcome; it is never folded into a negative.
+It is recorded when a value derived from the source reaches:
+
+- a computed callee — `window['docu'+'ment']['write'](x)` (reason
+  `dynamic property access`);
+- `eval(...)` / `new Function(...)` (`dynamic code evaluation`);
+- a second user-defined function boundary (`flow depth`), or a recursive call;
+- a function whose body is not in the analysed inline scripts (`external
+  function`);
+- a computed property **write** (`dynamic property write`);
+- a non-literal `URLSearchParams.get` / storage `getItem` selector (`dynamic
+  selector`).
+
+It is also the outcome when part of the page could not be tokenized or parsed
+(`unparsed script`) or when the bounded evaluation budget is exhausted
+(`analysis budget exhausted`). A `tainted_path` result still lists everything
+the pass could *not* see in `Result.Unresolved`, so a positive never hides a
+coverage hole.
+
+### Coverage limits (documented, not silent)
+
+- **Inline scripts only.** `<script src=…>` bodies are not in the page HTML;
+  they are counted in `Result.ExternalScripts` and mentioned in `Result.Notes`,
+  but not analysed. A `no_tainted_path` therefore describes the inline scripts,
+  never the whole application.
+- **Escaping is not modelled.** `.replace()`/`encodeURIComponent()`/
+  `decodeURIComponent()` propagate taint unchanged. The escaped-value fixture
+  that the browser correctly keeps Rejected still reports a *tainted path* here
+  — which is why this outcome is diagnostic only. `TestDOMXSSStaticEscapingIsNotModelled`
+  pins that behaviour.
+- **No control-flow reachability.** `if`/loop bodies are evaluated once; a sink
+  in dead code after a `return` is still evaluated. The pass over-approximates
+  presence, never execution.
+- **Lexing is heuristic.** A `/` is treated as a regular expression only in
+  expression position; an exotic regex/division ambiguity can make a script
+  unparseable, which surfaces as `unresolved_flow`, never as a negative.
+- **Not a DOM or browser model.** Inline event-handler attributes (`onclick=…`),
+  `javascript:` URLs, shadow DOM, and behaviour in external bundles are out of
+  scope.
+
 ## jQuery sink slices: attribute write and selector call (operator-authorized)
 
 The operator explicitly asked Indago to cover the jQuery DOM-XSS lab classes, so
