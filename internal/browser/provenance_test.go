@@ -21,8 +21,25 @@ func TestMarkerAtPosition(t *testing.T) {
 		{"property read is not a bare identifier", "a." + m, 0, 2, false},
 		{"longer identifier", m + "x", 0, 0, false},
 		{"member access suffix", m + ".y", 0, 0, false},
-		{"template literal prefix refused", "`${" + m + "}`", 0, 3, false},
+		// A ${...} substitution is ordinary code: a marker there is a bare
+		// identifier the engine evaluates (and throws on) exactly like a
+		// statement position, so it is accepted. Template TEXT is a string and
+		// an escaped \$ opens no substitution; both stay refused.
+		{"template substitution expression", "`" + "${" + m + "}`", 0, 3, true},
+		{"template substitution after literal text", "var x = `a" + "${" + m + "}`", 0, 12, true},
+		{"nested template substitution", "`a" + "${" + "`b" + "${" + m, 0, 8, true},
+		// V8 reports the template's own start when its first substitution is
+		// the throwing one; the marker must still be that whole substitution.
+		{"first-substitution reported at the template start", "var x = `" + "${" + m + "}`", 0, 8, true},
+		{"template start without an interpolation is text", "var x = `" + m + "`", 0, 8, false},
+		{"template start whose first substitution is another identifier", "`" + "${x}" + m + "`", 0, 0, false},
+		{"marker in template text", "var x = `" + m + "`", 0, 9, false},
+		{"marker after a closed substitution is template text", "`" + "${x}" + m + "`", 0, 5, false},
+		{"escaped interpolation stays text", "var x = `" + "\\${" + m + "}`", 0, 12, false},
+		{"unterminated template text refused", "var x = `" + m, 0, 9, false},
+		{"backtick inside a string does not open a template", "x('`');" + m, 0, 7, true},
 		{"non-ascii prefix refused", "var é=1;" + m, 0, 8, false},
+		{"division before the marker is refused", "var a=b/c;" + m, 0, 10, false},
 		{"position beyond line", m, 3, 0, false},
 		{"position beyond column", m, 0, 99, false},
 		{"empty marker", "", 0, 0, false},

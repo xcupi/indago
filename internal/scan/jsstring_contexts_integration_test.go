@@ -123,37 +123,30 @@ func TestReflectedJSStringContexts(t *testing.T) {
 	}
 
 	// Lab 3's template literal: the existing ${MARKER} candidate DOES reach an
-	// executable position — the browser raises an uncaught ReferenceError whose
-	// message names the marker — but the verdict is Inconclusive, not
-	// Confirmed. Verification's provenance lexer is a deliberate ASCII
-	// allow-list that refuses any position in a script containing a template
-	// literal (docs/verdict-provenance.md: "a regex or template literal ...
-	// yields Inconclusive instead of Confirmed"), so the exception cannot be
-	// attributed to the marker identifier. Escape the template literal or its
-	// backtick and the candidate would be wrong; changing the verdict authority
-	// is outside this slice's file scope. The positive must never read as a
-	// clean negative, so that is what this asserts. If the lexer ever learns
-	// template literals this assertion is the tripwire to update.
+	// executable position — the value lands in template TEXT, `${...}` starts a
+	// real interpolation, and V8 raises an uncaught ReferenceError naming the
+	// marker while the inline script is still parsing. The provenance lexer
+	// tracks `${...}` substitutions (docs/verdict-provenance.md), so this must
+	// now be Confirmed. Template TEXT itself is still refused, so the escaped
+	// /safe-template control below must stay unconfirmed.
 	lab3 := byPath["/lab3"]
 	if len(lab3) == 0 {
 		t.Fatal("/lab3: no finding; the template-literal candidate never ran")
 	}
-	sawExecutingSignal := false
+	confirmed3 := ""
 	for _, f := range lab3 {
-		if f.Verdict == domain.VerdictRejected {
-			t.Errorf("/lab3: verdict Rejected; an executed template-literal candidate must not read as a clean negative")
-		}
-		if f.Verdict != domain.VerdictInconclusive {
-			t.Logf("/lab3: verdict = %s (want the documented Inconclusive provenance boundary)", f.Verdict)
-		}
-		for _, a := range jsStringAttempts(f) {
-			if strings.Contains(a.Notes, "names the marker") {
-				sawExecutingSignal = true
-			}
+		if f.Verdict == domain.VerdictConfirmed {
+			confirmed3 = confirmedCandidate(f)
 		}
 	}
-	if !sawExecutingSignal {
-		t.Error("/lab3: no attempt recorded a page exception naming the marker; the candidate did not reach an executable position")
+	if confirmed3 == "" {
+		var got []domain.Verdict
+		for _, f := range lab3 {
+			got = append(got, f.Verdict)
+		}
+		t.Errorf("/lab3: verdicts = %v, want Confirmed by the executing ${MARKER} interpolation", got)
+	} else if !strings.Contains(confirmed3, "${") {
+		t.Errorf("/lab3: confirming candidate = %q, want a ${...} interpolation", confirmed3)
 	}
 
 	// Safe/escaped controls: they reflect (so a finding exists), but nothing

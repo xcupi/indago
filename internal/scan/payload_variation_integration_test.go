@@ -245,17 +245,17 @@ func TestReflectedVariationPacksConfirmAfterFirstVariantIsBlocked(t *testing.T) 
 	}
 	for _, tc := range cases {
 		t.Run(tc.context, func(t *testing.T) {
-			// Raw control: the fixture reflects and is confirmed. (The
-			// template literal is the one nuance: its canonical ${M} stays
-			// Inconclusive under the conservative provenance lexer, while the
-			// pack's script-close variant confirms — checked below.)
+			// Raw control: the fixture reflects and is confirmed. The template
+			// literal's canonical ${M} is evaluated during the page's own parse,
+			// so it now confirms on its own (the provenance lexer tracks ${...}
+			// substitutions — docs/verdict-provenance.md).
 			if raw := verdictAt(byPath, "/raw/"+tc.context); raw != domain.VerdictConfirmed {
 				t.Fatalf("raw %s verdict = %s, want confirmed", tc.context, raw)
 			}
 			if tc.context == "js_template" {
 				m := pathMarker(byPath, "/raw/js_template")
-				if v := attemptVerdict(byPath, "/raw/js_template", "${"+m+"}"); v != domain.VerdictInconclusive {
-					t.Fatalf("canonical ${M} at raw js_template = %s, want the documented inconclusive", v)
+				if v := attemptVerdict(byPath, "/raw/js_template", "${"+m+"}"); v != domain.VerdictConfirmed {
+					t.Fatalf("canonical ${M} at raw js_template = %s, want confirmed", v)
 				}
 			}
 

@@ -58,90 +58,46 @@ func (p *Page) RuntimeObservations() RuntimeObservations { return p.handle.Runti
 
 func sourceDigest(s string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(s))) }
 
-// markerAtPosition supports canonical event/timer bodies and marker statements
-// in ordinary scripts. Reject ambiguous lexical constructs rather than guessing:
-// templates, regexes, non-ASCII prefixes and property/throw expressions are not
+// markerAtPosition supports canonical event/timer bodies, marker statements in
+// ordinary scripts, and a marker evaluated as a `${...}` substitution expression
+// in a template literal. Reject ambiguous lexical constructs rather than
+// guessing: regexes, non-ASCII prefixes and property/throw expressions are not
 // evidence. The position is the actual paused V8 instruction, not an Error stack.
 func markerAtPosition(source, marker string, line, column int) (bool, string) {
 	if marker == "" || line < 0 || column < 0 {
 		return false, ""
 	}
 	pos, ok := v8Offset(source, line, column)
-	if !ok || !strings.HasPrefix(source[pos:], marker) {
+	if !ok {
+		return false, ""
+	}
+	// V8 reports a template literal's own start (the opening backtick) when the
+	// throwing substitution is its FIRST element — `` `${MARKER}` `` — and the
+	// identifier itself for any later substitution. Normalize that start to the
+	// identifier position; every check below then applies unchanged, so the
+	// marker must still be the template's first and whole substitution.
+	if strings.HasPrefix(source[pos:], "`${") {
+		pos += 3
+	}
+	if !strings.HasPrefix(source[pos:], marker) {
 		return false, ""
 	}
 	end := pos + len(marker)
 	if end < len(source) && (isIdentifierByte(source[end]) || source[end] == '.') {
 		return false, ""
 	}
-	// A conservative lexer: only normal code, quoted strings and comments.
-	state := byte(0)
-	escaped := false
-	lastToken := ""
-	token := ""
-	flush := func() {
-		if token != "" {
-			lastToken = token
-			token = ""
-		}
-	}
-	for i := 0; i < pos; i++ {
-		c := source[i]
-		if c >= 128 || c == '`' {
-			return false, ""
-		}
-		switch state {
-		case '\'', '"':
-			if escaped {
-				escaped = false
-			} else if c == '\\' {
-				escaped = true
-			} else if c == state {
-				state = 0
-				lastToken = "literal"
-			}
-		case 'l':
-			if c == '\n' || c == '\r' {
-				state = 0
-			}
-		case 'b':
-			if c == '*' && i+1 < pos && source[i+1] == '/' {
-				state = 0
-				i++
-			}
-		default:
-			if isIdentifierByte(c) {
-				token += string(c)
-				continue
-			}
-			flush()
-			if c == '\'' || c == '"' {
-				state = c
-			} else if c == '/' {
-				if i+1 < pos && source[i+1] == '/' {
-					state = 'l'
-					i++
-				} else if i+1 < pos && source[i+1] == '*' {
-					state = 'b'
-					i++
-				} else {
-					return false, ""
-				}
-			} else if c != ' ' && c != '\n' && c != '\r' && c != '\t' {
-				lastToken = string(c)
-			}
-		}
-	}
-	flush()
-	if state != 0 {
+	lastToken, ok := lastTokenBefore(source[:pos])
+	if !ok {
 		return false, ""
 	}
-	// Only a bare expression beginning a statement/body. No throw MARKER,
-	// property read, constructor call or identifier inside a fabricated message.
+	// Only a bare expression beginning a statement/body, or the expression of a
+	// `${...}` substitution (whose opener the lexer reports as "{"). No throw
+	// MARKER, property read, constructor call or identifier inside a fabricated
+	// message.
 	if lastToken != "" && lastToken != ";" && lastToken != "{" && lastToken != "}" {
 		return false, ""
 	}
-	suffix := strings.TrimLeft(source[end:], " \t\r\n")
+	suffix := strings.TrimLeft(source[end:], " 	\r\n")
 	if suffix != "" && !strings.HasPrefix(suffix, ";") && !strings.HasPrefix(suffix, "}") && !strings.HasPrefix(suffix, "//") {
 		return false, ""
 	}
@@ -153,6 +109,130 @@ func markerAtPosition(source, marker string, line, column int) (bool, string) {
 		hi = len(source)
 	}
 	return true, source[lo:hi]
+}
+
+// lastTokenBefore lexes a script prefix up to the engine's paused position and
+// returns the last syntactic token it saw. It is a deliberately conservative
+// allow-list: ordinary code, quoted strings, comments, and template literals
+// (whose `${...}` substitutions are ordinary code again, while their text is a
+// string). A regex literal, division, non-ASCII prefix or any unterminated
+// construct yields ok=false instead of a guess.
+//
+// Template tracking is exact, not a blanket refusal: the marker must be inside
+// a substitution expression, never in template text, so an echoed marker in
+// “ `... ${x} MARKER` “ can never be read as an evaluation.
+func lastTokenBefore(prefix string) (string, bool) {
+	const (
+		modeCode     = byte(0)
+		modeLine     = 'l'
+		modeBlock    = 'b'
+		modeTemplate = '`'
+	)
+	mode := modeCode
+	var subs []int // brace depth of each open ${ ... } substitution
+	escaped := false
+	lastToken := ""
+	var ident strings.Builder
+	flush := func() {
+		if ident.Len() > 0 {
+			lastToken = ident.String()
+			ident.Reset()
+		}
+	}
+	for i := 0; i < len(prefix); i++ {
+		c := prefix[i]
+		if c >= 128 {
+			return "", false
+		}
+		switch mode {
+		case '\'', '"':
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == mode {
+				mode = modeCode
+				lastToken = "literal"
+			}
+		case modeLine:
+			if c == '\n' || c == '\r' {
+				mode = modeCode
+			}
+		case modeBlock:
+			if c == '*' && i+1 < len(prefix) && prefix[i+1] == '/' {
+				mode = modeCode
+				i++
+			}
+		case modeTemplate:
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch c {
+			case '\\':
+				escaped = true
+			case '`':
+				mode = modeCode
+				lastToken = "literal"
+			case '$':
+				if i+1 < len(prefix) && prefix[i+1] == '{' {
+					i++
+					mode = modeCode
+					subs = append(subs, 0)
+					lastToken = "{"
+				}
+			}
+		default: // modeCode
+			if isIdentifierByte(c) {
+				ident.WriteByte(c)
+				continue
+			}
+			flush()
+			switch c {
+			case ' ', '	', '\r', '\n':
+				// whitespace never changes the last token
+			case '\'', '"':
+				mode = c
+			case '`':
+				mode = modeTemplate
+			case '/':
+				if i+1 < len(prefix) && prefix[i+1] == '/' {
+					mode = modeLine
+					i++
+				} else if i+1 < len(prefix) && prefix[i+1] == '*' {
+					mode = modeBlock
+					i++
+				} else {
+					return "", false // regex literal or division: refused
+				}
+			case '{':
+				if n := len(subs); n > 0 {
+					subs[n-1]++
+				}
+				lastToken = "{"
+			case '}':
+				if n := len(subs); n > 0 && subs[n-1] == 0 {
+					// This brace closes the substitution: template text resumes,
+					// so the next evaluated position would have to open another
+					// `${`.
+					subs = subs[:n-1]
+					mode = modeTemplate
+				} else {
+					if n := len(subs); n > 0 {
+						subs[n-1]--
+					}
+					lastToken = "}"
+				}
+			default:
+				lastToken = string(c)
+			}
+		}
+	}
+	flush()
+	if mode != modeCode || escaped {
+		return "", false
+	}
+	return lastToken, true
 }
 
 // v8Offset converts V8's (line, UTF-16 column) into a byte offset. V8 ends a
