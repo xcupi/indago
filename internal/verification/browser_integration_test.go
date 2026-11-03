@@ -71,7 +71,15 @@ func newManagerOrSkip(t *testing.T) *browser.Manager {
 	if exe == "" {
 		t.Skip("no Chromium found (set INDAGO_CHROMIUM_PATH or `playwright install chromium`)")
 	}
-	m, err := browser.NewManager(browser.Config{Headless: true, ExecutablePath: exe}, nil)
+	cfg := browser.Config{Headless: true, ExecutablePath: exe}
+	// Chromium's process sandbox is ON by default, exactly like production. A
+	// host that cannot start it (a restricted container with user namespaces
+	// disabled) skips these tests rather than silently lowering isolation; an
+	// operator validating them there must opt out EXPLICITLY here.
+	if os.Getenv("INDAGO_TEST_BROWSER_NO_SANDBOX") == "1" {
+		cfg.DisableSandbox = true
+	}
+	m, err := browser.NewManager(cfg, nil)
 	if err != nil {
 		t.Skipf("browser engine unavailable: %v", err)
 	}
@@ -392,9 +400,12 @@ func TestIntegrationVerifyJavaScriptContext(t *testing.T) {
 	}
 }
 
-// --- URL context: reflected, but a javascript: href never runs on page load ---
+// --- URL context: a javascript: href never runs on passive page load, and a
+// candidate that declares NO trigger is never activated. A candidate that
+// declares TriggerInteraction IS clicked once — see
+// activation_integration_test.go ---
 
-func TestIntegrationVerifyURLContextNotExecutedWithoutActivation(t *testing.T) {
+func TestIntegrationVerifyURLContextWithoutDeclaredTriggerIsNotActivated(t *testing.T) {
 	m := marker(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -414,8 +425,9 @@ func TestIntegrationVerifyURLContextNotExecutedWithoutActivation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	// Merely reflecting a javascript: URL into an href must NOT be confirmed:
-	// nothing activates (clicks) the link on passive page load.
+	// Merely reflecting a javascript: URL into an href must NOT be confirmed by
+	// a passive load; this candidate carries no trigger, so activation is not
+	// attempted either.
 	if res.Verdict != domain.VerdictRejected {
 		t.Fatalf("verdict = %s, want rejected (reflected but not activated)", res.Verdict)
 	}
