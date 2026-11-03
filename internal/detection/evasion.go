@@ -2,12 +2,21 @@ package detection
 
 // This file is the OPT-IN WAF/filter-bypass candidate generator.
 //
-// Everything here deliberately reshapes a canonical breakout to survive
-// common, naive content filters (case-sensitive string/regex matching,
-// literal-space-only tokenizing, single-layer URL decoding) — WHILE STILL
-// embedding nothing but the same benign marker as every other candidate
-// (TestEvasionCandidatesAreBenignMarkers enforces this exactly like
-// TestPlanCandidatesAreBenignMarkers does for the canonical set: no alert/
+// It covers two filter classes, both deliberately small and deterministic:
+//
+//   - REWRITING bypasses, which reshape a canonical breakout to survive a
+//     naive matcher (case-sensitive string/regex matching, literal-space-only
+//     tokenizing, single-layer URL decoding, ...).
+//   - ALLOW-LIST bypasses, where the filter admits only a fixed set of tag
+//     names and event-handler attributes, so no reshaping of a blocked tag can
+//     help — the only construct that survives is the one the allow-list was
+//     written to keep (body/onresize, custom elements+onfocus, an SVG SMIL
+//     animatetransform's onbegin; see "Filter-allow-list shapes" in
+//     docs/reflection-candidates.md).
+//
+// Everything here still embeds nothing but the same benign marker as every
+// other candidate (TestEvasionCandidatesAreBenignMarkers enforces this exactly
+// like TestPlanCandidatesAreBenignMarkers does for the canonical set: no alert/
 // cookie/exfiltration construct is ever generated here either).
 //
 // Gating: PlanCandidates only calls evasionTemplatesFor when the caller sets
@@ -56,13 +65,19 @@ func evasionTemplatesFor(a ContextAnalysis, m string) []candTemplate {
 }
 
 // evasionTpl builds a load-trigger evasion template tagged with technique.
-// All current techniques reshape a LOAD-trigger canonical breakout (never an
-// interaction-only one) because only a load-trigger candidate can ever be
-// Confirmed by the passive verifier — an evasion variant of an
-// interaction-only shape would be untestable the same way the canonical one
-// already is.
+// The generic techniques reshape a LOAD-trigger canonical breakout because only
+// a load-trigger candidate can ever be Confirmed by the passive verifier — an
+// evasion variant of an interaction-only shape would be untestable the same way
+// the canonical one already is.
 func evasionTpl(value, needs string, priority int, why, technique string) candTemplate {
-	return candTemplate{value: value, needs: needs, priority: priority, rationale: why, trigger: TriggerLoad, technique: technique}
+	return evasionTplTrigger(value, needs, priority, why, technique, TriggerLoad)
+}
+
+// evasionTplTrigger is evasionTpl with an explicit trigger class, for the one
+// allow-list shape whose event the passive verifier deliberately never
+// synthesizes (see the body/onresize template below).
+func evasionTplTrigger(value, needs string, priority int, why, technique, trigger string) candTemplate {
+	return candTemplate{value: value, needs: needs, priority: priority, rationale: why, trigger: trigger, technique: technique}
 }
 
 func htmlTextEvasionTemplates(a ContextAnalysis, m string) []candTemplate {
@@ -94,6 +109,26 @@ func htmlTextEvasionTemplates(a ContextAnalysis, m string) []candTemplate {
 		evasionTpl(prefix+"\uff1csvg onload="+m+"\uff1e", "", 12,
 			prefixReason(prefix, "fullwidth Unicode angle brackets (U+FF1C/U+FF1E) instead of ASCII '<'/'>' — invisible to a filter matching the ASCII literal, and only becomes a real breakout if the target itself Unicode-normalizes (NFKC) the value back to ASCII before storing/rendering it; opportunistic, depends entirely on target-side normalization"),
 			"unicode_fullwidth"),
+
+		// The three "allow-list" shapes below are a different class from the
+		// rewriting techniques above: the target's filter does not try to match
+		// obfuscated variants at all, it admits only a tiny, fixed set of tag
+		// names and event-handler attributes. Reshaping <svg onload> cannot
+		// help there — the TAG is blocked — so the only bypass is the one
+		// construct the allow-list was written to keep. These are still just
+		// benign-marker markup: nothing runs until the browser dispatches the
+		// named event, and the handler body is the bare marker (a
+		// ReferenceError, never alert/cookie/exfiltration). See
+		// docs/reflection-candidates.md, "Filter-allow-list shapes".
+		evasionTplTrigger(prefix+"<body onresize="+m+">", "<>", 44,
+			prefixReason(prefix, "the allow-list admits only the body tag and the onresize handler, so this is the one construct that survives: the parser merges the second body start tag's attributes onto the page's real <body>, and the marker handler fires when the viewport is resized"),
+			"allowlisted_tag_event", TriggerInteraction),
+		evasionTpl(prefix+"<x-"+m+" autofocus tabindex=1 onfocus="+m+"></x-"+m+">", "<>", 42,
+			prefixReason(prefix, "the allow-list blocks every standard tag but admits custom/unknown elements: a custom element with tabindex is focusable, and autofocus makes the browser focus it during page load, firing onfocus (no click or hover needed)"),
+			"custom_element_focus"),
+		evasionTpl(prefix+"<svg><animatetransform onbegin="+m+" attributeName=transform></svg>", "<>", 40,
+			prefixReason(prefix, "the allow-list admits only some SVG markup — here <svg> and <animatetransform>, while blocking <svg onload> and <animate> — and SMIL's begin event fires when the animation starts (default begin=\"0s\", i.e. immediately), so onbegin references the marker on load"),
+			"svg_smil_begin"),
 	}
 }
 

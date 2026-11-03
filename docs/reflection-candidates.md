@@ -336,15 +336,19 @@ else changes (same scope enforcement, same rate/concurrency limits, same
 benign-marker-only rule, same lack of exploit generation).
 
 Current techniques (`Candidate.Technique`, same `candTemplate`/`Candidate`
-shape as the canonical set, `Trigger: TriggerLoad` only — an evasion variant
-of an interaction-only shape would be just as unconfirmable as the canonical
-one already is):
+shape as the canonical set). They are load-triggered except where stated — an
+evasion variant of an interaction-only shape would be just as unconfirmable as
+the canonical one already is:
 
 | Technique | Idea | Reliability |
 |-----------|------|--------------|
 | `case_variation` | `<SvG OnLoad=M>` — mixed-case tag/attribute name | bypasses a case-sensitive literal-string filter |
 | `alt_separator` | `<svg/onload=M>` / a tab instead of a space before the attribute | valid HTML5 (the tokenizer treats `/` and tab as attribute-boundary whitespace here); bypasses a filter expecting a literal space |
 | `double_url_encoding` | the breakout pre-encoded (`%3Csvg...%3E`), which the transport encodes again on the wire | opportunistic only — works solely against a target that decodes twice (e.g. a WAF that decodes once to inspect, then an app that decodes once more); a single-decode target will reflect the literal percent-string, which is the correct, honest outcome, not a false negative |
+| `allowlisted_tag_event` | `<body onresize=M>` — the exact tag+event pair a body/onresize allow-list admits | a real bypass of that filter class, but the resize event is never produced by a passive page load. Tagged `interaction`: the verifier records the candidate as **Rejected** (never Confirmed by accident) and the finding is flagged for manual review. The lab's own exploit supplies the resize from an attacker-controlled iframe, which a candidate value cannot carry; the local fixture proves the handler throws the marker `ReferenceError` the moment a genuine viewport resize happens |
+| `custom_element_focus` | `<x-M autofocus tabindex=1 onfocus=M></x-M>` — a custom element (the only tag class an "all standard tags blocked" filter admits) plus a focus trigger | fires on load: `tabindex` makes the custom element focusable, `autofocus` focuses it during parsing, and `onfocus` evaluates the bare marker. If the page already has an earlier `autofocus` element, that one consumes the trigger; the lab's `#x`-fragment delivery is a human-payload alternative a reflected candidate value cannot express |
+| `svg_smil_begin` | `<svg><animatetransform onbegin=M attributeName=transform></svg>` — an SVG SMIL element whose `begin` event fires when the animation starts | fires on load (SMIL's default `begin="0s"`); covers an allow-list that admits `animatetransform` while blocking both `<svg onload>` and `<animate>` |
+
 
 `escaped_quote_prefix` (a leading backslash that absorbs a naive quote-escaping
 pass, the classic `addslashes()` bypass) remains an evasion-only technique for
@@ -359,6 +363,82 @@ handling. That class of evasion depends on infrastructure a single local
 scanner process does not have — adding it would be a materially different,
 larger change and needs its own explicit decision, not a quiet extension of
 this generator.
+
+### Filter-allow-list shapes
+
+The rewriting techniques above assume the filter is trying to *recognize* a
+breakout and can be confused. A different, common class does not pattern-match
+at all: it allows only a tiny, fixed set of tag names and event-handler
+attributes, rejecting everything else. Reshaping `<svg onload=M>` cannot help
+there — the **tag** is blocked — so the only possible bypass is the exact
+construct the allow-list was written to keep. `internal/detection/evasion.go`
+therefore adds three bounded, deterministic shapes of that class (HTML-text
+context only, priorities 44/42/40, never a generated payload library):
+
+| Allow-list (documented lab) | Surviving construct | Trigger |
+|---|---|---|
+| most tags/attributes blocked; `body` + `onresize` survive | `<body onresize=M>` | resize event — **not** supplied by a passive load; stays Rejected and flagged for manual review |
+| all standard tags blocked except custom/unknown ones | `<x-M autofocus tabindex=1 onfocus=M></x-M>` | `autofocus` + `tabindex` focus the custom element on load → `onfocus` |
+| most tags blocked; some SVG markup (`animatetransform`) survives | `<svg><animatetransform onbegin=M attributeName=transform></svg>` | SMIL `begin` fires when the animation starts (default `0s`) |
+
+All three embed only the benign marker; nothing runs until the browser
+dispatches the named event, and the handler body is the bare marker
+(a `ReferenceError`, never `alert`/cookie/exfiltration).
+
+**Why `allowlisted_tag_event` is tagged `interaction`.** `onresize` is a
+genuine event, not a user gesture, but a page load does not resize the
+viewport: the lab's published exploit delivers the payload inside an iframe
+and changes *that iframe's* width. Indago's verifier navigates once and
+deliberately never synthesizes a resize or any other activation, so it records
+this candidate **Rejected** ("no passive execution signal") and the finding
+carries the manual-review reason — the bypass is real and worth reporting, but
+a human must supply the trigger. Labelling it `load` would be false and would
+let the `minimal` profile send it as confirm-capable. A local fixture proves
+the handler is real: with a genuine viewport resize (`Page.SetViewportSize`,
+not a synthetic event) the page throws
+`Uncaught ReferenceError: <marker> is not defined`; without the resize it
+throws nothing.
+
+**Profiles.** These are planned *in addition to* the six canonical HTML-text
+candidates and the six pre-existing evasion shapes (15 candidates for an
+HTML-text site with evasion on). The default `standard` profile caps at 8 per
+injection point and canonical candidates sort first, so it sends only the two
+highest-priority evasion shapes. For a filter-allow-list engagement use
+`-candidate-profile thorough` (cap 16) or `-max-candidates`, exactly as for the
+existing evasion set — this slice does not change profile semantics.
+
+**Fixture proof (`internal/detection/evasion_filter_test.go`).** Each lab is
+reproduced as an allow-list over tag names and `on*` attributes, driven through
+a real HTML tokenizer:
+
+- every canonical payload for the site is **rejected** by each fixture (so the
+  fixture reproduces a filter, not a no-op);
+- an independently executable control (`<svg onload=M>`, which confirms on the
+  unfiltered control page) is **rejected by every fixture** — a permissive
+  matcher would wrongly admit it;
+- exactly the shape a technique claims is **admitted**, and the other labs'
+  shapes are rejected (the three allow-lists are disjoint);
+- a golden test freezes the entire default (evasion-off) plan — 20 candidates
+  across every category, values, priorities, triggers — so the default
+  candidate set cannot change silently.
+
+**Live validation** against the loopback-only lab
+(`/home/udalah/Documents/Developments/indago_lab/ps-filter-evasion/lab.py`,
+which returns 403 for a value containing a tag/event outside its allow-list;
+the 403 body never echoes the value). Real binary, real Chromium, one scan
+(`01420756-b077-4616-a8cf-5c5d31f7163e`) with `-enable-evasion
+-candidate-profile thorough` over four seeds:
+
+| Seed | Filter admits | Verified outcome |
+|---|---|---|
+| `/lab1` | `body` + `onresize` only | the body/onresize candidate reflects and is **Rejected** (needs the external resize); no canonical shape reflects |
+| `/lab2` | custom tags + `onfocus` | only `<x-… autofocus tabindex=1 onfocus=…>` is **Confirmed** (marker-specific `ReferenceError`) |
+| `/lab3` | `svg` + `animatetransform`, `onbegin` only | only `<svg><animatetransform onbegin=…>` is **Confirmed**; `<svg onload>` and `<svg><animate onbegin>` are refused with 403 and produce no finding |
+| `/open` | no filter (control) | canonical `<svg onload>` and the rest are **Confirmed**, including the new custom/SVG shapes; `<body onresize>` still Rejected (no resize) |
+
+The three 403-refusals surface as the engine's existing "possible block/filter"
+diagnostic (inconclusive, informational), never as an XSS verdict — the filter
+is not mistaken for a negative, and a blocked vector is never Confirmed.
 
 `TestEvasionCandidatesAreOffByDefault`, `TestEvasionCandidatesAreAdditive`
 and `TestEvasionCandidatesAreBenignMarkers` (`internal/detection/
