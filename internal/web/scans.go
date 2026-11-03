@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/idor"
 	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/store"
 )
@@ -243,7 +245,9 @@ type createScanReq struct {
 	EnableIDOR bool `json:"enable_idor"`
 	// IDORCandidates are operator-supplied foreign object identifiers, e.g.
 	// the victim username an authorized lab brief names. Bounded/validated by
-	// the controller; never invented by Indago.
+	// the controller; explicit values always come first and are merged ahead
+	// of identifiers the engine harvests from the scan's own data. Empty means
+	// "use the harvested set" — no candidate is ever guessed.
 	IDORCandidates []string `json:"idor_candidates"`
 }
 
@@ -556,4 +560,68 @@ func nonNil[T any](in []T) []T {
 		return []T{}
 	}
 	return in
+}
+
+// --- IDOR harvested candidates (read-only) ---
+
+// idorCandidateDTO is one identifier the IDOR engine harvested from data the
+// scan already held. Origin is what lets a report say "tested carlos harvested
+// from /admin/users".
+type idorCandidateDTO struct {
+	Value  string      `json:"value"`
+	Shape  string      `json:"shape"`
+	Origin idor.Origin `json:"origin"`
+	Count  int         `json:"observed_count,omitempty"`
+}
+
+type idorCandidatesResp struct {
+	ScanID     domain.ID          `json:"scan_id"`
+	Candidates []idorCandidateDTO `json:"candidates"`
+	Total      int                `json:"total"`
+	Note       string             `json:"note,omitempty"`
+}
+
+// handleIDORCandidates surfaces the harvested candidate set, read-only. The
+// engine persists it on the identity-baseline TestCase; this endpoint never
+// probes anything and never triggers harvesting.
+func (s *Server) handleIDORCandidates(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(r.PathValue("id"))
+	if _, err := s.store.Scans().Get(r.Context(), id); err != nil {
+		s.writeLookupError(w, err)
+		return
+	}
+	cases, err := s.store.TestCases().ListByScan(r.Context(), id)
+	if err != nil {
+		s.writeInternalError(w, "list test cases", err)
+		return
+	}
+	resp := idorCandidatesResp{ScanID: id, Candidates: []idorCandidateDTO{}}
+	for _, tc := range cases {
+		if tc.VulnClass != domain.VulnIDOR || len(tc.Detail) == 0 {
+			continue
+		}
+		var d struct {
+			Harvest []idor.Harvest `json:"harvested_candidates"`
+			Note    string         `json:"harvest_note"`
+		}
+		if json.Unmarshal(tc.Detail, &d) != nil {
+			continue
+		}
+		if d.Note != "" && resp.Note == "" {
+			resp.Note = d.Note
+		}
+		if len(d.Harvest) > len(resp.Candidates) {
+			resp.Candidates = resp.Candidates[:0]
+			for _, h := range d.Harvest {
+				resp.Candidates = append(resp.Candidates, idorCandidateDTO{
+					Value: h.Value, Shape: string(h.Shape), Origin: h.Origin, Count: h.Count,
+				})
+			}
+		}
+	}
+	if len(resp.Candidates) == 0 && resp.Note == "" {
+		resp.Note = "the IDOR engine has not harvested any identifier for this scan"
+	}
+	resp.Total = len(resp.Candidates)
+	writeJSON(w, http.StatusOK, resp)
 }

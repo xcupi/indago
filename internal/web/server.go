@@ -171,6 +171,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/scans/{id}/status", s.handleScanStatus)
 	mux.HandleFunc("GET /api/scans/{id}/coverage", s.handleScanCoverage)
 	mux.HandleFunc("GET /api/scans/{id}/tests", s.handleListScanTests)
+	mux.HandleFunc("GET /api/scans/{id}/idor/candidates", s.handleIDORCandidates)
 	mux.HandleFunc("GET /api/scans/{id}/explorer", s.handleScanExplorer)
 	mux.HandleFunc("GET /api/scans/{id}/findings", s.handleListFindings)
 	mux.HandleFunc("GET /api/scans/{id}/findings/{fid}", s.handleGetFinding)

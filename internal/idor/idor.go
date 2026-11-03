@@ -491,7 +491,14 @@ func looksLikeLoginPage(body []byte) bool {
 // Candidate is one foreign object identifier to try.
 type Candidate struct {
 	Value  string `json:"value"`
-	Source string `json:"source"` // "supplied" | "numeric" | "observed"
+	Source string `json:"source"` // "supplied" | "numeric" | "observed" | "harvested"
+	// Shape is the identifier family (see Shape). Empty on the legacy
+	// DeriveCandidates path, which does not shape-match.
+	Shape Shape `json:"shape,omitempty"`
+	// Origin is where a harvested candidate came from. Set only for
+	// candidates that were harvested from the scan's own data, so a finding
+	// can attribute the identifier it tested.
+	Origin *Origin `json:"origin,omitempty"`
 }
 
 // MaxCandidates bounds how many foreign identifiers one injection point may
@@ -507,19 +514,54 @@ const MaxCandidates = 5
 //  2. small numeric neighbours of the caller's own numeric id;
 //  3. identifier-shaped values already observed elsewhere in this scan.
 //
+// It is the pre-harvest entry point: observed values are NOT shape-filtered.
+// New callers use DeriveCandidatesFromHarvest, which adds provenance and shape
+// matching.
+//
 // A non-empty reason means no candidate could be derived safely.
 func DeriveCandidates(own string, supplied, observed []string, limit int) ([]Candidate, string) {
+	hs := make([]Harvest, 0, len(observed))
+	for _, v := range observed {
+		hs = append(hs, Harvest{Value: v, Shape: ShapeOf(v)})
+	}
+	out, reason := deriveCandidates(own, supplied, hs, limit, false)
+	for i := range out {
+		if out[i].Source == "harvested" {
+			out[i].Source = "observed"
+		}
+	}
+	return out, reason
+}
+
+// DeriveCandidatesFromHarvest is DeriveCandidates with provenance and shape
+// matching, for candidates harvested from data the scan already holds:
+//
+//  1. operator-supplied identifiers, in the order given, always first and
+//     never shape-filtered — they are the operator's explicit intent;
+//  2. small numeric neighbours of the caller's own numeric id;
+//  3. harvested identifiers whose shape matches the endpoint's own identifier
+//     (a UUID endpoint never receives a numeric id, and vice versa), ranked
+//     deterministically by HarvestCandidates.
+//
+// The cap stays MaxCandidates per injection point, so harvesting never turns
+// the pass into enumeration.
+func DeriveCandidatesFromHarvest(own string, supplied []string, harvested []Harvest, limit int) ([]Candidate, string) {
+	return deriveCandidates(own, supplied, harvested, limit, true)
+}
+
+func deriveCandidates(own string, supplied []string, harvested []Harvest, limit int, matchShape bool) ([]Candidate, string) {
 	if limit <= 0 || limit > MaxCandidates {
 		limit = MaxCandidates
 	}
 	own = strings.TrimSpace(own)
+	ownShape := ShapeOf(own)
 
 	seen := map[string]bool{}
 	if own != "" {
 		seen[strings.ToLower(own)] = true
 	}
 	var out []Candidate
-	add := func(raw, source string) bool {
+	add := func(raw, source string, shape Shape, origin *Origin, force bool) bool {
 		v := strings.TrimSpace(raw)
 		if v == "" || len(v) > MaxValueLen || seen[strings.ToLower(v)] {
 			return false
@@ -527,13 +569,18 @@ func DeriveCandidates(own string, supplied, observed []string, limit int) ([]Can
 		if !candidateShaped(v) {
 			return false
 		}
+		if matchShape && !force && !shapeCompatible(ownShape, shape) {
+			return false
+		}
 		seen[strings.ToLower(v)] = true
-		out = append(out, Candidate{Value: v, Source: source})
+		out = append(out, Candidate{Value: v, Source: source, Shape: shape, Origin: origin})
 		return len(out) >= limit
 	}
 
 	for _, v := range supplied {
-		if add(v, "supplied") {
+		// Operator-supplied values are explicit intent: they are tried even
+		// when their shape differs from the endpoint's own identifier.
+		if add(v, "supplied", ShapeOf(v), nil, true) {
 			return out, ""
 		}
 	}
@@ -543,21 +590,37 @@ func DeriveCandidates(own string, supplied, observed []string, limit int) ([]Can
 			if next <= 0 {
 				continue
 			}
-			if add(strconv.Itoa(next), "numeric") {
+			if add(strconv.Itoa(next), "numeric", ShapeNumeric, nil, false) {
 				return out, ""
 			}
 		}
 	}
-	for _, v := range observed {
-		if add(v, "observed") {
+	for _, h := range harvested {
+		origin := h.Origin
+		if add(h.Value, "harvested", h.Shape, &origin, false) {
 			return out, ""
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Sprintf("no bounded candidate identifiers available for own value %q: "+
-			"the identifier looks unpredictable, so guessing is not attempted", own)
+		return nil, noCandidateReason(own, ownShape, len(harvested), matchShape)
 	}
 	return out, ""
+}
+
+// noCandidateReason explains a skip without ever sounding like a guess was
+// made. It names the shape constraint so an operator can see why a harvested
+// value was not used.
+func noCandidateReason(own string, ownShape Shape, harvestedCount int, matchShape bool) string {
+	if !matchShape {
+		return fmt.Sprintf("no bounded candidate identifiers available for own value %q: "+
+			"the identifier looks unpredictable, so guessing is not attempted", own)
+	}
+	if harvestedCount == 0 {
+		return fmt.Sprintf("no candidate identifiers were harvested from this scan's own data for own value %q "+
+			"(shape %s): the identifier itself looks unpredictable, so guessing is not attempted", own, ownShape)
+	}
+	return fmt.Sprintf("no harvested identifier matches the endpoint's identifier shape (%s) for own value %q: "+
+		"the identifier looks unpredictable, so cross-shape guessing is not attempted", ownShape, own)
 }
 
 func numericID(v string) (int, bool) {

@@ -13,11 +13,14 @@ package scan
 // evidence stays in the scan's own evidence store, like every other engine.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +44,10 @@ const idorIdentityNote = "idor identity baseline"
 // Finding.Detail. It keeps the evidence trail an operator needs to re-check a
 // verdict: who the caller was established to be, which own-object request was
 // the baseline, and every foreign identifier tried with its own outcome.
+//
+// On the identity-baseline TestCase it ALSO carries the harvested candidate
+// set (Harvest/HarvestNote), so the identifiers the engine found on its own are
+// a read-only, restart-safe fact rather than a transient in-memory list.
 type idorDetail struct {
 	Engine           string               `json:"engine"`
 	Method           domain.HTTPMethod    `json:"method,omitempty"`
@@ -52,6 +59,9 @@ type idorDetail struct {
 	IdentityEvidence []domain.ID          `json:"identity_evidence,omitempty"`
 	BaselineEvidence []domain.ID          `json:"baseline_evidence,omitempty"`
 	BaselineStatus   int                  `json:"baseline_status,omitempty"`
+	HarvestedCount   int                  `json:"harvested_count,omitempty"`
+	Harvest          []idor.Harvest       `json:"harvested_candidates,omitempty"`
+	HarvestNote      string               `json:"harvest_note,omitempty"`
 	Attempts         []idorAttempt        `json:"attempts,omitempty"`
 	Verdict          domain.Verdict       `json:"verdict,omitempty"`
 	Reason           string               `json:"reason,omitempty"`
@@ -64,14 +74,15 @@ type idorDetail struct {
 
 // idorAttempt is one foreign object request (B) and what it proved.
 type idorAttempt struct {
-	Candidate   string      `json:"candidate"`
-	Source      string      `json:"source,omitempty"`
-	URL         string      `json:"url,omitempty"`
-	Status      int         `json:"status,omitempty"`
-	Outcome     string      `json:"outcome"`
-	Reason      string      `json:"reason,omitempty"`
-	Foreign     *idor.Field `json:"foreign,omitempty"`
-	EvidenceIDs []domain.ID `json:"evidence_ids,omitempty"`
+	Candidate   string       `json:"candidate"`
+	Source      string       `json:"source,omitempty"`
+	Origin      *idor.Origin `json:"origin,omitempty"`
+	URL         string       `json:"url,omitempty"`
+	Status      int          `json:"status,omitempty"`
+	Outcome     string       `json:"outcome"`
+	Reason      string       `json:"reason,omitempty"`
+	Foreign     *idor.Field  `json:"foreign,omitempty"`
+	EvidenceIDs []domain.ID  `json:"evidence_ids,omitempty"`
 }
 
 // idorExecutor runs JobIDOR jobs.
@@ -90,7 +101,14 @@ type idorExecutor struct {
 	// each fetch (and persist) their own baseline.
 	identityMu sync.Mutex
 	cached     *idorIdentity
-	supplied   []string
+	// harvestMu serializes the one-time harvest from the scan's own data (see
+	// harvestCandidates). Harvesting is local I/O only: it never sends a
+	// request, so it cannot change the pass's request count.
+	harvestMu   sync.Mutex
+	harvested   []idor.Harvest
+	harvestNote string
+	harvestDone bool
+	supplied    []string
 }
 
 type idorIdentity struct {
@@ -98,6 +116,13 @@ type idorIdentity struct {
 	Source   string
 	Evidence []domain.ID
 	Reason   string // non-empty when no identity could be established
+	// CaseID is the persisted identity-baseline TestCase; the harvested
+	// candidate set is stored on it (see persistHarvest).
+	CaseID domain.ID
+	// Harvest/HarvestNote are read back from that TestCase on restart so a
+	// resumed scan does not re-mine every stored body.
+	Harvest     []idor.Harvest
+	HarvestNote string
 }
 
 func newIDORExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, supplied []string) *idorExecutor {
@@ -153,15 +178,19 @@ func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.
 	}
 	tc.Method, tc.URL = string(ep.Method), ep.URL
 
+	d := idorDetail{Engine: "idor", Method: ep.Method}
+	// skip records WHY a parameter was not tested, preserving anything already
+	// established about it (e.g. how many identifiers were harvested).
 	skip := func(reason string) (idorDetail, domain.TestOutcome, error, bool, bool) {
-		return idorDetail{Engine: "idor", Method: ep.Method, Skipped: true, SkipReason: reason,
-			Verdict: domain.VerdictInconclusive, Reason: reason}, domain.OutcomeSuccess, nil, false, true
+		d.Skipped, d.SkipReason = true, reason
+		d.Verdict, d.Reason = domain.VerdictInconclusive, reason
+		return d, domain.OutcomeSuccess, nil, false, true
 	}
 
 	if focus == nil {
 		return idorDetail{Engine: "idor"}, domain.OutcomeError, fmt.Errorf("IDOR job has no injection point"), true, false
 	}
-	d := idorDetail{Engine: "idor", Method: ep.Method, Parameter: focus.Name, Location: focus.Location}
+	d.Parameter, d.Location = focus.Name, focus.Location
 
 	// This slice is read-only: GET/HEAD only, never a body-carrying method,
 	// even with the scan's state-changing opt-in (see AGENTS.md §3).
@@ -226,7 +255,10 @@ func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.
 		return d, domain.OutcomeSuccess, nil, false, false
 	}
 
-	cands, reason := idor.DeriveCandidates(own, e.supplied, e.observedIdentifiers(ctx, job.ScanID, focus), 0)
+	harvested, harvestNote := e.harvestCandidates(ctx, job.ScanID, ident)
+	d.HarvestedCount, d.HarvestNote = len(harvested), harvestNote
+
+	cands, reason := idor.DeriveCandidatesFromHarvest(own, e.supplied, harvested, 0)
 	if len(cands) == 0 {
 		return skip(reason)
 	}
@@ -270,10 +302,17 @@ func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.
 			dec = idor.Decision{Outcome: idor.OutcomeInconclusive,
 				Reason: "the foreign-object response named a different principal, but the request/response evidence pair could not be stored; not Confirmed without reproducible evidence"}
 		}
-		a := idorAttempt{Candidate: cand.Value, Source: cand.Source, URL: req.URL,
-			Status: resp.Status, Outcome: string(dec.Outcome), Reason: dec.Reason, Foreign: dec.Foreign, EvidenceIDs: evIDs}
+		// A harvested candidate's provenance travels with the attempt and into
+		// the finding reason, so the report can say which value was tested and
+		// where the scan found it. An operator-supplied candidate has none.
+		attemptReason := dec.Reason
+		if cand.Origin != nil {
+			attemptReason += "; candidate " + cand.Origin.Describe()
+		}
+		a := idorAttempt{Candidate: cand.Value, Source: cand.Source, Origin: cand.Origin, URL: req.URL,
+			Status: resp.Status, Outcome: string(dec.Outcome), Reason: attemptReason, Foreign: dec.Foreign, EvidenceIDs: evIDs}
 		d.Attempts = append(d.Attempts, a)
-		reasons = append(reasons, dec.Reason)
+		reasons = append(reasons, attemptReason)
 
 		switch dec.Outcome {
 		case idor.OutcomeConfirmed:
@@ -435,7 +474,8 @@ func (e *idorExecutor) identity(ctx context.Context, scanID domain.ID, ep *domai
 			var d idorDetail
 			_ = json.Unmarshal(tc.Detail, &d)
 			e.cached = &idorIdentity{Identity: d.CallerIdentity, Source: d.IdentitySource,
-				Evidence: d.IdentityEvidence, Reason: d.SkipReason}
+				Evidence: d.IdentityEvidence, Reason: d.SkipReason, CaseID: tc.ID,
+				Harvest: d.Harvest, HarvestNote: d.HarvestNote}
 			return e.cached, true
 		}
 	}
@@ -457,20 +497,21 @@ func (e *idorExecutor) identity(ctx context.Context, scanID domain.ID, ep *domai
 			continue
 		}
 		e.cached = &idorIdentity{Identity: ident, Source: origin + path}
-		e.persistIdentity(ctx, scanID, e.cached, resp)
+		e.cached.CaseID = e.persistIdentity(ctx, scanID, e.cached, resp)
 		return e.cached, false
 	}
 
 	reason := fmt.Sprintf("caller identity could not be established from the target with this session (tried %s)",
 		strings.Join(tried, ", "))
 	e.cached = &idorIdentity{Reason: reason}
-	e.persistIdentity(ctx, scanID, e.cached, nil)
+	e.cached.CaseID = e.persistIdentity(ctx, scanID, e.cached, nil)
 	return e.cached, false
 }
 
 // persistIdentity records the baseline (positive or negative) as a TestCase
-// with its own request/response evidence.
-func (e *idorExecutor) persistIdentity(ctx context.Context, scanID domain.ID, id *idorIdentity, resp *httpengine.Response) {
+// with its own request/response evidence, and returns its ID so the harvested
+// candidate set can be attached to the same durable row.
+func (e *idorExecutor) persistIdentity(ctx context.Context, scanID domain.ID, id *idorIdentity, resp *httpengine.Response) domain.ID {
 	now := time.Now()
 	tc := &domain.TestCase{
 		ID: domain.NewID(), ScanID: scanID, VulnClass: domain.VulnIDOR,
@@ -494,6 +535,32 @@ func (e *idorExecutor) persistIdentity(ctx context.Context, scanID domain.ID, id
 	tc.Detail = encodeIDORDetail(d)
 	if err := e.store.TestCases().Create(ctx, tc); err != nil {
 		e.log.Warn("persist IDOR identity baseline", "scan", scanID, "err", err)
+		return ""
+	}
+	return tc.ID
+}
+
+// persistHarvest attaches the harvested candidate set to the identity-baseline
+// TestCase. It is a read-only fact for the report/API — the engine itself never
+// re-reads it within a run (the in-memory set is authoritative there).
+func (e *idorExecutor) persistHarvest(ctx context.Context, ident *idorIdentity, harvested []idor.Harvest, note string) {
+	if ident == nil || ident.CaseID.Empty() {
+		return
+	}
+	tc, err := e.store.TestCases().Get(ctx, ident.CaseID)
+	if err != nil {
+		e.log.Warn("load identity baseline for harvest", "case", ident.CaseID, "err", err)
+		return
+	}
+	var d idorDetail
+	if len(tc.Detail) > 0 {
+		_ = json.Unmarshal(tc.Detail, &d)
+	}
+	d.Harvest, d.HarvestNote = harvested, note
+	tc.Detail = encodeIDORDetail(d)
+	tc.UpdatedAt = time.Now()
+	if err := e.store.TestCases().Update(ctx, tc); err != nil {
+		e.log.Warn("persist IDOR harvest", "case", ident.CaseID, "err", err)
 	}
 }
 
@@ -523,28 +590,227 @@ func ownObjectValue(ep *domain.Endpoint, p *domain.Parameter) string {
 	return u.Query().Get(p.Name)
 }
 
-// observedIdentifiers returns identifier-shaped values already seen elsewhere
-// in this scan (other parameters' examples). They are all in-scope values an
-// authenticated crawl observed; nothing is invented.
-func (e *idorExecutor) observedIdentifiers(ctx context.Context, scanID domain.ID, focus *domain.Parameter) []string {
+// ---------------------------------------------------------------------------
+// harvesting: identifiers mined from data the scan already holds
+// ---------------------------------------------------------------------------
+
+// maxHarvestBodies bounds how many stored response bodies are mined per scan.
+// Harvesting adds no requests, but it must not read an unbounded number of
+// blobs either.
+const maxHarvestBodies = 200
+
+// maxHarvestHeaderBytes bounds how much of an HTTP evidence dump is scanned
+// for the header/body separator before the body is taken.
+const maxHarvestHeaderBytes = 16 << 10
+
+// harvestCandidates returns the scan's harvested candidate set, computing it
+// once per execution and reusing the persisted set after a restart. It performs
+// local reads only: no request is ever sent to build this list.
+func (e *idorExecutor) harvestCandidates(ctx context.Context, scanID domain.ID, ident *idorIdentity) ([]idor.Harvest, string) {
+	e.harvestMu.Lock()
+	defer e.harvestMu.Unlock()
+	if e.harvestDone {
+		return e.harvested, e.harvestNote
+	}
+	e.harvestDone = true
+
+	// A resumed scan already has the set persisted on the identity baseline.
+	if ident != nil && ident.HarvestNote != "" {
+		e.harvested, e.harvestNote = ident.Harvest, ident.HarvestNote
+		return e.harvested, e.harvestNote
+	}
+
+	observations := e.harvestObservations(ctx, scanID)
+	e.harvested = idor.HarvestCandidates(observations, e.harvestExclusions(ctx, scanID, ident), 0)
+	e.harvestNote = fmt.Sprintf("%d identifiers harvested from the scan's own data (cap %d, no extra requests)",
+		len(e.harvested), idor.MaxHarvested)
+	if len(e.harvested) == 0 {
+		e.harvestNote = "no foreign identifier could be harvested from the scan's own data"
+	}
+	e.persistHarvest(ctx, ident, e.harvested, e.harvestNote)
+	e.log.Debug("idor harvest", "scan", scanID, "candidates", len(e.harvested))
+	return e.harvested, e.harvestNote
+}
+
+// harvestExclusions are values the harvester must never propose: the caller's
+// own identity and the scan's own session cookies (session material is a
+// credential, not a foreign object id).
+func (e *idorExecutor) harvestExclusions(ctx context.Context, scanID domain.ID, ident *idorIdentity) []string {
+	var out []string
+	if ident != nil {
+		for _, f := range ident.Identity.Fields {
+			out = append(out, f.Value)
+		}
+	}
+	if sess, err := e.store.Sessions().GetByScan(ctx, scanID); err == nil && sess != nil && sess.StatePath != "" {
+		for _, c := range sessionCookies(sess.StatePath) {
+			if c.Value != "" {
+				out = append(out, c.Value)
+			}
+		}
+	}
+	return out
+}
+
+// harvestObservations converts the scan's already-collected data into harvest
+// observations, deterministically ordered: endpoint URLs and object-id query
+// values, discovered parameter examples, then stored response bodies.
+func (e *idorExecutor) harvestObservations(ctx context.Context, scanID domain.ID) []idor.Observation {
+	var obs []idor.Observation
+	urlByEndpoint := map[domain.ID]string{}
+
+	endpoints, err := e.store.Endpoints().ListByScan(ctx, scanID)
+	if err == nil {
+		sort.SliceStable(endpoints, func(i, j int) bool { return endpoints[i].URL < endpoints[j].URL })
+		for _, ep := range endpoints {
+			urlByEndpoint[ep.ID] = ep.URL
+			u, perr := url.Parse(ep.URL)
+			if perr != nil {
+				continue
+			}
+			// Path segments that discovery itself considers variable values
+			// (never route keywords): /users/42/edit → "42".
+			var segs []string
+			for _, m := range discovery.QualifyingPathSegments(u.Path) {
+				segs = append(segs, m.Value)
+			}
+			if len(segs) > 0 {
+				obs = append(obs, idor.Observation{Endpoint: ep.URL, Field: "path", Via: idor.ViaPath, Values: segs})
+			}
+			q := u.Query()
+			names := make([]string, 0, len(q))
+			for name := range q {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				if !idor.ObjectIDParameter(name) {
+					continue
+				}
+				obs = append(obs, idor.Observation{Endpoint: ep.URL, Field: name, Via: idor.ViaQuery, Values: q[name]})
+			}
+		}
+	}
+
 	params, err := e.store.Parameters().ListByScan(ctx, scanID)
+	if err == nil {
+		sort.SliceStable(params, func(i, j int) bool {
+			if params[i].EndpointID != params[j].EndpointID {
+				return params[i].EndpointID < params[j].EndpointID
+			}
+			return params[i].Name < params[j].Name
+		})
+		for _, p := range params {
+			v := strings.TrimSpace(p.Example)
+			if v == "" {
+				continue
+			}
+			obs = append(obs, idor.Observation{Endpoint: urlByEndpoint[p.EndpointID], Field: p.Name, Via: idor.ViaParameter, Values: []string{v}})
+		}
+	}
+
+	obs = append(obs, e.harvestEvidenceBodies(ctx, scanID)...)
+	return obs
+}
+
+// harvestEvidenceBodies reads the response bodies the scan already stored as
+// evidence (HTML/JSON, bounded per body) and attributes each to the TestCase
+// URL that produced it.
+func (e *idorExecutor) harvestEvidenceBodies(ctx context.Context, scanID domain.ID) []idor.Observation {
+	if e.evidence == nil {
+		return nil
+	}
+	rows, err := e.store.Evidence().ListByScan(ctx, scanID)
 	if err != nil {
 		return nil
 	}
-	var out []string
-	for _, p := range params {
-		if p.ID == focus.ID || strings.TrimSpace(p.Example) == "" {
+	urlByCase := map[domain.ID]string{}
+	if cases, cerr := e.store.TestCases().ListByScan(ctx, scanID); cerr == nil {
+		for _, tc := range cases {
+			if tc.URL != "" {
+				urlByCase[tc.ID] = tc.URL
+			}
+		}
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		if !rows[i].CreatedAt.Equal(rows[j].CreatedAt) {
+			return rows[i].CreatedAt.Before(rows[j].CreatedAt)
+		}
+		return rows[i].ID < rows[j].ID
+	})
+
+	var out []idor.Observation
+	for _, row := range rows {
+		if len(out) >= maxHarvestBodies {
+			break
+		}
+		if row.Kind != domain.EvidenceResponse || !harvestableBody(row) {
 			continue
 		}
-		if p.Location != domain.LocationQuery && p.Location != domain.LocationPath {
+		body, ok := e.readEvidenceBody(row)
+		if !ok || len(bytes.TrimSpace(body)) == 0 {
 			continue
 		}
-		if p.Location == domain.LocationQuery && !idor.ObjectIDParameter(p.Name) {
-			continue
-		}
-		out = append(out, p.Example)
+		source := urlByCase[evidenceTestCaseID(row.Note)]
+		out = append(out, idor.Observation{Endpoint: source, BodyURL: source, Body: body})
 	}
 	return out
+}
+
+// harvestableBody keeps the harvest off binary artifacts (screenshots, HARs,
+// blobs) and on the response bodies that can carry identity data.
+func harvestableBody(row *domain.Evidence) bool {
+	mt := strings.ToLower(row.MediaType)
+	if strings.Contains(mt, "message/http") || strings.Contains(mt, "html") || strings.Contains(mt, "json") {
+		return true
+	}
+	lower := strings.ToLower(row.BlobPath)
+	for _, ext := range []string{".http", ".html", ".htm", ".json"} {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// readEvidenceBody returns the response body of one evidence blob, stripping
+// the HTTP message headers every executor writes around it.
+func (e *idorExecutor) readEvidenceBody(row *domain.Evidence) ([]byte, bool) {
+	rc, err := e.evidence.Open(row.BlobPath)
+	if err != nil {
+		return nil, false
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(io.LimitReader(rc, idor.MaxHarvestBodyBytes+maxHarvestHeaderBytes))
+	if err != nil {
+		return nil, false
+	}
+	if strings.EqualFold(row.MediaType, "message/http") || strings.HasSuffix(strings.ToLower(row.BlobPath), ".http") {
+		idx := bytes.Index(data, []byte("\r\n\r\n"))
+		if idx < 0 {
+			return nil, false
+		}
+		data = data[idx+4:]
+	}
+	if len(data) > idor.MaxHarvestBodyBytes {
+		data = data[:idor.MaxHarvestBodyBytes]
+	}
+	return data, true
+}
+
+// evidenceTestCaseID reads the "test_case=<id>" attribution every executor
+// writes into an evidence note.
+func evidenceTestCaseID(note string) domain.ID {
+	const prefix = "test_case="
+	i := strings.Index(note, prefix)
+	if i < 0 {
+		return ""
+	}
+	rest := note[i+len(prefix):]
+	if j := strings.IndexAny(rest, " 	"); j >= 0 {
+		rest = rest[:j]
+	}
+	return domain.ID(strings.TrimSpace(rest))
 }
 
 // idorFindingDedupKey identifies one broken-object-authorization site: the
