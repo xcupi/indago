@@ -130,19 +130,59 @@ func TestEvasionCandidatesCoverURLScheme(t *testing.T) {
 	}
 }
 
+// The single-quoted leading-backslash shape used to be evasion-only
+// ("escaped_quote_prefix"). It is now a CANONICAL candidate, because a server
+// that backslash-escapes the quote (without escaping backslash) is ordinary
+// application behaviour rather than a filter bypass — see
+// docs/reflection-candidates.md, "Reflected JavaScript string contexts
+// (measured)". Evasion must therefore not duplicate it, and the canonical plan
+// must carry it with no opt-in at all. The double-quoted sibling stays
+// evasion-only: no canonical reader escapes that quote without reason.
 func TestEvasionCandidatesCoverJSStringBreakout(t *testing.T) {
-	body := []byte(`<script>var x = '` + evProbe.Value() + `';</script>`)
-	on := planWithEvasion(t, body, true)
+	single := []byte(`<script>var x = '` + evProbe.Value() + `';</script>`)
+	ofSingle := planWithEvasion(t, single, false)
+	leadingBackslash := `\';` + evProbe.Token + "//"
+	counts := 0
+	for _, c := range ofSingle.Plan.Candidates {
+		if c.Value == leadingBackslash {
+			counts++
+			if c.Technique != "" {
+				t.Fatalf("canonical single-quoted escape-break is technique-tagged: %+v", c)
+			}
+		}
+	}
+	if counts != 1 {
+		t.Fatalf("evasion off: %d leading-backslash candidates, want exactly 1 canonical candidate", counts)
+	}
+	onSingle := planWithEvasion(t, single, true)
+	counts = 0
+	for _, c := range onSingle.Plan.Candidates {
+		if c.Value == leadingBackslash {
+			counts++
+		}
+	}
+	if counts != 1 {
+		t.Fatalf("evasion on: %d leading-backslash candidates, want exactly 1 (canonical, not duplicated as evasion)", counts)
+	}
+
+	double := []byte(`<script>var x = "` + evProbe.Value() + `";</script>`)
+	ofDouble := planWithEvasion(t, double, false)
+	for _, c := range ofDouble.Plan.Candidates {
+		if c.Technique == "escaped_quote_prefix" {
+			t.Fatalf("evasion off but got an escaped_quote_prefix candidate: %+v", c)
+		}
+	}
+	onDouble := planWithEvasion(t, double, true)
 	found := false
-	for _, c := range on.Plan.Candidates {
+	for _, c := range onDouble.Plan.Candidates {
 		if c.Technique == "escaped_quote_prefix" {
 			found = true
-			if !strings.HasPrefix(c.Value, `\'`) {
+			if !strings.HasPrefix(c.Value, `\"`) {
 				t.Fatalf("escaped_quote_prefix candidate %q does not lead with a backslash-prefixed quote", c.Value)
 			}
 		}
 	}
 	if !found {
-		t.Fatal("EnableEvasion=true produced no escaped_quote_prefix candidate for a single-quoted JS string site")
+		t.Fatal("EnableEvasion=true produced no escaped_quote_prefix candidate for a double-quoted JS string site")
 	}
 }

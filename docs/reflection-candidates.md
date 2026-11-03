@@ -44,7 +44,7 @@ library:
 |----------|---------|-------------------------------------|
 | `html_text` | element text, comment, RCDATA/RAWTEXT | `<svg onload=M>`, `<img src=x onerror=M>`, `<details open ontoggle=M>`, `<body onpageshow=M>` (the parser merges a second body tag's attributes onto the page's real `<body>`), `<svg><animate onbegin=M>` — five independent auto-firing vectors, so a filter blocking any one or two still misses the rest — plus a bare markup probe `<Mx>`; all prefixed with the construct's closer (`-->`, `</title>`, …) where needed |
 | `html_attribute` | attribute value / name, tag name | quote-aware `"><svg onload=M>`, an in-tag `autofocus onfocus=M` handler (fires on load, no interaction — same character requirement as the onmouseover one below), and an in-tag `onmouseover=M` handler (which needs only the delimiter, not `<`/`>`) |
-| `javascript` | JS string / template / code / comment / regex | quote-aware string escape `";M//`, template `${M}`, direct code `M` |
+| `javascript` | JS string / template / code / comment / regex | quote-aware string escape `";M//`, plus two single-quoted *escape-breakers* for a reader that backslash-escapes the quote: `</script><script>M</script>` (needs no quote at all) and `\';M//` (its leading backslash consumes the reader's escaping backslash); template `${M}`, direct code `M` |
 | `url` | URL attribute | `javascript:M` only at a scheme position (`start`, `relative_first_segment`); `data:` where plausible; nothing in a query/path/host |
 | `css` | `<style>` body, `style=""` attribute | `</style><svg onload=M>` for the element body; quote-aware `"><svg onload=M>` for the attribute (closing the attribute's quote and the tag reaches markup regardless of whether the CSS before it is valid — same mechanism as any other attribute breakout) |
 | `unknown_mixed` | unclassifiable / ambiguous | generic low-priority markup probes |
@@ -111,6 +111,51 @@ a character the browser decodes before use. Inside an event-handler / `style` /
 decoded back before the inner JS/CSS/URL parser sees them, so those candidates
 keep full priority; the same encoding inside a `<script>` string does not
 (`TestPlanTransformationAware`).
+
+## Reflected JavaScript string contexts (measured)
+
+Three authorized PortSwigger lab readers place a reflected value inside a
+JavaScript string under different escaping rules. Each is reproduced byte for
+byte by a loopback fixture (`internal/scan/jsstring_fixture_test.go`), which
+asserts the exact served bytes and the analyzer's per-character classification
+*before* the real-Chromium test (`TestReflectedJSStringContexts`) runs the whole
+pipeline against it. This is the "measure before changing" record: the numbers
+below are what the pipeline actually produced, not an expectation.
+
+| Reader (served escaping) | Breakout that reaches code | Why |
+|---|---|---|
+| `var searchTerms = 'VALUE';` with `'`→`\'` and `\`→`\\` | `</script><script>M</script>` | A quote breakout is impossible: the reader escapes the escaping backslash too. The HTML tokenizer ends the `<script>` element at a literal `</script>` regardless of JS string state, and the fresh block's whole body is the marker. Needs no quote at all. |
+| `var searchTerms = 'VALUE';` with `<`/`>`/`"` HTML-encoded and `'`→`\'` | `\';M//` | `<` and `>` are unavailable, so the script cannot be closed. The remaining route is the escape rule itself: the leading backslash consumes the backslash the reader inserts, leaving the closing quote raw. |
+| ``var searchTerms = `VALUE`;`` with `<` `>` `'` `"` `\` and backtick all `\uXXXX`-escaped | `${M}` (already planned before this slice) | The literal cannot be closed (backtick escaped), so interpolation is the only route; `$`, `{` and `}` are left alone. |
+
+Measured outcomes with the default `standard` profile and real Chromium:
+
+- readers 1 and 2 → **Confirmed** by a marker-naming uncaught `ReferenceError`
+  (`</script><script>M</script>` confirms the first; `\';M//` confirms the
+  second after the two quote-based shapes correctly fail);
+- reader 3 → reaches an executable position — Chromium raises
+  `ReferenceError: <marker> is not defined` — but the verdict is
+  **Inconclusive**, not Rejected: `internal/browser/provenance.go`'s
+  `markerAtPosition` is a deliberately conservative ASCII allow-list that
+  refuses any paused position in a script whose prefix contains a backtick
+  (`docs/verdict-provenance.md`: "a regex or template literal … yields
+  `Inconclusive` instead of `Confirmed`"). Teaching that lexer template
+  literals is a change to the shared verdict authority, not a candidate gap;
+  the positive is never reported as a clean negative.
+- each context's fully-escaped safe control stays **Rejected**, and a
+  non-reflecting control produces no finding.
+
+Transformation note: the backslash escape-breaker lists `'` as the canary
+character it depends on, so a reader that escapes the quote deprioritizes it
+(never drops it) — the planner cannot tell from its canary whether the reader
+*also* escapes backslash. The `</script>` escape-breaker needs only `<`/`>`, so
+it stays high-priority exactly when those survive (the first reader) and is
+deprioritized when they are HTML-encoded (the second). Consequence: the
+`minimal` profile's `skip_neutralized` filter keeps only the canonical `';M//`
+for the second reader and therefore cannot confirm it; the default `standard`
+profile sends all three and does. The `Transformation` annotation on such a
+winning candidate still reads `js` (the quote really was escaped); the candidate
+is designed for exactly that reader.
 
 ## Ordering and deduplication
 
@@ -199,6 +244,13 @@ one already is):
 | `case_variation` | `<SvG OnLoad=M>` — mixed-case tag/attribute name | bypasses a case-sensitive literal-string filter |
 | `alt_separator` | `<svg/onload=M>` / a tab instead of a space before the attribute | valid HTML5 (the tokenizer treats `/` and tab as attribute-boundary whitespace here); bypasses a filter expecting a literal space |
 | `double_url_encoding` | the breakout pre-encoded (`%3Csvg...%3E`), which the transport encodes again on the wire | opportunistic only — works solely against a target that decodes twice (e.g. a WAF that decodes once to inspect, then an app that decodes once more); a single-decode target will reflect the literal percent-string, which is the correct, honest outcome, not a false negative |
+
+`escaped_quote_prefix` (a leading backslash that absorbs a naive quote-escaping
+pass, the classic `addslashes()` bypass) remains an evasion-only technique for
+**double-quoted** JS strings. Its single-quoted form is now a *canonical*
+candidate — a server that backslash-escapes the quote is an ordinary reader,
+not a filter, so every scan tries that shape without an opt-in. See
+"Reflected JavaScript string contexts (measured)" below.
 
 Explicitly NOT in scope here, and not planned: request-fingerprint spoofing,
 TLS fingerprint randomization, IP/proxy rotation, timing jitter, CAPTCHA

@@ -396,7 +396,27 @@ func htmlAttrTemplates(a ContextAnalysis, m string) []candTemplate {
 func jsTemplates(a ContextAnalysis, m string) []candTemplate {
 	switch {
 	case a.Context == CtxJSString && a.Sub == "single_quoted":
-		return []candTemplate{onLoad("';"+m+"//", "'", 90, "close the single-quoted JS string and start a statement that references the marker")}
+		return []candTemplate{
+			onLoad("';"+m+"//", "'", 90, "close the single-quoted JS string and start a statement that references the marker"),
+			// A reader that backslash-escapes the quote defeats the shape above
+			// (the injected quote comes back as \', so the string never closes).
+			// The HTML tokenizer, though, ends the <script> ELEMENT at a literal
+			// </script> regardless of the JS string state, and a fresh script
+			// block whose whole body is the marker then runs. This needs no
+			// quote at all — only < and > — so it survives a quote-and-backslash
+			// escaping reader.
+			onLoad("</script><script>"+m+"</script>", "<>", 88,
+				"end the script element with a literal </script> (the HTML tokenizer does not track JS string state) and open a fresh script block whose whole body is the marker, so no quote is needed at all"),
+			// When < and > are HTML-encoded, the remaining route is the escape
+			// rule itself: a leading backslash consumes the backslash the reader
+			// inserts before the escaped quote, leaving that quote raw and
+			// closing the string. The probe canary has no backslash, so the
+			// planner cannot tell whether the reader escapes backslash too —
+			// this shape is planned anyway (never dropped) and simply fails
+			// against a reader that does.
+			onLoad(`\';`+m+"//", "'", 86,
+				"lead with a backslash so the reader's own quote escaping consumes it (\\' becomes \\\\'), leaving the closing quote raw; works when the reader escapes the quote but not the backslash"),
+		}
 	case a.Context == CtxJSString && a.Sub == "double_quoted":
 		return []candTemplate{onLoad(`";`+m+"//", `"`, 90, "close the double-quoted JS string and start a statement that references the marker")}
 	case a.Context == CtxJSString && a.Sub == "template_literal":

@@ -19,6 +19,7 @@ required = {
     "TestIntegrationNetworkJSONBodyDiscovery",
     "TestIntegrationVerifyExecutableCandidateIsConfirmed",
     "TestIntegrationVerifyReflectionOnlyIsRejected",
+    "TestReflectedJSStringContexts",
     "TestE2E_FullPipelineAgainstCorpus",
     "TestUINavigation",
     "TestUICooldownClock",

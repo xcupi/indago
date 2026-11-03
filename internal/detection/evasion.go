@@ -159,16 +159,17 @@ func urlEvasionTemplates(a ContextAnalysis, m string) []candTemplate {
 	}
 }
 
-// jsEvasionTemplates targets the two JS-category shapes most likely to face
+// jsEvasionTemplates targets the JS-category shapes most likely to face
 // a naive filter: a quoted-string breakout, and a line-comment breakout.
+//
+// The SINGLE-quoted leading-backslash shape (`\';M//`) is deliberately NOT
+// here: a server that backslash-escapes the quote is ordinary application
+// behaviour, not a filter bypass, and that shape is now a canonical candidate
+// (jsTemplates) so every scan tries it without an opt-in. It is still the
+// escaped_quote_prefix technique for DOUBLE-quoted strings, where the reader
+// has no canonical reason to escape that quote.
 func jsEvasionTemplates(a ContextAnalysis, m string) []candTemplate {
 	switch {
-	case a.Context == CtxJSString && a.Sub == "single_quoted":
-		return []candTemplate{
-			evasionTpl(`\';`+m+"//", "'", 30,
-				"a leading backslash ahead of the breakout quote — a naive filter that does a single-pass replace of \"'\" with \"\\'\" to \"escape\" it is itself fooled: the attacker's own backslash absorbs that escaping (classic addslashes()-style bypass), so the filter's output still contains an unescaped, string-breaking quote",
-				"escaped_quote_prefix"),
-		}
 	case a.Context == CtxJSString && a.Sub == "double_quoted":
 		return []candTemplate{
 			evasionTpl(`\";`+m+"//", `"`, 30,
