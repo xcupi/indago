@@ -459,13 +459,14 @@ func (c *cli) scanCreate(args []string) error {
 	depth := fs.Int("depth", 0, "crawl depth for a full scan (0 = server default; ignored with -quick)")
 	maxPages := fs.Int("max-pages", 0, "cap on pages fetched by the crawler (0 = server default)")
 	maxEndpoints := fs.Int("max-endpoints", 0, "cap on endpoints discovered (0 = server default)")
+	reconLevel := fs.String("recon-level", "off", "wordlist content/parameter discovery: off | safe (paths) | standard (paths+params+extensions) | aggressive (+ extended paths, directory recursion); OFF by default — see docs/recon-wordlists.md")
 	var seeds stringList
 	fs.Var(&seeds, "seed", "discovery seed URL (repeatable; default: the target base URL)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
@@ -473,6 +474,9 @@ func (c *cli) scanCreate(args []string) error {
 		"quick_scan": *quick, "max_depth": *depth, "max_pages": *maxPages, "max_endpoints": *maxEndpoints,
 		"enable_evasion": *enableEvasion,
 		"enable_idor":    *enableIDOR,
+	}
+	if *reconLevel != "" && !strings.EqualFold(*reconLevel, "off") {
+		req["recon_level"] = *reconLevel
 	}
 	if len(idorCandidates) > 0 {
 		req["idor_candidates"] = []string(idorCandidates)

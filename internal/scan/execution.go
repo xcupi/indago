@@ -199,6 +199,11 @@ func (c *Controller) discoveryConfig(sc *domain.Scan) discovery.Config {
 	if sc.Config.QuickScan {
 		cfg.MaxDepth = 0 // seeds only: do not follow links
 	}
+	// Recon level is per scan (set at creation). An unparseable/absent value
+	// means off: the safe default.
+	if level, err := discovery.ParseReconLevel(sc.Config.ReconLevel); err == nil {
+		cfg.ReconLevel = level
+	}
 	return cfg
 }
 
@@ -271,7 +276,8 @@ func (c *Controller) runDiscovery(ctx context.Context, ex *execution, sc *domain
 	}
 	ex.discFinished.Store(true)
 	c.log.Info("discovery complete", "scan", sc.ID,
-		"endpoints", res.Endpoints, "parameters", res.Parameters, "jobs", res.Jobs)
+		"endpoints", res.Endpoints, "parameters", res.Parameters, "jobs", res.Jobs,
+		"recon", res.Recon)
 }
 
 // stopExecution tears an execution down and waits for its goroutines. The caller

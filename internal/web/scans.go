@@ -210,6 +210,10 @@ type createScanReq struct {
 	MaxDepth     int  `json:"max_depth"`
 	MaxPages     int  `json:"max_pages"`
 	MaxEndpoints int  `json:"max_endpoints"`
+	// ReconLevel selects opt-in wordlist content/parameter discovery:
+	// "off" (default) | "safe" | "standard" | "aggressive". See
+	// domain.ScanConfig.ReconLevel and docs/recon-wordlists.md.
+	ReconLevel string `json:"recon_level"`
 
 	// Candidate selection: "minimal" | "standard" (default) | "thorough", and an
 	// optional per-injection-point cap overriding the profile's. Validated by
@@ -307,6 +311,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		MaxDepth:              req.MaxDepth,
 		MaxPages:              req.MaxPages,
 		MaxEndpoints:          req.MaxEndpoints,
+		ReconLevel:            req.ReconLevel,
 
 		CandidateProfile:        req.CandidateProfile,
 		MaxCandidates:           req.MaxCandidates,

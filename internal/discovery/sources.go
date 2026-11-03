@@ -1,12 +1,10 @@
 package discovery
 
 import (
-	"bufio"
 	"context"
 	"encoding/xml"
 	"errors"
 	"mime"
-	"os"
 	"path"
 	"strings"
 	"sync"
@@ -256,6 +254,14 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 }
 
 func (c *crawlSource) applyParamWordlist(ctx context.Context, sink Sink, endpointURL string) {
+	// Legacy path only: an operator-supplied ParamWordlist is registered on
+	// pages the crawler already fetched, with no extra requests. At standard
+	// and above, parameter mining (recon.go) replaces this with a real
+	// differential, so blindly registering the same names here would only add
+	// injection points nothing established as live.
+	if c.cfg.ReconLevel.UsesParams() {
+		return
+	}
 	for _, name := range c.cfg.ParamWordlist {
 		_ = sink.AddParameter(ctx, ParamCandidate{
 			EndpointURL:    endpointURL,
@@ -438,100 +444,6 @@ func cleanRobotsPath(p string) string {
 		p = "/" + p
 	}
 	return p
-}
-
-// ---------------------------------------------------------------------------
-// content discovery (wordlist)
-// ---------------------------------------------------------------------------
-
-type contentSource struct {
-	engine httpengine.Engine
-	cfg    Config
-}
-
-// NewContentSource probes paths from a wordlist under each seed origin.
-func NewContentSource(engine httpengine.Engine, cfg Config) Source {
-	return &contentSource{engine: engine, cfg: cfg.withDefaults()}
-}
-
-func (c *contentSource) Name() domain.DiscoverySource { return domain.SourceContentDiscovery }
-
-func (c *contentSource) Run(ctx context.Context, in Input, sink Sink) error {
-	words := c.cfg.Wordlist
-	if len(words) == 0 && in.Wordlist != "" {
-		loaded, err := loadWordlist(in.Wordlist)
-		if err != nil {
-			return nil // missing wordlist is not fatal
-		}
-		words = loaded
-	}
-	if len(words) == 0 {
-		return nil
-	}
-
-	for _, origin := range uniqueOrigins(in.SeedURLs) {
-		for _, w := range words {
-			if err := in.wait(ctx); err != nil {
-				return err
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			candidate := origin + "/" + strings.TrimPrefix(strings.TrimSpace(w), "/")
-			info, err := Normalize(candidate)
-			if err != nil || !in.Scope.Permits(info.Canonical).Allowed {
-				continue
-			}
-			if !allowFetch(sink, info.Canonical, domain.SourceContentDiscovery) {
-				continue // probing the path is itself the request that ends the session
-			}
-			resp, err := c.engine.Do(ctx, &httpengine.Request{Method: "GET", URL: info.Canonical})
-			if err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				continue
-			}
-			if !contentExists(resp.Status) {
-				continue
-			}
-			if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: info.Canonical, Method: domain.MethodGET, Source: domain.SourceContentDiscovery}); err != nil {
-				if errors.Is(err, ErrLimitReached) {
-					return nil
-				}
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func contentExists(status int) bool {
-	switch {
-	case status >= 200 && status < 400:
-		return true
-	case status == 401 || status == 403:
-		return true
-	default:
-		return false
-	}
-}
-
-func loadWordlist(path string) ([]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	var out []string
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line != "" && !strings.HasPrefix(line, "#") {
-			out = append(out, line)
-		}
-	}
-	return out, sc.Err()
 }
 
 // ---------------------------------------------------------------------------

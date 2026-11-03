@@ -31,6 +31,7 @@ type Collector struct {
 	endpointCount int
 	paramCount    int
 	jobCount      int
+	reconCounts   map[string]int // "list/level" → candidates recorded by recon
 }
 
 var _ Sink = (*Collector)(nil)
@@ -53,7 +54,37 @@ func NewCollector(st store.Store, q queue.Queue, scanID domain.ID, scope domain.
 		cfg:           cfg.withDefaults(),
 		seenEndpoints: make(map[string]domain.ID),
 		seenParams:    make(map[string]struct{}),
+		reconCounts:   make(map[string]int),
 	}
+}
+
+// noteRecon tallies a wordlist guess by list and level. The tally is exposed
+// through ReconCounts so a discovery run can report "paths/standard=12" — the
+// distinguishing record between an endpoint that was linked and one that was
+// guessed. Nothing here affects scope, testing, or any verdict.
+func (c *Collector) noteRecon(p *ReconProvenance) {
+	if p == nil || p.List == "" {
+		return
+	}
+	key := p.List
+	if p.Level != "" {
+		key += "/" + string(p.Level)
+	}
+	c.mu.Lock()
+	c.reconCounts[key]++
+	c.mu.Unlock()
+}
+
+// ReconCounts returns a copy of the wordlist-provenance tally ("list/level" →
+// count of candidates recorded this run).
+func (c *Collector) ReconCounts() map[string]int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]int, len(c.reconCounts))
+	for k, v := range c.reconCounts {
+		out[k] = v
+	}
+	return out
 }
 
 // Hydrate rebuilds the collector's deduplication state from what is already
@@ -291,6 +322,14 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 		return "", err
 	}
 
+	if ep.Provenance != nil {
+		// Structured record of the guess: which embedded list and level
+		// produced this endpoint (see ReconProvenance).
+		c.log.Debug("discovery: wordlist endpoint recorded",
+			"url", info.Canonical, "list", ep.Provenance.List, "level", ep.Provenance.Level)
+		c.noteRecon(ep.Provenance)
+	}
+
 	if c.cfg.EnqueueEndpointJobs {
 		_ = c.enqueueJob(ctx, domain.JobTarget{EndpointID: id, URL: info.Canonical})
 	}
@@ -348,6 +387,7 @@ func (c *Collector) AddParameter(ctx context.Context, p ParamCandidate) error {
 		loc = domain.LocationQuery
 	}
 	c.registerParam(ctx, endpointID, method, info, p.Name, loc, p.Example, p.Source)
+	c.noteRecon(p.Provenance)
 	return nil
 }
 

@@ -286,6 +286,12 @@ type CreateScanParams struct {
 	MaxPages     int
 	MaxEndpoints int
 
+	// ReconLevel selects the opt-in wordlist content/parameter discovery:
+	// "off" (default), "safe", "standard", or "aggressive". See
+	// discovery.Config.ReconLevel and docs/recon-wordlists.md. Empty means off,
+	// so existing scans and clients are unaffected.
+	ReconLevel string
+
 	// CandidateProfile ("minimal" | "standard" | "thorough"; empty = standard)
 	// and MaxCandidates (> 0 overrides the profile's per-injection-point cap)
 	// bound the candidates sent per injection point. See domain.ScanConfig.
@@ -377,6 +383,15 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	}
 	if p.MaxEndpoints > 0 {
 		cfg.MaxEndpoints = p.MaxEndpoints
+	}
+	// Wordlist recon is opt-in per scan; an explicit but invalid level is a
+	// creation error (fail fast) rather than silently running off.
+	if p.ReconLevel != "" {
+		level, err := discovery.ParseReconLevel(p.ReconLevel)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBadConfig, err)
+		}
+		cfg.ReconLevel = string(level)
 	}
 	if err := validateCrawlExtent(cfg); err != nil {
 		return nil, err

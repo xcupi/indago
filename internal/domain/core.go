@@ -184,6 +184,13 @@ type ScanConfig struct {
 	// MaxEndpoints caps endpoints discovered (0 = server default).
 	MaxEndpoints int `json:"max_endpoints,omitempty"`
 
+	// ReconLevel selects the opt-in wordlist content/parameter discovery:
+	// "off" (default), "safe", "standard", or "aggressive". Empty means off,
+	// which keeps every pre-existing scan byte-identical (no wordlist
+	// requests). Read when discovery starts, like the crawl controls. See
+	// discovery.Config.ReconLevel and docs/recon-wordlists.md.
+	ReconLevel string `json:"recon_level,omitempty"`
+
 	// CandidateProfile selects how many/which of the planner's candidates are
 	// sent per injection point: "minimal", "standard" (default when empty), or
 	// "thorough" (see internal/detection/profile.go). MaxCandidates, when > 0,
