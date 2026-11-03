@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -380,6 +381,16 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		return false
 	}
 	if q.Pending() > 0 {
+		// Work is outstanding. Normally that just means "wait". But a queue
+		// holding jobs of a type this execution can never run — no handler, no
+		// worker group that names it — will never drain, no matter how long the
+		// monitor waits. Fail the scan with a reason instead of leaving it
+		// running forever.
+		if stuck, reason := c.noRunnableJob(ctx, ex); stuck {
+			c.log.Warn("scan cannot make progress; reaching a terminal state instead of running forever",
+				"scan", ex.scanID, "reason", reason)
+			return c.failExecution(ctx, ex, reason)
+		}
 		return false
 	}
 	// Bounded, one-time combined (multi-parameter) candidate fallback pass
@@ -423,6 +434,74 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		return false
 	}
 	return c.finish(ctx, ex, false)
+}
+
+// noRunnableJob reports whether every outstanding job of the scan is one that
+// this execution can never run: no registered handler, no worker group that
+// names its type. It only answers true when nothing is active — a job a worker
+// is currently running is governed by the pool's per-job deadline, and a queued
+// job whose type the pool serves will run either now, once its retry backoff
+// elapses, or once an operator reconfigures a zero-sized group. None of those
+// is a permanent stall.
+func (c *Controller) noRunnableJob(ctx context.Context, ex *execution) (bool, string) {
+	jobs, err := c.queue.Jobs(ctx, ex.scanID)
+	if err != nil {
+		if ctx.Err() == nil {
+			c.log.Warn("monitor: list jobs", "scan", ex.scanID, "err", err)
+		}
+		return false, ""
+	}
+	pending := 0
+	for _, j := range jobs {
+		if j.State.IsTerminal() {
+			continue
+		}
+		if j.State.IsActive() {
+			return false, "" // a worker holds it; the pool deadline bounds it
+		}
+		pending++
+	}
+	if pending == 0 {
+		return false, ""
+	}
+	for _, j := range jobs {
+		if j.State.IsTerminal() {
+			continue
+		}
+		if ex.pool.Serves(j.Type) {
+			return false, ""
+		}
+	}
+	return true, fmt.Sprintf("%d queued job(s) remain but no worker group serves their type", pending)
+}
+
+// failExecution records a terminal failure for a scan whose queue can never
+// drain. It takes ownership of the execution under mu (so a concurrent
+// pause/cancel wins cleanly), tears it down, cancels the jobs that can never
+// run, and only then persists the terminal state. Called from the monitor
+// goroutine, hence waitMonitor=false.
+func (c *Controller) failExecution(ctx context.Context, ex *execution, reason string) bool {
+	c.mu.Lock()
+	if c.running[ex.scanID] != ex {
+		c.mu.Unlock()
+		return true // Cancel/Shutdown took ownership
+	}
+	sc, err := c.store.Scans().Get(ctx, ex.scanID)
+	if err != nil || sc.State != domain.ScanRunning {
+		c.mu.Unlock()
+		return false // paused/awaiting auth (or unreadable): keep the execution
+	}
+	delete(c.running, ex.scanID)
+	c.mu.Unlock()
+
+	c.stopExecution(ex, false) // we ARE the monitor goroutine
+
+	bg := context.Background()
+	if _, err := c.queue.CancelScan(bg, ex.scanID); err != nil {
+		c.log.Warn("fail scan: cancel remaining jobs", "scan", ex.scanID, "err", err)
+	}
+	c.failScan(ex.scanID, "scan stalled: "+reason)
+	return true
 }
 
 // finish completes the scan from the monitor. When cancelJobs is set (stop

@@ -18,6 +18,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"time"
 
@@ -90,8 +91,11 @@ type Queue interface {
 	// process startup, when no worker legitimately holds a lease. Returns count.
 	Recover(ctx context.Context) (int, error)
 
-	// ReapExpired requeues active jobs whose lease expired at or before now
-	// (dead-worker detection during normal running). Returns count.
+	// ReapExpired reclaims active jobs whose lease expired at or before now
+	// (dead-worker detection during normal running). A reclaimed job is
+	// requeued for another attempt; one whose attempts are exhausted becomes
+	// dead instead, so a permanently wedged job can never cycle forever.
+	// Returns count.
 	ReapExpired(ctx context.Context, now time.Time) (int, error)
 
 	// Stats returns job counts by state for a scan.
@@ -128,4 +132,10 @@ func defaultIfZero(v, def time.Time) time.Time {
 		return def
 	}
 	return v
+}
+
+// leaseExpiredCause records why a job whose lease expired without a heartbeat
+// became terminal instead of being retried again.
+func leaseExpiredCause(attempts int) string {
+	return fmt.Sprintf("lease expired after %d attempt(s); worker stopped heartbeating", attempts)
 }

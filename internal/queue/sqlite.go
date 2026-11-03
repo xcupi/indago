@@ -205,18 +205,25 @@ func (q *SQLite) Fail(ctx context.Context, jobID domain.ID, cause string, retry 
 		return err
 	}
 
+	var res sql.Result
 	if retry && attempts < maxAttempts {
 		availAt := now.Add(backoff(attempts))
-		_, err = tx.ExecContext(ctx,
-			`UPDATE jobs SET state=?, last_error=?, lease_id='', leased_until=NULL, available_at=?, updated_at=? WHERE id=?`,
-			domain.JobQueued, cause, qts(availAt), qts(now), jobID)
+		// The state guard is the cancellation defence: a late writer (an
+		// abandoned handler returning after the pool stopped, a reaper racing
+		// a cancel) must not resurrect a job that is no longer active.
+		res, err = tx.ExecContext(ctx,
+			`UPDATE jobs SET state=?, last_error=?, lease_id='', leased_until=NULL, available_at=?, updated_at=? WHERE id=? AND state IN (?,?)`,
+			domain.JobQueued, cause, qts(availAt), qts(now), jobID, domain.JobLeased, domain.JobRunning)
 	} else {
-		_, err = tx.ExecContext(ctx,
-			`UPDATE jobs SET state=?, last_error=?, lease_id='', leased_until=NULL, updated_at=? WHERE id=?`,
-			domain.JobDead, cause, qts(now), jobID)
+		res, err = tx.ExecContext(ctx,
+			`UPDATE jobs SET state=?, last_error=?, lease_id='', leased_until=NULL, updated_at=? WHERE id=? AND state IN (?,?)`,
+			domain.JobDead, cause, qts(now), jobID, domain.JobLeased, domain.JobRunning)
 	}
 	if err != nil {
 		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotLeasable
 	}
 	return tx.Commit()
 }
@@ -254,14 +261,33 @@ func (q *SQLite) Recover(ctx context.Context) (int, error) {
 }
 
 func (q *SQLite) ReapExpired(ctx context.Context, now time.Time) (int, error) {
+	// Two statements on purpose: an expired lease with attempts left is
+	// retried, while one with none is terminal. Requeueing the latter forever
+	// is how a permanently wedged job kept a scan running indefinitely.
+	total := 0
+
 	res, err := q.db.ExecContext(ctx,
-		`UPDATE jobs SET state=?, lease_id='', leased_until=NULL, available_at=?, updated_at=? WHERE state IN (?,?) AND leased_until IS NOT NULL AND leased_until<=?`,
-		domain.JobQueued, qts(now), qts(now), domain.JobLeased, domain.JobRunning, qts(now))
+		`UPDATE jobs SET state=?, last_error='lease expired after ' || attempts || ' attempt(s); worker stopped heartbeating', lease_id='', leased_until=NULL, updated_at=?
+		 WHERE state IN (?,?) AND leased_until IS NOT NULL AND leased_until<=? AND attempts>=max_attempts`,
+		domain.JobDead, qts(now), domain.JobLeased, domain.JobRunning, qts(now))
 	if err != nil {
 		return 0, err
 	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
+	if n, _ := res.RowsAffected(); n > 0 {
+		total += int(n)
+	}
+
+	res, err = q.db.ExecContext(ctx,
+		`UPDATE jobs SET state=?, lease_id='', leased_until=NULL, available_at=?, updated_at=?
+		 WHERE state IN (?,?) AND leased_until IS NOT NULL AND leased_until<=? AND attempts<max_attempts`,
+		domain.JobQueued, qts(now), qts(now), domain.JobLeased, domain.JobRunning, qts(now))
+	if err != nil {
+		return total, err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		total += int(n)
+	}
+	return total, nil
 }
 
 func (q *SQLite) Jobs(ctx context.Context, scanID domain.ID) ([]*domain.TestJob, error) {
