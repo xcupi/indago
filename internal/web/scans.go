@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/idor"
 	"github.com/indago/indago/internal/scan"
@@ -228,6 +229,11 @@ type createScanReq struct {
 	// operator sets this explicitly per scan.
 	EnableEvasion bool `json:"enable_evasion"`
 
+	// RawQueryInjection opts this scan into testing the WHOLE query string as
+	// one injection point ("off" default, "auto", or "always") — see
+	// domain.ScanConfig.RawQueryInjection and docs/raw-query-injection.md.
+	RawQueryInjection string `json:"raw_query_injection"`
+
 	// ProxyPool, when non-empty, routes this scan's outbound traffic (raw HTTP
 	// and browser verification alike) through one of the listed proxies,
 	// round-robin. See domain.ScanConfig.ProxyPool. Empty (the default) means
@@ -326,6 +332,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		CandidateProfile:          req.CandidateProfile,
 		MaxCandidates:             req.MaxCandidates,
 		EnableEvasion:             req.EnableEvasion,
+		RawQueryInjection:         req.RawQueryInjection,
 		ProxyPool:                 cleanList(req.ProxyPool),
 		RandomizeTLSFingerprint:   req.RandomizeTLSFingerprint,
 		EnableIDOR:                req.EnableIDOR,
@@ -525,6 +532,9 @@ func validateConfig(c domain.ScanConfig) string {
 	}
 	if c.RequestsPerSecond < 0 || c.RequestsPerSecond > maxRPS {
 		return "requests_per_second must be between 0 and " + strconv.Itoa(maxRPS)
+	}
+	if _, err := discovery.ParseRawQueryMode(c.RawQueryInjection); err != nil {
+		return "raw_query_injection: " + err.Error()
 	}
 	return ""
 }

@@ -206,6 +206,11 @@ func (c *Controller) discoveryConfig(sc *domain.Scan) discovery.Config {
 	if level, err := discovery.ParseReconLevel(sc.Config.ReconLevel); err == nil {
 		cfg.ReconLevel = level
 	}
+	// Raw query-string injection is per scan and off unless explicitly set. An
+	// unparseable/absent stored value means off, exactly like recon.
+	if mode, err := discovery.ParseRawQueryMode(sc.Config.RawQueryInjection); err == nil {
+		cfg.RawQueryInjection = mode
+	}
 	return cfg
 }
 

@@ -187,6 +187,20 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 			continue
 		}
 		tpls := templatesFor(*loc.Context, marker)
+		// A RAW QUERY-STRING injection point that lands in a URL inside an
+		// HTML attribute (the canonical <link rel="canonical" href="...">
+		// class) needs the attribute-breakout shapes too. templatesFor's URL
+		// branch deliberately plans none of them for a named parameter: a URL
+		// component the page itself navigates rarely yields load-time
+		// execution, and the canonical-link vector is an interaction
+		// candidate. A raw query blob, though, is exactly the shape that
+		// closes the attribute and injects a new element, so without these a
+		// raw-query finding could never be browser-confirmed at all. Gated to
+		// LocationRawQuery so every named-parameter plan is byte-identical to
+		// before this capability existed.
+		if rep.Location == domain.LocationRawQuery && categoryOf(loc.Context.Context) == CatURL {
+			tpls = append(tpls, htmlAttrTemplates(*loc.Context, marker)...)
+		}
 		if opts.EnableEvasion {
 			tpls = append(tpls, evasionTemplatesFor(*loc.Context, marker)...)
 		}

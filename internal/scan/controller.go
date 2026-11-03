@@ -300,6 +300,11 @@ type CreateScanParams struct {
 	MaxCandidates    int
 	// EnableEvasion — see domain.ScanConfig.EnableEvasion. Off by default.
 	EnableEvasion bool
+	// RawQueryInjection — see domain.ScanConfig.RawQueryInjection and
+	// discovery.ParseRawQueryMode. Empty / "off" (the default) adds nothing;
+	// "auto" probes GET endpoints with no named query parameters; "always"
+	// also probes endpoints that have them.
+	RawQueryInjection string
 	// ProxyPool — see domain.ScanConfig.ProxyPool. Empty (the default) means a
 	// direct connection for both raw HTTP traffic and browser verification.
 	ProxyPool []string
@@ -414,6 +419,16 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 		return nil, fmt.Errorf("%w: %v", ErrBadConfig, err)
 	}
 	cfg.EnableEvasion = p.EnableEvasion
+	// Raw query-string injection is a separate, opt-in capability. Parse the
+	// explicit value (empty means off) so a typo fails at creation rather than
+	// silently enabling or disabling probes mid-scan.
+	if p.RawQueryInjection != "" {
+		mode, err := discovery.ParseRawQueryMode(p.RawQueryInjection)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBadConfig, err)
+		}
+		cfg.RawQueryInjection = string(mode)
+	}
 	cfg.ProxyPool = p.ProxyPool
 	if err := validateProxyPool(cfg.ProxyPool); err != nil {
 		return nil, err

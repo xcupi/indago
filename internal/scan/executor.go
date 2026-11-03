@@ -504,6 +504,13 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 	jsonBody := map[string]json.RawMessage{}
 	var headerOverride map[string]string
 	var cookieOverride []*http.Cookie
+	// rawQuery/hasRawQuery carry a raw query-string injection (LocationRawQuery):
+	// the ENTIRE query string is replaced by the pseudo-parameter's shape plus
+	// its encoded payload, instead of q carrying name=value pairs. It is applied
+	// after the loop so a raw-query injection deterministically wins over any
+	// named parameter, regardless of iteration order.
+	var rawQuery string
+	var hasRawQuery bool
 	for _, p := range sorted {
 		val := p.Example
 		injectedA := inj != nil && inj.param != nil && p.ID == inj.param.ID
@@ -581,9 +588,25 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 					}
 				}
 			}
+		case domain.LocationRawQuery:
+			// The whole query string is the injection point. The reserved
+			// pseudo-parameter name selects the shape (bare "?<payload>" or
+			// named "?x=<payload>"); the payload is encoded exactly like a
+			// named value, so the server sees the same bytes. A non-injected
+			// raw-query parameter is a no-op, which keeps every baseline and
+			// every named-parameter request byte-identical.
+			if injected {
+				if rs, ok := discovery.RawQueryQueryString(p.Name, val); ok {
+					rawQuery, hasRawQuery = rs, true
+				}
+			}
 		}
 	}
-	u.RawQuery = q.Encode()
+	if hasRawQuery {
+		u.RawQuery = rawQuery
+	} else {
+		u.RawQuery = q.Encode()
+	}
 
 	req := &httpengine.Request{Method: string(ep.Method), URL: u.String()}
 	if len(headerOverride) > 0 {

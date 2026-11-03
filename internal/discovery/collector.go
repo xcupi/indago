@@ -32,6 +32,9 @@ type Collector struct {
 	paramCount    int
 	jobCount      int
 	reconCounts   map[string]int // "list/level" → candidates recorded by recon
+	// rawQueryProbes counts raw-query injection points registered so far,
+	// hydrated from persisted rows and capped by MaxRawQueryProbesPerScan.
+	rawQueryProbes int
 }
 
 var _ Sink = (*Collector)(nil)
@@ -142,6 +145,11 @@ func (c *Collector) Hydrate(ctx context.Context) error {
 		if !ok {
 			continue
 		}
+		if isRawQueryLocation(p.Location) {
+			// Restore the per-scan raw-query budget across a restart; the
+			// persisted rows are the authority on what was already sent.
+			c.rawQueryProbes++
+		}
 		key := fp + "#" + string(p.Location) + ":" + p.Name
 		if _, dup := c.seenParams[key]; !dup {
 			c.seenParams[key] = struct{}{}
@@ -211,6 +219,7 @@ func (c *Collector) reconcile(ctx context.Context, endpoints []*domain.Endpoint,
 		c.registerHeaderInjectionPoints(ctx, e.ID, e.Method, info, e.Source)
 		c.registerCookieInjectionPoints(ctx, e.ID, e.Method, info, e.Source)
 		c.registerPathInjectionPoints(ctx, e.ID, e.Method, info, e.Source)
+		c.registerRawQueryInjectionPoints(ctx, e.ID, e.Method, info, e.Source)
 	}
 
 	for _, p := range params {
@@ -349,6 +358,7 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 	c.registerHeaderInjectionPoints(ctx, id, method, info, ep.Source)
 	c.registerCookieInjectionPoints(ctx, id, method, info, ep.Source)
 	c.registerPathInjectionPoints(ctx, id, method, info, ep.Source)
+	c.registerRawQueryInjectionPoints(ctx, id, method, info, ep.Source)
 	return id, nil
 }
 
@@ -392,17 +402,19 @@ func (c *Collector) AddParameter(ctx context.Context, p ParamCandidate) error {
 }
 
 // registerParam persists a parameter + injection point and enqueues a test job,
-// deduplicating by parameter key.
-func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, method domain.HTTPMethod, info URLInfo, name string, loc domain.ParamLocation, example string, source domain.DiscoverySource) {
+// deduplicating by parameter key. It reports whether a NEW parameter was
+// persisted (false for a duplicate), which the raw-query registrar needs to
+// charge its per-scan budget only for real probes.
+func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, method domain.HTTPMethod, info URLInfo, name string, loc domain.ParamLocation, example string, source domain.DiscoverySource) bool {
 	if name == "" {
-		return
+		return false
 	}
 	pkey := ParamKey(method, info, name, loc)
 
 	c.mu.Lock()
 	if _, ok := c.seenParams[pkey]; ok {
 		c.mu.Unlock()
-		return
+		return false
 	}
 	c.seenParams[pkey] = struct{}{}
 	c.paramCount++
@@ -425,12 +437,12 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 		c.paramCount--
 		c.mu.Unlock()
 		c.log.Warn("discovery: persist parameter", "err", err)
-		return
+		return false
 	}
 
 	if loc == domain.LocationFragment {
 		// DOM-only: no HTTP injection point, so no HTTP engine ever sends it.
-		return
+		return true
 	}
 	ip := &domain.InjectionPoint{
 		ID:          domain.NewID(),
@@ -442,7 +454,7 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 	}
 	if err := c.store.InjectionPoints().Create(ctx, ip); err != nil {
 		c.log.Warn("discovery: persist injection point", "err", err)
-		return
+		return false
 	}
 
 	_ = c.enqueueJob(ctx, domain.JobTarget{
@@ -450,6 +462,7 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 		InjectionPointID: ip.ID,
 		URL:              info.Canonical,
 	})
+	return true
 }
 
 // enqueueJob enqueues a test job for a discovered target. Enqueue failures are

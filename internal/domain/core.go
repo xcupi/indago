@@ -215,6 +215,19 @@ type ScanConfig struct {
 	// docs/reflection-candidates.md "Evasion candidates (opt-in)".
 	EnableEvasion bool `json:"enable_evasion,omitempty"`
 
+	// RawQueryInjection opts into testing the WHOLE query string as one
+	// injection point, for endpoints that echo their entire query string
+	// (a canonical <link href>, some 404/search/error pages) and therefore
+	// have no named parameter to test. "" / "off" (the default) adds nothing
+	// and keeps every existing scan byte-identical; "auto" probes only GET
+	// endpoints with no named query parameters; "always" also probes
+	// endpoints that do have them. Bounded (2 probe shapes per endpoint,
+	// 40 probes per scan) and GET-only; every request goes through the same
+	// scope-enforcing engine, limiter and session as a named parameter, and
+	// the probe flows through the same reflection → context → candidate →
+	// browser-verification pipeline. See docs/raw-query-injection.md.
+	RawQueryInjection string `json:"raw_query_injection,omitempty"`
+
 	// ProxyPool, when non-empty, routes every outbound request this scan
 	// makes — raw HTTP engine requests AND browser verification navigation
 	// alike — through one of the listed proxies ("http://host:port",

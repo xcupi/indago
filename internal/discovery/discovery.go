@@ -200,6 +200,12 @@ type Config struct {
 	// still limited by the stored cookie's scope when sent. Empty for an
 	// anonymous scan (or one with no saved session material).
 	SessionCookies []*http.Cookie
+
+	// RawQueryInjection opts into the raw query-string injection point (see
+	// rawquery.go and docs/raw-query-injection.md). Zero value / RawQueryOff
+	// registers nothing, so every pre-existing scan is unchanged. Read at
+	// discovery time, like the crawl controls.
+	RawQueryInjection RawQueryMode
 }
 
 // DefaultConfig returns conservative discovery defaults.

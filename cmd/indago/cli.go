@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/indago/indago/internal/config"
+	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/llm"
 	"github.com/indago/indago/internal/scan"
@@ -225,6 +226,33 @@ type stringList []string
 
 func (s *stringList) String() string     { return strings.Join(*s, ",") }
 func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
+
+// rawQueryModeFlag accepts the optional-value form the operator types:
+//
+//	-raw-query-injection            → "auto"   (bare boolean-style flag)
+//	-raw-query-injection=auto       → "auto"
+//	-raw-query-injection=always     → "always"
+//	-raw-query-injection=off|false  → "off"
+//
+// The bare form is what flag.Value.Set receives ("true") for a flag given
+// without a value, so it maps to the conservative "auto" mode: probe only GET
+// endpoints that have no named query parameters at all.
+type rawQueryModeFlag string
+
+func (f *rawQueryModeFlag) String() string { return string(*f) }
+
+// IsBoolFlag makes the bare form (-raw-query-injection) legal without a
+// following argument; flag.Value.Set then receives "true", which maps to auto.
+func (f *rawQueryModeFlag) IsBoolFlag() bool { return true }
+
+func (f *rawQueryModeFlag) Set(v string) error {
+	mode, err := discovery.ParseRawQueryMode(v)
+	if err != nil {
+		return err
+	}
+	*f = rawQueryModeFlag(mode)
+	return nil
+}
 
 // parseInterspersed parses flags that may appear before or after positional
 // arguments (Go's flag package stops at the first positional), returning the
@@ -449,6 +477,8 @@ func (c *cli) scanCreate(args []string) error {
 	candProfile := fs.String("candidate-profile", "", "XSS candidate profile: minimal | standard | thorough (default: server default)")
 	maxCand := fs.Int("max-candidates", 0, "cap on candidates tried per injection point (0 = the profile's own; hard ceiling 32)")
 	enableEvasion := fs.Bool("enable-evasion", false, "opt in to WAF/filter-bypass candidate variants (case variation, alt separators, double URL-encoding) ON TOP OF the canonical set; OFF by default — only for an authorized engagement where a bypass is itself the reportable finding (see AGENTS.md §2.3)")
+	var rawQuery rawQueryModeFlag
+	fs.Var(&rawQuery, "raw-query-injection", "opt in to testing the WHOLE query string as one injection point, for pages that echo their entire query (canonical <link href>, 404/search/error pages): bare flag = auto (only GET endpoints with no named query parameters), =always also probes endpoints that have named parameters; OFF by default, GET-only, capped at 2 shapes/endpoint and 40 probes/scan (see docs/raw-query-injection.md)")
 	enableIDOR := fs.Bool("idor", false, "opt in to the IDOR engine's object-identifier differential (GET/HEAD reads only); requires an authenticated session — OFF by default (see docs/idor.md)")
 	var idorCandidates stringList
 	fs.Var(&idorCandidates, "idor-candidates", "foreign object identifier to try for the IDOR differential, e.g. the victim username an authorized lab brief names (repeatable, max 10; never invented by Indago)")
@@ -468,7 +498,7 @@ func (c *cli) scanCreate(args []string) error {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
@@ -482,6 +512,9 @@ func (c *cli) scanCreate(args []string) error {
 	}
 	if *idorEnumN != 0 {
 		req["idor_enumerate_n"] = *idorEnumN
+	}
+	if len(rawQuery) > 0 && rawQuery != "off" {
+		req["raw_query_injection"] = string(rawQuery)
 	}
 	if *reconLevel != "" && !strings.EqualFold(*reconLevel, "off") {
 		req["recon_level"] = *reconLevel

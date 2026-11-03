@@ -106,12 +106,21 @@ const (
 	// route fragment (e.g. "q" in "#/search?q=..."). It is never an HTTP
 	// injection point: only the DOM-XSS engine reads it.
 	LocationFragment ParamLocation = "fragment"
+	// LocationRawQuery is the WHOLE query string as one injection point — an
+	// unnamed blob such as "/?<payload>" or "/?x=<payload>", not a
+	// name=value parameter. It exists for pages that echo their entire query
+	// string (canonical <link href>, some 404/search/error pages) where a
+	// parameter-driven scan has no named parameter to focus on. It is an HTTP
+	// injection point (GET only, behind the opt-in raw-query mode) and is
+	// deliberately distinct from LocationQuery so provenance never claims a
+	// named parameter that does not exist. See docs/raw-query-injection.md.
+	LocationRawQuery ParamLocation = "raw_query"
 )
 
 // IsValid reports whether the location is a known value.
 func (l ParamLocation) IsValid() bool {
 	switch l {
-	case LocationQuery, LocationForm, LocationJSON, LocationHeader, LocationCookie, LocationPath, LocationFragment:
+	case LocationQuery, LocationForm, LocationJSON, LocationHeader, LocationCookie, LocationPath, LocationFragment, LocationRawQuery:
 		return true
 	default:
 		return false

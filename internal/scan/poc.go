@@ -248,6 +248,33 @@ func redactDynamicTokenValues(req *httpengine.Request, params []*domain.Paramete
 	var jsonBody map[string]json.RawMessage
 	jsonLoaded := false
 
+	// A GET/HEAD request carrying a raw query-string injection point has its
+	// ENTIRE query replaced by the blob. If no named dynamic token survives in
+	// that query (the normal case: the blob replaced them all), there is
+	// nothing to redact and re-encoding the query would corrupt the blob, so
+	// leave the request exactly as buildRequest produced it. A named-parameter
+	// request on an endpoint that merely ALSO has raw-query pseudo-parameters
+	// still redacts normally, because its dynamic token key is present.
+	hasRawQuery := false
+	for _, p := range params {
+		if p != nil && p.Location == domain.LocationRawQuery {
+			hasRawQuery = true
+			break
+		}
+	}
+	if hasRawQuery && (req.Method == "GET" || req.Method == "HEAD") {
+		namedTokenPresent := false
+		for _, p := range params {
+			if p != nil && isDynamicTokenName(p.Name) && query.Has(p.Name) {
+				namedTokenPresent = true
+				break
+			}
+		}
+		if !namedTokenPresent {
+			return nil
+		}
+	}
+
 	for _, p := range params {
 		if p == nil || !isDynamicTokenName(p.Name) {
 			continue
@@ -371,7 +398,9 @@ func findCandidateForAttempt(cands []detection.Candidate, att *verificationAttem
 func allLinkable(locs []domain.ParamLocation, method domain.HTTPMethod) bool {
 	for _, loc := range locs {
 		switch loc {
-		case domain.LocationQuery, domain.LocationPath:
+		case domain.LocationQuery, domain.LocationPath, domain.LocationRawQuery:
+			// A raw query-string override is already part of the URL, exactly
+			// like a query or path override, so a plain link carries it.
 			continue
 		case domain.LocationForm:
 			if method != domain.MethodPOST {
