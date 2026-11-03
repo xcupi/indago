@@ -66,6 +66,8 @@ required = {
     "TestDOMXSSMarkerWindowSinkPaths",
     "TestDOMXSSHarnessMarkerSnippetBounded",
     "TestDOMXSSMarkerWindowExcerptNatives",
+    "TestDOMXSSWorkerRetriesTransientVerificationFailure",
+    "TestDOMXSSWorkerCancellationAndConfirmedDurability",
 }
 if not shutil.which("node"):
     raise SystemExit("required Node.js unavailable")

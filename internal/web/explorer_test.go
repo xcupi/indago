@@ -169,6 +169,9 @@ type explorerDOM struct {
 	Status     string `json:"status"`
 	ReasonCode string `json:"reason_code"`
 	Gap        bool   `json:"gap"`
+	Tests      struct {
+		Total, Completed, Skipped, Failed int
+	} `json:"tests"`
 }
 
 type explorerEndpoint struct {

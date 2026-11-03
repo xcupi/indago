@@ -961,7 +961,16 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	}
 	if verr != nil {
 		e.finishTestCase(ctx, verifyTC, verr, "verification navigation for "+label)
-		return nil // the finding stays Pending; a later retry can still verify it
+		// Surface the failure to the worker instead of returning nil: a nil
+		// result makes the queue complete the job while its verification
+		// TestCase is recorded as failed, so the existing bounded
+		// MaxAttempts/backoff retry (and eventual dead-job state) never runs.
+		// The failure stays retryable — a dropped connection or a transient
+		// provenance failure is not a permanent verdict.
+		if ctx.Err() != nil {
+			return ctx.Err() // preserve cancellation; never mask it as success
+		}
+		return fmt.Errorf("verification navigation for %s: %w", label, verr)
 	}
 
 	harness2 := domXSSHarnessMessages(obs2.Runtime)
