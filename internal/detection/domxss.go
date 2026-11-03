@@ -1,10 +1,12 @@
 package detection
 
 // This file is the pure seven-source DOM-XSS candidate model. HTML sinks
-// normally receive the unchanged marker image; query-sourced document.write
-// uses a benign script body for targets whose decodeURI reader preserves
-// reserved attributes/closing-tag escapes. Primitive-string timers receive a
-// bare marker expression. See docs/dom-xss.md for bounded coverage.
+// receive an ordered, bounded set of shapes: wholesale markup insertion
+// (query-sourced document.write keeps its benign script body, because a
+// decodeURI reader preserves reserved characters) and — for a value injected
+// inside a quoted attribute — an attribute-breakout image whose broken src
+// fires onerror. Primitive-string timers receive a bare marker expression.
+// See docs/dom-xss.md for bounded coverage.
 // A DOM-XSS site is identified by (client-side source, sink) at an Endpoint,
 // not a server-side injection point. In particular, fragments never reach the
 // server-response-based Reflected XSS pipeline.
@@ -153,18 +155,40 @@ func DOMXSSCanary(marker string) string {
 	return "indago-domxss-canary-" + marker
 }
 
-// DOMXSSPayloadFor returns the deterministic verification Candidate for a
-// REACHABLE (source, sink) pair found during phase one. Pure,
-// deterministic, benign-marker-only — HTML sinks usually receive a broken-image
-// event candidate, which is effective for standalone wholesale HTML insertion.
-// Query-sourced document.write instead uses a script body: a page can wrap the
-// value inside option/select markup and read location.href through decodeURI,
-// which preserves encoded reserved slashes and equals signs; the candidate and
-// query URL encoding must account for both behaviors.
+// DOMXSS candidate SHAPES. A shape is one deterministic way of turning the
+// same benign marker into an executing position; each shape is an independent
+// Candidate with its own DedupKey, verified by its own navigation. Only
+// shapes that can be overlaid on the SAME (source, sink) sit here — a shape
+// never changes the source or the sink.
+const (
+	// domXSSShapeMarkup is the original wholesale-insertion shape: markup
+	// handed to a sink that parses it as HTML from the start.
+	domXSSShapeMarkup = "markup"
+	// domXSSShapeAttributeBreakout is for values that reach an HTML sink
+	// inside an ALREADY-OPEN quoted attribute (for example a page that does
+	// document.write('<img src="/t.gif?q='+value+'">')). No standalone tag
+	// can execute there: the markup stays part of the attribute value. This
+	// shape closes the enclosing double-quoted attribute and tag first, then
+	// injects an image whose deliberately-broken src fires onerror. Measured
+	// against current Chromium: an inline <svg onload=…> does NOT fire when
+	// written/assigned this way, while <img onerror=…> does.
+	domXSSShapeAttributeBreakout = "attr_breakout"
+	// domXSSShapeTimerExpression is the only shape a primitive-string timer
+	// can evaluate: a bare JavaScript expression.
+	domXSSShapeTimerExpression = "timer_expression"
+)
+
+// DOMXSSPayloadFor returns the PRIMARY (first) verification Candidate for a
+// REACHABLE (source, sink) pair. It is the wholesale-markup shape, or the
+// query-sourced document.write script body, or the bare marker expression for
+// primitive-string timers. Verification code must use DOMXSSPayloadsFor so a
+// value that lands inside an attribute still gets its breakout attempt; this
+// function stays as the single-shape view for callers that only need one
+// representative candidate.
 //
-// Primitive-string timer candidates instead contain ONLY the bare marker
-// expression: native timers evaluate JavaScript, not HTML. No string-literal
-// breakout is attempted. Invalid/non-identifier markers are rejected.
+// Primitive-string timer candidates contain ONLY the bare marker expression:
+// native timers evaluate JavaScript, not HTML. No string-literal breakout is
+// attempted. Invalid/non-identifier markers are rejected.
 //
 // Field repurposing (documented once here; applies everywhere this
 // Candidate is read back by scan/report/web/cli code): Category is always
@@ -178,8 +202,27 @@ func DOMXSSCanary(marker string) string {
 // source in ContextSub. Other sources leave Location/Parameter/
 // InjectionPointID at zero values because they have no named selector.
 func DOMXSSPayloadFor(source DOMXSSSource, sink DOMXSSSink, marker string) (Candidate, bool) {
-	if !sink.IsValid() || !source.IsValid() || !validDOMXSSMarker(marker) {
+	cands := DOMXSSPayloadsFor(source, sink, marker)
+	if len(cands) == 0 {
 		return Candidate{}, false
+	}
+	return cands[0], true
+}
+
+// DOMXSSPayloadsFor returns the ordered, bounded verification Candidate set
+// for a REACHABLE (source, sink) pair. Ordered most-specific-first and fully
+// deterministic: HTML sinks get the wholesale-markup shape and then the
+// attribute-breakout shape; primitive-string timers get exactly one shape.
+// One candidate per (source, sink, shape), enforced by the shape component of
+// DedupKey. Callers try them in order and stop at the first Confirmed
+// execution — a reflection alone never confirms any shape.
+func DOMXSSPayloadsFor(source DOMXSSSource, sink DOMXSSSink, marker string) []Candidate {
+	if !sink.IsValid() || !source.IsValid() || !validDOMXSSMarker(marker) {
+		return nil
+	}
+	if sink == DOMSinkSetTimeout || sink == DOMSinkSetInterval {
+		// A timer evaluates JavaScript, not HTML.
+		return []Candidate{domXSSPayloadCandidate(source, sink, domXSSShapeTimerExpression, marker, domXSSRationale(source, sink))}
 	}
 	value := "<img src=x onerror=" + marker + ">"
 	if source == DOMSourceQuery && sink == DOMSinkDocumentWrite {
@@ -189,9 +232,16 @@ func DOMXSSPayloadFor(source DOMXSSSource, sink DOMXSSSink, marker string) (Cand
 		// builder keep its closing-tag slash literal for that reader.
 		value = "<script>" + marker + "</script>"
 	}
-	if sink == DOMSinkSetTimeout || sink == DOMSinkSetInterval {
-		value = marker // A timer evaluates JavaScript, not HTML.
+	return []Candidate{
+		domXSSPayloadCandidate(source, sink, domXSSShapeMarkup, value, domXSSRationale(source, sink)),
+		domXSSPayloadCandidate(source, sink, domXSSShapeAttributeBreakout, `"><img src=y onerror=`+marker+">", domXSSAttributeBreakoutRationale(source, sink)),
 	}
+}
+
+// domXSSPayloadCandidate builds one shape's Candidate. DedupKey names the
+// shape explicitly (not just its value), so "one candidate per (source, sink,
+// shape)" holds by construction even if two shapes ever shared a value.
+func domXSSPayloadCandidate(source DOMXSSSource, sink DOMXSSSink, shape, value, rationale string) Candidate {
 	return Candidate{
 		Source:     SourceBuiltin,
 		Category:   CatDOMXSS,
@@ -199,9 +249,9 @@ func DOMXSSPayloadFor(source DOMXSSSource, sink DOMXSSSink, marker string) (Cand
 		ContextSub: string(source),
 		Value:      value,
 		Trigger:    TriggerLoad,
-		Rationale:  domXSSRationale(source, sink),
-		DedupKey:   "dom_xss\x00" + string(source) + "\x00" + string(sink) + "\x00" + value,
-	}, true
+		Rationale:  rationale,
+		DedupKey:   "dom_xss\x00" + string(source) + "\x00" + string(sink) + "\x00" + shape + "\x00" + value,
+	}
 }
 
 // validDOMXSSMarker accepts only a bare ASCII identifier, never supplied code,
@@ -224,13 +274,9 @@ func validDOMXSSMarker(marker string) bool {
 	return true
 }
 
-// domXSSRationale explains, per source, how the verification candidate's
-// value is expected to reach sink — each source has a genuinely different
-// client-side read, worth spelling out distinctly rather than a single
-// generic sentence.
-func domXSSRationale(source DOMXSSSource, sink DOMXSSSink) string {
-	var how string
-	storageControlCaveat := ""
+// domXSSSourceRoute describes, per source, how a verification value reaches
+// the page and the exploitability caveat that applies to it.
+func domXSSSourceRoute(source DOMXSSSource) (how, storageControlCaveat string) {
 	switch source {
 	case DOMSourceQuery:
 		how = "the location.search (query string) value, read via URLSearchParams or location.search itself,"
@@ -249,6 +295,15 @@ func domXSSRationale(source DOMXSSSource, sink DOMXSSSink) string {
 	default: // DOMSourceHash
 		how = "the location.hash value"
 	}
+	return how, storageControlCaveat
+}
+
+// domXSSRationale explains, per source, how the verification candidate's
+// value is expected to reach sink — each source has a genuinely different
+// client-side read, worth spelling out distinctly rather than a single
+// generic sentence.
+func domXSSRationale(source DOMXSSSource, sink DOMXSSSink) string {
+	how, storageControlCaveat := domXSSSourceRoute(source)
 	if sink == DOMSinkSetTimeout || sink == DOMSinkSetInterval {
 		return how + " reaches the primitive-string handler of native " + string(sink) + "; the browser alone schedules and evaluates the benign bare marker expression, subject to native delay, cancellation, CSP and Trusted Types; confirmation requires the exact marker-specific page error within the bounded observation window" + storageControlCaveat
 	}
@@ -260,4 +315,14 @@ func domXSSRationale(source DOMXSSSource, sink DOMXSSSink) string {
 	}
 	return how + " is assigned wholesale to " + string(sink) +
 		"; an <img> with a deliberately-broken src fires its onerror handler the moment the browser parses the injected markup, referencing the benign marker" + storageControlCaveat
+}
+
+// domXSSAttributeBreakoutRationale explains the second, attribute-context
+// shape: the same source reaches the same sink, but the page places the value
+// inside a quoted HTML attribute (or an equivalent document.write template),
+// where no standalone tag can execute. It states explicitly that confirmation
+// still comes from the browser's marker-specific execution signal.
+func domXSSAttributeBreakoutRationale(source DOMXSSSource, sink DOMXSSSink) string {
+	how, storageControlCaveat := domXSSSourceRoute(source)
+	return how + " reaches " + string(sink) + " inside an already-open quoted HTML attribute (for example an img src or document.write template, where the value cannot start its own tag); this shape first closes that attribute and the enclosing tag, then injects an <img> whose deliberately-broken src fires onerror referencing the benign marker; confirmation still requires the browser's own marker-specific execution signal, never the reflection alone" + storageControlCaveat
 }

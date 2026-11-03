@@ -125,13 +125,26 @@ func TestDOMHTMLSourceMatrix(t *testing.T) {
 			if parameter == "" {
 				parameter = sc.source
 			}
-			if len(d.Candidates) != 1 || string(d.Candidates[0].Context) != sc.sink || d.Candidates[0].ContextSub != sc.source || d.Candidates[0].Parameter != selector || d.ParameterName != parameter {
-				t.Fatalf("wrong source/sink/selector attribution: %+v", d)
+			if len(d.Candidates) == 0 || len(d.Candidates) > 2 {
+				t.Fatalf("want the bounded candidate shapes (markup, then attribute breakout at most): %+v", d)
 			}
-			if len(d.Attempts) != 2 || d.Attempts[1].Verdict == domain.VerdictPending || len(d.TestCaseIDs) != 2 || d.Attempts[1].VerifyTestCaseID.Empty() {
+			for _, cand := range d.Candidates {
+				if string(cand.Context) != sc.sink || cand.ContextSub != sc.source || cand.Parameter != selector {
+					t.Fatalf("wrong source/sink/selector attribution: %+v", d)
+				}
+			}
+			if d.ParameterName != parameter {
+				t.Fatalf("wrong parameter attribution: %+v", d)
+			}
+			// One reachability attempt plus exactly one verification attempt per
+			// candidate shape: each distinct shape is tried at most once, and
+			// every shape that was tried produced a real (non-pending) verdict
+			// with its own test case.
+			last := d.Attempts[len(d.Attempts)-1]
+			if len(d.Attempts) != 1+len(d.Candidates) || last.Verdict == domain.VerdictPending || len(d.TestCaseIDs) != len(d.Attempts) || last.VerifyTestCaseID.Empty() {
 				t.Fatalf("control did not complete payload verification: %+v", d)
 			}
-			wantCases := 2
+			wantCases := 1 + len(d.Candidates)
 			if strings.HasSuffix(sc.source, "Storage") {
 				wantCases++ // observation-only key discovery is a separate case
 				if !strings.Contains(f.Summary, "attacker-relevant ability to write or poison") || !strings.Contains(d.Candidates[0].Rationale, "manual exploitability review") {
@@ -142,7 +155,7 @@ func TestDOMHTMLSourceMatrix(t *testing.T) {
 				t.Fatalf("test cases=%d, want %d", len(cases), wantCases)
 			}
 			if sc.control == "positive" {
-				if f.Verdict != domain.VerdictConfirmed || !strings.Contains(d.Attempts[1].Notes, marker+" is not defined") {
+				if f.Verdict != domain.VerdictConfirmed || !strings.Contains(last.Notes, marker+" is not defined") {
 					t.Fatalf("expected one Confirmed with actual marker error: %+v", f)
 				}
 			} else if f.Verdict == domain.VerdictConfirmed {

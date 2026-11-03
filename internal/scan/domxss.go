@@ -106,6 +106,25 @@ func domXSSNavigable(m domain.HTTPMethod) bool {
 	}
 }
 
+// domXSSContentTypeAllowsDOM reports whether a discovered endpoint's response
+// media type can host a DOM at all. A non-HTML media type (an image, PDF, JSON,
+// XML, plain text, …) carries no HTML document and therefore no DOM sink, so
+// browser-probing it can only manufacture noise or a dead job. An EMPTY/unknown
+// content type is still probed: absence of a recorded type is not evidence of
+// "no DOM here".
+func domXSSContentTypeAllowsDOM(raw string) bool {
+	media := strings.ToLower(strings.TrimSpace(raw))
+	if i := strings.IndexByte(media, ';'); i >= 0 {
+		media = strings.TrimSpace(media[:i])
+	}
+	switch media {
+	case "", "text/html", "application/xhtml+xml":
+		return true
+	default:
+		return false
+	}
+}
+
 // selectDOMXSSEndpoints returns, in input order, the distinct (by URL)
 // GET/HEAD-navigable endpoints to probe. Pure (no store/queue), so the
 // enqueue dedup/filter logic is unit-testable without either.
@@ -747,6 +766,18 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	}
 
 	source := dj.Source
+	// "No DOM here" is the honest answer for a non-HTML response, and it is
+	// decided BEFORE any browser context, selector discovery, or navigation:
+	// the crawler also registers image/asset URLs, and browser-probing those
+	// used to error (and retry into a dead job) instead of recording that the
+	// source simply does not apply.
+	if ct := strings.TrimSpace(ep.ContentType); !domXSSContentTypeAllowsDOM(ct) {
+		tc := e.newTestCase(ctx, job, ep.URL)
+		tc.Status = domain.TestCaseSkipped
+		e.finishTestCase(ctx, tc, nil, fmt.Sprintf("DOM-XSS %s probe not applicable: endpoint content type %q is not an HTML document, so there is no DOM for a client-side source to reach; not a clean negative, and no browser navigation was made", source, ct))
+		return nil
+	}
+
 	marker := detection.NewProbe(job.ScanID, ep.ID).Token
 	sessionStatePath := e.sessionStatePathFor(ctx, job.ScanID)
 	proxy := e.nextProxy() // one proxy per job, shared by every per-selector context below
@@ -906,6 +937,11 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	// --- Phase 1: reachability ---
 	obs1, canaryNavURL, navErr := e.navigateSource(ctx, bctx, source, ep, selector, marker, canary)
 	reachTC := e.newTestCase(ctx, job, canaryNavURL)
+	if errors.Is(navErr, errDOMXSSSourceNotApplicable) {
+		reachTC.Status = domain.TestCaseSkipped
+		e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("%s not applicable for this endpoint: the loaded document has no attachable root element (no body and no documentElement), so nothing could receive this source's value here; no DOM-XSS coverage was exercised for it and this is not a clean negative", label))
+		return nil
+	}
 	if navErr == nil {
 		navErr = requireDOMXSSProvenance(obs1)
 	}
@@ -936,26 +972,53 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	sink := reachable[0]
 	e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("reachable sink: %s from %s (canary observed in the hooked setter/call)", sink, label))
 
-	cand, ok := detection.DOMXSSPayloadFor(source, sink, marker)
-	if !ok {
-		return nil
-	}
-	cand = domXSSCandidateForSelector(cand, source, selector)
+	// Every candidate SHAPE for this (source, sink) is tried in the planner's
+	// deterministic order. The first shape whose navigation produces a REAL
+	// marker execution ends verification; a shape that merely reflects is
+	// rejected and the next shape gets its own navigation. All shapes at one
+	// site correlate into the SAME finding (finding identity is
+	// endpoint/source/sink/selector, never the payload value), so trying an
+	// extra shape never creates a near-duplicate row.
+	for _, shape := range detection.DOMXSSPayloadsFor(source, sink, marker) {
+		cand := domXSSCandidateForSelector(shape, source, selector)
 
-	e.findingsMu.Lock()
-	finding, err := upsertDOMXSSFinding(ctx, e.store, job.ScanID, ep, cand, canary, reachTC.ID)
-	e.findingsMu.Unlock()
-	if err != nil {
-		e.log.Warn("dom-xss: upsert finding", "job", job.ID, "err", err)
-		return nil
-	}
+		e.findingsMu.Lock()
+		finding, err := upsertDOMXSSFinding(ctx, e.store, job.ScanID, ep, cand, canary, reachTC.ID)
+		e.findingsMu.Unlock()
+		if err != nil {
+			e.log.Warn("dom-xss: upsert finding", "job", job.ID, "err", err)
+			return nil
+		}
 
-	// --- Phase 2: verification ---
-	// Execution is attributed by the browser engine (the paused instruction
-	// is the bare marker identifier, in the main frame), never by matching
-	// page-controlled error or console text.
+		stop, err := e.verifyDOMXSSShape(ctx, bctx, job, ep, source, selector, marker, sink, cand, finding.ID, label)
+		if err != nil {
+			return err
+		}
+		if stop {
+			return nil
+		}
+	}
+	return nil
+}
+
+// verifyDOMXSSShape runs phase 2 (VERIFICATION) for ONE candidate shape and
+// correlates its verdict into the already-upserted finding. It returns
+// stop=true when the site's verification is finished — a shape produced a
+// genuine Confirmed execution, the source proved not applicable to this
+// document, or a failure was surfaced for the worker's bounded retry — and
+// false when the next shape should be tried because this one only reflected.
+//
+// Execution is attributed by the browser engine (the paused instruction is
+// the bare marker identifier, in the main frame), never by matching
+// page-controlled error or console text.
+func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, marker string, sink detection.DOMXSSSink, cand detection.Candidate, findingID domain.ID, label string) (bool, error) {
 	obs2, payloadNavURL, verr := e.navigateSource(ctx, bctx, source, ep, selector, marker, cand.Value)
 	verifyTC := e.newTestCase(ctx, job, payloadNavURL)
+	if errors.Is(verr, errDOMXSSSourceNotApplicable) {
+		verifyTC.Status = domain.TestCaseSkipped
+		e.finishTestCase(ctx, verifyTC, nil, fmt.Sprintf("%s not applicable for this endpoint: the loaded document has no attachable root element, so this shape could not be delivered; not a clean negative", label))
+		return true, nil
+	}
 	if verr == nil {
 		verr = requireDOMXSSProvenance(obs2)
 	}
@@ -968,9 +1031,9 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 		// The failure stays retryable — a dropped connection or a transient
 		// provenance failure is not a permanent verdict.
 		if ctx.Err() != nil {
-			return ctx.Err() // preserve cancellation; never mask it as success
+			return true, ctx.Err() // preserve cancellation; never mask it as success
 		}
-		return fmt.Errorf("verification navigation for %s: %w", label, verr)
+		return true, fmt.Errorf("verification navigation for %s: %w", label, verr)
 	}
 
 	harness2 := domXSSHarnessMessages(obs2.Runtime)
@@ -1014,8 +1077,8 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	verifyTC.EvidenceIDs = evidenceIDs
 	e.finishTestCase(ctx, verifyTC, nil, notes)
 
-	e.correlateDOMXSSVerification(ctx, finding.ID, cand, verdict, confidence, notes, verifyTC.ID, evidenceIDs, payloadNavURL)
-	return nil
+	e.correlateDOMXSSVerification(ctx, findingID, cand, verdict, confidence, notes, verifyTC.ID, evidenceIDs, payloadNavURL)
+	return verdict == domain.VerdictConfirmed, nil
 }
 
 // requireDOMXSSProvenance turns missing engine-level provenance into a visible
@@ -1281,6 +1344,12 @@ func setWindowNameScript(value string) string {
 // are read back. Since the target itself remains the top-level document,
 // existing Page console/error/hook observations and DOM evidence still
 // describe the target page directly.
+//
+// A document with no attachable root (no body and no documentElement — a
+// body-less/plugin/XML-ish response) reports errDOMXSSSourceNotApplicable
+// instead of a Playwright TypeError: nothing could ever receive this
+// delivery there, so the source is NOT APPLICABLE for the endpoint, not
+// broken. Any genuine evaluation failure still propagates as an error.
 func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (domXSSObservation, error) {
 	page, err := e.openObservedPage(ctx, bctx, marker)
 	if err != nil {
@@ -1290,8 +1359,12 @@ func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *brow
 	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
 		return domXSSObservation{}, err
 	}
-	if _, err := page.Evaluate(ctx, postMessageScript(value)); err != nil {
+	status, err := page.Evaluate(ctx, postMessageScript(value))
+	if err != nil {
 		return domXSSObservation{}, err
+	}
+	if s, ok := status.(string); ok && s == domXSSPostMessageNoRoot {
+		return domXSSObservation{}, errDOMXSSSourceNotApplicable
 	}
 	return observePage(ctx, page), nil
 }
@@ -1302,10 +1375,36 @@ func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *brow
 // serializes as "null". The parent receives the event from another Window,
 // never from its own window object. No network request is made by this
 // local sender document.
+//
+// It attaches to the first real container the document has (body, else
+// documentElement — a frameset document has no body but does have a root)
+// and resolves domXSSPostMessageNoRoot when neither exists, so a body-less
+// response is an explicit NOT APPLICABLE answer rather than a crash. The
+// attachment itself is NOT wrapped in try/catch: a genuine failure on an
+// attachable document must still surface as an evaluation error.
 func postMessageScript(value string) string {
 	srcdoc := "<!doctype html><script>parent.postMessage(" + goQuoteJS(value) + ", '*');</script>"
-	return "(() => new Promise((resolve) => { const sender = document.createElement('iframe'); sender.setAttribute('sandbox', 'allow-scripts'); sender.onload = () => setTimeout(resolve, 300); sender.srcdoc = " + goQuoteJS(srcdoc) + "; document.body.appendChild(sender); }))();"
+	return "(() => new Promise((resolve) => { const root = document.body || document.documentElement; if (!root) { resolve(" + goQuoteJS(domXSSPostMessageNoRoot) + "); return; } " +
+		"const sender = document.createElement('iframe'); sender.setAttribute('sandbox', 'allow-scripts'); " +
+		"sender.onload = () => setTimeout(() => resolve(" + goQuoteJS(domXSSPostMessageSent) + "), 300); " +
+		"sender.srcdoc = " + goQuoteJS(srcdoc) + "; root.appendChild(sender); }))();"
 }
+
+const (
+	// domXSSPostMessageNoRoot is what postMessageScript resolves when the
+	// loaded document has no container to attach a sender frame to.
+	domXSSPostMessageNoRoot = "indago-domxss-postmessage-no-root"
+	// domXSSPostMessageSent is what it resolves after the sender frame
+	// loaded and was given time to post.
+	domXSSPostMessageSent = "indago-domxss-postmessage-sent"
+)
+
+// errDOMXSSSourceNotApplicable reports that a source's injection mechanism
+// found nothing it could deliver into — today, a document with no attachable
+// root for the postMessage sender. The caller records a skipped/not-applicable
+// TestCase: no DOM-XSS coverage was exercised, and this is explicitly not a
+// clean negative.
+var errDOMXSSSourceNotApplicable = errors.New("dom-xss source not applicable to this document")
 
 const domXSSStorageObserverPrefix = "__INDAGO_DOMXSS_STORAGE__"
 

@@ -185,19 +185,27 @@ func TestDOMXSSMarkerWindowRetention(t *testing.T) {
 			}
 			f := findings[0]
 			d := decodeFindingDetail(f.Detail)
-			if len(d.Candidates) != 1 || string(d.Candidates[0].Context) != string(detection.DOMSinkInnerHTML) ||
-				d.Candidates[0].ContextSub != string(detection.DOMSourceHash) {
-				t.Fatalf("wrong source/sink attribution: %+v", d)
+			if len(d.Candidates) == 0 || len(d.Candidates) > 2 {
+				t.Fatalf("want the bounded candidate shapes (markup, then attribute breakout at most): %+v", d)
 			}
-			if len(d.Attempts) != 2 || d.Attempts[1].VerifyTestCaseID.Empty() {
+			for _, cand := range d.Candidates {
+				if string(cand.Context) != string(detection.DOMSinkInnerHTML) ||
+					cand.ContextSub != string(detection.DOMSourceHash) {
+					t.Fatalf("wrong source/sink attribution: %+v", d)
+				}
+			}
+			// One reachability attempt plus one verification attempt per tried
+			// shape; the last attempt is the one that produced the final verdict.
+			last := d.Attempts[len(d.Attempts)-1]
+			if len(d.Attempts) != 1+len(d.Candidates) || last.VerifyTestCaseID.Empty() {
 				t.Fatalf("payload verification did not complete: %+v", d)
 			}
 			if tc.confirmed {
 				if f.Verdict != domain.VerdictConfirmed {
 					t.Fatalf("verdict = %s, want confirmed (long harmless prefix must not hide native execution): %+v", f.Verdict, f)
 				}
-				if !strings.Contains(d.Attempts[1].Notes, marker+" is not defined") {
-					t.Fatalf("confirmed attempt lacks the marker-specific runtime signal: %q", d.Attempts[1].Notes)
+				if !strings.Contains(last.Notes, marker+" is not defined") {
+					t.Fatalf("confirmed attempt lacks the marker-specific runtime signal: %q", last.Notes)
 				}
 				if len(f.EvidenceIDs) < 3 {
 					t.Fatalf("missing screenshot/DOM/browser-log evidence: %+v", f.EvidenceIDs)

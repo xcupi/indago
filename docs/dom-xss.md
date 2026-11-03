@@ -1,5 +1,68 @@
 # Indago — bounded DOM-XSS HTML and string-timer sinks
 
+## Candidate shapes: the attribute-context breakout, and non-HTML endpoints
+
+Two coverage gaps found against PortSwigger labs are fixed here. Neither adds a
+source, sink, engine category or verification signal.
+
+**1. Attribute-context HTML sinks now get a breakout shape.** A page can place a
+source value *inside an already-open quoted attribute* — the lab shape is
+`document.write('<img src="/resources/images/tracker.gif?searchTerms='+query+'">')`.
+No standalone markup candidate can execute there: `<img src=x onerror=…>` simply
+becomes part of the `src` attribute's value. `detection.DOMXSSPayloadsFor` now
+returns an ordered, bounded set of shapes per reachable `(source, sink)`:
+
+| order | shape | value | when it is the one that works |
+|---|---|---|---|
+| 1 | `markup` (unchanged) | `<img src=x onerror=MARKER>`; `<script>MARKER</script>` for query-sourced `document.write`; the bare marker for timers | the value starts its own HTML markup |
+| 2 | `attr_breakout` (new) | `"><img src=y onerror=MARKER>` | the value sits inside a **double-quoted** attribute |
+
+Each shape is its own `Candidate` with its own `DedupKey`
+(`…\x00<shape>\x00<value>`), and verification gives each one its own navigation,
+in this order. Ordering matters: the query/`document.write` script body stays
+first because a page reading `decodeURI(location.href)` keeps reserved `=`/`+`
+encoded, where the breakout shape cannot work. The scan stops at the first
+**Confirmed** shape, so a target that the existing markup shape already
+confirms still makes exactly one verification navigation and one finding. A
+shape that only reflects is Rejected and the next shape is tried; all shapes at
+one site correlate into the same finding (finding identity is
+endpoint/source/sink/selector, never the value), so the extra shape can never
+produce a near-duplicate row. A reflection — or a page-authored
+`ReferenceError: MARKER is not defined` console line — still never confirms;
+confirmation remains the engine-attributed marker execution, and the
+attribute-context tests keep an escaped/safe control and a forged-console
+control Rejected.
+
+Bounded limits, stated honestly: the breakout shape closes a **double-quoted**
+attribute only (single-quoted and unquoted attributes are not covered, and a
+page that HTML-escapes `"` defeats it — both are documented gaps, not silent
+negatives). Measured against current Chromium, an inline `<svg onload=…>`
+variant does **not** fire when written/assigned this way, which is why the
+breakout shape uses an `<img onerror=…>` instead. Each reachable site can cost
+at most two verification navigations.
+
+**2. A response with no DOM is NOT APPLICABLE, not an error.** The crawler also
+registers image/asset URLs, and a non-HTML response has no document body. The
+postMessage probe used to end with `document.body.appendChild(sender)` and
+crashed (`TypeError: Cannot read properties of null (reading 'appendChild')`),
+retrying into a dead job and leaving the scan's coverage incomplete. Two
+honest gates now exist:
+
+- `domXSSExecutor.Handle` checks the endpoint's recorded `ContentType` **before**
+  any browser context, selector discovery or navigation. A non-empty non-HTML
+  media type (`image/*`, `application/json`, `application/xml`, `text/plain`,
+  `application/pdf`, …) records one **skipped** TestCase saying the source is not
+  applicable and makes no navigation. An empty/unknown content type is still
+  probed — an unrecorded type is not evidence of "no DOM here".
+- `postMessageScript` attaches its opaque-origin sender to `document.body ||
+  documentElement` (a frameset document has no body but does have a root) and
+  resolves a distinct no-root status when neither exists. That status maps to
+  `errDOMXSSSourceNotApplicable`, which both phases record as a **skipped**
+  TestCase ("not applicable … not a clean negative"). The attachment itself is
+  deliberately **not** wrapped in `try`/`catch`: a genuine evaluation failure on
+  an attachable document still surfaces as a retried error, and both properties
+  are asserted by `TestDOMBodylessDocumentIsNotApplicable`.
+
 ## P2.3: primitive-string setTimeout / setInterval
 
 The current sink inventory extends the unchanged HTML sinks below with exactly

@@ -68,6 +68,11 @@ required = {
     "TestDOMXSSMarkerWindowExcerptNatives",
     "TestDOMXSSWorkerRetriesTransientVerificationFailure",
     "TestDOMXSSWorkerCancellationAndConfirmedDurability",
+    # DOM coverage-gap regressions: an attribute-context injection must confirm
+    # through a real breakout execution, and a body-less/non-HTML response must
+    # be recorded as not applicable rather than as a dead/erroring probe.
+    "TestDOMAttributeBreakoutInQuotedAttributeIsConfirmed",
+    "TestDOMBodylessDocumentIsNotApplicable",
 }
 if not shutil.which("node"):
     raise SystemExit("required Node.js unavailable")
