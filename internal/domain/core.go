@@ -237,6 +237,22 @@ type ScanConfig struct {
 	// context has its own, genuine (unspoofed) TLS stack that this setting
 	// has no way to reach into.
 	RandomizeTLSFingerprint bool `json:"randomize_tls_fingerprint,omitempty"`
+
+	// EnableIDOR opts this scan into the IDOR engine's object-identifier
+	// differential (see internal/idor and docs/idor.md). Off by default
+	// (conservative by design): it reads objects selected by other
+	// identifiers, so an operator turns it on explicitly for an authorized
+	// access-control engagement. It requires an authenticated session — the
+	// engine establishes the caller's identity from the target itself, and
+	// without a session there is no identity to compare against.
+	EnableIDOR bool `json:"enable_idor,omitempty"`
+	// IDORCandidates are operator-supplied foreign object identifiers for
+	// EnableIDOR, e.g. the victim username a lab brief names ("carlos") or an
+	// unpredictable id. They are only ever tried as read-only GET/HEAD object
+	// lookups inside the scan's scope; the engine never invents them. Empty
+	// leaves derivation to bounded numeric neighbours of the caller's own
+	// identifier.
+	IDORCandidates []string `json:"idor_candidates,omitempty"`
 }
 
 // StopMode controls when a scan stops relative to confirmed findings.

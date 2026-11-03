@@ -248,12 +248,17 @@ const (
 	// never the raw HTTP engine (the whole point of this engine is that
 	// location.hash never reaches the server at all).
 	JobDOMXSS JobType = "dom_xss"
+	// JobIDOR runs the IDOR engine's object-identifier differential for one
+	// injection point (see internal/idor and internal/scan/idor.go). It uses
+	// the raw HTTP engine (GET/HEAD reads only) and is dispatched to the
+	// HTTP worker group.
+	JobIDOR JobType = "idor"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR:
 		return true
 	default:
 		return false

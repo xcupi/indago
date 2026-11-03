@@ -1,0 +1,772 @@
+package scan
+
+// IDOR engine (family A: broken object-level authorization). This file is the
+// scan-side handler: it establishes the caller's identity from the target
+// itself, sends the caller's own object request (A) and a bounded set of
+// foreign object requests (B) through the scan's scope-enforcing engine, and
+// correlates the differential into a Finding only when a response POSITIVELY
+// names a different principal. See internal/idor for the pure decision rules
+// and docs/idor.md for the slice boundaries.
+//
+// Read-only by construction: only GET/HEAD requests are ever sent, the
+// candidate set is hard-capped, and no response body is ever exfiltrated —
+// evidence stays in the scan's own evidence store, like every other engine.
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/indago/indago/internal/discovery"
+	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/evidence"
+	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/idor"
+	"github.com/indago/indago/internal/store"
+	"github.com/indago/indago/internal/worker"
+)
+
+// idorIdentityNote prefixes the TestCase that records the caller-identity
+// baseline. The note is the durable, restart-safe lookup key: the baseline is
+// recorded ONCE per scan with its own evidence, and every IDOR probe reads it
+// back instead of re-fetching an account page.
+const idorIdentityNote = "idor identity baseline"
+
+// idorDetail is the engine-specific JSON recorded in TestCase.Detail and
+// Finding.Detail. It keeps the evidence trail an operator needs to re-check a
+// verdict: who the caller was established to be, which own-object request was
+// the baseline, and every foreign identifier tried with its own outcome.
+type idorDetail struct {
+	Engine           string               `json:"engine"`
+	Method           domain.HTTPMethod    `json:"method,omitempty"`
+	Parameter        string               `json:"parameter,omitempty"`
+	Location         domain.ParamLocation `json:"location,omitempty"`
+	OwnValue         string               `json:"own_value,omitempty"`
+	CallerIdentity   idor.Identity        `json:"caller_identity,omitempty"`
+	IdentitySource   string               `json:"identity_source,omitempty"`
+	IdentityEvidence []domain.ID          `json:"identity_evidence,omitempty"`
+	BaselineEvidence []domain.ID          `json:"baseline_evidence,omitempty"`
+	BaselineStatus   int                  `json:"baseline_status,omitempty"`
+	Attempts         []idorAttempt        `json:"attempts,omitempty"`
+	Verdict          domain.Verdict       `json:"verdict,omitempty"`
+	Reason           string               `json:"reason,omitempty"`
+	DedupKey         string               `json:"dedup_key,omitempty"`
+	Occurrences      int                  `json:"occurrences,omitempty"`
+	TestCaseIDs      []domain.ID          `json:"test_case_ids,omitempty"`
+	Skipped          bool                 `json:"skipped,omitempty"`
+	SkipReason       string               `json:"skip_reason,omitempty"`
+}
+
+// idorAttempt is one foreign object request (B) and what it proved.
+type idorAttempt struct {
+	Candidate   string      `json:"candidate"`
+	Source      string      `json:"source,omitempty"`
+	URL         string      `json:"url,omitempty"`
+	Status      int         `json:"status,omitempty"`
+	Outcome     string      `json:"outcome"`
+	Reason      string      `json:"reason,omitempty"`
+	Foreign     *idor.Field `json:"foreign,omitempty"`
+	EvidenceIDs []domain.ID `json:"evidence_ids,omitempty"`
+}
+
+// idorExecutor runs JobIDOR jobs.
+type idorExecutor struct {
+	store    store.Store
+	engine   httpengine.Engine
+	evidence evidence.Store
+	cfg      ExecutorConfig
+	log      *slog.Logger
+	// findingsMu serializes Finding correlation with every other engine's
+	// correlation in this scan (the same shared mutex defaultHandlers passes
+	// to the XSS and DOM-XSS executors).
+	findingsMu *sync.Mutex
+	// identityMu serializes establishment of the per-scan identity baseline:
+	// several IDOR jobs run concurrently on the HTTP worker group and must not
+	// each fetch (and persist) their own baseline.
+	identityMu sync.Mutex
+	cached     *idorIdentity
+	supplied   []string
+}
+
+type idorIdentity struct {
+	Identity idor.Identity
+	Source   string
+	Evidence []domain.ID
+	Reason   string // non-empty when no identity could be established
+}
+
+func newIDORExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, supplied []string) *idorExecutor {
+	if findingsMu == nil {
+		findingsMu = &sync.Mutex{}
+	}
+	return &idorExecutor{store: st, engine: eng, evidence: ev, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu, supplied: append([]string(nil), supplied...)}
+}
+
+var _ worker.Handler = (*idorExecutor)(nil)
+
+// Handle implements worker.Handler with the same return-value contract as the
+// other executors: skipped/completed → nil; cancellation → context error;
+// transport errors → retryable; permanent resolution errors → ErrPermanent.
+func (e *idorExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
+	started := time.Now()
+	tc := &domain.TestCase{
+		ID: domain.NewID(), ScanID: job.ScanID, JobID: job.ID, Attempt: job.Attempts,
+		VulnClass: domain.VulnIDOR, Status: domain.TestCaseRunning, URL: job.Target.URL,
+		StartedAt: &started, CreatedAt: started, UpdatedAt: started,
+	}
+	if err := e.store.TestCases().Create(ctx, tc); err != nil {
+		return fmt.Errorf("persist test case: %w", err)
+	}
+
+	d, outcome, err, permanent, skipped := e.run(ctx, job, tc)
+
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	e.finish(wctx, tc, d, outcome, err, skipped)
+
+	switch {
+	case skipped, outcome == domain.OutcomeSuccess:
+		return nil
+	case outcome == domain.OutcomeCancelled:
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		return context.Canceled
+	case permanent:
+		return fmt.Errorf("%w: %w", worker.ErrPermanent, err)
+	default:
+		return err
+	}
+}
+
+// run performs the differential. It returns the detail to persist, the
+// execution outcome, and (for retryable transport failures) the error.
+func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.TestCase) (idorDetail, domain.TestOutcome, error, bool, bool) {
+	ep, params, focus, err := resolveJobTarget(ctx, e.store, job)
+	if err != nil {
+		return idorDetail{Engine: "idor"}, domain.OutcomeError, err, true, false
+	}
+	tc.Method, tc.URL = string(ep.Method), ep.URL
+
+	skip := func(reason string) (idorDetail, domain.TestOutcome, error, bool, bool) {
+		return idorDetail{Engine: "idor", Method: ep.Method, Skipped: true, SkipReason: reason,
+			Verdict: domain.VerdictInconclusive, Reason: reason}, domain.OutcomeSuccess, nil, false, true
+	}
+
+	if focus == nil {
+		return idorDetail{Engine: "idor"}, domain.OutcomeError, fmt.Errorf("IDOR job has no injection point"), true, false
+	}
+	d := idorDetail{Engine: "idor", Method: ep.Method, Parameter: focus.Name, Location: focus.Location}
+
+	// This slice is read-only: GET/HEAD only, never a body-carrying method,
+	// even with the scan's state-changing opt-in (see AGENTS.md §3).
+	if !isSafeMethod(ep.Method) {
+		return skip(fmt.Sprintf("method %s is state-changing; the IDOR engine's current slice performs GET/HEAD reads only", ep.Method))
+	}
+	if focus.Location != domain.LocationQuery && focus.Location != domain.LocationPath {
+		return skip(fmt.Sprintf("parameter %s is carried in a %s body/header; only query and path object identifiers are in this slice", focus.Name, focus.Location))
+	}
+
+	own := ownObjectValue(ep, focus)
+	if own == "" {
+		return skip(fmt.Sprintf("no caller-owned value was observed for parameter %s", focus.Name))
+	}
+	d.OwnValue = own
+
+	ident, _ := e.identity(ctx, job.ScanID, ep)
+	if ident.Identity.Empty() {
+		reason := ident.Reason
+		if reason == "" {
+			reason = "caller identity could not be established from the target with this session"
+		}
+		d.CallerIdentity = ident.Identity
+		return skip(reason)
+	}
+	d.CallerIdentity, d.IdentitySource = ident.Identity, ident.Source
+	d.IdentityEvidence = ident.Evidence
+
+	// Request A: the caller's OWN object, exactly as observed. Its evidence is
+	// half of the differential pair.
+	baseAddr := *ep
+	baseReq, err := buildRequest(&baseAddr, params, &injection{param: focus, value: own})
+	if err != nil {
+		return d, domain.OutcomeError, err, true, false
+	}
+	tc.URL = baseReq.URL
+	baseResp, baseOutcome, baseErr, _ := e.send(ctx, baseReq)
+	d.BaselineStatus = statusOf(baseResp)
+	if baseOutcome != domain.OutcomeSuccess {
+		return d, baseOutcome, baseErr, false, false
+	}
+	baseEvidence, err := e.persistPair(ctx, tc, baseResp, "idor baseline (own object)")
+	if err != nil {
+		tc.Note = strings.TrimSpace(tc.Note + " | evidence incomplete: " + truncate(err.Error(), 200))
+	}
+	d.BaselineEvidence = baseEvidence
+	tc.EvidenceIDs = appendUniqueIDs(tc.EvidenceIDs, baseEvidence)
+
+	// Guard: if the caller's OWN object does not identify as the established
+	// identity, the identity baseline or the parameter interpretation is
+	// wrong, and a foreign-looking response would be meaningless.
+	if ownIdent := idor.ExtractIdentity(baseResp.Body); !ownIdent.Empty() {
+		if same, ok := samePrincipal(d.CallerIdentity, ownIdent); !ok || !same {
+			d.Verdict = domain.VerdictInconclusive
+			d.Reason = "the caller's own-object baseline does not match the established identity; no differential is meaningful"
+			return d, domain.OutcomeSuccess, nil, false, false
+		}
+	}
+	if d.BaselineStatus == 401 || d.BaselineStatus == 403 {
+		d.Verdict = domain.VerdictInconclusive
+		d.Reason = fmt.Sprintf("the caller's own-object baseline was denied (HTTP %d); the session cannot read the object at all", d.BaselineStatus)
+		return d, domain.OutcomeSuccess, nil, false, false
+	}
+
+	cands, reason := idor.DeriveCandidates(own, e.supplied, e.observedIdentifiers(ctx, job.ScanID, focus), 0)
+	if len(cands) == 0 {
+		return skip(reason)
+	}
+
+	// Request B: one bounded read per foreign identifier.
+	verdict := domain.VerdictInconclusive
+	var reasons []string
+	for _, cand := range cands {
+		addr := *ep
+		req, err := buildRequest(&addr, params, &injection{param: focus, value: cand.Value})
+		if err != nil {
+			reasons = append(reasons, err.Error())
+			continue
+		}
+		resp, outcome, reqErr, _ := e.send(ctx, req)
+		if outcome != domain.OutcomeSuccess {
+			if outcome == domain.OutcomeCancelled && ctx.Err() != nil {
+				return d, outcome, reqErr, false, false
+			}
+			d.Attempts = append(d.Attempts, idorAttempt{Candidate: cand.Value, Source: cand.Source,
+				URL: req.URL, Outcome: string(domain.OutcomeError), Reason: "request failed: " + truncate(errText(reqErr), 200)})
+			continue
+		}
+		dec := idor.Decide(d.CallerIdentity, cand.Value, resp.Status, resp.Body)
+		a := idorAttempt{Candidate: cand.Value, Source: cand.Source, URL: req.URL,
+			Status: resp.Status, Outcome: string(dec.Outcome), Reason: dec.Reason, Foreign: dec.Foreign}
+		if ids, evErr := e.persistPair(ctx, tc, resp, "idor candidate "+cand.Value); evErr != nil {
+			tc.Note = strings.TrimSpace(tc.Note + " | evidence incomplete: " + truncate(evErr.Error(), 200))
+		} else {
+			a.EvidenceIDs = ids
+			tc.EvidenceIDs = appendUniqueIDs(tc.EvidenceIDs, ids)
+		}
+		d.Attempts = append(d.Attempts, a)
+		reasons = append(reasons, dec.Reason)
+
+		switch dec.Outcome {
+		case idor.OutcomeConfirmed:
+			verdict = domain.VerdictConfirmed
+		case idor.OutcomeRejected:
+			if verdict != domain.VerdictConfirmed {
+				verdict = domain.VerdictRejected
+			}
+		}
+		if verdict == domain.VerdictConfirmed {
+			break // one positive mismatch is enough; stop reading further objects
+		}
+	}
+
+	d.Verdict = verdict
+	d.Reason = joinReasons(reasons)
+	if verdict == domain.VerdictConfirmed {
+		e.correlate(ctx, job.ScanID, ep, focus, job.Target.InjectionPointID, d, tc.ID)
+	}
+	return d, domain.OutcomeSuccess, nil, false, false
+}
+
+// send executes one request through the scan's scope-enforcing engine with the
+// per-request timeout. Mirrors the XSS executor's send without sharing state
+// with it.
+func (e *idorExecutor) send(ctx context.Context, req *httpengine.Request) (*httpengine.Response, domain.TestOutcome, error, time.Duration) {
+	if err := ctx.Err(); err != nil {
+		return nil, domain.OutcomeCancelled, err, 0
+	}
+	timed := *req
+	timed.Timeout = e.cfg.RequestTimeout
+	t0 := time.Now()
+	resp, err := e.engine.Do(ctx, &timed)
+	dur := time.Since(t0)
+	switch {
+	case err == nil:
+		return resp, domain.OutcomeSuccess, nil, resp.Duration
+	case ctx.Err() != nil:
+		return nil, domain.OutcomeCancelled, ctx.Err(), dur
+	case isTimeout(err):
+		return nil, domain.OutcomeTimeout, err, dur
+	default:
+		return nil, domain.OutcomeError, err, dur
+	}
+}
+
+// finish persists the probe result. Skipped probes still write a row: an
+// operator must be able to see WHY a parameter was not tested.
+func (e *idorExecutor) finish(ctx context.Context, tc *domain.TestCase, d idorDetail, outcome domain.TestOutcome, runErr error, skipped bool) {
+	now := time.Now()
+	tc.FinishedAt, tc.UpdatedAt = &now, now
+	tc.Detail = encodeIDORDetail(d)
+	switch {
+	case skipped:
+		tc.Status = domain.TestCaseSkipped
+		tc.Note = "idor skipped: " + d.SkipReason
+	case outcome == domain.OutcomeSuccess:
+		tc.Status = domain.TestCaseCompleted
+		tc.Outcome = outcome
+		if d.Verdict == "" {
+			d.Verdict = domain.VerdictInconclusive
+			d.Reason = "no differential result was produced"
+			tc.Detail = encodeIDORDetail(d)
+		}
+		tc.Note = fmt.Sprintf("idor: %s (%s)", d.Verdict, truncate(d.Reason, 300))
+	default:
+		tc.Outcome = outcome
+		tc.Status = domain.TestCaseFailed
+		if outcome == domain.OutcomeCancelled {
+			tc.Status = domain.TestCaseCancelled
+		}
+		if runErr != nil {
+			tc.Error = truncate(runErr.Error(), 1024)
+		}
+	}
+	if err := e.store.TestCases().Update(ctx, tc); err != nil {
+		e.log.Error("persist IDOR test case", "test_case", tc.ID, "job", tc.JobID, "err", err)
+	}
+}
+
+func encodeIDORDetail(d idorDetail) []byte {
+	b, _ := json.Marshal(d)
+	return b
+}
+
+func statusOf(r *httpengine.Response) int {
+	if r == nil {
+		return 0
+	}
+	return r.Status
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func joinReasons(reasons []string) string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range reasons {
+		if r == "" || seen[r] {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	return truncate(strings.Join(out, "; "), 500)
+}
+
+// persistPair stores the request and response of one probe as evidence and
+// returns their IDs (request A or B of the differential).
+func (e *idorExecutor) persistPair(ctx context.Context, tc *domain.TestCase, resp *httpengine.Response, role string) ([]domain.ID, error) {
+	var ids []domain.ID
+	if e.evidence == nil || resp == nil || resp.Request == nil {
+		return ids, nil
+	}
+	id, err := putEvidenceBlob(ctx, e.store, e.evidence, tc.ScanID, domain.EvidenceRequest, ".http", "message/http",
+		dumpRequest(resp.Request), "test_case="+string(tc.ID)+" "+role+" request")
+	if err != nil {
+		return ids, err
+	}
+	ids = append(ids, id)
+	note := "test_case=" + string(tc.ID) + " " + role + " response"
+	if resp.Truncated {
+		note += " (body truncated at the engine's size cap)"
+	}
+	id, err = putEvidenceBlob(ctx, e.store, e.evidence, tc.ScanID, domain.EvidenceResponse, ".http", "message/http",
+		dumpResponse(resp), note)
+	if err != nil {
+		return ids, err
+	}
+	ids = append(ids, id)
+	return ids, nil
+}
+
+// ---------------------------------------------------------------------------
+// identity baseline: who am I, established from the target itself
+// ---------------------------------------------------------------------------
+
+// identity returns the scan's caller-identity baseline, establishing and
+// persisting it on first use. The baseline is read back from a TestCase so a
+// restarted scan does not probe the account page again. Only bounded, common
+// account paths on the endpoint's own origin are tried: no wordlist, no
+// cross-host lookup.
+func (e *idorExecutor) identity(ctx context.Context, scanID domain.ID, ep *domain.Endpoint) (*idorIdentity, bool) {
+	e.identityMu.Lock()
+	defer e.identityMu.Unlock()
+	if e.cached != nil {
+		return e.cached, true
+	}
+	if cases, err := e.store.TestCases().ListByScan(ctx, scanID); err == nil {
+		for _, tc := range cases {
+			if tc.VulnClass != domain.VulnIDOR || !strings.HasPrefix(tc.Note, idorIdentityNote) {
+				continue
+			}
+			var d idorDetail
+			_ = json.Unmarshal(tc.Detail, &d)
+			e.cached = &idorIdentity{Identity: d.CallerIdentity, Source: d.IdentitySource,
+				Evidence: d.IdentityEvidence, Reason: d.SkipReason}
+			return e.cached, true
+		}
+	}
+
+	origin := originOf(ep.URL)
+	var tried []string
+	for _, path := range []string{"/my-account", "/profile", "/account", "/me"} {
+		if origin == "" {
+			break
+		}
+		tried = append(tried, path)
+		req := httpengine.GET(origin + path)
+		resp, outcome, _, _ := e.send(ctx, req)
+		if outcome != domain.OutcomeSuccess || resp == nil || resp.Status < 200 || resp.Status >= 300 {
+			continue
+		}
+		ident := idor.ExtractIdentity(resp.Body)
+		if ident.Empty() {
+			continue
+		}
+		e.cached = &idorIdentity{Identity: ident, Source: origin + path}
+		e.persistIdentity(ctx, scanID, e.cached, resp)
+		return e.cached, false
+	}
+
+	reason := fmt.Sprintf("caller identity could not be established from the target with this session (tried %s)",
+		strings.Join(tried, ", "))
+	e.cached = &idorIdentity{Reason: reason}
+	e.persistIdentity(ctx, scanID, e.cached, nil)
+	return e.cached, false
+}
+
+// persistIdentity records the baseline (positive or negative) as a TestCase
+// with its own request/response evidence.
+func (e *idorExecutor) persistIdentity(ctx context.Context, scanID domain.ID, id *idorIdentity, resp *httpengine.Response) {
+	now := time.Now()
+	tc := &domain.TestCase{
+		ID: domain.NewID(), ScanID: scanID, VulnClass: domain.VulnIDOR,
+		Status: domain.TestCaseCompleted, Outcome: domain.OutcomeSuccess,
+		URL: id.Source, StartedAt: &now, FinishedAt: &now, CreatedAt: now, UpdatedAt: now,
+	}
+	d := idorDetail{Engine: "idor", CallerIdentity: id.Identity, IdentitySource: id.Source, Reason: id.Reason, SkipReason: id.Reason}
+	tc.Note = idorIdentityNote
+	if id.Identity.Empty() {
+		tc.Note = idorIdentityNote + " unavailable: " + truncate(id.Reason, 200)
+	}
+	if resp != nil {
+		if ids, err := e.persistPair(ctx, tc, resp, "idor identity baseline"); err == nil {
+			tc.EvidenceIDs = ids
+			id.Evidence = ids
+			d.IdentityEvidence = ids
+		} else {
+			tc.Note += " | identity evidence incomplete: " + truncate(err.Error(), 200)
+		}
+	}
+	tc.Detail = encodeIDORDetail(d)
+	if err := e.store.TestCases().Create(ctx, tc); err != nil {
+		e.log.Warn("persist IDOR identity baseline", "scan", scanID, "err", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// candidates and correlation
+// ---------------------------------------------------------------------------
+
+// ownObjectValue is the caller's own object identifier: the value discovery
+// observed for the focused parameter with the scan's authenticated session.
+func ownObjectValue(ep *domain.Endpoint, p *domain.Parameter) string {
+	if v := strings.TrimSpace(p.Example); v != "" {
+		return v
+	}
+	u, err := url.Parse(ep.URL)
+	if err != nil {
+		return ""
+	}
+	if p.Location == domain.LocationPath {
+		if idx, ok := pathSegmentIndex(p.Name); ok {
+			segs := discovery.PathSegments(u.Path)
+			if idx >= 0 && idx < len(segs) {
+				return segs[idx]
+			}
+		}
+		return ""
+	}
+	return u.Query().Get(p.Name)
+}
+
+// observedIdentifiers returns identifier-shaped values already seen elsewhere
+// in this scan (other parameters' examples). They are all in-scope values an
+// authenticated crawl observed; nothing is invented.
+func (e *idorExecutor) observedIdentifiers(ctx context.Context, scanID domain.ID, focus *domain.Parameter) []string {
+	params, err := e.store.Parameters().ListByScan(ctx, scanID)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, p := range params {
+		if p.ID == focus.ID || strings.TrimSpace(p.Example) == "" {
+			continue
+		}
+		if p.Location != domain.LocationQuery && p.Location != domain.LocationPath {
+			continue
+		}
+		if p.Location == domain.LocationQuery && !idor.ObjectIDParameter(p.Name) {
+			continue
+		}
+		out = append(out, p.Example)
+	}
+	return out
+}
+
+// idorFindingDedupKey identifies one broken-object-authorization site: the
+// endpoint + parameter whose identifier can select another principal's
+// object. Category/context do not apply the way they do for XSS.
+func idorFindingDedupKey(ep *domain.Endpoint, focus *domain.Parameter) string {
+	return string(ep.ID) + "\x00" + string(focus.ID) + "\x00idor"
+}
+
+// correlate creates or ratchets the Confirmed Finding for this site. Only a
+// Confirmed differential ever creates a Finding; Rejected/Inconclusive
+// outcomes stay in the TestCase detail so a report is never padded with
+// per-parameter negatives.
+func (e *idorExecutor) correlate(ctx context.Context, scanID domain.ID, ep *domain.Endpoint, focus *domain.Parameter, ipID domain.ID, d idorDetail, tcID domain.ID) {
+	e.findingsMu.Lock()
+	defer e.findingsMu.Unlock()
+
+	key := idorFindingDedupKey(ep, focus)
+	d.DedupKey = key
+	d.TestCaseIDs = appendUniqueID(d.TestCaseIDs, tcID)
+
+	var evidence []domain.ID
+	evidence = append(evidence, d.IdentityEvidence...)
+	evidence = append(evidence, d.BaselineEvidence...)
+	for _, a := range d.Attempts {
+		if a.Outcome == string(idor.OutcomeConfirmed) {
+			evidence = append(evidence, a.EvidenceIDs...)
+		}
+	}
+
+	existing, err := e.store.Findings().ListByScan(ctx, scanID)
+	if err != nil {
+		e.log.Warn("list findings for IDOR correlation", "scan", scanID, "err", err)
+		return
+	}
+	for _, f := range existing {
+		if f.VulnClass != domain.VulnIDOR {
+			continue
+		}
+		var fd idorDetail
+		_ = json.Unmarshal(f.Detail, &fd)
+		if fd.DedupKey != key {
+			continue
+		}
+		fd.Occurrences++
+		fd.TestCaseIDs = appendUniqueID(fd.TestCaseIDs, tcID)
+		fd.Attempts = mergeIDORAttempts(fd.Attempts, d.Attempts)
+		fd.Verdict = domain.VerdictConfirmed
+		fd.Reason = d.Reason
+		f.Detail = encodeIDORDetail(fd)
+		f.Verdict = domain.VerdictConfirmed
+		f.EvidenceIDs = appendUniqueIDs(f.EvidenceIDs, evidence)
+		f.UpdatedAt = time.Now()
+		if err := e.store.Findings().Update(ctx, f); err != nil {
+			e.log.Warn("update IDOR finding", "finding", f.ID, "err", err)
+		}
+		return
+	}
+
+	sc, err := e.store.Scans().Get(ctx, scanID)
+	if err != nil {
+		e.log.Warn("load scan for IDOR finding", "scan", scanID, "err", err)
+		return
+	}
+	now := time.Now()
+	foreign := firstForeign(d.Attempts)
+	title := fmt.Sprintf("IDOR: parameter %q at %s %s returned another principal's data", focus.Name, ep.Method, endpointLabel(ep.URL))
+	if foreign != "" {
+		title = fmt.Sprintf("IDOR: parameter %q at %s %s returned another principal's data (%s)", focus.Name, ep.Method, endpointLabel(ep.URL), foreign)
+	}
+	f := &domain.Finding{
+		ID: domain.NewID(), ScanID: scanID, ProjectID: sc.ProjectID, VulnClass: domain.VulnIDOR,
+		Verdict: domain.VerdictConfirmed, Severity: domain.SeverityHigh, Confidence: domain.ConfidenceHigh,
+		Title:            title,
+		Summary:          d.Reason,
+		EndpointID:       ep.ID,
+		InjectionPointID: ipID,
+		ParameterID:      focus.ID,
+		Location:         focus.Location,
+		EvidenceIDs:      appendUniqueIDs(nil, evidence),
+		Provenance:       domain.Provenance{Engine: "idor", DiscoverySource: ep.Source, DetectedAt: now, AIAssisted: false},
+		Detail:           encodeIDORDetail(d),
+		CreatedAt:        now, UpdatedAt: now,
+	}
+	if err := e.store.Findings().Create(ctx, f); err != nil {
+		e.log.Warn("create IDOR finding", "scan", scanID, "err", err)
+	}
+}
+
+func firstForeign(attempts []idorAttempt) string {
+	for _, a := range attempts {
+		if a.Foreign != nil {
+			return a.Foreign.Value
+		}
+	}
+	return ""
+}
+
+func mergeIDORAttempts(existing, add []idorAttempt) []idorAttempt {
+	for _, a := range add {
+		found := false
+		for _, x := range existing {
+			if x.Candidate == a.Candidate {
+				found = true
+				break
+			}
+		}
+		if !found {
+			existing = append(existing, a)
+		}
+	}
+	return existing
+}
+
+// ---------------------------------------------------------------------------
+// probe pass: one JobIDOR per object-identifier injection point
+// ---------------------------------------------------------------------------
+
+// enqueueIDORProbes runs once per execution, after the XSS and DOM-XSS passes,
+// for a scan that explicitly opted into the IDOR engine. Bounded by the
+// discovered parameters: it only queues GET/HEAD query/path object-id
+// injection points.
+func (c *Controller) enqueueIDORProbes(ctx context.Context, scanID domain.ID) {
+	sc, err := c.store.Scans().Get(ctx, scanID)
+	if err != nil {
+		c.log.Warn("idor probes: load scan", "scan", scanID, "err", err)
+		return
+	}
+	if !sc.Config.EnableIDOR {
+		return
+	}
+	endpoints, err := c.store.Endpoints().ListByScan(ctx, scanID)
+	if err != nil {
+		c.log.Warn("idor probes: list endpoints", "scan", scanID, "err", err)
+		return
+	}
+	params, err := c.store.Parameters().ListByScan(ctx, scanID)
+	if err != nil {
+		c.log.Warn("idor probes: list parameters", "scan", scanID, "err", err)
+		return
+	}
+	ips, err := c.store.InjectionPoints().ListByScan(ctx, scanID)
+	if err != nil {
+		c.log.Warn("idor probes: list injection points", "scan", scanID, "err", err)
+		return
+	}
+	byEndpoint := map[domain.ID][]*domain.Parameter{}
+	for _, p := range params {
+		byEndpoint[p.EndpointID] = append(byEndpoint[p.EndpointID], p)
+	}
+	ipByParam := map[domain.ID]domain.ID{}
+	for _, ip := range ips {
+		ipByParam[ip.ParameterID] = ip.ID
+	}
+
+	now := time.Now()
+	n := 0
+	for _, ep := range endpoints {
+		if !isSafeMethod(ep.Method) {
+			continue
+		}
+		for _, p := range byEndpoint[ep.ID] {
+			if !idorParameter(p) {
+				continue
+			}
+			ipID := ipByParam[p.ID]
+			if ipID.Empty() {
+				ip := &domain.InjectionPoint{ID: domain.NewID(), ScanID: scanID, EndpointID: ep.ID,
+					ParameterID: p.ID, Location: p.Location, CreatedAt: now}
+				if err := c.store.InjectionPoints().Create(ctx, ip); err != nil {
+					c.log.Warn("idor probes: create injection point", "scan", scanID, "param", p.Name, "err", err)
+					continue
+				}
+				ipID = ip.ID
+				ipByParam[p.ID] = ipID
+			}
+			job := &domain.TestJob{
+				ID: domain.NewID(), ScanID: scanID, Type: domain.JobIDOR, State: domain.JobQueued,
+				Priority: 30, Target: domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ipID, URL: ep.URL},
+				MaxAttempts: 2, AvailableAt: now, CreatedAt: now, UpdatedAt: now,
+			}
+			if err := c.queue.Enqueue(ctx, job); err != nil {
+				c.log.Warn("idor probes: enqueue job", "scan", scanID, "param", p.Name, "err", err)
+				continue
+			}
+			n++
+		}
+	}
+	if n > 0 {
+		c.log.Info("idor probes: enqueued", "scan", scanID, "jobs", n)
+	}
+}
+
+// idorParameter reports whether a discovered parameter is an object
+// identifier this engine may probe.
+func idorParameter(p *domain.Parameter) bool {
+	switch p.Location {
+	case domain.LocationQuery:
+		return idor.ObjectIDParameter(p.Name)
+	case domain.LocationPath:
+		return strings.TrimSpace(p.Example) != ""
+	default:
+		return false
+	}
+}
+
+func pathSegmentIndex(name string) (int, bool) {
+	return discovery.ParsePathSegmentParamName(name)
+}
+
+func originOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// samePrincipal compares two extracted identities. ok is false when they
+// share no comparable field (so no conclusion can be drawn).
+func samePrincipal(a, b idor.Identity) (same bool, ok bool) {
+	comparable := 0
+	for _, af := range a.Fields {
+		for _, bf := range b.Fields {
+			if af.Kind != bf.Kind {
+				continue
+			}
+			comparable++
+			if !strings.EqualFold(strings.TrimSpace(af.Value), strings.TrimSpace(bf.Value)) {
+				return false, true
+			}
+		}
+	}
+	if comparable == 0 {
+		return false, false
+	}
+	return true, true
+}

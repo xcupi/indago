@@ -11,12 +11,16 @@ const (
 	VulnReflectedXSS VulnClass = "reflected_xss"
 	VulnStoredXSS    VulnClass = "stored_xss" // designed-for, not implemented
 	VulnDOMXSS       VulnClass = "dom_xss"    // designed-for, not implemented
+	// VulnIDOR is broken object-level authorization (family A: object
+	// identifiers selecting another principal's object). Function/role-level
+	// access control (family B) is not part of this class yet.
+	VulnIDOR VulnClass = "idor"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR:
 		return true
 	default:
 		return false

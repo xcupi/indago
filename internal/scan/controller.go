@@ -299,6 +299,14 @@ type CreateScanParams struct {
 	// RandomizeTLSFingerprint — see domain.ScanConfig.RandomizeTLSFingerprint.
 	// Off by default; mutually exclusive with ProxyPool (validated below).
 	RandomizeTLSFingerprint bool
+	// EnableIDOR opts into the IDOR engine's object-identifier differential —
+	// see domain.ScanConfig.EnableIDOR. Off by default; requires a real
+	// authenticated session (there is no identity to compare against without
+	// one).
+	EnableIDOR bool
+	// IDORCandidates are operator-supplied foreign object identifiers — see
+	// domain.ScanConfig.IDORCandidates. Bounded and validated at creation.
+	IDORCandidates []string
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -395,6 +403,12 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 			"Go's HTTP transport performs TLS internally after any proxy tunnel, never through a "+
 			"custom TLS dialer, so the fingerprint override would silently have no effect through a proxy", ErrBadConfig)
 	}
+	// IDOR engine opt-in and its operator-supplied candidate identifiers.
+	cfg.EnableIDOR = p.EnableIDOR
+	cfg.IDORCandidates = cleanIDORCandidates(p.IDORCandidates)
+	if err := validateIDORCandidates(cfg.IDORCandidates); err != nil {
+		return nil, err
+	}
 
 	mode := p.AuthMode
 	if !mode.IsValid() {
@@ -403,6 +417,13 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	statePath, err := c.resolveAuth(ctx, mode, p, scope)
 	if err != nil {
 		return nil, err
+	}
+	// Fail closed at creation: the IDOR engine's whole differential rests on a
+	// caller identity established from an authenticated session. An anonymous
+	// scan has none, so reject the combination instead of running a pass that
+	// can only skip.
+	if cfg.EnableIDOR && mode == domain.AuthAnonymous {
+		return nil, fmt.Errorf("%w: enable_idor requires an authenticated session (auth_mode %q has no caller identity); use -auth existing/-auth interactive/-auth mfa/-auth password", ErrBadConfig, mode)
 	}
 	stop := p.Stop
 	if !stop.Mode.IsValid() {
@@ -899,6 +920,49 @@ func validateProxyPool(pool []string) error {
 	return nil
 }
 
+// IDOR candidate-identifier bounds: a typo must never turn the differential
+// into an enumeration run.
+const (
+	maxIDORCandidates   = 10
+	maxIDORCandidateLen = 120
+)
+
+// cleanIDORCandidates trims, drops empties and collapses duplicates while
+// preserving the operator's order.
+func cleanIDORCandidates(in []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, raw := range in {
+		v := strings.TrimSpace(raw)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
+// validateIDORCandidates rejects an implausible identifier up front: this
+// list is the ONLY unbounded-by-derivation input to the differential, so it is
+// hard-capped and restricted to identifier-shaped values.
+func validateIDORCandidates(cands []string) error {
+	if len(cands) > maxIDORCandidates {
+		return fmt.Errorf("%w: at most %d idor_candidates are allowed, got %d", ErrBadConfig, maxIDORCandidates, len(cands))
+	}
+	for _, v := range cands {
+		if len(v) > maxIDORCandidateLen {
+			return fmt.Errorf("%w: idor_candidates entry is longer than %d characters", ErrBadConfig, maxIDORCandidateLen)
+		}
+		for _, r := range v {
+			if r < 0x20 || r == 0x7f || r == '<' || r == '>' || r == '"' || r == '\'' || r == '\\' || r == ' ' || r == '\t' {
+				return fmt.Errorf("%w: idor_candidates entry %q contains whitespace, control or markup characters", ErrBadConfig, v)
+			}
+		}
+	}
+	return nil
+}
+
 // loadScope loads the project's scope, failing closed when absent or empty.
 func (c *Controller) loadScope(ctx context.Context, projectID domain.ID) (domain.Scope, error) {
 	scope, err := c.store.Scopes().GetByProject(ctx, projectID)
@@ -1036,7 +1100,7 @@ func (c *Controller) poolConfig(sc *domain.Scan) worker.Config {
 		ScanID: sc.ID,
 		Groups: []worker.GroupSpec{
 			{Name: GroupDiscovery, Types: []domain.JobType{domain.JobDiscovery}, Size: sc.Config.DiscoveryConcurrency},
-			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest}, Size: sc.Config.HTTPConcurrency},
+			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR}, Size: sc.Config.HTTPConcurrency},
 			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify, domain.JobDOMXSS}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
 		},
 		LeaseDuration: c.opts.LeaseDuration,

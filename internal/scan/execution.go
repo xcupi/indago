@@ -53,6 +53,11 @@ type execution struct {
 	// enqueued — the SAME "run once when the queue goes quiet" shape
 	// combinedPassDone uses, checked right after it in evaluate().
 	domXSSPassDone atomic.Bool
+
+	// idorPassDone marks that this execution's one-time IDOR probe pass (see
+	// idor.go's enqueueIDORProbes) has already been enqueued. It runs after
+	// the DOM-XSS pass, for scans that explicitly enabled the engine.
+	idorPassDone atomic.Bool
 }
 
 // pause routes a scan pause to both the worker pool and discovery.
@@ -97,7 +102,7 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 
 	handlers := c.opts.Handlers
 	if handlers == nil {
-		handlers = c.defaultHandlers(eng, scope, sc.Config.ProxyPool, limiter)
+		handlers = c.defaultHandlers(eng, scope, sc.Config.ProxyPool, limiter, sc.Config.IDORCandidates)
 	}
 	pool := worker.New(c.queue, handlers, c.poolConfig(sc), c.log)
 	if err := pool.Start(runCtx); err != nil {
@@ -399,6 +404,15 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 	if !ex.domXSSPassDone.Load() {
 		ex.domXSSPassDone.Store(true)
 		c.enqueueDOMXSSProbes(ctx, ex.scanID)
+		return false
+	}
+	// Bounded, one-time IDOR probe pass (see idor.go): only for a scan that
+	// opted into the engine, and only after every earlier pass drained, so
+	// its findings cannot be overwritten by late correlation from another
+	// engine. Same "go quiet, run once" shape as the passes above.
+	if !ex.idorPassDone.Load() {
+		ex.idorPassDone.Store(true)
+		c.enqueueIDORProbes(ctx, ex.scanID)
 		return false
 	}
 	return c.finish(ctx, ex, false)

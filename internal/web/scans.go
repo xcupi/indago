@@ -232,6 +232,15 @@ type createScanReq struct {
 	// Off by default; the server rejects this combined with ProxyPool (see
 	// Controller.CreateScan) rather than silently no-op the override.
 	RandomizeTLSFingerprint bool `json:"randomize_tls_fingerprint"`
+
+	// EnableIDOR opts this scan into the IDOR engine's object-identifier
+	// differential (see domain.ScanConfig.EnableIDOR). Off by default; the
+	// server rejects it for an anonymous scan, which has no caller identity.
+	EnableIDOR bool `json:"enable_idor"`
+	// IDORCandidates are operator-supplied foreign object identifiers, e.g.
+	// the victim username an authorized lab brief names. Bounded/validated by
+	// the controller; never invented by Indago.
+	IDORCandidates []string `json:"idor_candidates"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -304,6 +313,8 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		EnableEvasion:           req.EnableEvasion,
 		ProxyPool:               cleanList(req.ProxyPool),
 		RandomizeTLSFingerprint: req.RandomizeTLSFingerprint,
+		EnableIDOR:              req.EnableIDOR,
+		IDORCandidates:          req.IDORCandidates,
 	})
 	if err != nil {
 		s.writeScanError(w, err)
