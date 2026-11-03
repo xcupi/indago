@@ -22,6 +22,26 @@ login
 dashboard
 manage
 management
+# Account and object surfaces: the everyday paths where broken object-level
+# authorization and reflected input actually live. Ordered first because a
+# scanner that cannot reach them fails both XSS and access-control work.
+my-account
+account
+accounts
+profile
+user
+users
+me
+orders
+order
+cart
+invoice
+invoices
+api/user
+api/users
+api/account
+api/accounts
+api/v1/user
 console
 cpanel
 phpmyadmin
