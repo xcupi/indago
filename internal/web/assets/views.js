@@ -334,6 +334,138 @@ async function renderReports(_params, view) {
 }
 
 // ---------------------------------------------------------------------------
+// Settings — LLM provider (configuration only)
+// ---------------------------------------------------------------------------
+// The API never returns the key (only a masked hint), so the password field is
+// never populated from the server: an empty value on Save means "keep the
+// stored key". Nothing here contacts the provider unless the operator presses
+// Test or Fetch models; loading this screen only reads local settings.
+function llmSettingsCard() {
+  const c = card("LLM provider");
+  const state = el("div", "loading…", "hint");
+  const err = el("div", undefined, "err");
+  const msg = el("div", undefined, "ok-msg");
+  const provider = select("llm_provider", [], "");
+  const model = input("llm_model", "text", "model name");
+  const baseURL = input("llm_base_url", "url", "https://host/v1");
+  const apiKey = input("llm_api_key", "password", "API key");
+  apiKey.autocomplete = "new-password";
+  const modelList = document.createElement("datalist");
+  modelList.id = "llm_model_list";
+  model.setAttribute("list", modelList.id);
+
+  let providers = [];
+  let save, testBtn, modelsBtn;
+
+  function providerDef() {
+    return providers.find((p) => p.id === provider.value) || null;
+  }
+  function applyPlaceholders() {
+    const p = providerDef();
+    model.placeholder = p && p.default_model ? p.default_model : "model name (required for custom)";
+    baseURL.placeholder = p && p.default_base_url ? p.default_base_url : "https://host/v1 (required for custom)";
+    apiKey.placeholder = apiKey.dataset.set === "1"
+      ? "A key is stored — leave empty to keep it"
+      : (p && p.requires_key ? "API key" : "API key (optional)");
+  }
+  function showStatus(cfg) {
+    apiKey.dataset.set = cfg.key_set ? "1" : "0";
+    apiKey.value = ""; // never repopulate a secret from the server
+    if (cfg.configured) {
+      const dl = el("dl", undefined, "detail");
+      dl.append(el("dt", "Status"), el("dd", "configured"));
+      dl.append(el("dt", "Provider"), el("dd", cfg.provider));
+      dl.append(el("dt", "Model"), el("dd", cfg.model || "—"));
+      dl.append(el("dt", "Base URL"), el("dd", cfg.base_url || "—"));
+      dl.append(el("dt", "API key"), el("dd", cfg.key_set ? cfg.key_hint + " (last 4 characters only)" : "none"));
+      state.replaceChildren(dl);
+    } else {
+      state.replaceChildren(el("p", "Not configured. Indago works fully without an LLM; save a provider here only if you want later features to be able to assist an assessment.", "hint"));
+    }
+    if (testBtn) { testBtn.disabled = !cfg.configured; modelsBtn.disabled = !cfg.configured; }
+    applyPlaceholders();
+  }
+  function refreshForm(cfg) {
+    providers = cfg.providers || [];
+    provider.replaceChildren();
+    providers.forEach((p) => { const o = el("option", p.label); o.value = p.id; provider.appendChild(o); });
+    const def = providers.find((p) => p.default);
+    provider.value = cfg.provider || (def ? def.id : (providers[0] ? providers[0].id : "deepseek"));
+    model.value = cfg.model || "";
+    baseURL.value = cfg.base_url || "";
+    showStatus(cfg);
+  }
+  async function load() {
+    try {
+      refreshForm(await getJSON("/api/llm/config"));
+    } catch (e) {
+      state.replaceChildren(el("p", "LLM settings are unavailable: " + e.message, "err"));
+      if (testBtn) { testBtn.disabled = true; modelsBtn.disabled = true; }
+    }
+  }
+
+  provider.addEventListener("change", applyPlaceholders);
+
+  save = button("Save", async () => {
+    setMsg(err, ""); setMsg(msg, "");
+    save.disabled = true;
+    try {
+      const res = await mutate("PUT", "/api/llm/config", {
+        provider: provider.value,
+        model: model.value.trim(),
+        base_url: baseURL.value.trim(),
+        api_key: apiKey.value, // empty = keep the stored key
+      });
+      if (!res.ok) { setMsg(err, errMsg(res, "save LLM settings failed")); return; }
+      // The server returns only the public view; show the normalized values.
+      model.value = res.data.model || "";
+      baseURL.value = res.data.base_url || "";
+      showStatus(res.data);
+      setMsg(msg, "Saved. Press Test connection to check it.", true);
+    } finally { save.disabled = false; }
+  }, "primary", "llm_save");
+
+  testBtn = button("Test connection", async () => {
+    setMsg(err, ""); setMsg(msg, "");
+    testBtn.disabled = true;
+    try {
+      const res = await mutate("POST", "/api/llm/test", {});
+      if (!res.ok) { setMsg(err, errMsg(res, "connection test failed")); return; }
+      const d = res.data || {};
+      if (d.ok) setMsg(msg, "Connection OK — " + d.provider + " / " + d.model + " (" + d.latency_ms + " ms).", true);
+      else setMsg(err, "Connection failed after " + (d.latency_ms || 0) + " ms: " + (d.error || "unknown error"));
+    } finally { testBtn.disabled = false; }
+  }, "", "llm_test");
+
+  modelsBtn = button("Fetch models", async () => {
+    setMsg(err, ""); setMsg(msg, "");
+    modelsBtn.disabled = true;
+    try {
+      const res = await mutate("POST", "/api/llm/models", {});
+      if (!res.ok) { setMsg(err, errMsg(res, "could not list models")); return; }
+      const list = Array.isArray(res.data.models) ? res.data.models : [];
+      modelList.replaceChildren();
+      list.forEach((m) => { const o = document.createElement("option"); o.value = m; modelList.appendChild(o); });
+      if (list.length) setMsg(msg, list.length + " model(s) available — pick one or keep typing.", true);
+      else setMsg(err, (res.data.error ? "Model list unavailable: " + res.data.error + ". " : "The provider returned no models. ") + "The model field stays free text; type the name manually.");
+    } finally { modelsBtn.disabled = false; }
+  }, "small", "llm_models");
+
+  const actions = el("div", undefined, "form-actions");
+  actions.append(save, testBtn, modelsBtn);
+  c.append(
+    state,
+    el("p", "Configuration only: these settings are stored locally and never decide a verdict. Both Test and Fetch models use the saved configuration, and Indago contacts the provider only when you press one of them — never while scanning or simply opening a page.", "hint"),
+    rowOf(field("Provider", provider), field("Model", model)),
+    rowOf(field("Base URL", baseURL), field("API key", apiKey)),
+    modelList,
+    actions, msg, err,
+  );
+  load();
+  return c;
+}
+
+// ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
 async function renderSettings(_params, view) {
@@ -344,6 +476,8 @@ async function renderSettings(_params, view) {
   interval.addEventListener("change", () => { prefs.set("refreshMs", interval.value); route(); });
   view.appendChild(card("Live refresh interval", field("How often live views poll for updates", interval),
     el("p", "Off stops all background polling; use \u21bb Refresh in the header to update a view. A per-browser preference only; it changes nothing on the server.", "hint")));
+
+  view.appendChild(llmSettingsCard());
 
   let login = "unknown";
   try {

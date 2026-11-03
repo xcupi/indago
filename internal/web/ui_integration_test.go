@@ -33,6 +33,7 @@ import (
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/llm"
 	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/store/memory"
@@ -136,6 +137,9 @@ func newUIHarnessWith(t *testing.T, token string, caps web.Capabilities) *uiHarn
 	}
 	h := web.NewServer(st, ctrl, "test", log, evStore, t.TempDir())
 	h.SetCapabilities(caps)
+	// The settings screen always exercises the LLM store, so the UI tests see
+	// the same "not configured" state a real server starts from.
+	h.SetLLMStore(llm.NewStore(filepath.Join(t.TempDir(), "llm")))
 	if token != "" {
 		if err := h.SetAPIToken(token); err != nil {
 			t.Fatal(err)

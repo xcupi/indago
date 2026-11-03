@@ -60,6 +60,11 @@ type Server struct {
 	// creation then skips AI-drafted summaries, never fails because of it.
 	ai ai.Gateway
 
+	// llm is the LLM provider configuration store behind /api/llm/* (see
+	// internal/llm). Nil leaves those endpoints reporting that configuration
+	// is unavailable; it never blocks the scanner.
+	llm llmStore
+
 	// apiTokenDigest is SHA-256 of the configured bearer token (see
 	// SetAPIToken). Nil means the control API is unauthenticated.
 	apiTokenDigest []byte
@@ -132,6 +137,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/version", s.handleVersion)
 	mux.HandleFunc("GET /api/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
+
+	// LLM provider settings (configuration only). Every route is inside /api/
+	// and therefore behind the same guard, rate limiter and bearer-token
+	// middleware as the rest of the control API. Data-modifying methods are
+	// PUT/DELETE/POST and are CSRF-guarded accordingly; GET never contacts a
+	// provider.
+	mux.HandleFunc("GET /api/llm/config", s.handleGetLLMConfig)
+	mux.HandleFunc("PUT /api/llm/config", s.handlePutLLMConfig)
+	mux.HandleFunc("DELETE /api/llm/config", s.handleDeleteLLMConfig)
+	mux.HandleFunc("POST /api/llm/test", s.handleTestLLM)
+	mux.HandleFunc("POST /api/llm/models", s.handleListLLMModels)
 
 	mux.HandleFunc("GET /api/projects", s.handleListProjects)
 	mux.HandleFunc("POST /api/projects", s.handleCreateProject)

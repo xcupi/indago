@@ -9,6 +9,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -24,7 +25,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/indago/indago/internal/config"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/llm"
 	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/web"
 )
@@ -285,6 +288,8 @@ func (c *cli) runClient(group string, args []string) error {
 		return c.auth(sub, rest)
 	case "report":
 		return c.report(sub, rest)
+	case "config":
+		return c.config(sub, rest)
 	}
 	return fmt.Errorf("unknown command group %q", group)
 }
@@ -1250,4 +1255,128 @@ func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+// --- local configuration: LLM provider --------------------------------------
+//
+// These commands are deliberately local: they read and write the same
+// <data>/llm directory `indago serve` reads, with no HTTP client involved. That
+// keeps the API key off every socket and lets an operator configure a provider
+// before the server starts. Run them with the same -data directory as the
+// server (the default is the same "data" both use).
+//
+// The only command here that contacts a provider is `test`, and it makes ONE
+// bounded request.
+
+// llmAPIKeyEnv is the preferred way to supply the key: unlike -api-key, an
+// environment variable does not land in shell history or `ps` output.
+const llmAPIKeyEnv = "INDAGO_LLM_API_KEY"
+
+func (c *cli) config(section string, args []string) error {
+	if section != "llm" {
+		return fmt.Errorf("unknown config section %q (only \"llm\" is supported)", section)
+	}
+	if len(args) == 0 {
+		return errors.New("usage: indago config llm set|show|clear|test [flags]")
+	}
+	action, rest := args[0], args[1:]
+
+	fs := flag.NewFlagSet("config llm "+action, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dataDir := fs.String("data", config.DefaultDataDir, "data directory (the same -data `indago serve` uses)")
+
+	provider := llm.DefaultProvider
+	var model, baseURL, apiKey string
+	switch action {
+	case "set":
+		fs.StringVar(&provider, "provider", provider, "provider: deepseek|openai|custom")
+		fs.StringVar(&model, "model", "", "model name (default: the provider's default)")
+		fs.StringVar(&baseURL, "base-url", "", "override the provider's base URL")
+		fs.StringVar(&apiKey, "api-key", "", "API key (prefer $"+llmAPIKeyEnv+"; a flag is visible in shell history)")
+	case "show", "clear", "test":
+		// Only -data applies.
+	default:
+		return fmt.Errorf("unknown config llm subcommand %q (set, show, clear, test)", action)
+	}
+	pos, err := parseInterspersed(fs, rest)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 0 {
+		return fmt.Errorf("unexpected argument %q", pos[0])
+	}
+
+	store := llm.NewStore(filepath.Join(*dataDir, "llm"))
+	switch action {
+	case "set":
+		key := strings.TrimSpace(apiKey)
+		fromFlag := key != ""
+		if key == "" {
+			key = strings.TrimSpace(os.Getenv(llmAPIKeyEnv))
+		}
+		cfg, err := store.Set(llm.SetRequest{
+			Provider: provider, Model: model, BaseURL: baseURL, APIKey: key,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(c.out, "configured LLM provider %s (model %s)\n", cfg.Provider, cfg.Model)
+		fmt.Fprintf(c.out, "base URL: %s\n", cfg.BaseURL)
+		if cfg.HasKey() {
+			fmt.Fprintf(c.out, "API key:  %s (stored; only the last 4 characters are shown)\n", cfg.MaskedKey())
+		} else {
+			fmt.Fprintln(c.out, "API key:  none (allowed for a local endpoint)")
+		}
+		if fi, statErr := os.Stat(store.Path()); statErr == nil {
+			fmt.Fprintf(c.out, "config:   %s (mode %04o)\n", store.Path(), fi.Mode().Perm())
+		}
+		if fromFlag {
+			fmt.Fprintf(c.out, "note: -api-key is visible in shell history and process listings; prefer $%s\n", llmAPIKeyEnv)
+		}
+		return nil
+	case "show":
+		cfg, err := store.Load()
+		if errors.Is(err, llm.ErrNotConfigured) {
+			fmt.Fprintln(c.out, "LLM provider: not configured")
+			fmt.Fprintf(c.out, "config:       %s (absent)\n", store.Path())
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(c.out, "provider: %s\n", cfg.Provider)
+		fmt.Fprintf(c.out, "model:    %s\n", cfg.Model)
+		fmt.Fprintf(c.out, "base URL: %s\n", cfg.BaseURL)
+		if cfg.HasKey() {
+			fmt.Fprintf(c.out, "API key:  %s (set; last 4 characters only)\n", cfg.MaskedKey())
+		} else {
+			fmt.Fprintln(c.out, "API key:  none")
+		}
+		if fi, statErr := os.Stat(store.Path()); statErr == nil {
+			fmt.Fprintf(c.out, "config:   %s (mode %04o)\n", store.Path(), fi.Mode().Perm())
+		}
+		return nil
+	case "clear":
+		if err := store.Clear(); err != nil {
+			return err
+		}
+		fmt.Fprintln(c.out, "LLM provider configuration cleared (config and key file removed)")
+		return nil
+	case "test":
+		cfg, err := store.Load()
+		if errors.Is(err, llm.ErrNotConfigured) {
+			return errors.New("LLM provider is not configured; run `indago config llm set ...` first")
+		}
+		if err != nil {
+			return err
+		}
+		res := llm.NewProber(0).Test(context.Background(), cfg)
+		fmt.Fprintf(c.out, "provider: %s\nmodel:    %s\nlatency:  %d ms\n", res.Provider, res.Model, res.LatencyMS)
+		if !res.OK {
+			return fmt.Errorf("connection test failed: %s", cfg.Redact(res.Error))
+		}
+		fmt.Fprintln(c.out, "result:   OK")
+		return nil
+	}
+	return fmt.Errorf("unknown config llm subcommand %q (set, show, clear, test)", action)
 }
