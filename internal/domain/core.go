@@ -260,6 +260,18 @@ type ScanConfig struct {
 	// leaves derivation to bounded numeric neighbours of the caller's own
 	// identifier.
 	IDORCandidates []string `json:"idor_candidates,omitempty"`
+
+	// EnableIDOREnumeration opts into the bounded enumeration pass: when a
+	// parameter's observed identifier is numeric (7), try 6, 8 and 1..N; when
+	// it is a short slug, try the fixed common neighbours admin/test/demo/
+	// guest. It is a separate, explicit switch ON TOP of EnableIDOR, OFF by
+	// default, and never a wordlist (see internal/idor/enumerate.go and
+	// docs/idor.md). Requires EnableIDOR.
+	EnableIDOREnumeration bool `json:"idor_enumerate,omitempty"`
+	// IDOREnumerationNeighbours is N: how many low integers 1..N are tried for
+	// a numeric baseline. 0 means the engine default (5); the hard ceiling is
+	// internal/idor.MaxEnumerationNeighbours (10).
+	IDOREnumerationNeighbours int `json:"idor_enumerate_n,omitempty"`
 }
 
 // StopMode controls when a scan stops relative to confirmed findings.

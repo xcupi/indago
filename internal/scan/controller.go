@@ -42,6 +42,7 @@ import (
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/idor"
 	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/verification"
@@ -313,6 +314,11 @@ type CreateScanParams struct {
 	// IDORCandidates are operator-supplied foreign object identifiers — see
 	// domain.ScanConfig.IDORCandidates. Bounded and validated at creation.
 	IDORCandidates []string
+	// EnableIDOREnumeration / IDOREnumerationNeighbours — see
+	// domain.ScanConfig.EnableIDOREnumeration. Off by default; requires the
+	// IDOR engine itself to be enabled.
+	EnableIDOREnumeration     bool
+	IDOREnumerationNeighbours int
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -422,6 +428,13 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.EnableIDOR = p.EnableIDOR
 	cfg.IDORCandidates = cleanIDORCandidates(p.IDORCandidates)
 	if err := validateIDORCandidates(cfg.IDORCandidates); err != nil {
+		return nil, err
+	}
+	// Bounded enumeration is a second, explicit opt-in ON TOP of the engine;
+	// enabling it without the engine would silently do nothing, so fail closed.
+	cfg.EnableIDOREnumeration = p.EnableIDOREnumeration
+	cfg.IDOREnumerationNeighbours = p.IDOREnumerationNeighbours
+	if err := validateIDOREnumeration(cfg.EnableIDOR, cfg.EnableIDOREnumeration, cfg.IDOREnumerationNeighbours); err != nil {
 		return nil, err
 	}
 
@@ -974,6 +987,23 @@ func validateIDORCandidates(cands []string) error {
 				return fmt.Errorf("%w: idor_candidates entry %q contains whitespace, control or markup characters", ErrBadConfig, v)
 			}
 		}
+	}
+	return nil
+}
+
+// validateIDOREnumeration rejects a configuration that cannot do what the
+// operator asked: enumeration without the engine, or N outside the engine's
+// stated range. Bounded means bounded — a typo must not become a wordlist.
+func validateIDOREnumeration(enableIDOR, enableEnum bool, neighbours int) error {
+	if enableEnum && !enableIDOR {
+		return fmt.Errorf("%w: idor_enumerate requires enable_idor", ErrBadConfig)
+	}
+	if neighbours != 0 && !enableEnum {
+		return fmt.Errorf("%w: idor_enumerate_n requires idor_enumerate", ErrBadConfig)
+	}
+	if neighbours < 0 || neighbours > idor.MaxEnumerationNeighbours {
+		return fmt.Errorf("%w: idor_enumerate_n must be between 1 and %d (0 = default %d), got %d",
+			ErrBadConfig, idor.MaxEnumerationNeighbours, idor.DefaultEnumerationNeighbours, neighbours)
 	}
 	return nil
 }

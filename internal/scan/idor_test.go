@@ -130,7 +130,7 @@ func TestIDORConfirmsForeignObject(t *testing.T) {
 	focus := env.param(ep, "id", domain.LocationQuery, "wiener")
 	ip := env.injection(ep, focus)
 
-	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, env.sc.Config.IDORCandidates)
+	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, env.sc.Config.IDORCandidates, idor.EnumerationOptions{})
 	if err := ex.Handle(context.Background(), env.idorJobHelper(ep, ip)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestIDORSamePrincipalIsNeverConfirmed(t *testing.T) {
 	focus := env.param(ep, "id", domain.LocationQuery, "1")
 	ip := env.injection(ep, focus)
 
-	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, nil)
+	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, nil, idor.EnumerationOptions{})
 	if err := ex.Handle(context.Background(), env.idorJobHelper(ep, ip)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -264,12 +264,15 @@ func TestIDORNoIdentityFieldsIsNeverConfirmed(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	})
+	// A supplied candidate gives the differential something to read; the point
+	// of the test is what Decide makes of a body with no identity fields.
+	env.sc.Config.IDORCandidates = []string{"2.txt"}
 
 	ep := env.endpoint(srv.URL+"/download?file=1.txt", domain.MethodGET)
 	focus := env.param(ep, "file", domain.LocationQuery, "1.txt")
 	ip := env.injection(ep, focus)
 
-	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, nil)
+	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, []string{"2.txt"}, idor.EnumerationOptions{})
 	if err := ex.Handle(context.Background(), env.idorJobHelper(ep, ip)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -302,7 +305,7 @@ func TestIDORLoginRedirectIsInconclusive(t *testing.T) {
 	focus := env.param(ep, "id", domain.LocationQuery, "wiener")
 	ip := env.injection(ep, focus)
 
-	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, env.sc.Config.IDORCandidates)
+	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, env.sc.Config.IDORCandidates, idor.EnumerationOptions{})
 	if err := ex.Handle(context.Background(), env.idorJobHelper(ep, ip)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -327,7 +330,7 @@ func TestIDOROpaqueIdentifierSkipsWithoutGuessing(t *testing.T) {
 	focus := env.param(ep, "id", domain.LocationQuery, own)
 	ip := env.injection(ep, focus)
 
-	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, nil)
+	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, nil, idor.EnumerationOptions{})
 	if err := ex.Handle(context.Background(), env.idorJobHelper(ep, ip)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -364,7 +367,7 @@ func TestIDORStateChangingParameterIsOutOfSlice(t *testing.T) {
 	focus := env.param(ep, "id", domain.LocationForm, "1")
 	ip := env.injection(ep, focus)
 
-	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, nil)
+	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, nil, idor.EnumerationOptions{})
 	if err := ex.Handle(context.Background(), env.idorJobHelper(ep, ip)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}

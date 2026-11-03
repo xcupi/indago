@@ -301,8 +301,12 @@ var nonIdentifierWords = map[string]bool{
 	"oauth2": true, "callback": true, "webhook": true, "docs": true, "help": true,
 	"about": true, "contact": true, "search": true, "edit": true, "new": true,
 	"create": true, "update": true, "delete": true, "view": true, "show": true,
-	"list": true, "detail": true, "details": true, "items": true, "products": true,
-	"orders": true, "cart": true, "checkout": true, "download": true, "upload": true,
+	"list": true, "detail": true, "details": true, "items": true, "item": true,
+	"products": true, "product": true, "orders": true, "order": true,
+	"invoices": true, "invoice": true, "documents": true, "document": true,
+	"doc": true, "articles": true, "article": true,
+	"categories": true, "category": true,
+	"cart": true, "checkout": true, "download": true, "upload": true,
 	"files": true, "images": true, "css": true, "js": true, "favicon": true,
 	"robots": true, "sitemap": true, "health": true, "healthz": true, "status": true,
 	"submit": true, "cancel": true, "save": true, "close": true, "next": true,
@@ -507,25 +511,23 @@ func walkHarvest(v any, path string, depth int, add func(value, path string)) {
 	}
 }
 
-// harvestKey reports whether a JSON key names an identity or object
-// identifier. A bare "id" is accepted here (unlike identity extraction, where
-// it must sit inside a user-ish object): harvesting is explicitly looking for
-// object identifiers anywhere in a listing.
+// harvestKey reports whether a JSON key names an object identifier (the
+// documented vocabulary) or an identity attribute of the record it belongs
+// to. A bare "id" is accepted here (unlike identity extraction, where it must
+// sit inside a user-ish object): harvesting is explicitly looking for object
+// identifiers anywhere in a listing — but only where the FIELD NAME says it
+// is one, never because some value merely looks identifier-shaped.
 func harvestKey(key string) bool {
-	k := strings.ToLower(strings.TrimSpace(key))
-	switch k {
-	case "id", "uuid", "guid",
-		"username", "user_name", "login", "handle", "screen_name", "nickname", "nick",
-		"email", "mail", "email_address", "contact_email",
-		"user", "owner", "author", "created_by", "uid", "userid",
-		"account_id", "profile_id", "customer_id", "member_id", "object_id", "item_id",
-		"post_id", "comment_id", "order_id", "invoice_id", "document_id", "doc_id",
-		"file_id", "tenant_id", "org_id", "group_id", "employee_id", "patient_id",
-		"booking_id", "ticket_id", "attachment_id", "product_id", "record_id",
-		"report_id", "message_id", "download_id":
+	if IdentifierName(key) {
 		return true
 	}
-	return strings.HasSuffix(k, "_id")
+	switch normalizeIdentifierName(key) {
+	case "username", "user_name", "login", "handle", "screen_name", "nickname", "nick",
+		"email", "mail", "email_address", "contact_email",
+		"uuid", "guid", "owner", "author", "created_by":
+		return true
+	}
+	return false
 }
 
 var (
@@ -533,6 +535,19 @@ var (
 )
 
 func mineHTML(body []byte, ob Observation, add func(string, Origin)) {
+	// Ordinary route words this page links to in a NON-object position: a
+	// bare /product or /login link makes "product"/"login" a route, never an
+	// identifier, even if the same word also appears as an input value or in
+	// labelled text. Precision first: one identifier not tested is safe; a
+	// route probed as an object is a wasted request and a misleading verdict.
+	routeWords := linkRouteWords(body, ob)
+	addHTML := func(raw string, origin Origin) {
+		if isRouteWordValue(raw, routeWords) {
+			return
+		}
+		add(raw, origin)
+	}
+
 	// Form fields: <input name="username" value="carlos">.
 	for _, tag := range inputTagRE.FindAll(body, -1) {
 		attrs := map[string]string{}
@@ -548,7 +563,7 @@ func mineHTML(body []byte, ob Observation, add func(string, Origin)) {
 		if !harvestInputName(name) {
 			continue
 		}
-		add(attrs["value"], Origin{Endpoint: ob.Endpoint, Field: name, Via: ViaHTML})
+		addHTML(attrs["value"], Origin{Endpoint: ob.Endpoint, Field: name, Via: ViaHTML})
 	}
 
 	// Same-origin links: the crawler's own link graph, recovered from a stored
@@ -558,7 +573,7 @@ func mineHTML(body []byte, ob Observation, add func(string, Origin)) {
 		if raw == "" {
 			raw = string(m[2])
 		}
-		mineLink(raw, ob, add)
+		mineLink(raw, ob, addHTML)
 	}
 
 	// Labelled text ("Username: carlos", "Your username is carlos"). Reuse the
@@ -578,7 +593,7 @@ func mineHTML(body []byte, ob Observation, add func(string, Origin)) {
 			}
 			val := text[m[2]:m[3]]
 			if s, ok := acceptableValue(spec.kind, val); ok {
-				add(s, Origin{Endpoint: ob.Endpoint, Field: "labelled text", Via: ViaHTML})
+				addHTML(s, Origin{Endpoint: ob.Endpoint, Field: "labelled text", Via: ViaHTML})
 			}
 		}
 	}
@@ -596,23 +611,24 @@ func harvestInputName(name string) bool {
 	return ok
 }
 
-// mineLink extracts identifier-shaped path segments and object-id query values
-// from one same-origin link. Route keywords are refused (see
-// nonIdentifierWords), so "/users/edit" contributes nothing.
-func mineLink(raw string, ob Observation, add func(string, Origin)) {
+// resolveSameOriginLink resolves one href/action against the body URL and
+// reports whether it is usable and same-origin, returning its path. Cross-
+// origin links, fragments and non-navigational schemes are refused, so a
+// stored body can only attribute data to its own origin.
+func resolveSameOriginLink(raw string, ob Observation) (*url.URL, string, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || strings.HasPrefix(raw, "#") {
-		return
+		return nil, "", false
 	}
 	lower := strings.ToLower(raw)
 	for _, prefix := range []string{"javascript:", "mailto:", "tel:", "data:"} {
 		if strings.HasPrefix(lower, prefix) {
-			return
+			return nil, "", false
 		}
 	}
 	ref, err := url.Parse(raw)
 	if err != nil {
-		return
+		return nil, "", false
 	}
 	base, baseErr := url.Parse(ob.BodyURL)
 	if baseErr != nil || base.Scheme == "" || base.Host == "" {
@@ -620,14 +636,73 @@ func mineLink(raw string, ob Observation, add func(string, Origin)) {
 	}
 	if ref.IsAbs() {
 		if base == nil || !strings.EqualFold(ref.Scheme, base.Scheme) || !strings.EqualFold(ref.Host, base.Host) {
-			return // cross-origin: outside what this body can attribute
+			return nil, "", false
 		}
 	} else if base != nil {
 		ref = base.ResolveReference(ref)
 	}
-	linkPath := ref.Path
-	for _, seg := range strings.Split(strings.Trim(linkPath, "/"), "/") {
-		if seg == "" {
+	return ref, ref.Path, true
+}
+
+// linkRouteWords collects the ordinary route segments this body links to:
+// every path segment that is NOT positionally an object. A page linking
+// /product marks "product" as a route; a page linking /users/dave does not
+// mark "dave", because that segment is in object position.
+func linkRouteWords(body []byte, ob Observation) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range hrefRE.FindAllStringSubmatch(string(body), -1) {
+		raw := string(m[1])
+		if raw == "" {
+			raw = string(m[2])
+		}
+		_, linkPath, ok := resolveSameOriginLink(raw, ob)
+		if !ok {
+			continue
+		}
+		segs := splitPathSegments(linkPath)
+		for i, seg := range segs {
+			if objectPosition(segs, i) {
+				continue
+			}
+			out[strings.ToLower(seg)] = true
+		}
+	}
+	return out
+}
+
+// isRouteWordValue reports whether a pure alphabetic value is also an
+// ordinary route on this page ("product" because /product is linked). Such a
+// word is a route, not a foreign identifier: probing it reads an unrelated
+// page and produces a misleading "session did not reach the object" verdict.
+func isRouteWordValue(raw string, routeWords map[string]bool) bool {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" || !routeWords[v] {
+		return false
+	}
+	for _, r := range v {
+		if r < 'a' || r > 'z' {
+			return false
+		}
+	}
+	return true
+}
+
+// mineLink extracts identifier-shaped path segments and object-id query values
+// from one same-origin link.
+//
+// A path segment is mined ONLY when it is positionally an object: the segment
+// after a collection noun (/users/dave, /orders/99). A bare top-level route
+// (/product) contributes nothing — that was the live defect this rule fixes.
+// Route keywords are still refused inside an object position, so
+// /users/edit contributes nothing.
+func mineLink(raw string, ob Observation, add func(string, Origin)) {
+	ref, linkPath, ok := resolveSameOriginLink(raw, ob)
+	if !ok {
+		return
+	}
+	segs := splitPathSegments(linkPath)
+	for i, seg := range segs {
+		if !objectPosition(segs, i) {
 			continue
 		}
 		if _, ok := classifyHarvested(seg); !ok {
@@ -635,11 +710,17 @@ func mineLink(raw string, ob Observation, add func(string, Origin)) {
 		}
 		add(seg, Origin{Endpoint: ob.Endpoint, Field: linkPath, Via: ViaLink})
 	}
-	for name, vals := range ref.Query() {
+	query := ref.Query()
+	names := make([]string, 0, len(query))
+	for name := range query {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
 		if !ObjectIDParameter(name) {
 			continue
 		}
-		for _, v := range vals {
+		for _, v := range query[name] {
 			add(v, Origin{Endpoint: ob.Endpoint, Field: linkPath + "?" + name, Via: ViaLink})
 		}
 	}

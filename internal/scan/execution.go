@@ -10,6 +10,7 @@ import (
 	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/idor"
 	"github.com/indago/indago/internal/ratelimit"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/worker"
@@ -103,7 +104,8 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 
 	handlers := c.opts.Handlers
 	if handlers == nil {
-		handlers = c.defaultHandlers(eng, scope, sc.Config.ProxyPool, limiter, sc.Config.IDORCandidates)
+		handlers = c.defaultHandlers(eng, scope, sc.Config.ProxyPool, limiter, sc.Config.IDORCandidates,
+			idor.EnumerationOptions{Enabled: sc.Config.EnableIDOREnumeration, Neighbours: sc.Config.IDOREnumerationNeighbours})
 	}
 	pool := worker.New(c.queue, handlers, c.poolConfig(sc), c.log)
 	if err := pool.Start(runCtx); err != nil {

@@ -62,6 +62,12 @@ type idorDetail struct {
 	HarvestedCount   int                  `json:"harvested_count,omitempty"`
 	Harvest          []idor.Harvest       `json:"harvested_candidates,omitempty"`
 	HarvestNote      string               `json:"harvest_note,omitempty"`
+	Enumeration      bool                 `json:"enumeration,omitempty"`
+	EnumerationNote  string               `json:"enumeration_note,omitempty"`
+	ProbesBudget     int                  `json:"probes_budget,omitempty"`
+	ProbesLeft       int                  `json:"probes_left,omitempty"`
+	BudgetExhausted  bool                 `json:"probe_budget_exhausted,omitempty"`
+	SessionBlocked   bool                 `json:"session_blocked,omitempty"`
 	Attempts         []idorAttempt        `json:"attempts,omitempty"`
 	Verdict          domain.Verdict       `json:"verdict,omitempty"`
 	Reason           string               `json:"reason,omitempty"`
@@ -109,6 +115,64 @@ type idorExecutor struct {
 	harvestNote string
 	harvestDone bool
 	supplied    []string
+	// enum is the operator's bounded-enumeration opt-in. The zero value means
+	// "off", which is the default and preserves the previous behaviour
+	// exactly (see docs/idor.md).
+	enum idor.EnumerationOptions
+	// probes is the scan-wide foreign-object request budget, SHARED by the
+	// derived-candidate pass and the enumeration pass. Several IDOR jobs run
+	// concurrently, so it is mutex-guarded.
+	probes *idorProbeBudget
+	// loginMu guards the once-per-scan login-page note. A login page means the
+	// session did not reach the object; reporting it per candidate would bury
+	// the one fact the operator needs and waste probes.
+	loginMu   sync.Mutex
+	loginNote bool
+}
+
+// maxIDORProbesPerScan is the hard, scan-wide ceiling on foreign-object
+// requests (request B of the differential), shared by every IDOR job of one
+// execution and by both candidate sources. Per injection point the bound is
+// MaxCandidates (5 derived) + MaxEnumerationPerSite (12 enumerated) = 17, and
+// this scan-wide ceiling keeps a target with many parameters from ever
+// multiplying that.
+const maxIDORProbesPerScan = 60
+
+// idorProbeBudget is a shared, concurrency-safe request budget.
+type idorProbeBudget struct {
+	mu   sync.Mutex
+	left int
+}
+
+func newIDORProbeBudget(n int) *idorProbeBudget {
+	if n < 0 {
+		n = 0
+	}
+	return &idorProbeBudget{left: n}
+}
+
+// take reserves one foreign-object probe and reports whether one was left.
+func (b *idorProbeBudget) take() bool {
+	if b == nil {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.left <= 0 {
+		return false
+	}
+	b.left--
+	return true
+}
+
+// remaining reports the probes left, for the persisted detail.
+func (b *idorProbeBudget) remaining() int {
+	if b == nil {
+		return 0
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.left
 }
 
 type idorIdentity struct {
@@ -125,11 +189,12 @@ type idorIdentity struct {
 	HarvestNote string
 }
 
-func newIDORExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, supplied []string) *idorExecutor {
+func newIDORExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, supplied []string, enum idor.EnumerationOptions) *idorExecutor {
 	if findingsMu == nil {
 		findingsMu = &sync.Mutex{}
 	}
-	return &idorExecutor{store: st, engine: eng, evidence: ev, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu, supplied: append([]string(nil), supplied...)}
+	return &idorExecutor{store: st, engine: eng, evidence: ev, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu,
+		supplied: append([]string(nil), supplied...), enum: enum, probes: newIDORProbeBudget(maxIDORProbesPerScan)}
 }
 
 var _ worker.Handler = (*idorExecutor)(nil)
@@ -186,6 +251,19 @@ func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.
 		d.Verdict, d.Reason = domain.VerdictInconclusive, reason
 		return d, domain.OutcomeSuccess, nil, false, true
 	}
+	// noCandidate is the CLEAN conclusion for a parameter with nothing to try:
+	// one informative, skipped test case and NOT a single request. It is a
+	// success, not an inconclusive verdict — there is no probability judgement
+	// to make when the engine never reached the target.
+	noCandidate := func(detail string) (idorDetail, domain.TestOutcome, error, bool, bool) {
+		reason := "no foreign object identifier available; supply -idor-candidates or enable -idor-enumerate"
+		if detail != "" {
+			reason += " (" + truncate(detail, 240) + ")"
+		}
+		d.Skipped, d.SkipReason, d.Reason = true, reason, reason
+		d.Verdict = ""
+		return d, domain.OutcomeSuccess, nil, false, true
+	}
 
 	if focus == nil {
 		return idorDetail{Engine: "idor"}, domain.OutcomeError, fmt.Errorf("IDOR job has no injection point"), true, false
@@ -207,7 +285,25 @@ func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.
 	}
 	d.OwnValue = own
 
+	// Candidate derivation is LOCAL work: the harvest reads only data the scan
+	// already holds and enumeration is arithmetic. It therefore happens BEFORE
+	// any request, so a parameter with no identifier to try never touches the
+	// target — the live defect where an ordinary /product link was probed and
+	// misreported as a login page cannot recur.
+	known := e.knownIdentity(ctx, job.ScanID)
+	harvested, harvestNote := e.harvestCandidates(ctx, job.ScanID, known, own)
+	d.HarvestedCount, d.HarvestNote = len(harvested), harvestNote
+
+	cands, deriveReason := e.deriveCandidates(own, harvested, &d)
+	if len(cands) == 0 {
+		return noCandidate(deriveReason)
+	}
+
 	ident, _ := e.identity(ctx, job.ScanID, ep)
+	// The durable identity baseline now exists (positive or negative): attach
+	// the harvested set to it so the report and a restarted scan can see what
+	// the engine found, without re-mining the evidence store.
+	e.persistHarvest(ctx, ident, harvested, harvestNote)
 	if ident.Identity.Empty() {
 		reason := ident.Reason
 		if reason == "" {
@@ -218,6 +314,14 @@ func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.
 	}
 	d.CallerIdentity, d.IdentitySource = ident.Identity, ident.Source
 	d.IdentityEvidence = ident.Evidence
+
+	// A harvested value that IS the caller's own identity is never a foreign
+	// object. Derivation ran before the identity baseline (so a no-candidate
+	// scan sends no request), so the filter is applied here.
+	cands = filterCallerCandidates(cands, ident.Identity)
+	if len(cands) == 0 {
+		return noCandidate("every identifier derived for this parameter belongs to the caller")
+	}
 
 	// Request A: the caller's OWN object, exactly as observed. Its evidence is
 	// half of the differential pair.
@@ -255,18 +359,18 @@ func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.
 		return d, domain.OutcomeSuccess, nil, false, false
 	}
 
-	harvested, harvestNote := e.harvestCandidates(ctx, job.ScanID, ident)
-	d.HarvestedCount, d.HarvestNote = len(harvested), harvestNote
-
-	cands, reason := idor.DeriveCandidatesFromHarvest(own, e.supplied, harvested, 0)
-	if len(cands) == 0 {
-		return skip(reason)
-	}
-
 	// Request B: one bounded read per foreign identifier.
+	d.ProbesBudget = maxIDORProbesPerScan
 	verdict := domain.VerdictInconclusive
 	var reasons []string
 	for _, cand := range cands {
+		// One scan-wide budget, spent by derived and enumerated candidates
+		// alike: enumeration can never multiply the pass's request count.
+		if !e.probes.take() {
+			d.BudgetExhausted = true
+			reasons = append(reasons, "the scan-wide IDOR probe budget was exhausted before every candidate was tried")
+			break
+		}
 		addr := *ep
 		req, err := buildRequest(&addr, params, &injection{param: focus, value: cand.Value})
 		if err != nil {
@@ -305,7 +409,15 @@ func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.
 		// A harvested candidate's provenance travels with the attempt and into
 		// the finding reason, so the report can say which value was tested and
 		// where the scan found it. An operator-supplied candidate has none.
+		//
+		// A login page means the session never reached the object. It is
+		// reported ONCE per scan: repeating it per candidate buried the one
+		// fact the operator needs and wasted the request budget.
+		loginPage := dec.Outcome == idor.OutcomeInconclusive && idor.LooksLikeLoginPage(resp.Body)
 		attemptReason := dec.Reason
+		if loginPage && !e.noteLoginPage() {
+			attemptReason = "the session is still on the login page already reported by this scan; no further candidates were probed at this site"
+		}
 		if cand.Origin != nil {
 			attemptReason += "; candidate " + cand.Origin.Describe()
 		}
@@ -325,14 +437,33 @@ func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.
 		if verdict == domain.VerdictConfirmed {
 			break // one positive mismatch is enough; stop reading further objects
 		}
+		if loginPage {
+			// No further candidate at this site can succeed: stop instead of
+			// spending the rest of the budget on the same login page.
+			d.SessionBlocked = true
+			break
+		}
 	}
 
 	d.Verdict = verdict
 	d.Reason = joinReasons(reasons)
+	d.ProbesLeft = e.probes.remaining()
 	if verdict == domain.VerdictConfirmed {
 		e.correlate(ctx, job.ScanID, ep, focus, job.Target.InjectionPointID, d, tc.ID)
 	}
 	return d, domain.OutcomeSuccess, nil, false, false
+}
+
+// noteLoginPage records the scan's single login-page observation and reports
+// whether this call was the first.
+func (e *idorExecutor) noteLoginPage() bool {
+	e.loginMu.Lock()
+	defer e.loginMu.Unlock()
+	if e.loginNote {
+		return false
+	}
+	e.loginNote = true
+	return true
 }
 
 // send executes one request through the scan's scope-enforcing engine with the
@@ -455,6 +586,44 @@ func (e *idorExecutor) persistPair(ctx context.Context, tc *domain.TestCase, res
 // identity baseline: who am I, established from the target itself
 // ---------------------------------------------------------------------------
 
+// loadIdentityCase reads the persisted identity baseline TestCase, if the scan
+// already established one (positive or negative). It performs no request, so
+// candidate derivation can use the caller's exclusions without touching the
+// target.
+func (e *idorExecutor) loadIdentityCase(ctx context.Context, scanID domain.ID) (*idorIdentity, bool) {
+	cases, err := e.store.TestCases().ListByScan(ctx, scanID)
+	if err != nil {
+		return nil, false
+	}
+	for _, tc := range cases {
+		if tc.VulnClass != domain.VulnIDOR || !strings.HasPrefix(tc.Note, idorIdentityNote) {
+			continue
+		}
+		var d idorDetail
+		_ = json.Unmarshal(tc.Detail, &d)
+		return &idorIdentity{Identity: d.CallerIdentity, Source: d.IdentitySource,
+			Evidence: d.IdentityEvidence, Reason: d.SkipReason, CaseID: tc.ID,
+			Harvest: d.Harvest, HarvestNote: d.HarvestNote}, true
+	}
+	return nil, false
+}
+
+// knownIdentity returns the caller baseline ONLY if this scan already
+// established one. It never probes: the no-candidate path must be able to
+// harvest with exclusions and then conclude without sending anything.
+func (e *idorExecutor) knownIdentity(ctx context.Context, scanID domain.ID) *idorIdentity {
+	e.identityMu.Lock()
+	defer e.identityMu.Unlock()
+	if e.cached != nil {
+		return e.cached
+	}
+	if ident, ok := e.loadIdentityCase(ctx, scanID); ok {
+		e.cached = ident
+		return ident
+	}
+	return nil
+}
+
 // identity returns the scan's caller-identity baseline, establishing and
 // persisting it on first use. The baseline is read back from a TestCase so a
 // restarted scan does not probe the account page again. Only bounded, common
@@ -466,18 +635,9 @@ func (e *idorExecutor) identity(ctx context.Context, scanID domain.ID, ep *domai
 	if e.cached != nil {
 		return e.cached, true
 	}
-	if cases, err := e.store.TestCases().ListByScan(ctx, scanID); err == nil {
-		for _, tc := range cases {
-			if tc.VulnClass != domain.VulnIDOR || !strings.HasPrefix(tc.Note, idorIdentityNote) {
-				continue
-			}
-			var d idorDetail
-			_ = json.Unmarshal(tc.Detail, &d)
-			e.cached = &idorIdentity{Identity: d.CallerIdentity, Source: d.IdentitySource,
-				Evidence: d.IdentityEvidence, Reason: d.SkipReason, CaseID: tc.ID,
-				Harvest: d.Harvest, HarvestNote: d.HarvestNote}
-			return e.cached, true
-		}
+	if ident, ok := e.loadIdentityCase(ctx, scanID); ok {
+		e.cached = ident
+		return e.cached, true
 	}
 
 	origin := originOf(ep.URL)
@@ -590,6 +750,84 @@ func ownObjectValue(ep *domain.Endpoint, p *domain.Parameter) string {
 	return u.Query().Get(p.Name)
 }
 
+// deriveCandidates merges the bounded candidate sources for one parameter:
+// operator-supplied values, numeric neighbours and harvested identifiers
+// (always), then — only when the operator explicitly opted in — the bounded
+// enumeration set. The per-site bound is MaxCandidates for derived values plus
+// MaxEnumerationPerSite for enumerated ones; the scan-wide probe budget is
+// spent by both through the same counter.
+func (e *idorExecutor) deriveCandidates(own string, harvested []idor.Harvest, d *idorDetail) ([]idor.Candidate, string) {
+	if !e.enum.Enabled {
+		// Off by default: exactly the previous behaviour, byte for byte.
+		return idor.DeriveCandidatesFromHarvest(own, e.supplied, harvested, 0)
+	}
+
+	// Enumeration replaces the implicit numeric neighbours with a stated
+	// arithmetic, so the two do not both run (the old unpadded neighbours would
+	// contradict a padded set). Explicit values and harvested identifiers come
+	// first; the bounded enumeration set follows, deduplicated.
+	cands, reason := idor.DeriveExplicitAndHarvested(own, e.supplied, harvested, 0)
+	extra := idor.EnumerateCandidates(own, e.enum.Neighbours)
+	var added []idor.Candidate
+	for _, c := range extra {
+		if candidateValuePresent(cands, c.Value) {
+			continue
+		}
+		cands = append(cands, c)
+		added = append(added, c)
+	}
+	if len(extra) > 0 {
+		values := make([]string, 0, len(added))
+		for _, c := range added {
+			values = append(values, c.Value)
+		}
+		d.Enumeration = true
+		if len(added) == 0 {
+			d.EnumerationNote = fmt.Sprintf("bounded enumeration of baseline %q with N=%d produced no new candidate (all already proposed by another source)",
+				own, e.enum.ResolveNeighbours())
+		} else {
+			d.EnumerationNote = fmt.Sprintf("bounded enumeration of baseline %q with N=%d: tried %s",
+				own, e.enum.ResolveNeighbours(), strings.Join(values, ", "))
+		}
+	}
+	if len(cands) > 0 {
+		return cands, ""
+	}
+	return nil, reason
+}
+
+func candidateValuePresent(cands []idor.Candidate, value string) bool {
+	for _, c := range cands {
+		if strings.EqualFold(strings.TrimSpace(c.Value), strings.TrimSpace(value)) {
+			return true
+		}
+	}
+	return false
+}
+
+// filterCallerCandidates drops any candidate that is one of the caller's own
+// identity values. The harvest may have been computed before the identity
+// baseline was established, so this is the second, authoritative exclusion.
+func filterCallerCandidates(cands []idor.Candidate, caller idor.Identity) []idor.Candidate {
+	if len(caller.Fields) == 0 {
+		return cands
+	}
+	excluded := make(map[string]bool, len(caller.Fields))
+	for _, f := range caller.Fields {
+		if v := strings.ToLower(strings.TrimSpace(f.Value)); v != "" {
+			excluded[v] = true
+		}
+	}
+	out := make([]idor.Candidate, 0, len(cands))
+	for _, c := range cands {
+		if excluded[strings.ToLower(strings.TrimSpace(c.Value))] {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // harvesting: identifiers mined from data the scan already holds
 // ---------------------------------------------------------------------------
@@ -606,7 +844,7 @@ const maxHarvestHeaderBytes = 16 << 10
 // harvestCandidates returns the scan's harvested candidate set, computing it
 // once per execution and reusing the persisted set after a restart. It performs
 // local reads only: no request is ever sent to build this list.
-func (e *idorExecutor) harvestCandidates(ctx context.Context, scanID domain.ID, ident *idorIdentity) ([]idor.Harvest, string) {
+func (e *idorExecutor) harvestCandidates(ctx context.Context, scanID domain.ID, ident *idorIdentity, own string) ([]idor.Harvest, string) {
 	e.harvestMu.Lock()
 	defer e.harvestMu.Unlock()
 	if e.harvestDone {
@@ -620,14 +858,20 @@ func (e *idorExecutor) harvestCandidates(ctx context.Context, scanID domain.ID, 
 		return e.harvested, e.harvestNote
 	}
 
+	exclude := e.harvestExclusions(ctx, scanID, ident)
+	// The focused parameter's own value is the CALLER's object identifier: it
+	// is never a foreign candidate, and proposing it would waste a probe (and
+	// make an empty harvest look non-empty).
+	if v := strings.TrimSpace(own); v != "" {
+		exclude = append(exclude, v)
+	}
 	observations := e.harvestObservations(ctx, scanID)
-	e.harvested = idor.HarvestCandidates(observations, e.harvestExclusions(ctx, scanID, ident), 0)
+	e.harvested = idor.HarvestCandidates(observations, exclude, 0)
 	e.harvestNote = fmt.Sprintf("%d identifiers harvested from the scan's own data (cap %d, no extra requests)",
 		len(e.harvested), idor.MaxHarvested)
 	if len(e.harvested) == 0 {
 		e.harvestNote = "no foreign identifier could be harvested from the scan's own data"
 	}
-	e.persistHarvest(ctx, ident, e.harvested, e.harvestNote)
 	e.log.Debug("idor harvest", "scan", scanID, "candidates", len(e.harvested))
 	return e.harvested, e.harvestNote
 }
@@ -668,13 +912,10 @@ func (e *idorExecutor) harvestObservations(ctx context.Context, scanID domain.ID
 			if perr != nil {
 				continue
 			}
-			// Path segments that discovery itself considers variable values
-			// (never route keywords): /users/42/edit → "42".
-			var segs []string
-			for _, m := range discovery.QualifyingPathSegments(u.Path) {
-				segs = append(segs, m.Value)
-			}
-			if len(segs) > 0 {
+			// Path segments that are POSITIONALLY objects (/users/42, never
+			// a bare /product route): precision first, so harvesting does
+			// not propose the crawl's own route words.
+			if segs := idor.ObjectPathSegments(u.Path); len(segs) > 0 {
 				obs = append(obs, idor.Observation{Endpoint: ep.URL, Field: "path", Via: idor.ViaPath, Values: segs})
 			}
 			q := u.Query()

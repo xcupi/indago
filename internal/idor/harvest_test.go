@@ -252,6 +252,103 @@ func TestDeriveFromHarvestMergesExplicitFirstAndDedupes(t *testing.T) {
 	}
 }
 
+// TestHarvestOnlyMinesIdentifierPositions is the live-lab precision defect:
+// an ordinary link (/product) must never yield an identifier, while a
+// positional object segment (/users/42) and an id-named query parameter
+// (?user_id=77) must.
+func TestHarvestOnlyMinesIdentifierPositions(t *testing.T) {
+	body := []byte(`<html><body>
+	  <a href="/product">Product</a>
+	  <a href="/users/42">Alice</a>
+	  <a href="/orders/99">Order</a>
+	  <a href="/search?user_id=77">search 77</a>
+	  <a href="/users/edit">Edit</a>
+	</body></html>`)
+
+	got := HarvestCandidates([]Observation{{
+		Endpoint: "https://app.test/",
+		BodyURL:  "https://app.test/",
+		Body:     body,
+	}}, nil, 0)
+
+	have := map[string]bool{}
+	for _, h := range got {
+		have[h.Value] = true
+	}
+	for _, want := range []string{"42", "99", "77"} {
+		if !have[want] {
+			t.Fatalf("%q missing from harvest: %v", want, harvestValues(got))
+		}
+	}
+	for _, banned := range []string{"product", "products", "users", "orders", "search", "edit"} {
+		if have[banned] {
+			t.Fatalf("%q must not be harvested from an ordinary route: %v", banned, harvestValues(got))
+		}
+	}
+}
+
+// TestHarvestDropsRouteWordsUsedAsValues: a bare word that the same page links
+// to as an ordinary route is a route, even when it also appears as a form
+// value or labelled text. This is the second half of the /product defect.
+func TestHarvestDropsRouteWordsUsedAsValues(t *testing.T) {
+	body := []byte(`<html><body>
+	  <a href="/warehouse">Warehouse</a>
+	  <form><input name="username" value="warehouse"></form>
+	  <p>Username: warehouse</p>
+	</body></html>`)
+
+	got := HarvestCandidates([]Observation{{
+		Endpoint: "https://app.test/",
+		BodyURL:  "https://app.test/",
+		Body:     body,
+	}}, nil, 0)
+	if len(got) != 0 {
+		t.Fatalf("a route word was harvested as an identifier: %v", harvestValues(got))
+	}
+}
+
+// TestObjectPathSegmentsRequiresPosition pins the path rule directly.
+func TestObjectPathSegmentsRequiresPosition(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want []string
+	}{
+		{"/users/42", []string{"42"}},
+		{"/users/42/edit", []string{"42"}},
+		{"/orders/99", []string{"99"}},
+		{"/documents/abc123", []string{"abc123"}},
+		{"/product", nil},
+		{"/products", nil},
+		{"/product/42", []string{"42"}},
+		{"/users/edit", nil},
+		{"/admin/users", nil},
+	} {
+		got := ObjectPathSegments(tc.path)
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("ObjectPathSegments(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestIdentifierVocabulary pins the documented name table and the `_id`
+// suffix rule.
+func TestIdentifierVocabulary(t *testing.T) {
+	for _, name := range []string{
+		"id", "uid", "user", "user_id", "userId", "account", "accountId",
+		"order", "order_id", "invoice", "item", "product", "doc", "document_id",
+		"file", "ref", "no", "num", "number", "victim_id", "filters[user_id]",
+	} {
+		if !IdentifierName(name) {
+			t.Errorf("IdentifierName(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"q", "search", "page", "lang", "sort", "path[1]", "", "csrf_token"} {
+		if IdentifierName(name) {
+			t.Errorf("IdentifierName(%q) = true, want false", name)
+		}
+	}
+}
+
 // TestHarvestStaysPure keeps the package's no-I/O claim honest: harvesting
 // must never grow a dependency that could send a request or read a file.
 func TestHarvestStaysPure(t *testing.T) {

@@ -46,10 +46,13 @@ discovery (authenticated)                      controller, once per execution,
         │
         ├─ request A: own identifier, observed value   → evidence (baseline)
         │
-        ├─ candidate derivation (bounded, deterministic)
-        │     operator-supplied → numeric neighbours → observed identifiers
+        ├─ candidate derivation (bounded, deterministic, LOCAL — no request)
+        │     operator-supplied → numeric neighbours / harvested identifiers
+        │     → opt-in bounded enumeration (value±1, 1..N, padded; or the
+        │       fixed slug set admin/test/demo/guest)
+        │     no candidate at all → one informative skipped TestCase, NO probe
         │
-        ├─ request B × N (N ≤ 5): each → idor.Decide(...)
+        ├─ request B × N: each → idor.Decide(...)
         │     → request/response evidence per attempt
         │
         └─ Confirmed → Finding (VulnClass "idor")
@@ -78,7 +81,12 @@ discovery (authenticated)                      controller, once per execution,
 
 ### Candidate derivation (bounded, never brute force)
 
-`idor.DeriveCandidates`, in this order, capped at `idor.MaxCandidates` (5):
+Derivation is **local work**: it reads only data the scan already holds and
+performs arithmetic. It therefore happens BEFORE any request, so a parameter
+with nothing to try never touches the target (see "Clean conclusion" below).
+
+With the default engine (enumeration off), `idor.DeriveCandidatesFromHarvest`,
+in this order, capped at `idor.MaxCandidates` (5):
 
 1. **operator-supplied** identifiers (`-idor-candidates` / `idor_candidates`),
    in the given order — the only way to test an opaque identifier. Max 10,
@@ -86,12 +94,89 @@ discovery (authenticated)                      controller, once per execution,
    them (e.g. the victim username an authorized lab brief states).
 2. **numeric neighbours** of the caller's own numeric identifier (`+1`, `−1`,
    `+2`, `−2`, `+3`), dropped at `≤ 0`.
-3. **observed identifiers** — identifier-shaped values discovery already saw in
-   other in-scope parameters with the authenticated session.
+3. **harvested identifiers** — identifier-shaped values mined from the scan's
+   own data (see "Harvesting precision").
 
-An opaque identifier (UUID, long random slug) with no supplied candidate yields
-**no candidates at all** and a stated skip reason. There is no enumeration,
-no wordlist and no timing jitter.
+With `-idor-enumerate` on, the two numeric sources are replaced by the stated
+enumeration arithmetic (below), so the probe list is predictable; supplied and
+harvested identifiers still come first.
+
+An opaque identifier (UUID, long random slug) with no supplied candidate and no
+harvest yields **no candidates at all** and a stated skip reason. There is no
+wordlist and no timing jitter.
+
+### Harvesting precision
+
+A value is only ever treated as an object identifier when the POSITION it came
+from plausibly is one:
+
+| Position | Accepted when | Example |
+|---|---|---|
+| query parameter | name is in the identifier vocabulary | `/my-account?user_id=42` |
+| JSON field | field name is in the vocabulary (or is an identity attribute) | `{"users":[{"id":17}]}` |
+| path segment | it is the segment AFTER a collection noun | `/users/42`, `/orders/99` |
+
+A bare top-level path is never an identifier: `/product` contributes nothing.
+A pure word that the same page also links to as an ordinary route is dropped
+even when it appears as a form value or in labelled text. The rest of the
+existing filter is unchanged: caller identity, session secrets, timestamps,
+versions, asset fingerprints, length bounds, and the deterministic
+`MaxHarvested` cap all still apply.
+
+The vocabulary (see `internal/idor/vocabulary.go`) is `id`, `uid`, `guid`,
+`uuid`, `user`, `account`, `profile`, `member`, `customer`, `employee`,
+`patient`, `order`, `invoice`, `item`, `product`, `booking`, `ticket`, `doc`,
+`document`, `file`, `attachment`, `download`, `ref`, `reference`, `no`, `num`,
+`number`, `post`, `message`, `comment`, `report`, `record`, `object`, `tenant`,
+`org`, `group`, `company`, plus their `_id` / camelCase forms and any
+`<something>_id` suffix. The same table gates which parameters are probed
+(`ObjectIDParameter`), so harvesting and probing cannot disagree.
+
+### Bounded enumeration (opt-in)
+
+`-idor-enumerate` / `idor_enumerate` adds a small, predictable arithmetic step
+for the classic `?id=1`, `?id=2` case. It is OFF by default and requires
+`-idor`.
+
+| Baseline observed value | Candidates (N = `-idor-enumerate-n`, default 5, ceiling 10) |
+|---|---|
+| numeric `7` | `6`, `8`, then `1,2,3,4,5` — exactly 7 values |
+| zero-padded `007` | `006`, `008`, then `001..005` — padding preserved at the baseline's width, never unpadded |
+| short slug `wiener` | `admin`, `test`, `demo`, `guest` — the only slug set, never a wordlist |
+| UUID / email / opaque / long hex | none |
+
+The baseline itself is never repeated; `value-1` is dropped when it would be
+`≤ 0`. Arithmetic is `strconv.Atoi` on the observed value (1..12 digits) and
+`fmt.Sprintf("%0*d", width, v)` when the baseline is padded — see
+`internal/idor/enumerate.go`.
+
+**Bounds.** Per injection point: at most `MaxCandidates` (5) derived plus
+`MaxEnumerationPerSite` (2 + N ≤ 12) enumerated = **17 foreign-object
+requests**. Scan-wide: ONE shared budget of **60** probes
+(`maxIDORProbesPerScan`) spent by derived and enumerated candidates alike, so
+enumeration can never multiply the pass's request count. Every probe is still a
+single scoped GET/HEAD through the same scope-enforcing engine with the same
+saved session; `idor.Decide` is unchanged — an enumeration hit that returns the
+caller's own data is **Rejected**, never Confirmed.
+
+### Clean conclusion
+
+If no candidate survives harvesting (and enumeration is off, or produces
+nothing), the engine sends **no request at all** — not even the own-object
+baseline — and records one skipped `TestCase` whose note reads:
+
+> no foreign object identifier available; supply -idor-candidates or enable
+> -idor-enumerate
+
+That is a success with no verdict (not an inconclusive): there is no
+probability judgement to make about a target the engine never reached.
+
+### Login-page conclusion, once per scan
+
+A candidate response that renders a password form means the session did not
+reach the object. The engine states that **once per scan** (later sites say the
+login page was already reported), and stops probing that site immediately
+instead of spending the rest of the budget on the same page.
 
 ### Verdict rules (`idor.Decide`)
 
@@ -192,6 +277,9 @@ Deliberately **not** implemented or not performed:
   a leak that appears only in an intermediate redirect body is not detected.
 * **Randomized/opaque identifier enumeration.** Refused by design; supply
   explicit candidates when an authorized brief names the victim's identifier.
+  The only enumeration is the bounded, opt-in arithmetic above (small numeric
+  neighbours and a four-item slug set) — never a wordlist, never a
+  UUID/hash search.
 * **Function-level authorization and BFLA.**
 
 ## 4. Configuration
@@ -207,8 +295,12 @@ indago scan create -project P -target T -auth existing -auth-state state.json \
   an anonymous scan (there is no caller identity to establish).
 * `-idor-candidates` / `idor_candidates`: repeatable, at most 10,
   identifier-shaped values only.
+* `-idor-enumerate` / `idor_enumerate`: opt-in bounded enumeration. Off by
+  default. Requires `-idor`; rejected at creation otherwise.
+* `-idor-enumerate-n` / `idor_enumerate_n`: N for `1..N` (default 5, ceiling
+  10). Rejected when set without `-idor-enumerate`.
 
-The API (`POST /api/scans`) accepts the same two fields.
+The API (`POST /api/scans`) accepts the same four fields.
 
 ## 5. Tests
 
@@ -218,6 +310,17 @@ The API (`POST /api/scans`) accepts the same two fields.
   live lab page shape (`Your username is: <name>` under a
   "User ID controlled by request parameter" title) in both its confirming and
   same-principal forms.
+* `internal/idor/harvest_test.go` — position/vocabulary precision
+  (`/product` and other ordinary routes are never identifiers; `/users/42` and
+  `?user_id=42` are), route-word values, the `ObjectPathSegments` rule, plus the
+  existing rejection/ranking/purity fixtures.
+* `internal/idor/enumerate_test.go` — the exact arithmetic: baseline 7 with N=3
+  is exactly `6,8,1,2,3`; a zero-padded baseline yields only padded variants;
+  `value-1` never becomes 0; slug/opaque baselines; N clamping; determinism;
+  and the unchanged legacy numeric set used when enumeration is off.
+* `internal/scan/idor_harvest_test.go` — the harvest integration (no extra
+  requests, provenance, persistence, shape matching) and the clean no-candidate
+  conclusion: **zero** requests when nothing can be tried.
 * `internal/scan/idor_test.go` — the differential against real `httptest`
   servers: Confirmed on foreign data with both requests as evidence;
   same-principal and no-identity fixtures never Confirmed; login redirect not
@@ -232,6 +335,13 @@ The API (`POST /api/scans`) accepts the same two fields.
     downgrades the verdict instead of creating an unreproducible finding;
   * `TestIDORPassRunsWithoutWaitingForDOMWork` — with `browser_concurrency=0`
     the IDOR job is enqueued while DOM-XSS work is still pending.
+* `internal/scan/idor_enumerate_test.go` — the engine-level enumeration
+  contract: the exact numeric set, confirmation on an enumerated foreign object,
+  the shared 60-probe budget (a 3-probe budget sends exactly 3), the
+  once-per-scan login-page conclusion (one attempt per site, never repeated),
+  enumeration-off preserving the legacy candidate set, a `/product`-link page
+  producing zero requests, zero-padded requests, and the scan-creation
+  validation gate.
 
 ## 6. Product-boundary note
 

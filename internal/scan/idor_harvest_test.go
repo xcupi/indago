@@ -128,7 +128,7 @@ func TestIDORHarvestedCandidateConfirmsWithProvenance(t *testing.T) {
 			return 200, `<p>Your username is <strong>wiener</strong></p>`
 		}
 	}}
-	ex := newIDORExecutor(env.st, eng, env.ev, ExecutorConfig{}, execLog(), nil, nil)
+	ex := newIDORExecutor(env.st, eng, env.ev, ExecutorConfig{}, execLog(), nil, nil, idor.EnumerationOptions{})
 	if err := ex.Handle(context.Background(), env.idorJobHelper(ep, ip)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestIDORWithoutCandidatesOrHarvestSendsNoProbes(t *testing.T) {
 	eng := &idorFakeEngine{respond: func(string) (int, string) {
 		return 200, `<p>Your username is <strong>wiener</strong></p>`
 	}}
-	ex := newIDORExecutor(env.st, eng, env.ev, ExecutorConfig{}, execLog(), nil, nil)
+	ex := newIDORExecutor(env.st, eng, env.ev, ExecutorConfig{}, execLog(), nil, nil, idor.EnumerationOptions{})
 	if err := ex.Handle(context.Background(), env.idorJobHelper(ep, ip)); err != nil {
 		t.Fatalf("handle must not fail when there is nothing to test: %v", err)
 	}
@@ -208,20 +208,25 @@ func TestIDORWithoutCandidatesOrHarvestSendsNoProbes(t *testing.T) {
 	if d.Verdict == domain.VerdictConfirmed {
 		t.Fatal("nothing may be confirmed without a candidate")
 	}
+	// The clean conclusion: no verdict at all, one informative note naming both
+	// ways to give the engine something to test.
+	if d.Verdict != "" {
+		t.Fatalf("verdict = %q, want none (nothing was probed, so there is no inconclusive to report)", d.Verdict)
+	}
+	if !strings.Contains(d.SkipReason, "supply -idor-candidates or enable -idor-enumerate") {
+		t.Fatalf("skip reason must tell the operator what to do: %q", d.SkipReason)
+	}
 	if d.HarvestedCount != 0 || !strings.Contains(d.HarvestNote, "no foreign identifier") {
 		t.Fatalf("detail must state that nothing was harvested: %+v", d)
 	}
 	if !strings.Contains(strings.ToLower(d.SkipReason), "unpredictable") {
 		t.Fatalf("skip reason must explain the refusal: %q", d.SkipReason)
 	}
-	// Identity probe + own-object baseline only. No foreign object read.
-	if len(eng.seen()) != 2 {
-		t.Fatalf("requests = %v, want only identity + own baseline", eng.seen())
-	}
-	for _, call := range eng.seen() {
-		if !strings.Contains(call, "id=wiener") && !strings.HasSuffix(call, "/my-account") {
-			t.Fatalf("unexpected probe: %s", call)
-		}
+	// Requirement C: nothing to try must mean NOT ONE request. Derivation is
+	// local, so even the identity baseline is deferred until a candidate
+	// exists.
+	if len(eng.seen()) != 0 {
+		t.Fatalf("requests = %v, want none (no candidate, no probe)", eng.seen())
 	}
 }
 
@@ -238,7 +243,7 @@ func TestIDORExplicitCandidatesStillLead(t *testing.T) {
 		}
 		return 200, `<p>Your username is <strong>wiener</strong></p>`
 	}}
-	ex := newIDORExecutor(env.st, eng, env.ev, ExecutorConfig{}, execLog(), nil, []string{"carlos"})
+	ex := newIDORExecutor(env.st, eng, env.ev, ExecutorConfig{}, execLog(), nil, []string{"carlos"}, idor.EnumerationOptions{})
 	if err := ex.Handle(context.Background(), env.idorJobHelper(ep, ip)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -284,7 +289,7 @@ func TestIDORExplicitCandidatesMergeAheadOfHarvested(t *testing.T) {
 			return 200, `<p>Your username is <strong>wiener</strong></p>`
 		}
 	}}
-	ex := newIDORExecutor(env.st, eng, env.ev, ExecutorConfig{}, execLog(), nil, []string{"carlos"})
+	ex := newIDORExecutor(env.st, eng, env.ev, ExecutorConfig{}, execLog(), nil, []string{"carlos"}, idor.EnumerationOptions{})
 	if err := ex.Handle(context.Background(), env.idorJobHelper(ep, ip)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -328,7 +333,7 @@ func TestIDORHarvestedCandidateMustMatchEndpointShape(t *testing.T) {
 		}
 		return 200, `<p>Your username is <strong>wiener</strong></p>`
 	}}
-	ex := newIDORExecutor(env.st, eng, env.ev, ExecutorConfig{}, execLog(), nil, nil)
+	ex := newIDORExecutor(env.st, eng, env.ev, ExecutorConfig{}, execLog(), nil, nil, idor.EnumerationOptions{})
 	if err := ex.Handle(context.Background(), env.idorJobHelper(ep, ip)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -358,7 +363,7 @@ func TestIDORHarvestPersistsOnTheIdentityBaseline(t *testing.T) {
 	eng := &idorFakeEngine{respond: func(string) (int, string) {
 		return 200, `<p>Your username is <strong>wiener</strong></p>`
 	}}
-	ex := newIDORExecutor(env.st, eng, env.ev, ExecutorConfig{}, execLog(), nil, nil)
+	ex := newIDORExecutor(env.st, eng, env.ev, ExecutorConfig{}, execLog(), nil, nil, idor.EnumerationOptions{})
 	if err := ex.Handle(context.Background(), env.idorJobHelper(ep, ip)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}

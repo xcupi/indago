@@ -452,6 +452,8 @@ func (c *cli) scanCreate(args []string) error {
 	enableIDOR := fs.Bool("idor", false, "opt in to the IDOR engine's object-identifier differential (GET/HEAD reads only); requires an authenticated session — OFF by default (see docs/idor.md)")
 	var idorCandidates stringList
 	fs.Var(&idorCandidates, "idor-candidates", "foreign object identifier to try for the IDOR differential, e.g. the victim username an authorized lab brief names (repeatable, max 10; never invented by Indago)")
+	enableIDOREnum := fs.Bool("idor-enumerate", false, "opt in to BOUNDED identifier enumeration for the IDOR engine: numeric neighbours (value-1, value+1, 1..N) and a fixed short-slug set (admin, test, demo, guest); requires -idor, OFF by default (see docs/idor.md)")
+	idorEnumN := fs.Int("idor-enumerate-n", 0, "N for -idor-enumerate: how many low integers 1..N to try (default 5, ceiling 10)")
 	var proxyPool stringList
 	fs.Var(&proxyPool, "proxy", "proxy to route this scan's traffic through — raw HTTP and browser verification alike (repeatable, round-robin; http://host:port, https://host:port, or socks5://host:port, optionally with embedded user:pass@ creds); operator-supplied infrastructure only, off by default (see AGENTS.md §2.3)")
 	randomizeTLS := fs.Bool("randomize-tls-fingerprint", false, "randomize the raw HTTP engine's TLS ClientHello (JA3) via uTLS instead of Go's own default — OFF by default (see AGENTS.md §2.3); MUTUALLY EXCLUSIVE with -proxy (Go's transport never consults a custom TLS dialer for a proxied connection); has no effect on browser verification, which already uses a real browser's own TLS stack")
@@ -474,6 +476,12 @@ func (c *cli) scanCreate(args []string) error {
 		"quick_scan": *quick, "max_depth": *depth, "max_pages": *maxPages, "max_endpoints": *maxEndpoints,
 		"enable_evasion": *enableEvasion,
 		"enable_idor":    *enableIDOR,
+	}
+	if *enableIDOREnum {
+		req["idor_enumerate"] = true
+	}
+	if *idorEnumN != 0 {
+		req["idor_enumerate_n"] = *idorEnumN
 	}
 	if *reconLevel != "" && !strings.EqualFold(*reconLevel, "off") {
 		req["recon_level"] = *reconLevel

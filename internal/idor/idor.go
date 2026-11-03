@@ -488,6 +488,12 @@ func looksLikeLoginPage(body []byte) bool {
 	return passwordInputRE.Match(body)
 }
 
+// LooksLikeLoginPage reports whether a response renders a password form: the
+// session did not reach the candidate object. Exported so the scan-side
+// executor can recognise this outcome, stop probing that site, and report it
+// at most once per scan instead of once per candidate.
+func LooksLikeLoginPage(body []byte) bool { return looksLikeLoginPage(body) }
+
 // Candidate is one foreign object identifier to try.
 type Candidate struct {
 	Value  string `json:"value"`
@@ -524,7 +530,7 @@ func DeriveCandidates(own string, supplied, observed []string, limit int) ([]Can
 	for _, v := range observed {
 		hs = append(hs, Harvest{Value: v, Shape: ShapeOf(v)})
 	}
-	out, reason := deriveCandidates(own, supplied, hs, limit, false)
+	out, reason := deriveCandidates(own, supplied, hs, limit, false, true)
 	for i := range out {
 		if out[i].Source == "harvested" {
 			out[i].Source = "observed"
@@ -546,10 +552,20 @@ func DeriveCandidates(own string, supplied, observed []string, limit int) ([]Can
 // The cap stays MaxCandidates per injection point, so harvesting never turns
 // the pass into enumeration.
 func DeriveCandidatesFromHarvest(own string, supplied []string, harvested []Harvest, limit int) ([]Candidate, string) {
-	return deriveCandidates(own, supplied, harvested, limit, true)
+	return deriveCandidates(own, supplied, harvested, limit, true, true)
 }
 
-func deriveCandidates(own string, supplied []string, harvested []Harvest, limit int, matchShape bool) ([]Candidate, string) {
+// DeriveExplicitAndHarvested is the enumeration-mode derivation: the operator's
+// explicit values first, then harvested identifiers — with NO implicit numeric
+// neighbours. Bounded enumeration replaces the neighbours with a stated,
+// predictable arithmetic (value-1, value+1, 1..N, padded only when the baseline
+// is padded), so the two must not both run: the old unpadded neighbours would
+// contradict the padded set and make the probe list unpredictable.
+func DeriveExplicitAndHarvested(own string, supplied []string, harvested []Harvest, limit int) ([]Candidate, string) {
+	return deriveCandidates(own, supplied, harvested, limit, true, false)
+}
+
+func deriveCandidates(own string, supplied []string, harvested []Harvest, limit int, matchShape, numericNeighbours bool) ([]Candidate, string) {
 	if limit <= 0 || limit > MaxCandidates {
 		limit = MaxCandidates
 	}
@@ -584,14 +600,16 @@ func deriveCandidates(own string, supplied []string, harvested []Harvest, limit 
 			return out, ""
 		}
 	}
-	if n, ok := numericID(own); ok {
-		for _, delta := range []int{1, -1, 2, -2, 3, -3} {
-			next := n + delta
-			if next <= 0 {
-				continue
-			}
-			if add(strconv.Itoa(next), "numeric", ShapeNumeric, nil, false) {
-				return out, ""
+	if numericNeighbours {
+		if n, ok := numericID(own); ok {
+			for _, delta := range []int{1, -1, 2, -2, 3, -3} {
+				next := n + delta
+				if next <= 0 {
+					continue
+				}
+				if add(strconv.Itoa(next), "numeric", ShapeNumeric, nil, false) {
+					return out, ""
+				}
 			}
 		}
 	}
@@ -646,41 +664,12 @@ func candidateShaped(v string) bool {
 	return true
 }
 
-// objectIDParams is the conservative set of parameter names that select an
-// object by identifier. Anything not listed is left alone: a wrong guess would
-// read an unrelated object rather than test authorization.
-var objectIDParams = map[string]bool{
-	"id": true, "uid": true, "user": true, "username": true, "userid": true, "user_id": true,
-	"account": true, "accountid": true, "account_id": true,
-	"profile": true, "profileid": true, "profile_id": true,
-	"file": true, "filename": true, "file_name": true, "fileid": true, "file_id": true,
-	"doc": true, "document": true, "documentid": true, "document_id": true, "docid": true,
-	"object": true, "objectid": true, "object_id": true,
-	"order": true, "orderid": true, "order_id": true,
-	"invoice": true, "invoiceid": true, "invoice_id": true,
-	"post": true, "postid": true, "post_id": true,
-	"message": true, "messageid": true, "message_id": true, "msg": true, "msgid": true, "msg_id": true,
-	"report": true, "reportid": true, "report_id": true,
-	"record": true, "recordid": true, "record_id": true,
-	"item": true, "itemid": true, "item_id": true,
-	"product": true, "productid": true, "product_id": true,
-	"tenant": true, "tenantid": true, "tenant_id": true,
-	"customer": true, "customerid": true, "customer_id": true,
-	"employee": true, "employeeid": true, "employee_id": true,
-	"group": true, "groupid": true, "group_id": true,
-	"org": true, "orgid": true, "org_id": true,
-	"company": true, "companyid": true, "company_id": true,
-	"patient": true, "patientid": true, "patient_id": true,
-	"booking": true, "bookingid": true, "booking_id": true,
-	"ticket": true, "ticketid": true, "ticket_id": true,
-	"comment": true, "commentid": true, "comment_id": true,
-	"attachment": true, "attachmentid": true, "attachment_id": true,
-	"download": true, "downloadid": true, "download_id": true,
-	"number": true, "num": true,
-}
-
-// nonObjectHints always win: these select sessions, credentials, navigation or
-// filters, never another principal's object.
+// ObjectIDParameter is the probe gate: it uses the shared identifier
+// vocabulary (vocabulary.go), so harvesting and probing agree on what an
+// identifier name is, and refuses names that always select sessions,
+// credentials, navigation or filters (nonObjectHints). Anything outside the
+// vocabulary is left alone: a wrong guess would read an unrelated object
+// rather than test authorization.
 var nonObjectHints = []string{"csrf", "token", "sess", "auth", "pass", "secret", "nonce", "signature", "redirect", "next", "return", "callback"}
 
 // ObjectIDParameter reports whether a parameter name plausibly selects an
@@ -695,5 +684,5 @@ func ObjectIDParameter(name string) bool {
 			return false
 		}
 	}
-	return objectIDParams[n]
+	return IdentifierName(n)
 }

@@ -8,12 +8,17 @@ import (
 	"github.com/indago/indago/internal/browser"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/idor"
 	"github.com/indago/indago/internal/ratelimit"
 	"github.com/indago/indago/internal/verification"
 	"github.com/indago/indago/internal/worker"
 )
 
-func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope, proxyPool []string, limiter *ratelimit.Limiter, idorCandidates []string) map[domain.JobType]worker.Handler {
+func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope, proxyPool []string, limiter *ratelimit.Limiter, idorCandidates []string, idorEnum ...idor.EnumerationOptions) map[domain.JobType]worker.Handler {
+	var enum idor.EnumerationOptions
+	if len(idorEnum) > 0 {
+		enum = idorEnum[0]
+	}
 	h := phase0Handlers(c.log)
 	// Shared by both executors so Finding correlation (candidate-side upsert
 	// and verification-side update) is race-free across the whole scan — see
@@ -35,7 +40,7 @@ func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope, 
 	// IDOR shares findingsMu for the same reason: its correlation reads and
 	// writes the SAME Findings() rows. It is a raw-HTTP engine (GET/HEAD
 	// reads), never a browser job.
-	h[domain.JobIDOR] = newIDORExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log, findingsMu, idorCandidates)
+	h[domain.JobIDOR] = newIDORExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log, findingsMu, idorCandidates, enum)
 	return h
 }
 

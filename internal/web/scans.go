@@ -249,6 +249,12 @@ type createScanReq struct {
 	// of identifiers the engine harvests from the scan's own data. Empty means
 	// "use the harvested set" — no candidate is ever guessed.
 	IDORCandidates []string `json:"idor_candidates"`
+	// EnableIDOREnumeration opts into the IDOR engine's bounded enumeration
+	// pass (numeric neighbours + a fixed short-slug set). Requires enable_idor;
+	// off by default. IDOREnumerationNeighbours is N (0 = engine default 5,
+	// ceiling 10). See docs/idor.md.
+	EnableIDOREnumeration     bool `json:"idor_enumerate"`
+	IDOREnumerationNeighbours int  `json:"idor_enumerate_n"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -317,13 +323,15 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		MaxEndpoints:          req.MaxEndpoints,
 		ReconLevel:            req.ReconLevel,
 
-		CandidateProfile:        req.CandidateProfile,
-		MaxCandidates:           req.MaxCandidates,
-		EnableEvasion:           req.EnableEvasion,
-		ProxyPool:               cleanList(req.ProxyPool),
-		RandomizeTLSFingerprint: req.RandomizeTLSFingerprint,
-		EnableIDOR:              req.EnableIDOR,
-		IDORCandidates:          req.IDORCandidates,
+		CandidateProfile:          req.CandidateProfile,
+		MaxCandidates:             req.MaxCandidates,
+		EnableEvasion:             req.EnableEvasion,
+		ProxyPool:                 cleanList(req.ProxyPool),
+		RandomizeTLSFingerprint:   req.RandomizeTLSFingerprint,
+		EnableIDOR:                req.EnableIDOR,
+		IDORCandidates:            req.IDORCandidates,
+		EnableIDOREnumeration:     req.EnableIDOREnumeration,
+		IDOREnumerationNeighbours: req.IDOREnumerationNeighbours,
 	})
 	if err != nil {
 		s.writeScanError(w, err)
