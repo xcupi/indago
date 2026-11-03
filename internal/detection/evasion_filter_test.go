@@ -281,8 +281,12 @@ func TestEvasionNewShapesAreBoundedAndDeterministic(t *testing.T) {
 			t.Fatalf("technique %q planned %d times, want exactly 1 (all: %v)", want, counts[want], counts)
 		}
 	}
-	// html_text: 6 canonical + 6 pre-existing evasion + 3 new = 15.
-	if len(first.Plan.Candidates) != 15 {
-		t.Fatalf("html_text plan size = %d, want 15 (bounded extension)", len(first.Plan.Candidates))
+	// html_text with the evasion opt-in: 6 canonical + 9 pre-existing/new
+	// evasion shapes + 2 variation-pack values that are not already canonical
+	// (the pack's other three values dedup onto canonical ones). The variation
+	// packs ride the SAME operator opt-in as evasion (see variation.go), so
+	// this count is the bounded total for that opt-in, not a new knob.
+	if len(first.Plan.Candidates) != 17 {
+		t.Fatalf("html_text plan size = %d, want 17 (bounded extension)", len(first.Plan.Candidates))
 	}
 }

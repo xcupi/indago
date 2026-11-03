@@ -92,6 +92,13 @@ type Candidate struct {
 	// opted in via PlanOptions.EnableEvasion — see evasion.go. Kept distinct
 	// from Rationale so a report can filter/group on it directly.
 	Technique string `json:"technique,omitempty"`
+	// Variation names the mechanism a VARIATION PACK variant uses (e.g.
+	// "img_error", "inline_script", "entity_colon"), empty for every canonical
+	// and every evasion candidate. Only ever set when the variation packs ran
+	// (PlanOptions.EnableVariationPacks, or the same operator opt-in that
+	// enables evasion — see variation.go). Distinct from Technique because a
+	// variation is an alternative MECHANISM, not a filter bypass.
+	Variation string `json:"variation,omitempty"`
 	// Priority orders execution: higher first. Candidates whose required
 	// characters the site neutralizes are deprioritized, not hidden.
 	Priority  int    `json:"priority"`
@@ -127,6 +134,10 @@ type CandidatePlan struct {
 	Profile CandidateProfile `json:"profile,omitempty"`
 	Limit   int              `json:"limit,omitempty"`
 	Dropped int              `json:"dropped,omitempty"`
+	// VariationCapped records how many DISTINCT variation-pack candidates the
+	// hard per-injection-point cap (MaxVariationCandidatesPerInjectionPoint)
+	// left unsent. Zero when the packs did not run or nothing was capped.
+	VariationCapped int `json:"variation_capped,omitempty"`
 }
 
 // PlanOptions configures planning.
@@ -145,6 +156,14 @@ type PlanOptions struct {
 	// candidates — it never replaces or hides them. Defaults to false
 	// (conservative by design, AGENTS.md §2.3): an operator opts in per scan.
 	EnableEvasion bool
+	// EnableVariationPacks additionally plans mechanism-distinct variation
+	// packs (see variation.go) per reflection context, ON TOP OF the canonical
+	// candidates. Defaults to false, so the default plan is byte-identical to
+	// before the packs existed. The existing per-scan evasion opt-in also
+	// enables them (EnableEvasion is the operator gate already wired end to
+	// end); this field exists so a future dedicated flag, or a direct planner
+	// caller, can ask for the packs alone.
+	EnableVariationPacks bool
 }
 
 // PlanCandidates builds the candidate plan for rep and stores it in rep.Plan. It
@@ -171,6 +190,17 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 		if opts.EnableEvasion {
 			tpls = append(tpls, evasionTemplatesFor(*loc.Context, marker)...)
 		}
+		// Variation packs are opt-in extra probing: a variant whose required
+		// canary characters the site provably neutralizes is not planned at
+		// all (unlike a canonical candidate, which is only deprioritized).
+		if opts.EnableVariationPacks || opts.EnableEvasion {
+			for _, tpl := range variationTemplatesFor(*loc.Context, marker) {
+				if ok, _ := survives(loc, tpl.needs); !ok {
+					continue
+				}
+				tpls = append(tpls, tpl)
+			}
+		}
 		for _, tpl := range tpls {
 			plan.Generated++
 			c := Candidate{
@@ -187,6 +217,7 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 				Value:            tpl.value,
 				Trigger:          tpl.trigger,
 				Technique:        tpl.technique,
+				Variation:        tpl.variation,
 				Rationale:        tpl.rationale,
 			}
 			c.Transformation, c.Priority = transform(loc, tpl, &c)
@@ -204,6 +235,25 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 	sort.Slice(plan.Candidates, func(i, j int) bool {
 		return lessCandidate(plan.Candidates[i], plan.Candidates[j])
 	})
+	// Hard cap on variation-pack candidates per injection point. Applied in
+	// plan order (highest priority first), so a page that reflects into many
+	// contexts keeps the most likely mechanisms and drops the tail — it can
+	// never grow the plan without bound with the response.
+	if opts.EnableVariationPacks || opts.EnableEvasion {
+		kept := plan.Candidates[:0]
+		n := 0
+		for _, c := range plan.Candidates {
+			if c.Variation != "" {
+				if n >= MaxVariationCandidatesPerInjectionPoint {
+					plan.VariationCapped++
+					continue
+				}
+				n++
+			}
+			kept = append(kept, c)
+		}
+		plan.Candidates = kept
+	}
 	if opts.Profile != (ProfileSpec{}) {
 		plan.Candidates, plan.Dropped = opts.Profile.Select(plan.Candidates)
 		plan.Profile, plan.Limit = opts.Profile.Name, opts.Profile.MaxPerInjectionPoint
@@ -269,6 +319,7 @@ type candTemplate struct {
 	rationale string
 	trigger   string // TriggerLoad / TriggerInteraction / TriggerNone
 	technique string // "" for every canonical template; see evasion.go
+	variation string // "" for every canonical/evasion template; see variation.go
 }
 
 // templatesFor returns the built-in candidates for a site's context.
@@ -309,15 +360,7 @@ func markupProbe(value, needs string, priority int, why string) candTemplate {
 func htmlTextTemplates(a ContextAnalysis, m string) []candTemplate {
 	// In RCDATA/RAWTEXT (title/textarea/iframe/xmp/…) or a comment, markup is not
 	// parsed until the construct closes, so the breakout must close it first.
-	prefix := ""
-	switch {
-	case a.Context == CtxHTMLComment:
-		prefix = "-->"
-	case a.Sub == "rcdata" || a.Sub == "rawtext" || a.Sub == "rawtext_noscript":
-		if a.Element != "" {
-			prefix = "</" + a.Element + ">"
-		}
-	}
+	prefix := closingPrefix(a)
 	return []candTemplate{
 		onLoad(prefix+"<svg onload="+m+">", "<>", 90,
 			prefixReason(prefix, "inject an <svg> element whose onload handler references the benign marker")),
@@ -547,6 +590,23 @@ func prefixReason(prefix, base string) string {
 		return base
 	}
 	return "close the enclosing construct (" + prefix + ") then " + base
+}
+
+// closingPrefix is the sequence an HTML-text breakout needs to close the
+// enclosing construct first: "-->" inside a comment, and the matching end tag
+// inside an RCDATA/RAWTEXT element (title, textarea, iframe, xmp, noscript…).
+// Plain element content needs nothing. Shared by the canonical set and the
+// variation packs so the two can never drift.
+func closingPrefix(a ContextAnalysis) string {
+	switch {
+	case a.Context == CtxHTMLComment:
+		return "-->"
+	case a.Sub == "rcdata" || a.Sub == "rawtext" || a.Sub == "rawtext_noscript":
+		if a.Element != "" {
+			return "</" + a.Element + ">"
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------

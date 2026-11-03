@@ -400,12 +400,15 @@ not a synthetic event) the page throws
 throws nothing.
 
 **Profiles.** These are planned *in addition to* the six canonical HTML-text
-candidates and the six pre-existing evasion shapes (15 candidates for an
-HTML-text site with evasion on). The default `standard` profile caps at 8 per
-injection point and canonical candidates sort first, so it sends only the two
-highest-priority evasion shapes. For a filter-allow-list engagement use
-`-candidate-profile thorough` (cap 16) or `-max-candidates`, exactly as for the
-existing evasion set — this slice does not change profile semantics.
+candidates, the nine pre-existing evasion shapes, and the two variation-pack
+values that are not already canonical — 17 candidates for an HTML-text site
+with the opt-in on (see "Variation packs (opt-in)" below; the same operator flag
+gates both). The default `standard` profile caps at 8 per injection point and
+canonical candidates sort first, so it sends the six canonical shapes plus the
+two variation-pack values and none of the evasion shapes. For a filter-allow-list
+engagement use `-candidate-profile thorough` (cap 16) or `-max-candidates`,
+exactly as for the existing evasion set — this slice does not change profile
+semantics.
 
 **Fixture proof (`internal/detection/evasion_filter_test.go`).** Each lab is
 reproduced as an allow-list over tag names and `on*` attributes, driven through
@@ -445,6 +448,162 @@ and `TestEvasionCandidatesAreBenignMarkers` (`internal/detection/
 evasion_test.go`) enforce exactly these properties: off unless asked for,
 additive never destructive, and still benign-marker-only — the same
 guarantee `TestPlanCandidatesAreBenignMarkers` holds for the canonical set.
+
+## Variation packs (opt-in)
+
+The canonical set answers "what is the most likely breakout at this site?".
+That is one answer per context, so one filter, one rewritten character, or one
+browser-specific "not this shape here" hides the injection point completely.
+The variation packs add a small, ordered set of **mechanism-distinct** fallbacks
+per reflection context — image-error vs SVG-load vs toggle vs handler-free
+script vs `</script>` breakout — so a single blocked vector is not the end of
+the test. They are not a fuzzer: the packs are literal tables, at most five
+variants per context, with fixed priorities and no mutation.
+
+Implementation: `internal/detection/variation.go`; `Candidate.Variation` names
+the mechanism, `Candidate.Technique` stays empty (a variation is an alternative
+mechanism, not a filter-bypass technique).
+
+### Gate and default behaviour
+
+Nothing is planned unless `PlanOptions.EnableVariationPacks` is set, **or** the
+scan already opted into evasion (`PlanOptions.EnableEvasion`) — the operator
+flag that already exists end to end (`scan create -enable-evasion` / API
+`enable_evasion`). The named field exists so a direct planner caller, or a
+future dedicated flag, can ask for the packs alone; a dedicated CLI/API flag
+would touch files outside this slice and is not added here.
+
+The default plan is byte-identical to before the packs existed:
+`TestVariationPacksOffByDefault` (no `Variation` tag, `VariationCapped == 0`,
+6/6 candidates for an HTML-text site) and the frozen golden
+`TestEvasionDefaultCandidateSetUnchanged` (20/20 candidates across six contexts,
+values, priorities and triggers unchanged) both enforce it.
+
+### The packs
+
+Marker = `M`. `q` is the site's own attribute delimiter (`"`, `'`, or empty for
+an unquoted value). "Canonical dup" means the pack deliberately repeats a shape
+the canonical set already plans, at the same value, so each pack is a complete
+ordered answer for its context; deduplication collapses it onto the canonical
+candidate (the canonical instance wins, so `Variation` stays empty there).
+
+| Context (analyzer) | Variant | Mechanism | Trigger |
+|---|---|---|---|
+| `html_text` (element/body content) | `<svg onload=M>` | `svg_load` (canonical dup) | load |
+| | `<img src=x onerror=M>` | `img_error` (canonical dup) | load |
+| | `<script>M</script>` | `inline_script` — parser-executed element, **no event handler** | load |
+| | `<details open ontoggle=M>` | `details_toggle` (canonical dup) | load |
+| | `<svg><script>M</script></svg>` | `svg_script` — foreign-content script element | load |
+| `html_attr_value` (quoted + unquoted) | `q"><svg onload=M>` | `tag_breakout_svg` (canonical dup) | load |
+| | `q autofocus onfocus=M x=q` | `in_tag_focus` (canonical dup; no `<`/`>` needed) | load |
+| | `q"><script>M</script>` | `tag_breakout_script` | load |
+| | `q"><img src=x onerror=M>` | `tag_breakout_img` | load |
+| | `q"><details open ontoggle=M>` | `tag_breakout_details` | load |
+| `js_string` (single/double quoted) | `';M//` / `";M//` | `quote_breakout` (canonical dup) | load |
+| | `</script><script>M</script>` | `script_restart` (canonical dup single; new for double) | load |
+| | `</script><svg onload=M>` | `script_close_svg` | load |
+| | `</script><img src=x onerror=M>` | `script_close_img` | load |
+| | `</script><details open ontoggle=M>` | `script_close_details` | load |
+| `js_string:template_literal` | `${M}` | `interpolation` (canonical dup) | load |
+| | `` `;M// `` | `literal_close` | load |
+| | `</script><script>M</script>` | `script_restart` | load |
+| | `</script><svg onload=M>` | `script_close_svg` | load |
+| | `</script><img src=x onerror=M>` | `script_close_img` | load |
+| `script_block` (inert data block, or a JS code position) | `</script><svg onload=M>` | `script_close_svg` | load |
+| | `</script><script>M</script>` | `script_restart` | load |
+| | `</script><img src=x onerror=M>` | `script_close_img` | load |
+| | `</script><details open ontoggle=M>` | `script_close_details` | load |
+| `url` at a scheme position | `javascript:M` | `scheme_injection` (canonical dup) | interaction |
+| | `javascript&colon;M` | `entity_colon` — decoded before URL parsing | interaction |
+| | `\tjavascript:M` | `leading_whitespace` — URL parser strips it | interaction |
+| | `data:text/html,<script>M</script>` | `data_uri` | interaction |
+
+`script_block` maps to the analyzer's `unknown:script_data_block` (a
+`<script type="text/plain">`-style body a browser never executes, so the direct
+marker is inert and **only** a literal `</script>` leaves it) and to
+`js_code` positions, where the same shapes are a fallback if direct code is not
+the route the page offers.
+
+Every variant is a benign-marker probe: the handler/script body is the bare
+marker, so execution raises `ReferenceError: <marker> is not defined`. No
+`alert`, cookie access, network call, or DOM exfiltration is generated
+(`TestVariationCandidatesAreBenignMarkers`).
+
+**Interaction-only variants.** The four `url` shapes need the link to be
+activated, which the passive verifier deliberately never simulates
+(AGENTS.md §3), so they are tagged `interaction` — the same trigger class the
+evasion allow-list work introduced. They stay **Rejected** and the finding
+carries the manual-review reason. Every other pack leads with `load` variants.
+
+**`needs` handling.** A variation whose required canary characters the site
+provably neutralizes is **not planned at all** (the packs are opt-in extra
+requests; an impossible shape would only add noise). Canonical candidates keep
+their older deprioritize-never-drop rule. Example: HTML-text reflection with
+`<`/`>` entity-encoded gets no `<>`-dependent variation, and a JS string whose
+quote came back backslash-escaped still gets the script-element routes but not
+the quote breakout.
+
+### Bounded arithmetic
+
+- Pack size: at most **5** variants per context (`maxVariantsPerContext`).
+- Six contexts × 5 = **30** template entries is the theoretical ceiling for a
+  response reflecting into every context, but one reflection site has exactly
+  one innermost context, so a site contributes at most 5.
+- Deduplication collapses identical `category + value` entries: 3 HTML-text,
+  2 attribute, 2 JS-string, 1 template-literal and 1 URL pack entry are
+  canonical duplicates, and the `</script>` family is shared across the JS
+  contexts. A single-context HTML-text site with the opt-in on is therefore
+  6 canonical + 2 new variation values = **8** planned candidates.
+- The whole plan additionally caps distinct variation candidates at
+  `MaxVariationCandidatesPerInjectionPoint` = **10** after sorting by priority;
+  the overflow is reported as `CandidatePlan.VariationCapped`, never silently
+  lost. Worst realistic case (one site in each of html, attribute, js_string,
+  url, script_block) is 14 distinct pack values → 10 kept, 4 reported capped.
+- Requests sent are still bounded by the candidate profile: `minimal` 3,
+  `standard` 8, `thorough` 16, operator override ≤ hard ceiling **32**. The
+  packs never bypass that selection.
+
+### Validation: first variant blocked, a later one still confirms
+
+Pure half (`internal/detection/variation_filter_test.go`) — for each of the six
+contexts, a realistic server-side filter rewrites the value so the **first**
+pack variant is neutralised while the claimed later variant passes through
+byte-identical, and the planner still plans that survivor from the filtered
+canary response:
+
+| Context | Filter | First variant (blocked) | Survivor |
+|---|---|---|---|
+| html | strips `on*=` attributes and `<svg` openings | `<svg onload=M>` | `<script>M</script>` |
+| attribute | same | `"><svg onload=M>` | `"><script>M</script>` |
+| js_string | backslash-escapes quotes, disables `<script` openings | `';M//` | `</script><svg onload=M>` |
+| js_template_literal | `\uXXXX`-escapes `$`, `{`, `}`, backtick, quotes and backslash; disables `<script` openings | `${M}` | `</script><svg onload=M>` |
+| script_block | disables `<svg` | `</script><svg onload=M>` | `</script><script>M</script>` |
+| url | removes the literal `javascript:` | `javascript:M` | `javascript&colon;M` |
+
+Real-Chromium half (`internal/scan/payload_variation_integration_test.go`, build
+tag `browser_integration`): one loopback lab serves a raw and a filtered route
+per context; one scan with the evasion opt-in (which also enables the packs)
+must produce a **Confirmed** finding at every filtered route, with the
+confirmed candidate equal to the surviving later variant. The URL route is the
+honest exception: the entity-encoded colon reflects (the filter is bypassed) but
+a `javascript:` URL needs activation, so the verdict is Rejected and the finding
+is flagged for manual review — never Confirmed by a passive load.
+
+Measured outcomes are recorded in the run handoff
+(`ps-payload-variation/HANDOFF.md`); this section describes the contract the
+tests enforce, not a claim about an unrun target.
+
+Measured on the loopback lab (real Chromium, one scan with the opt-in, standard
+profile), marker `M` per injection point: the filtered route confirmed with
+exactly the surviving variant — `<script>M</script>` (html), `"><script>M</script>`
+(attribute), `</script><svg onload=M>` (js_string and js_template) and
+`</script><script>M</script>` (script_block) — while the unmodified shapes were
+rejected or stripped. On the raw html/attribute/js_string/script_block routes
+the variation shapes confirmed alongside the canonical ones. Two honest
+exceptions: the canonical `${M}` stays **Inconclusive** (the documented
+template-literal provenance limit) and the pack's `</script><svg onload=M>` is
+what turns that site into a **Confirmed** finding; and the `url` route stays
+**Rejected** because none of its variants can fire without activation.
 
 ## Combined (multi-parameter) candidates
 
