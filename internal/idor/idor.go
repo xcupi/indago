@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // FieldKind classifies one identity attribute extracted from a response.
@@ -155,19 +157,78 @@ func identityKey(key, parent string) (FieldKind, bool) {
 	return "", false
 }
 
+// labelSeparator is the punctuation or verb that MUST appear between an
+// identity label and its value. Requiring at least one is what keeps prose
+// from being mined as an identity: "<title>User ID controlled by request
+// parameter</title>" has no separator after the label, so "controlled" is not
+// a value, while "Your username is: wiener" carries two ("is" and ":").
+// Without this, the live lab's page title and the word after "is" were both
+// extracted as identity fields, making every response look the same.
+const labelSeparator = `[\s\x00]*(?:is|:|=)`
+
 var (
-	inputTagRE   = regexp.MustCompile(`(?is)<input\b[^>]*>`)
-	inputAttrRE  = regexp.MustCompile(`(?is)\b(name|value)\s*=\s*(?:"([^"]*)"|'([^']*)')`)
-	tagRE        = regexp.MustCompile(`(?s)<[^>]*>`)
-	spacesRE     = regexp.MustCompile(`\s+`)
-	usernameText = regexp.MustCompile(`(?i)\busername\b\s*(?:is|:|=)?\s*([A-Za-z0-9][A-Za-z0-9._@+-]{0,63})`)
-	emailText    = regexp.MustCompile(`(?i)\b(?:email|e-mail)(?:\s+address)?\b\s*(?:is|:|=)?\s*([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})`)
-	userIDText   = regexp.MustCompile(`(?i)\b(?:user\s*id|userid|account\s*id|accountid|profile\s*id|profileid)\b\s*(?:is|:|=)?\s*([A-Za-z0-9._-]{1,64})`)
+	inputTagRE  = regexp.MustCompile(`(?is)<input\b[^>]*>`)
+	inputAttrRE = regexp.MustCompile(`(?is)\b(name|value)\s*=\s*(?:"([^"]*)"|'([^']*)')`)
+	tagRE       = regexp.MustCompile(`(?s)<[^>]*>`)
+	spacesRE    = regexp.MustCompile(`\s+`)
+
+	// Invisible regions: their text is not rendered page copy, so it must not
+	// be mined for identity. A page <title> such as "User ID controlled by
+	// request parameter" is exactly the kind of prose that produced a bogus
+	// identity (user_id="controlled") on the live lab.
+	commentRE  = regexp.MustCompile(`(?s)<!--.*?-->`)
+	scriptRE   = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script\s*>`)
+	styleRE    = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style\s*>`)
+	headRE     = regexp.MustCompile(`(?is)<head\b[^>]*>.*?</head\s*>`)
+	titleRE    = regexp.MustCompile(`(?is)<title\b[^>]*>.*?</title\s*>`)
+	templateRE = regexp.MustCompile(`(?is)<template\b[^>]*>.*?</template\s*>`)
+	noscriptRE = regexp.MustCompile(`(?is)<noscript\b[^>]*>.*?</noscript\s*>`)
+
+	usernameText = regexp.MustCompile(`(?i)\busername\b(?:` + labelSeparator + `)+[\s\x00]*([A-Za-z0-9][A-Za-z0-9._@+-]{0,63})`)
+	emailText    = regexp.MustCompile(`(?i)\b(?:email|e-mail)(?:\s+address)?\b(?:` + labelSeparator + `)+[\s\x00]*([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})`)
+	userIDText   = regexp.MustCompile(`(?i)\b(?:user\s*id|userid|account\s*id|accountid|profile\s*id|profileid)\b(?:` + labelSeparator + `)+[\s\x00]*([A-Za-z0-9._-]{1,64})`)
 )
 
 type positionedField struct {
 	pos int
 	Field
+}
+
+// visibleText returns the page's rendered text: comments and non-rendered
+// elements (head, script, style, title, template, noscript) are dropped, every
+// remaining tag becomes an element boundary sentinel (\x00), and runs of
+// whitespace collapse. The sentinel lets a labelled value be recognised as the
+// END of an element's text ("…wiener</p>") rather than the first word of a
+// longer sentence.
+func visibleText(body []byte) string {
+	s := string(body)
+	s = commentRE.ReplaceAllString(s, " ")
+	for _, re := range []*regexp.Regexp{headRE, scriptRE, styleRE, titleRE, templateRE, noscriptRE} {
+		s = re.ReplaceAllString(s, " ")
+	}
+	s = tagRE.ReplaceAllString(s, "\x00")
+	return spacesRE.ReplaceAllString(s, " ")
+}
+
+// valueContinues reports whether text after a captured labelled value is more
+// of the same sentence (the next word starts with a letter/digit) rather than
+// the end of the element. "user ID is controlled by the request parameter"
+// must not yield "controlled": the value is followed by another word. A tag
+// boundary always terminates the value, so ordinary markup line breaks are
+// unaffected.
+func valueContinues(text string, end int) bool {
+	rest := text[end:]
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case ' ', '	', '\r', '\n':
+			continue
+		case 0:
+			return false // element boundary: the value ended here
+		}
+		r, _ := utf8.DecodeRuneInString(rest[i:])
+		return unicode.IsLetter(r) || unicode.IsDigit(r)
+	}
+	return false
 }
 
 func extractHTMLIdentity(body []byte) []Field {
@@ -193,20 +254,24 @@ func extractHTMLIdentity(body []byte) []Field {
 		}
 	}
 
-	// Labelled text ("Your username is <strong>wiener</strong>"): strip tags
-	// first, then read label patterns. Offsets stay in document order for
-	// the stripped text, which is all the ordering needs.
-	text := spacesRE.ReplaceAllString(tagRE.ReplaceAllString(string(body), " "), " ")
+	// Labelled text ("Your username is: <strong>wiener</strong>"): read only
+	// rendered text, require a real separator between label and value, and
+	// reject a capture that is just the next word of a sentence.
+	text := visibleText(body)
 	for _, spec := range []struct {
-		re   *regexp.Regexp
-		kind FieldKind
+		re    *regexp.Regexp
+		kind  FieldKind
+		guard bool
 	}{
-		{usernameText, FieldUsername},
-		{emailText, FieldEmail},
-		{userIDText, FieldUserID},
+		{usernameText, FieldUsername, true},
+		{emailText, FieldEmail, false},
+		{userIDText, FieldUserID, true},
 	} {
 		for _, m := range spec.re.FindAllStringSubmatchIndex(text, -1) {
 			val := text[m[2]:m[3]]
+			if spec.guard && valueContinues(text, m[3]) {
+				continue
+			}
 			if s, ok := acceptableValue(spec.kind, val); ok {
 				found = append(found, positionedField{m[2], Field{Kind: spec.kind, Value: s}})
 			}
@@ -247,6 +312,15 @@ var placeholderValues = map[string]bool{
 	"unknown": true, "enter username": true, "enter email": true,
 }
 
+// grammarValues are sentence words that can end up after an identity label by
+// accident ("Your username is not set"). They are never identifiers, so they
+// are rejected even if a label pattern captured them.
+var grammarValues = map[string]bool{
+	"is": true, "are": true, "was": true, "were": true, "be": true, "been": true,
+	"not": true, "and": true, "or": true, "the": true, "a": true, "an": true,
+	"your": true, "my": true, "this": true, "that": true, "here": true, "below": true,
+}
+
 func acceptableValue(kind FieldKind, raw string) (string, bool) {
 	v := strings.TrimSpace(raw)
 	if v == "" || len(v) > MaxValueLen {
@@ -255,7 +329,7 @@ func acceptableValue(kind FieldKind, raw string) (string, bool) {
 	if strings.ContainsAny(v, "<>{}\"'\\\r\n\t") || strings.Contains(v, "{{") || strings.Contains(v, "%s") {
 		return "", false
 	}
-	if placeholderValues[strings.ToLower(v)] {
+	if placeholderValues[strings.ToLower(v)] || grammarValues[strings.ToLower(v)] {
 		return "", false
 	}
 	switch kind {

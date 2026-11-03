@@ -34,10 +34,10 @@ to the ordinary **HTTP worker group** — no special case in the worker.
 
 ```
 discovery (authenticated)                      controller, once per execution,
-  └─ endpoints + parameters                     after the XSS/DOM-XSS passes
-        │                                              │
-        │  opt-in: ScanConfig.EnableIDOR               │ enqueueIDORProbes
-        ▼                                              ▼
+  └─ endpoints + parameters                     on the same quiet tick as the
+        │                                       DOM-XSS pass (neither gates
+        │  opt-in: ScanConfig.EnableIDOR        the other)
+        ▼                                              │
    JobIDOR (one per object-identifier injection point)
         │
         ├─ identity baseline (once per scan, persisted as a TestCase)
@@ -98,7 +98,9 @@ no wordlist and no timing jitter.
 Confirmed requires a **positive identity mismatch** in the response body. Status
 codes, body lengths and redirects alone are never enough; the identifier must
 also visibly be present in the request (the engine sends it in the focused
-parameter only).
+parameter only), and — when an evidence store is configured — both request A
+and request B blobs must actually be stored (a persistence failure downgrades
+the outcome to Inconclusive rather than shipping an unreproducible finding).
 
 | Response shape | Outcome | Reason class |
 |---|---|---|
@@ -110,11 +112,47 @@ parameter only).
 | 401 / 403 | Rejected | object is protected |
 | other 4xx/5xx | Inconclusive | no identity data observed |
 | empty body | Inconclusive | no identity data observed |
+| evidence store configured but either differential pair could not be stored | Inconclusive | not reproducible |
 
 A finding is created **only** for Confirmed. Rejected/Inconclusive/Skipped
 outcomes stay in the `TestCase.Detail` so a report is never padded with one
 negative row per parameter. A later Confirmed result at the same
 (endpoint, parameter) ratchets the existing Finding and unions evidence.
+
+### Identity extraction rules (and the false-negative defect they fix)
+
+The live PortSwigger "User ID controlled by request parameter" lab exposed a
+decision-path defect: the page renders the identity as
+`<p>Your username is: wiener</p>` and its title is
+`User ID controlled by request parameter`. The old labelled-text patterns made
+the separator optional, so `username` + `is` matched with `is` as the value and
+the title produced `user_id=controlled`. Both responses — the caller's own and
+the foreign object — therefore extracted to the SAME bogus identity
+(`username=is`, `user_id=controlled`) and every probe was Rejected.
+
+Extraction is now deliberately strict:
+
+* **A separator is required** between a label and its value: `is`, `:` or `=`
+  (in any combination, e.g. `is:`). Prose such as `<title>User ID controlled by
+  request parameter</title>` has none and yields nothing.
+* **Only rendered text is mined.** `<head>`, `<title>`, `<script>`, `<style>`,
+  `<template>`, `<noscript>` and HTML comments are removed first, so page
+  metadata and script bodies can never supply an identity.
+* **A value must end its element.** Each remaining tag becomes an element
+  boundary; a captured word followed by more sentence words is rejected
+  ("Your user ID is controlled by the request parameter" yields nothing).
+* **Grammar words are not identities** ("is", "not", "the", ... are dropped).
+* JSON extraction is unchanged: keys are read structurally, arrays are never
+  descended into (a user listing is not the page's principal).
+
+These rules only make the extractor more conservative: a page that renders no
+labelled identity remains Inconclusive, never Confirmed on a guess.
+
+The differential itself was already correct — `Decide` is fed the CANDIDATE
+response body, not the baseline body — and the account endpoint was already
+probed as a target (`/my-account?id=…`): both were verified against the live
+fixture before changing anything. The defect was entirely in what the two
+responses were understood to say.
 
 ### Evidence
 
@@ -126,6 +164,16 @@ Every Confirmed finding references:
 * the identity-baseline TestCase with the account-page request/response.
 
 Evidence blobs are the same `.http` message dumps every other engine writes.
+
+### Pass scheduling
+
+The IDOR pass is raw HTTP work on the ordinary HTTP worker group, so it is
+enqueued on the **same quiet tick as the DOM-XSS pass** rather than after that
+pass's jobs drain. The previous ordering let a single slow or stuck browser
+job (reproduced with `browser_concurrency=0`, where browser-group work can
+stall indefinitely) prevent object-authorization testing from ever starting.
+Both passes remain one-time per execution and still start only once the
+ordinary candidate/reflection queue is quiet.
 
 ## 3. Current slice boundaries
 
@@ -166,12 +214,24 @@ The API (`POST /api/scans`) accepts the same two fields.
 
 * `internal/idor/idor_test.go` — pure extraction/derivation/decision fixtures,
   including the mandatory negative controls (same-principal data, no identity
-  fields, login pages, opaque identifiers, mixed caller/foreign pages).
+  fields, login pages, opaque identifiers, mixed caller/foreign pages) and the
+  live lab page shape (`Your username is: <name>` under a
+  "User ID controlled by request parameter" title) in both its confirming and
+  same-principal forms.
 * `internal/scan/idor_test.go` — the differential against real `httptest`
   servers: Confirmed on foreign data with both requests as evidence;
   same-principal and no-identity fixtures never Confirmed; login redirect not
   Confirmed; opaque identifier skipped without guessing; POST skipped with no
-  request sent; probe-pass selection; opt-in gate; worker-group routing.
+  request sent; probe-pass selection; opt-in gate; worker-group routing. Plus
+  the regressions for this slice:
+  * `TestIDORConfirmsLiveLabShape` — the exact live page shape confirms, the
+    caller extracts as `username=wiener` (not `is`), and the account endpoint
+    is both the identity source and the probed target;
+  * `TestIDORConfirmsJSONVariant` — the same differential on JSON bodies;
+  * `TestIDORRequiresStoredEvidenceToConfirm` — a failing evidence backend
+    downgrades the verdict instead of creating an unreproducible finding;
+  * `TestIDORPassRunsWithoutWaitingForDOMWork` — with `browser_concurrency=0`
+    the IDOR job is enqueued while DOM-XSS work is still pending.
 
 ## 6. Product-boundary note
 

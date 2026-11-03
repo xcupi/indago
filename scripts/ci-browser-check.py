@@ -79,6 +79,12 @@ required = {
     # be recorded as not applicable rather than as a dead/erroring probe.
     "TestDOMAttributeBreakoutInQuotedAttributeIsConfirmed",
     "TestDOMBodylessDocumentIsNotApplicable",
+    # Measured coverage records (no new payload shapes): document.write inside a
+    # <select> is already confirmed by the existing shapes under Chromium's
+    # customizable-select parser, and the canonical-link attribute-only vector is
+    # planned and sent, with the passive verifier honestly rejecting it.
+    "TestDOMDocumentWriteInsideSelectIsAlreadyConfirmed",
+    "TestReflectedCanonicalLinkVectorIsPlannedButNeedsActivation",
 }
 if not shutil.which("node"):
     raise SystemExit("required Node.js unavailable")

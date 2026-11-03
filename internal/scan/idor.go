@@ -250,15 +250,28 @@ func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.
 				URL: req.URL, Outcome: string(domain.OutcomeError), Reason: "request failed: " + truncate(errText(reqErr), 200)})
 			continue
 		}
-		dec := idor.Decide(d.CallerIdentity, cand.Value, resp.Status, resp.Body)
-		a := idorAttempt{Candidate: cand.Value, Source: cand.Source, URL: req.URL,
-			Status: resp.Status, Outcome: string(dec.Outcome), Reason: dec.Reason, Foreign: dec.Foreign}
+		// Request B's request/response pair is stored BEFORE the decision is
+		// recorded, so a Confirmed verdict can never exist without the
+		// foreign-object evidence that proves it.
+		var evIDs []domain.ID
 		if ids, evErr := e.persistPair(ctx, tc, resp, "idor candidate "+cand.Value); evErr != nil {
 			tc.Note = strings.TrimSpace(tc.Note + " | evidence incomplete: " + truncate(evErr.Error(), 200))
 		} else {
-			a.EvidenceIDs = ids
+			evIDs = ids
 			tc.EvidenceIDs = appendUniqueIDs(tc.EvidenceIDs, ids)
 		}
+		dec := idor.Decide(d.CallerIdentity, cand.Value, resp.Status, resp.Body)
+		// Evidence integrity: when an evidence store is configured, a
+		// Confirmed verdict must be reproducible from stored request A and
+		// request B blobs. A persistence failure downgrades the outcome
+		// rather than shipping a finding nobody can re-check (AGENTS.md §2.6).
+		if dec.Outcome == idor.OutcomeConfirmed && e.evidence != nil &&
+			(len(d.BaselineEvidence) == 0 || len(evIDs) == 0) {
+			dec = idor.Decision{Outcome: idor.OutcomeInconclusive,
+				Reason: "the foreign-object response named a different principal, but the request/response evidence pair could not be stored; not Confirmed without reproducible evidence"}
+		}
+		a := idorAttempt{Candidate: cand.Value, Source: cand.Source, URL: req.URL,
+			Status: resp.Status, Outcome: string(dec.Outcome), Reason: dec.Reason, Foreign: dec.Foreign, EvidenceIDs: evIDs}
 		d.Attempts = append(d.Attempts, a)
 		reasons = append(reasons, dec.Reason)
 

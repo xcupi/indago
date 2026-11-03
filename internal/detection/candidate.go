@@ -281,7 +281,12 @@ func templatesFor(a ContextAnalysis, m string) []candTemplate {
 	case CatJS:
 		return jsTemplates(a, m)
 	case CatURL:
-		return urlTemplates(a, m)
+		// A URL component nested inside an HTML attribute is still inside that
+		// attribute: the closing quote alone ends it, so the attribute layer is
+		// plannable even when < and > are encoded. urlTemplates' own output
+		// stays first (it is the most specific to the URL layer); the link
+		// templates only ever add to it. See linkAttributeTemplates.
+		return append(urlTemplates(a, m), linkAttributeTemplates(a, m)...)
 	case CatCSS:
 		return cssTemplates(a, m)
 	default:
@@ -420,7 +425,19 @@ func jsTemplates(a ContextAnalysis, m string) []candTemplate {
 	case a.Context == CtxJSString && a.Sub == "double_quoted":
 		return []candTemplate{onLoad(`";`+m+"//", `"`, 90, "close the double-quoted JS string and start a statement that references the marker")}
 	case a.Context == CtxJSString && a.Sub == "template_literal":
-		return []candTemplate{onLoad("${"+m+"}", "", 85, "inject a ${} substitution into the template literal")}
+		// Substitution is the one shape a template literal cannot take away
+		// from us: it executes without needing any quote, angle bracket or
+		// backtick, so it is the only route when the reader escapes those
+		// characters — the literal cannot then be closed, and the script
+		// element cannot be ended either. It does depend on the server
+		// leaving '$', '{' and '}' unescaped, which the probe canary
+		// (<>"') cannot observe, so the planner neither claims nor denies
+		// that they survive: it plans the shape at full priority and sends
+		// it regardless. A reader that escapes those characters too (or
+		// escapes the whole opener) keeps it inert text, and the attempt is
+		// then recorded as reflected-but-not-executed.
+		return []candTemplate{onLoad("${"+m+"}", "", 85,
+			"interpolate the marker as ${MARKER}: substitution executes inside the template literal without needing any quote, angle bracket or backtick, so it is the only route when the reader escapes those characters (the literal cannot then be closed and the script element cannot be ended); it depends on the server leaving '$', '{' and '}' unescaped, which the probe canary cannot observe, so it is planned at full priority regardless")}
 	case a.Context == CtxJSComment:
 		// Escaping a comment needs a newline (line) or the close sequence (block).
 		if a.Sub == "block" {
@@ -451,6 +468,43 @@ func urlTemplates(a ContextAnalysis, m string) []candTemplate {
 		// script execution. Plan nothing rather than noise.
 		return nil
 	}
+}
+
+// linkAttributeTemplates covers a value reflected inside a URL component of a
+// <link> element's attribute — the canonical-link position. The analyzer's
+// innermost context there is the URL (chain [html_attr_value, url]), and
+// urlTemplates deliberately plans nothing for a query/path/fragment component.
+// That is right for a URL the page itself navigates; a <link> is metadata
+// instead: it has no rendered box, the page never navigates its href, and no
+// load-time event fires on it, so neither a javascript: URL nor a tag-injection
+// shape can execute there.
+//
+// The value is still inside an HTML attribute, though, so the closing quote
+// alone ends it and an attribute-only injection IS plannable: a new attribute
+// pair on the link element itself. That is the reported canonical-link vector
+// (accesskey plus onclick). It only runs after an operator keypress that the
+// passive verifier never simulates, so it is an interaction candidate: it
+// documents the position — and, because it reflects, still produces a finding —
+// but it can never be Confirmed by the verifier.
+func linkAttributeTemplates(a ContextAnalysis, m string) []candTemplate {
+	if a.Element != "link" || a.Attribute == "" {
+		return nil
+	}
+	var q, needs string
+	switch a.Quote {
+	case "double":
+		q, needs = `"`, `"`
+	case "single":
+		q, needs = `'`, `'`
+	case "unquoted":
+		q, needs = "", ""
+	default:
+		// No attribute delimiter was established, so this is not an attribute
+		// injection position at all.
+		return nil
+	}
+	return []candTemplate{onInteraction(q+" accesskey=x onclick="+m+" y="+q, needs, 60,
+		"close the link's href attribute and add an accesskey/onclick pair on the link element itself (the canonical-link vector); it needs only the quote, so encoding < and > does not stop it, but it executes only after an activation keypress that the passive verifier never simulates, so it documents the position and is never Confirmed")}
 }
 
 func cssTemplates(a ContextAnalysis, m string) []candTemplate {

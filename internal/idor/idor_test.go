@@ -21,6 +21,33 @@ func TestExtractIdentity(t *testing.T) {
 			want: []Field{{FieldUsername, "wiener"}, {FieldEmail, "wiener@example.com"}},
 		},
 		{
+			// The exact live shape that produced the false negative: the verb
+			// "is" is followed by a colon before the value, and the page title
+			// names the parameter ("User ID controlled by request parameter").
+			name: "live lab shape: username is colon value",
+			body: `<!DOCTYPE html><html><head><title>User ID controlled by request parameter</title></head>` +
+				`<body><p>Your username is: wiener</p>` +
+				`<div>Your API Key is: joDf0jBgED4rHONGSn2aNs516rNn9QcX</div><br/></body></html>`,
+			want: []Field{{FieldUsername, "wiener"}},
+		},
+		{
+			name: "live lab shape: labelled user id after is",
+			body: `<html><head><title>User ID controlled by request parameter</title></head><body>` +
+				`<p>Your user ID is: 1</p><p>Your username is: wiener</p></body></html>`,
+			want: []Field{{FieldUsername, "wiener"}, {FieldUserID, "1"}},
+		},
+		{
+			name: "page title prose is not an identity",
+			body: `<html><head><title>User ID controlled by request parameter</title></head>` +
+				`<body><p>Nothing to see</p></body></html>`,
+			want: nil,
+		},
+		{
+			name: "sentence continuation after a label is not an identity",
+			body: `<p>Your user ID is controlled by the request parameter</p>`,
+			want: nil,
+		},
+		{
 			name: "html form field values",
 			body: `<form><input type="text" name="username" value="wiener">` +
 				`<input type="email" value="wiener@example.com" name="email"></form>`,
@@ -101,6 +128,21 @@ func TestDecide(t *testing.T) {
 			body:        `<p>Your username is <strong>carlos</strong></p><p>Email: carlos@example.com</p>`,
 			want:        OutcomeConfirmed,
 			wantForeign: "carlos",
+		},
+		{
+			// The live false negative, at the decision layer: same page shape,
+			// 200, foreign principal after "username is:".
+			name:        "live lab shape foreign principal is confirmed",
+			status:      200,
+			body:        `<html><head><title>User ID controlled by request parameter</title></head><body><p>Your username is: carlos</p></body></html>`,
+			want:        OutcomeConfirmed,
+			wantForeign: "carlos",
+		},
+		{
+			name:   "live lab shape same principal is rejected",
+			status: 200,
+			body:   `<html><head><title>User ID controlled by request parameter</title></head><body><p>Your username is: wiener</p></body></html>`,
+			want:   OutcomeRejected,
 		},
 		{
 			name:   "same principal is not confirmed",

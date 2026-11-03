@@ -63,6 +63,31 @@ honest gates now exist:
   an attachable document still surfaces as a retried error, and both properties
   are asserted by `TestDOMBodylessDocumentIsNotApplicable`.
 
+**3. `document.write` inside a `<select>`: measured, and no shape is added.**
+The stock-checker lab shape — a page's own script reads a client-side value and
+hands it to `document.write` inside a `<select>` — was measured on a loopback
+fixture (`internal/scan/domxss_select_shape_integration_test.go`) before adding
+anything. The premise that HTML's "in select" insertion mode ignores an injected
+`<img>`, so only a `</select>`-closing shape could execute, does **not** hold for
+the Chromium the verifier actually drives (Chrome 156 here: the parser change
+that accepts arbitrary content inside `<select>` shipped with customizable
+select). Measured directly, a `document.write`'d
+`<option>x<img src=y onerror=…>` becomes a real `<img>` element inside the
+`<option>`.
+
+Consequences, verified end to end at the base commit and pinned by that test:
+
+| position | shape that confirms |
+|---|---|
+| value as the `<option>`'s text, `location.search` | the existing query/`document.write` script body (`<script>M</script>`) |
+| value as the `<option>`'s text, any other source | the existing markup shape (`<img src=x onerror=M>`) |
+| value inside an ATTRIBUTE of an element inside the `<select>` | the existing `attr_breakout` shape |
+
+So a `select_breakout` shape is deliberately **not** added: it would only cost a
+third verification navigation at every non-confirming `document.write` site and
+would never run where the earlier shapes already confirm. Each position's
+fully-escaped control stays Rejected.
+
 ## jQuery sink slices: attribute write and selector call (operator-authorized)
 
 The operator explicitly asked Indago to cover the jQuery DOM-XSS lab classes, so

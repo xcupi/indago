@@ -126,7 +126,69 @@ below are what the pipeline actually produced, not an expectation.
 |---|---|---|
 | `var searchTerms = 'VALUE';` with `'`→`\'` and `\`→`\\` | `</script><script>M</script>` | A quote breakout is impossible: the reader escapes the escaping backslash too. The HTML tokenizer ends the `<script>` element at a literal `</script>` regardless of JS string state, and the fresh block's whole body is the marker. Needs no quote at all. |
 | `var searchTerms = 'VALUE';` with `<`/`>`/`"` HTML-encoded and `'`→`\'` | `\';M//` | `<` and `>` are unavailable, so the script cannot be closed. The remaining route is the escape rule itself: the leading backslash consumes the backslash the reader inserts, leaving the closing quote raw. |
-| ``var searchTerms = `VALUE`;`` with `<` `>` `'` `"` `\` and backtick all `\uXXXX`-escaped | `${M}` (already planned before this slice) | The literal cannot be closed (backtick escaped), so interpolation is the only route; `$`, `{` and `}` are left alone. |
+| ``var searchTerms = `VALUE`;`` with `<` `>` `'` `"` `\` and backtick all `\uXXXX`-escaped | `${M}` (the only shape this reader leaves open; see below) | The literal cannot be closed (backtick escaped) and the script element cannot be ended (`<`/`>` escaped), so interpolation is the only route; `$`, `{` and `}` are left alone. |
+
+### Template-literal interpolation (`${MARKER}`) — escaping rationale
+
+The third reader above is PortSwigger's "template literal" lab. Its rule, applied
+to every reflected value, is exactly:
+
+```
+<  -> \u003c    >  -> \u003e    '  -> \u0027
+"  -> \u0022    \  -> \u005c    `  -> \u0060
+```
+
+so a reflected `ind…<>"'end…` comes back as `ind\u003c\u003e\u0022\u0027end…`
+inside `` var searchTerms = `…`; ``. Each escaping decision removes one shape and
+leaves exactly one:
+
+| Shape | Needs | Verdict for this reader |
+|---|---|---|
+| `';M//` / `";M//` | a raw quote | impossible: both quotes are `\uXXXX`-escaped |
+| `\';M//` (escape-rule bypass) | a raw quote after the reader's own backslash | impossible: the backslash is escaped too |
+| `</script><script>M</script>` | raw `<` and `>` | impossible: both are escaped, so the element cannot be ended |
+| `` `;M// `` (close the literal) | a raw backtick | impossible: the backtick is escaped |
+| `${M}` | nothing that is escaped | **the only route**: substitution evaluates its expression inside the literal |
+
+`${MARKER}` therefore carries no quote, angle bracket, backtick or backslash at
+all — it is the bare marker identifier wrapped in an interpolation — and it is
+planned for the `js_string`/`template_literal` context at full priority. The
+quote-breaking shapes stay planned for the `single_quoted`/`double_quoted`
+sub-kinds that can use them; nothing was removed or weakened.
+
+One dependency is deliberately *not* scored: the shape needs `$`, `{` and `}` to
+survive, but the probe canary is fixed at `<>"'`
+(`detection.canaryChars`), so the reflection step cannot observe what the reader
+does to those three characters. The planner's contract is to annotate what it
+*measured*, so it neither claims they survived (`raw` would be an unverified
+claim) nor that they were neutralised (which would deprioritise the only
+executable candidate for this reader): the candidate is planned at full priority
+and sent, and a reader that escapes those characters as well keeps it inert
+text. A neutralised control must therefore escape `$`, `{`, `}` (or the whole
+opener as `\${`) — **HTML-escaping does not neutralise this shape**, because none
+of `$`, `{`, `}` is HTML-special and character references are not decoded inside
+a `<script>` element.
+
+Both facts are pinned on a loopback fixture that serves the exact lab bytes
+(`internal/detection/template_literal_test.go`): the escaped positive, the
+byte-level neutralised control (`\u0024\u007b`…`\u007d`), the
+`js_string:template_literal` classification with per-character `js` encoding,
+and the plan being exactly `${M}`. The end-to-end outcome of that control
+(reflected but never executed → **Rejected**) is covered by the `/safe-template`
+control of `TestReflectedJSStringContexts`.
+
+Measured verdict for the escaped positive: the candidate reaches an executable
+position — Chromium raises `ReferenceError: <marker> is not defined` — but the
+finding is **Inconclusive**, not Confirmed, because the shared verdict authority
+(`internal/browser/provenance.go`'s `markerAtPosition`) is a conservative ASCII
+allow-list that refuses any paused position in a script whose prefix opens a
+template literal (`docs/verdict-provenance.md`). That is not a candidate gap and
+cannot be fixed from the planner: *every* position inside the literal lives in
+that script, so no breakout shape (interpolation or otherwise) can present the
+marker in a script the lexer will accept. Teaching the lexer template-literal
+state is a change to the shared verdict authority — its own slice, with the
+forged-position regressions that must come with it — not something this
+planner may work around by loosening the check.
 
 Measured outcomes with the default `standard` profile and real Chromium:
 
@@ -156,6 +218,45 @@ for the second reader and therefore cannot confirm it; the default `standard`
 profile sends all three and does. The `Transformation` annotation on such a
 winning candidate still reads `js` (the quote really was escaped); the candidate
 is designed for exactly that reader.
+
+## Reflected value inside a `<link>` attribute (canonical link, measured)
+
+The canonical-link lab reflects a value inside
+`<link rel="canonical" href='…?search=VALUE'>` in the document head, with `<` and
+`>` HTML-encoded (quotes stay raw). Reproduced byte for byte by a loopback
+fixture (`internal/scan/canonical_link_fixture_test.go`), which asserts the exact
+served bytes before the analyzer sees them.
+
+Measured at the base commit: the analyzer reports the innermost context as
+`url:query` with chain `[html_attr_value, url]`, `element=link`,
+`attribute=href`, `quote=single` — and `urlTemplates` deliberately plans nothing
+for a query component, so the plan was **empty**. A reflecting site was therefore
+completely unreported.
+
+`templatesFor`'s `CatURL` case now also plans `linkAttributeTemplates`, which is
+gated on the enclosing element being `link` with a real attribute and a known
+delimiter:
+
+| template | value | trigger | confirms? |
+|---|---|---|---|
+| link attribute injection | `' accesskey=x onclick=M y='` (quote style follows the site) | `interaction` | **never** by the passive verifier |
+
+Why this shape and not a tag injection: a `<link>` is metadata. It has no
+rendered box, the page never navigates its `href`, and no load-time event fires
+on it, so neither `javascript:` nor `<svg onload>` can execute there. The value
+is still inside an HTML attribute, though, so the closing quote alone ends it —
+which is why encoding `<`/`>` does not stop this vector. That is the reported lab
+vector: an `accesskey`/`onclick` pair on the link element itself, executable only
+by an operator keypress. The passive verifier never simulates activation
+(AGENTS.md §3), so the finding is created (the candidate reflects and is sent)
+and honestly stays **Rejected**; the escaped control is Rejected too. Live
+outcome, real Chromium: `TestReflectedCanonicalLinkVectorIsPlannedButNeedsActivation`.
+
+Boundaries: the gate is the `link` element only. The same URL-in-attribute
+position on an `<a>` the page itself navigates keeps its previous behaviour (no
+planned candidate), so this slice adds no requests at ordinary anchors; the
+`minimal` profile drops the candidate (it is load-trigger-only) exactly as it
+drops the sibling `onmouseover` template.
 
 ## Ordering and deduplication
 

@@ -394,25 +394,32 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		c.enqueueCombinedCandidates(ctx, ex.scanID)
 		return false
 	}
-	// Bounded, one-time DOM-XSS probe pass (see domxss.go): runs right
-	// after the combined pass, the SAME "go quiet, run once, let its own
-	// jobs drain before finishing" shape. Only one source/sink category
-	// is implemented (see docs/dom-xss.md) — this is genuinely cheap
-	// (bounded by discovered endpoints, not candidates), so it never
-	// gates behind "single-parameter testing failed" the way combined
-	// does; it runs for every GET/HEAD-navigable endpoint regardless.
+	// Bounded, one-time probe passes. They are enqueued on the SAME quiet
+	// tick and are independent of each other: DOM-XSS probing is
+	// browser-group work (slow, and able to stall when no usable browser
+	// worker is available), while IDOR probing is raw HTTP on the ordinary
+	// HTTP group. Letting the IDOR pass wait for DOM jobs to drain is how a
+	// single stuck DOM job starved object-authorization testing entirely
+	// (observed with browser_concurrency=0), so neither pass gates the
+	// other. The one-time flags keep both to one pass per execution.
+	passes := false
+	// DOM-XSS: only one source/sink category is implemented (see
+	// docs/dom-xss.md) — genuinely cheap (bounded by discovered endpoints,
+	// not candidates), so it never gates behind "single-parameter testing
+	// failed" the way combined does; it runs for every GET/HEAD-navigable
+	// endpoint regardless.
 	if !ex.domXSSPassDone.Load() {
 		ex.domXSSPassDone.Store(true)
 		c.enqueueDOMXSSProbes(ctx, ex.scanID)
-		return false
+		passes = true
 	}
-	// Bounded, one-time IDOR probe pass (see idor.go): only for a scan that
-	// opted into the engine, and only after every earlier pass drained, so
-	// its findings cannot be overwritten by late correlation from another
-	// engine. Same "go quiet, run once" shape as the passes above.
+	// IDOR: only for a scan that opted into the engine (see idor.go).
 	if !ex.idorPassDone.Load() {
 		ex.idorPassDone.Store(true)
 		c.enqueueIDORProbes(ctx, ex.scanID)
+		passes = true
+	}
+	if passes {
 		return false
 	}
 	return c.finish(ctx, ex, false)
