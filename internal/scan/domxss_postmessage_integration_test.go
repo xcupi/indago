@@ -29,7 +29,7 @@ func TestDOMXSSPostMessageFromOpaqueCrossOriginSenderReachesAndConfirms(t *testi
 	marker := "indagopostmsgpositive"
 	exec := &domXSSExecutor{}
 	canary := detection.DOMXSSCanary(marker)
-	obs, err := exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/vulnerable"), marker, canary)
+	obs, err := exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/vulnerable"), marker, canary, domXSSActivateNone)
 	if err != nil {
 		t.Fatalf("deliver canary from opaque sandboxed sender: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestDOMXSSPostMessageFromOpaqueCrossOriginSenderReachesAndConfirms(t *testi
 	if !ok {
 		t.Fatal("could not create DOM-XSS verification candidate")
 	}
-	obs, err = exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/vulnerable"), marker, candidate.Value)
+	obs, err = exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/vulnerable"), marker, candidate.Value, domXSSActivateNone)
 	if err != nil {
 		t.Fatalf("deliver verification payload from opaque sandboxed sender: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestDOMXSSPostMessageRejectsOpaqueCrossOriginSender(t *testing.T) {
 	marker := "indagopostmsgnegative"
 	exec := &domXSSExecutor{}
 	canary := detection.DOMXSSCanary(marker)
-	obs, err := exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/validated"), marker, canary)
+	obs, err := exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/validated"), marker, canary, domXSSActivateNone)
 	if err != nil {
 		t.Fatalf("deliver canary from opaque sandboxed sender: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestDOMXSSPostMessageRejectsOpaqueCrossOriginSender(t *testing.T) {
 	if !ok {
 		t.Fatal("could not create DOM-XSS verification candidate")
 	}
-	obs, err = exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/validated"), marker, candidate.Value)
+	obs, err = exec.navigateWithPostMessage(context.Background(), ctx, targetURL("/validated"), marker, candidate.Value, domXSSActivateNone)
 	if err != nil {
 		t.Fatalf("deliver verification payload from opaque sandboxed sender: %v", err)
 	}

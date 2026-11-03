@@ -36,6 +36,11 @@ required = {
     "TestUIFailedScanOverviewWarnsEvenThoughEverythingRecordedPassed",
     "TestDOMHTMLSourceMatrix",
     "TestDOMStringTimerSourceMatrix",
+    # jQuery sink coverage: attribute-write activation and hashchange-delivered
+    # selector markup, with safe/forged controls and the native API contract.
+    "TestDOMJQueryAnchorHrefSinkIsActivated",
+    "TestDOMJQuerySelectorHashchangeSinkIsActivated",
+    "TestDOMJQuerySinkNativeContract",
     "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms",
     "TestDOMXSSFragmentRouteCapturesPostLoadSink",
     "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource",

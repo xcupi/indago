@@ -192,6 +192,11 @@ func (c *Controller) enqueueDOMXSSProbes(ctx context.Context, scanID domain.ID) 
 // be told apart from any console.log the page's own code might emit.
 const domXSSConsolePrefix = "__INDAGO_DOMXSS__"
 
+// domXSSActivationEvidencePrefix tags the browser-log evidence line that
+// records which bounded activation step (if any) verification performed before
+// reading the execution signal. It is evidence, never verdict authority.
+const domXSSActivationEvidencePrefix = "__INDAGO_DOMXSS_ACTIVATION__"
+
 // domXSSSinkReport is the JSON payload the harness logs (after
 // domXSSConsolePrefix) each time a value containing the marker reaches a
 // hooked sink.
@@ -250,6 +255,163 @@ func hasConnectedDOMXSSFragment(messages []browser.ConsoleMessage, marker string
 		}
 	}
 	return false
+}
+
+// jQuery activation. Two implemented sinks cannot execute on load at all:
+// an href write needs the link to be activated, and a page that only wires a
+// hashchange listener has not run its own selector code yet. Verification is
+// therefore allowed exactly ONE deterministic activation step before the
+// engine reads the execution signal. The activation never carries a payload of
+// its own: it clicks the element the harness itself tagged, or re-issues the
+// hash change the page itself listens for.
+type domXSSActivation int
+
+const (
+	domXSSActivateNone domXSSActivation = iota
+	// domXSSActivateHashChange re-issues the fragment the navigation already
+	// carried, so a hashchange-driven page runs its own handler with exactly
+	// this candidate value (the realistic iframe delivery: load, then change
+	// the hash).
+	domXSSActivateHashChange
+	// domXSSActivateHrefClick clicks the exact element whose href the harness
+	// observed and tagged. No target discovered is not an error: it means the
+	// page never performed the write this attempt was verifying.
+	domXSSActivateHrefClick
+)
+
+const (
+	domXSSActivationClicked       = "clicked"
+	domXSSActivationTargetMissing = "missing"
+	// domXSSActivationWindow bounds the observation wait after an activation.
+	// It reuses the engine's existing URL-source observation window.
+	domXSSActivationWindow = 250 * time.Millisecond
+)
+
+// label names the activation in evidence logs and verification notes.
+func (a domXSSActivation) label() string {
+	switch a {
+	case domXSSActivateHashChange:
+		return "hash_change"
+	case domXSSActivateHrefClick:
+		return "href_click"
+	default:
+		return "none"
+	}
+}
+
+// describe is the operator-facing wording used in a verification note.
+func (a domXSSActivation) describe() string {
+	switch a {
+	case domXSSActivateHashChange:
+		return "one bounded hash change issued by the engine so the page's own hashchange handler runs"
+	case domXSSActivateHrefClick:
+		return "one click on the exact element the harness located for the observed href write"
+	default:
+		return "none"
+	}
+}
+
+// domXSSPrimarySink applies the engine's first-reachable-sink bound with one
+// attribution rule. jQuery's own HTML parsing assigns innerHTML INSIDE the
+// factory call, so a marker-carrying $(...) can legitimately report both
+// sinks; the page-authored jQuery.selector call is the site's identity, and
+// choosing innerHTML there would silently drop the activation that factory
+// call needs. Every other combination keeps the original first-seen order.
+func domXSSPrimarySink(reachable []detection.DOMXSSSink) detection.DOMXSSSink {
+	for _, sink := range reachable {
+		if sink == detection.DOMSinkJQuerySelector {
+			return sink
+		}
+	}
+	if len(reachable) == 0 {
+		return ""
+	}
+	return reachable[0]
+}
+
+// domXSSActivationForSink maps a reachable sink to its bounded activation.
+// hashActivated records that phase one only reached the sink after the engine
+// issued a hash change, so a load-time selector call needs no extra event.
+func domXSSActivationForSink(sink detection.DOMXSSSink, hashActivated bool) domXSSActivation {
+	switch sink {
+	case detection.DOMSinkJQueryAttr:
+		return domXSSActivateHrefClick
+	case detection.DOMSinkJQuerySelector:
+		if hashActivated {
+			return domXSSActivateHashChange
+		}
+	}
+	return domXSSActivateNone
+}
+
+// domXSSHashChangeActivationScript re-issues value as the fragment. Resetting
+// the fragment first makes the assignment a real change even when the
+// navigation URL already carried the same value; the page's hashchange handler
+// reads the final value (verified in Chromium: both queued events see it).
+func domXSSHashChangeActivationScript(value string) string {
+	return "(() => { location.hash = ''; location.hash = " + goQuoteJS(value) + "; return location.href; })()"
+}
+
+// domXSSHrefClickScript clicks the element the harness tagged for marker. It
+// is the browser's own default activation of that element, not a navigation
+// the engine invents; a missing target is reported, never fabricated.
+func domXSSHrefClickScript(marker string) string {
+	return "(() => { var el = document.querySelector('[data-indago-xss-target=\"' + " + goQuoteJS(marker) + " + '\"]'); if (!el) return " + goQuoteJS(domXSSActivationTargetMissing) + "; el.click(); return " + goQuoteJS(domXSSActivationClicked) + "; })()"
+}
+
+// applyDOMXSSActivation performs the one activation step. It reports whether a
+// step actually happened; an error means the page could not be driven and the
+// caller must surface it to the worker's bounded retry, never treat it as a
+// negative.
+func (e *domXSSExecutor) applyDOMXSSActivation(ctx context.Context, page *browser.Page, act domXSSActivation, marker, value string) (bool, error) {
+	switch act {
+	case domXSSActivateHashChange:
+		if _, err := page.Evaluate(ctx, domXSSHashChangeActivationScript(value)); err != nil {
+			return false, fmt.Errorf("hash-change activation: %w", err)
+		}
+		return true, nil
+	case domXSSActivateHrefClick:
+		raw, err := page.Evaluate(ctx, domXSSHrefClickScript(marker))
+		if err != nil {
+			return false, fmt.Errorf("href-click activation: %w", err)
+		}
+		status, _ := raw.(string)
+		return status == domXSSActivationClicked, nil
+	default:
+		return false, nil
+	}
+}
+
+// waitDOMXSSActivationWindow lets the activated page finish its own work
+// before observations are read back. It uses the scan context, so
+// cancellation still wins.
+func waitDOMXSSActivationWindow(ctx context.Context) error {
+	timer := time.NewTimer(domXSSActivationWindow)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// finishSourceNavigation applies activation after a source-specific
+// navigation (window.name, postMessage, referrer, storage). Navigation that
+// carries the value in the URL uses navigate's own copy of this logic, because
+// its hash probe also needs the pre-activation observation.
+func (e *domXSSExecutor) finishSourceNavigation(ctx context.Context, page *browser.Page, act domXSSActivation, marker, value string) error {
+	if act == domXSSActivateNone {
+		return nil
+	}
+	ok, err := e.applyDOMXSSActivation(ctx, page, act, marker, value)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return waitDOMXSSActivationWindow(ctx)
+	}
+	return nil
 }
 
 // goQuoteJS renders s as a JS double-quoted string literal. Go's %q
@@ -411,6 +573,65 @@ const domXSSHarnessTemplate = `(() => {
       return origWriteln.apply(document, arguments);
     };
   } catch (e) {}
+  // jQuery sinks. jQuery is normally loaded by the page AFTER this init
+  // script, so intercept the global assignments instead of assuming it
+  // exists. Wrapping is observational: native init/attr always run FIRST with
+  // the original receiver and every argument, and the native result is
+  // returned unchanged. Only a primitive-string selector/attribute value that
+  // contains the marker is reported, and only an href write is tagged for the
+  // engine's one activation click.
+  const JQ_TARGET_ATTR = 'data-indago-xss-target';
+  const JQ_WRAPPED = new WeakSet();
+  function wrapJQuery(jq) {
+    if (typeof jq !== 'function' || !jq.fn || JQ_WRAPPED.has(jq)) return;
+    JQ_WRAPPED.add(jq);
+    try {
+      const fn = jq.fn;
+      const nativeInit = fn.init;
+      if (typeof nativeInit === 'function') {
+        // jQuery's factory calls new jQuery.fn.init(...). Keeping the native
+        // prototype preserves instanceof/prototype identity exactly.
+        const init = function (selector) {
+          const result = nativeInit.apply(this, arguments);
+          if (typeof selector === 'string') report('jQuery.selector', selector);
+          return result;
+        };
+        init.prototype = fn;
+        fn.init = init;
+      }
+      const nativeAttr = fn.attr;
+      if (typeof nativeAttr === 'function') {
+        fn.attr = function (name, value) {
+          const result = nativeAttr.apply(this, arguments);
+          try {
+            if (arguments.length >= 2 && typeof name === 'string' && name.toLowerCase() === 'href' &&
+                typeof value === 'string' && value.indexOf(MARKER) !== -1) {
+              var tagged = false;
+              for (var i = 0; i < this.length; i++) {
+                var el = this[i];
+                if (el && typeof el.setAttribute === 'function') { el.setAttribute(JQ_TARGET_ATTR, MARKER); tagged = true; }
+              }
+              if (tagged) report('jQuery.attr', value);
+            }
+          } catch (e) {}
+          return result;
+        };
+      }
+    } catch (e) {}
+  }
+  ['jQuery', '$'].forEach(function (prop) {
+    try {
+      const desc = Object.getOwnPropertyDescriptor(window, prop);
+      var current = desc && desc.value;
+      Object.defineProperty(window, prop, {
+        configurable: true,
+        enumerable: true,
+        get: function () { return current; },
+        set: function (v) { current = v; wrapJQuery(v); }
+      });
+      if (current) wrapJQuery(current);
+    } catch (e) {}
+  });
 })();`
 
 // ---------------------------------------------------------------------------
@@ -935,7 +1156,12 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	canary := detection.DOMXSSCanary(marker)
 
 	// --- Phase 1: reachability ---
-	obs1, canaryNavURL, navErr := e.navigateSource(ctx, bctx, source, ep, selector, marker, canary)
+	// probeHashChange is phase-one only and hash-source only: a page that
+	// wires a hashchange listener has not run it for the fragment the URL
+	// already carried, so when nothing is reachable the engine re-issues the
+	// same fragment once and observes again. A sink found that way is marked
+	// so verification repeats the delivery it needed.
+	obs1, canaryNavURL, hashActivated, navErr := e.navigateSourceWithActivation(ctx, bctx, source, ep, selector, marker, canary, domXSSActivateNone, source == detection.DOMSourceHash)
 	reachTC := e.newTestCase(ctx, job, canaryNavURL)
 	if errors.Is(navErr, errDOMXSSSourceNotApplicable) {
 		reachTC.Status = domain.TestCaseSkipped
@@ -967,10 +1193,15 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 		e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("no implemented DOM-XSS sink reachable from %s (negative result)", label))
 		return nil
 	}
-	// Bounded to the FIRST reachable sink (deterministic: whichever the
-	// page's own script used first) — see this file's header comment.
-	sink := reachable[0]
-	e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("reachable sink: %s from %s (canary observed in the hooked setter/call)", sink, label))
+	// Bounded to the first reachable sink (deterministic: whichever the
+	// page's own script used first) — see this file's header comment. jQuery's
+	// factory is the one exception, explained on domXSSPrimarySink.
+	sink := domXSSPrimarySink(reachable)
+	reachNote := fmt.Sprintf("reachable sink: %s from %s (canary observed in the hooked setter/call)", sink, label)
+	if hashActivated {
+		reachNote += "; the page only reached the sink after the engine's bounded hash change, because its own load-time scripts did not run the handler for the fragment the URL already carried"
+	}
+	e.finishTestCase(ctx, reachTC, nil, reachNote)
 
 	// Every candidate SHAPE for this (source, sink) is tried in the planner's
 	// deterministic order. The first shape whose navigation produces a REAL
@@ -990,7 +1221,7 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 			return nil
 		}
 
-		stop, err := e.verifyDOMXSSShape(ctx, bctx, job, ep, source, selector, marker, sink, cand, finding.ID, label)
+		stop, err := e.verifyDOMXSSShape(ctx, bctx, job, ep, source, selector, marker, sink, hashActivated, cand, finding.ID, label)
 		if err != nil {
 			return err
 		}
@@ -1011,8 +1242,9 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 // Execution is attributed by the browser engine (the paused instruction is
 // the bare marker identifier, in the main frame), never by matching
 // page-controlled error or console text.
-func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, marker string, sink detection.DOMXSSSink, cand detection.Candidate, findingID domain.ID, label string) (bool, error) {
-	obs2, payloadNavURL, verr := e.navigateSource(ctx, bctx, source, ep, selector, marker, cand.Value)
+func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, marker string, sink detection.DOMXSSSink, hashActivated bool, cand detection.Candidate, findingID domain.ID, label string) (bool, error) {
+	act := domXSSActivationForSink(sink, hashActivated)
+	obs2, payloadNavURL, activationApplied, verr := e.navigateSourceWithActivation(ctx, bctx, source, ep, selector, marker, cand.Value, act, false)
 	verifyTC := e.newTestCase(ctx, job, payloadNavURL)
 	if errors.Is(verr, errDOMXSSSourceNotApplicable) {
 		verifyTC.Status = domain.TestCaseSkipped
@@ -1062,12 +1294,26 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 	if source == detection.DOMSourceLocalStorage || source == detection.DOMSourceSessionStorage {
 		notes += "; attacker-relevant ability to write or poison this storage key is not established by this isolated probe and requires manual exploitability review unless the target flow demonstrates it"
 	}
+	if act != domXSSActivateNone {
+		if activationApplied {
+			notes += "; activation step: " + act.describe() + ", performed once before the execution signal was read"
+		} else {
+			notes += "; activation step (" + act.label() + ") found no target element the harness had located, so execution was not attemptable on this run"
+		}
+	}
 
 	var evidenceIDs []domain.ID
 	if e.evidence != nil {
 		logLines := append(append([]string(nil), consoleErrs...), obs2.PageErrors...)
 		for _, message := range harness2 {
 			logLines = append(logLines, message.Text)
+		}
+		if act != domXSSActivateNone {
+			state := "not-applied"
+			if activationApplied {
+				state = "applied"
+			}
+			logLines = append(logLines, domXSSActivationEvidencePrefix+act.label()+":"+state)
 		}
 		if raw, err := json.Marshal(obs2.Runtime); err == nil {
 			logLines = append(logLines, "__INDAGO_RUNTIME_PROVENANCE__"+string(raw))
@@ -1190,22 +1436,34 @@ func observePage(ctx context.Context, page *browser.Page) domXSSObservation {
 // docs/dom-xss.md describes; the sink-hook harness and the phase-2
 // verification signal are identical for all four.
 func (e *domXSSExecutor) navigateSource(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, ep *domain.Endpoint, queryParam, marker, value string) (obs domXSSObservation, navURL string, err error) {
+	obs, navURL, _, err = e.navigateSourceWithActivation(ctx, bctx, source, ep, queryParam, marker, value, domXSSActivateNone, false)
+	return obs, navURL, err
+}
+
+// navigateSourceWithActivation is navigateSource plus the one bounded
+// activation step a sink may need (see domXSSActivation), and a phase-one
+// probe mode for the hash source: when the page reaches no hooked sink from
+// the fragment carried by the navigation itself, the engine re-issues that
+// same fragment as a real hash change, because a hashchange-driven page has
+// not run its handler yet. activated reports whether a step actually ran, so
+// verification repeats only the delivery phase one needed.
+func (e *domXSSExecutor) navigateSourceWithActivation(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, ep *domain.Endpoint, queryParam, marker, value string, act domXSSActivation, probeHashChange bool) (obs domXSSObservation, navURL string, activated bool, err error) {
 	switch source {
 	case detection.DOMSourceQuery:
 		navURL = domXSSQueryURL(ep.URL, queryParam, value)
-		obs, err = e.navigate(ctx, bctx, navURL, marker)
+		obs, activated, err = e.navigate(ctx, bctx, navURL, marker, value, act, false)
 	case detection.DOMSourceWindowName:
 		navURL = ep.URL
-		obs, err = e.navigateWithWindowName(ctx, bctx, navURL, marker, value)
+		obs, err = e.navigateWithWindowName(ctx, bctx, navURL, marker, value, act)
 	case detection.DOMSourcePostMessage:
 		navURL = ep.URL
-		obs, err = e.navigateWithPostMessage(ctx, bctx, navURL, marker, value)
+		obs, err = e.navigateWithPostMessage(ctx, bctx, navURL, marker, value, act)
 	case detection.DOMSourceReferrer:
 		navURL = ep.URL
-		obs, err = e.navigateWithReferrer(ctx, bctx, navURL, marker, value)
+		obs, err = e.navigateWithReferrer(ctx, bctx, navURL, marker, value, act)
 	case detection.DOMSourceLocalStorage, detection.DOMSourceSessionStorage:
 		navURL = ep.URL
-		obs, err = e.navigateWithStorage(ctx, bctx, source, navURL, queryParam, marker, value)
+		obs, err = e.navigateWithStorage(ctx, bctx, source, navURL, queryParam, marker, value, act)
 	default: // detection.DOMSourceHash
 		navURL = domXSSHashURL(ep.URL, value)
 		if queryParam != "" {
@@ -1213,9 +1471,9 @@ func (e *domXSSExecutor) navigateSource(ctx context.Context, bctx *browser.Conte
 				navURL = routeURL
 			}
 		}
-		obs, err = e.navigate(ctx, bctx, navURL, marker)
+		obs, activated, err = e.navigate(ctx, bctx, navURL, marker, value, act, probeHashChange)
 	}
-	return obs, navURL, err
+	return obs, navURL, activated, err
 }
 
 // sessionStatePathFor returns the scan's saved authenticated session
@@ -1265,19 +1523,43 @@ func waitForDOMXSSURLSourceObservationWindow(ctx context.Context, navURL string)
 // work, and returns the page's observations. One page per navigation, never
 // reused — mirrors BrowserVerifier.Verify's own discipline of never
 // attributing a signal to the wrong navigation.
-func (e *domXSSExecutor) navigate(ctx context.Context, bctx *browser.Context, navURL, marker string) (domXSSObservation, error) {
+//
+// probeHashChange (hash source, phase one only) re-issues the fragment as a
+// real hash change when the page's own load-time scripts reached no hooked
+// sink; a hashchange-driven page has not run its handler with the fragment the
+// URL already carried. act applies the same bounded activation unconditionally
+// during verification. The observation is retaken after any activation, and
+// activated reports whether one happened.
+func (e *domXSSExecutor) navigate(ctx context.Context, bctx *browser.Context, navURL, marker, value string, act domXSSActivation, probeHashChange bool) (domXSSObservation, bool, error) {
 	page, err := e.openObservedPage(ctx, bctx, marker)
 	if err != nil {
-		return domXSSObservation{}, err
+		return domXSSObservation{}, false, err
 	}
 	defer page.Close()
 	if _, err := page.Navigate(ctx, navURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
-		return domXSSObservation{}, err
+		return domXSSObservation{}, false, err
 	}
 	if err := waitForDOMXSSURLSourceObservationWindow(ctx, navURL); err != nil {
-		return domXSSObservation{}, err
+		return domXSSObservation{}, false, err
 	}
-	return observePage(ctx, page), nil
+	obs := observePage(ctx, page)
+	if probeHashChange && act == domXSSActivateNone && len(parseDOMXSSReachability(domXSSHarnessMessages(obs.Runtime), marker)) == 0 {
+		act = domXSSActivateHashChange
+	}
+	if act == domXSSActivateNone {
+		return obs, false, nil
+	}
+	applied, err := e.applyDOMXSSActivation(ctx, page, act, marker, value)
+	if err != nil {
+		return domXSSObservation{}, false, err
+	}
+	if !applied {
+		return obs, false, nil
+	}
+	if err := waitForDOMXSSURLSourceObservationWindow(ctx, navURL); err != nil {
+		return domXSSObservation{}, false, err
+	}
+	return observePage(ctx, page), true, nil
 }
 
 // navigateWithWindowName implements the ONE genuinely different mechanical
@@ -1301,7 +1583,7 @@ func (e *domXSSExecutor) navigate(ctx context.Context, bctx *browser.Context, na
 //     exactly reproducing the real-world legacy attack (an attacker page
 //     sets window.name on a tab it controls, then redirects that SAME tab
 //     to the victim page).
-func (e *domXSSExecutor) navigateWithWindowName(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (domXSSObservation, error) {
+func (e *domXSSExecutor) navigateWithWindowName(ctx context.Context, bctx *browser.Context, targetURL, marker, value string, act domXSSActivation) (domXSSObservation, error) {
 	page, err := e.openObservedPage(ctx, bctx, marker)
 	if err != nil {
 		return domXSSObservation{}, err
@@ -1314,6 +1596,9 @@ func (e *domXSSExecutor) navigateWithWindowName(ctx context.Context, bctx *brows
 		return domXSSObservation{}, err
 	}
 	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
+		return domXSSObservation{}, err
+	}
+	if err := e.finishSourceNavigation(ctx, page, act, marker, value); err != nil {
 		return domXSSObservation{}, err
 	}
 	return observePage(ctx, page), nil
@@ -1350,7 +1635,7 @@ func setWindowNameScript(value string) string {
 // instead of a Playwright TypeError: nothing could ever receive this
 // delivery there, so the source is NOT APPLICABLE for the endpoint, not
 // broken. Any genuine evaluation failure still propagates as an error.
-func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (domXSSObservation, error) {
+func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *browser.Context, targetURL, marker, value string, act domXSSActivation) (domXSSObservation, error) {
 	page, err := e.openObservedPage(ctx, bctx, marker)
 	if err != nil {
 		return domXSSObservation{}, err
@@ -1365,6 +1650,9 @@ func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *brow
 	}
 	if s, ok := status.(string); ok && s == domXSSPostMessageNoRoot {
 		return domXSSObservation{}, errDOMXSSSourceNotApplicable
+	}
+	if err := e.finishSourceNavigation(ctx, page, act, marker, value); err != nil {
+		return domXSSObservation{}, err
 	}
 	return observePage(ctx, page), nil
 }
@@ -1583,13 +1871,16 @@ func domXSSRefererURL(fragmentValue string) string {
 // page's own document.referrer (see domXSSRefererURL's doc comment for
 // why the value must be wrapped in a synthetic absolute URL rather than
 // passed raw).
-func (e *domXSSExecutor) navigateWithReferrer(ctx context.Context, bctx *browser.Context, targetURL, marker, value string) (domXSSObservation, error) {
+func (e *domXSSExecutor) navigateWithReferrer(ctx context.Context, bctx *browser.Context, targetURL, marker, value string, act domXSSActivation) (domXSSObservation, error) {
 	page, err := e.openObservedPage(ctx, bctx, marker)
 	if err != nil {
 		return domXSSObservation{}, err
 	}
 	defer page.Close()
 	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad, Referer: domXSSRefererURL(value)}); err != nil {
+		return domXSSObservation{}, err
+	}
+	if err := e.finishSourceNavigation(ctx, page, act, marker, value); err != nil {
 		return domXSSObservation{}, err
 	}
 	return observePage(ctx, page), nil
@@ -1615,7 +1906,7 @@ func (e *domXSSExecutor) navigateWithReferrer(ctx context.Context, bctx *browser
 //     needed) under this exact, previously discovered key;
 //  4. THEN navigate (same page) to targetURL — the write from step 3 is
 //     now visible since both navigations share the same origin.
-func (e *domXSSExecutor) navigateWithStorage(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, targetURL, key, marker, value string) (domXSSObservation, error) {
+func (e *domXSSExecutor) navigateWithStorage(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, targetURL, key, marker, value string, act domXSSActivation) (domXSSObservation, error) {
 	page, err := e.openObservedPage(ctx, bctx, marker)
 	if err != nil {
 		return domXSSObservation{}, err
@@ -1637,6 +1928,9 @@ func (e *domXSSExecutor) navigateWithStorage(ctx context.Context, bctx *browser.
 		return domXSSObservation{}, err
 	}
 	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
+		return domXSSObservation{}, err
+	}
+	if err := e.finishSourceNavigation(ctx, page, act, marker, value); err != nil {
 		return domXSSObservation{}, err
 	}
 	return observePage(ctx, page), nil

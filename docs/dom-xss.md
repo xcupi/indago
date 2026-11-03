@@ -1,4 +1,4 @@
-# Indago — bounded DOM-XSS HTML and string-timer sinks
+# Indago — bounded DOM-XSS HTML, string-timer and jQuery sinks
 
 ## Candidate shapes: the attribute-context breakout, and non-HTML endpoints
 
@@ -62,6 +62,86 @@ honest gates now exist:
   deliberately **not** wrapped in `try`/`catch`: a genuine evaluation failure on
   an attachable document still surfaces as a retried error, and both properties
   are asserted by `TestDOMBodylessDocumentIsNotApplicable`.
+
+## jQuery sink slices: attribute write and selector call (operator-authorized)
+
+The operator explicitly asked Indago to cover the jQuery DOM-XSS lab classes, so
+this slice adds two first-class sinks. They are called `jQuery.attr` and
+`jQuery.selector` so an operator can tell them apart from the HTML sinks on
+every presentation surface. This is operator-authorized work; `AGENTS.md` §3
+still lists DOM slices beyond P2.3 as out of scope until the coordinator raises
+that wording with the operator.
+
+**Hook, not source-text search.** The harness wraps the page's own jQuery
+library when the page assigns the global (`window.jQuery = window.$ = jQuery`),
+which happens before any later page script can call it:
+
+- `jQuery.fn.init` (the function every `jQuery(...)`/`$(...)` call constructs)
+  reports `jQuery.selector` when the selector argument is a primitive string
+  containing the marker.
+- `jQuery.fn.attr` reports `jQuery.attr` only for an `href` write whose value is
+  a primitive string containing the marker, and tags the exact element(s) with
+  `data-indago-xss-target="<marker>"` so verification can click the element it
+  located instead of inventing a selector.
+
+Native code always runs first with the original receiver and every argument,
+and its result is returned identically. A page that replaces `console.log` or
+`JSON.stringify` after load cannot silence the reports (the harness captured the
+natives before page scripts). A throwing native call is not reported, exactly
+like the other sinks' primitive-string-only rule.
+
+**Reachability is still inert.** The phase-one canary is
+`indago-domxss-canary-<marker>`: no `javascript:` scheme and no markup, so a
+`jQuery.attr` write stores it as a harmless relative URL and a
+`jQuery.selector` call treats it as a selector. A page can therefore reach a
+sink without anything executing.
+
+**Verification candidates and activation.** Each sink has exactly one bounded
+shape:
+
+| sink | shape | activation before reading the signal |
+|---|---|---|
+| `jQuery.attr` | `javascript:<marker>` | one click on the harness-tagged element; the browser's own default activation of that link evaluates the marker identifier |
+| `jQuery.selector` | `<img src=x onerror=<marker>>` | only if phase one needed it: one bounded hash change, so the page's own `hashchange` handler runs with exactly this value |
+
+The hash probe is phase-one only: when the fragment carried by the navigation
+reaches no hooked sink, the hash source re-issues the same fragment as a real
+hash change (`location.hash = ''; location.hash = <value>`) and observes again;
+that is how a `hashchange`-driven page ever runs its handler. Verification
+repeats the delivery phase one needed, once, inside the existing observation
+window. A non-hashchange selector page needs no activation. Both activations
+are engine-issued DOM operations, not OS-level trusted input: the click goes
+through the element's own activation behavior (`element.click()` via the page
+evaluate escape hatch), and the hash change is a normal script URL mutation. The
+engine never navigates to the `javascript:` URL itself.
+
+**No verdict rule changed.** Confirmation is still
+`verification.MatchRuntimeExecution`/`DecideWithProvenance`: the engine-attributed
+`ReferenceError: <marker> is not defined` at the bare marker identifier in the
+main frame. In Chromium this is observed for both a clicked `javascript:`
+URL and a jQuery-created image `onerror`. A reflection (the marker in the
+`href`/DOM), a page-authored console line formatted as the same
+ReferenceError, and a safe/escaped control all stay Rejected; each real-Chromium
+case reaches the hook and finishes payload verification first. Activation is
+recorded in the verification note and in the browser-log evidence as
+`__INDAGO_DOMXSS_ACTIVATION__<kind>:applied|not-applied`.
+
+**One attribution rule.** jQuery's own HTML parsing assigns `innerHTML` inside
+the factory call, so a markup-carrying `$(...)` can report both
+`jQuery.selector` and `innerHTML`. The page-authored `jQuery.selector` call is
+the site identity; choosing `innerHTML` there would drop the activation the
+factory call needs. Every other sink keeps the original first-reachable order.
+
+Bounded limits, stated honestly: only the global jQuery function's factory
+(`fn.init`) and `fn.attr` are hooked. `jQuery.fn.prop`, `.html`, `.append`,
+direct `jQuery.find(selector)` calls, non-`href` attributes, single-quoted
+attribute writes and a jQuery loaded only through an AMD/CommonJS module with no
+global are not covered. The selector lab class is version-specific: jQuery
+1.8.3's selector parser turns `:contains(<img ...>)` into markup, while modern
+jQuery does not (the local fixture is the pinned upstream 1.8.3 in
+`internal/scan/testdata/`). The click activation is one attempt per candidate;
+if the harness found no element, execution is not attempted and the attempt is
+not reported as a clean negative.
 
 ## P2.3: primitive-string setTimeout / setInterval
 
@@ -321,7 +401,7 @@ sinks added by P2.1 are described at the top of this document. See "Out of scope
 | Axis | Implemented |
 |---|---|
 | Sources | SEVEN (all client-side sources identified so far): `location.hash` (piece 1); `location.search`/`URLSearchParams`, `window.name`, `postMessage` (piece 2); `document.referrer`, `localStorage`, `sessionStorage` (piece 3 — `detection.DOMXSSSources`) |
-| Sink categories (current) | Bounded HTML injection: `Element.prototype.innerHTML` / `outerHTML`, `document.write` / `document.writeln`, `Element.prototype.insertAdjacentHTML`, `Range.prototype.createContextualFragment`; P2.3 adds only primitive-string `setTimeout` / `setInterval` (see native/timing limits above) |
+| Sink categories (current) | Bounded HTML injection: `Element.prototype.innerHTML` / `outerHTML`, `document.write` / `document.writeln`, `Element.prototype.insertAdjacentHTML`, `Range.prototype.createContextualFragment`; P2.3 adds only primitive-string `setTimeout` / `setInterval`; the operator-authorized jQuery slice adds `jQuery.attr` (an `href` write, activated by one click) and `jQuery.selector` (a factory/selector call, hash-change activated only when the page needs it) — see the jQuery section above |
 | Pairs tested per endpoint/source/selector | At most ONE — the first reachable sink (by the page's own script call order) for each query parameter or storage key; non-selector sources have one pass — see "Two-phase design" below |
 | Methods probed | GET/HEAD-navigable endpoints only — UNCHANGED from piece 1 |
 | Query source coverage | Every distinct discovered `Location=Query` parameter name, sorted lexicographically for deterministic ordering — each name gets an independent canary/payload pass and finding identity. If no query parameter was discovered, a skipped `TestCase` says the source was not tested (not a clean negative) |
@@ -715,8 +795,10 @@ deliberate exclusions for future, separate pieces of work:
   `detection.DOMXSSSources`). A genuinely new source not yet identified
   would still be new work, but nothing on the current list remains.
 - **Sinks**: bounded HTML injection plus the two P2.3 primitive-string timers
-  listed above. `eval`/`Function` and `location`/`src` assignment (including
-  script-src) remain excluded.
+  and the two operator-authorized jQuery sinks described above. Every other
+  jQuery method (`prop`, `html`, `append`, direct `jQuery.find`, …), `eval`/
+  `Function` and `location`/`src` assignment (including script-src) remain
+  excluded.
   Other HTML methods are not implicitly covered. Source-specific limits and
   the first-reachable-sink bound still apply; this is not exhaustive DOM XSS.
 - **More than one reachable pair per endpoint/source/selector per probe

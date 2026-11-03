@@ -6,7 +6,11 @@ package detection
 // decodeURI reader preserves reserved characters) and — for a value injected
 // inside a quoted attribute — an attribute-breakout image whose broken src
 // fires onerror. Primitive-string timers receive a bare marker expression.
-// See docs/dom-xss.md for bounded coverage.
+// The two jQuery sinks are attribute/selector calls, not HTML parses from the
+// start: a jQuery href write receives a javascript: URL (activated by one
+// deterministic engine click) and a jQuery selector call receives markup that
+// jQuery's own parser turns into elements. See docs/dom-xss.md for bounded
+// coverage.
 // A DOM-XSS site is identified by (client-side source, sink) at an Endpoint,
 // not a server-side injection point. In particular, fragments never reach the
 // server-response-based Reflected XSS pipeline.
@@ -111,9 +115,13 @@ var DOMXSSSources = []DOMXSSSource{
 	DOMSourceReferrer, DOMSourceLocalStorage, DOMSourceSessionStorage,
 }
 
-// DOMXSSSink identifies the bounded HTML and primitive-string timer sinks.
-// document.writeln shares document.write's identity. eval/Function and
-// location/src assignment remain excluded; see docs/dom-xss.md.
+// DOMXSSSink identifies the bounded HTML, primitive-string timer and jQuery
+// sinks. document.writeln shares document.write's identity. The jQuery sinks
+// are the instrumented call paths, never a source-text search for "$(":
+// jQuery.attr is an attribute WRITE (only href is observed) and
+// jQuery.selector is a value handed to jQuery's own factory/selector parser.
+// eval/Function, location/src assignment and every other jQuery method remain
+// excluded; see docs/dom-xss.md.
 type DOMXSSSink string
 
 const (
@@ -124,12 +132,24 @@ const (
 	DOMSinkCreateContextualFragment DOMXSSSink = "Range.createContextualFragment"
 	DOMSinkSetTimeout               DOMXSSSink = "setTimeout"
 	DOMSinkSetInterval              DOMXSSSink = "setInterval"
+	// DOMSinkJQueryAttr is jQuery's Element attribute writer used for an
+	// <a href> (jQuery.fn.attr("href", value)). A javascript: URL written
+	// there executes only when the link is activated, so verification
+	// performs one deterministic click on the exact element the harness
+	// tagged. Only the href attribute of a real element is observed.
+	DOMSinkJQueryAttr DOMXSSSink = "jQuery.attr"
+	// DOMSinkJQuerySelector is a value handed to jQuery's factory/selector
+	// call (jQuery(...)/$(...)). jQuery decides between a CSS selector and
+	// HTML; a value that turns the call into markup is parsed and created.
+	// Verification issues the hash change a hashchange-driven page needs,
+	// then requires the same marker execution signal.
+	DOMSinkJQuerySelector DOMXSSSink = "jQuery.selector"
 )
 
 // IsValid reports whether sink is one of this engine's implemented sinks.
 func (s DOMXSSSink) IsValid() bool {
 	switch s {
-	case DOMSinkInnerHTML, DOMSinkOuterHTML, DOMSinkDocumentWrite, DOMSinkInsertAdjacentHTML, DOMSinkCreateContextualFragment, DOMSinkSetTimeout, DOMSinkSetInterval:
+	case DOMSinkInnerHTML, DOMSinkOuterHTML, DOMSinkDocumentWrite, DOMSinkInsertAdjacentHTML, DOMSinkCreateContextualFragment, DOMSinkSetTimeout, DOMSinkSetInterval, DOMSinkJQueryAttr, DOMSinkJQuerySelector:
 		return true
 	default:
 		return false
@@ -176,6 +196,11 @@ const (
 	// domXSSShapeTimerExpression is the only shape a primitive-string timer
 	// can evaluate: a bare JavaScript expression.
 	domXSSShapeTimerExpression = "timer_expression"
+	// domXSSShapeJQueryJavascriptURL is the only shape a jQuery href
+	// attribute write can execute: a javascript: URL whose body is the bare
+	// marker identifier. It is inert until the link is activated, so the
+	// engine performs exactly one click on the element it located.
+	domXSSShapeJQueryJavascriptURL = "jquery_javascript_url"
 )
 
 // DOMXSSPayloadFor returns the PRIMARY (first) verification Candidate for a
@@ -223,6 +248,18 @@ func DOMXSSPayloadsFor(source DOMXSSSource, sink DOMXSSSink, marker string) []Ca
 	if sink == DOMSinkSetTimeout || sink == DOMSinkSetInterval {
 		// A timer evaluates JavaScript, not HTML.
 		return []Candidate{domXSSPayloadCandidate(source, sink, domXSSShapeTimerExpression, marker, domXSSRationale(source, sink))}
+	}
+	if sink == DOMSinkJQueryAttr {
+		// An href write only executes a javascript: URL, and only when the
+		// link is activated. No markup shape belongs here: the page writes
+		// the exact value we supply as the attribute value.
+		return []Candidate{domXSSPayloadCandidate(source, sink, domXSSShapeJQueryJavascriptURL, "javascript:"+marker, domXSSJQueryAttrRationale(source, sink))}
+	}
+	if sink == DOMSinkJQuerySelector {
+		// jQuery decides selector vs HTML itself. Markup is the shape that
+		// makes its own parser create an element whose onerror references
+		// the bare marker.
+		return []Candidate{domXSSPayloadCandidate(source, sink, domXSSShapeMarkup, "<img src=x onerror="+marker+">", domXSSJQuerySelectorRationale(source, sink))}
 	}
 	value := "<img src=x onerror=" + marker + ">"
 	if source == DOMSourceQuery && sink == DOMSinkDocumentWrite {
@@ -325,4 +362,24 @@ func domXSSRationale(source DOMXSSSource, sink DOMXSSSink) string {
 func domXSSAttributeBreakoutRationale(source DOMXSSSource, sink DOMXSSSink) string {
 	how, storageControlCaveat := domXSSSourceRoute(source)
 	return how + " reaches " + string(sink) + " inside an already-open quoted HTML attribute (for example an img src or document.write template, where the value cannot start its own tag); this shape first closes that attribute and the enclosing tag, then injects an <img> whose deliberately-broken src fires onerror referencing the benign marker; confirmation still requires the browser's own marker-specific execution signal, never the reflection alone" + storageControlCaveat
+}
+
+// domXSSJQueryAttrRationale explains the javascript: URL shape for a jQuery
+// href attribute write. The value is inert until the link is activated, so the
+// engine's one deterministic click is part of verification; the verdict is
+// still the marker-specific browser execution signal, never the attribute
+// value itself.
+func domXSSJQueryAttrRationale(source DOMXSSSource, sink DOMXSSSink) string {
+	how, storageControlCaveat := domXSSSourceRoute(source)
+	return how + " is written by jQuery through " + string(sink) + " into the href attribute of an anchor element; only a javascript: URL executes from that position, and only after the link is activated, so verification performs one deterministic activation click on the exact element the harness located and then requires the browser's own marker-specific execution signal (the bare marker identifier evaluated by the javascript: URL), never the attribute value or a reflection alone" + storageControlCaveat
+}
+
+// domXSSJQuerySelectorRationale explains the markup shape for a value handed
+// to jQuery's factory/selector call. jQuery itself decides selector vs HTML;
+// a hashchange-driven page needs the engine's bounded hash-change activation
+// before its own handler runs. The verdict is the marker-specific browser
+// execution signal.
+func domXSSJQuerySelectorRationale(source DOMXSSSource, sink DOMXSSSink) string {
+	how, storageControlCaveat := domXSSSourceRoute(source)
+	return how + " is handed to jQuery's factory/selector call through " + string(sink) + "; jQuery parses a value that turns that call into markup and creates an element whose deliberately-broken src fires onerror referencing the benign marker, so a hashchange-driven page needs the engine's one bounded hash-change activation before its own handler runs; confirmation still requires the browser's own marker-specific execution signal, never the reflection alone" + storageControlCaveat
 }
