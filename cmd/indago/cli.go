@@ -484,6 +484,9 @@ func (c *cli) scanCreate(args []string) error {
 	fs.Var(&idorCandidates, "idor-candidates", "foreign object identifier to try for the IDOR differential, e.g. the victim username an authorized lab brief names (repeatable, max 10; never invented by Indago)")
 	enableIDOREnum := fs.Bool("idor-enumerate", false, "opt in to BOUNDED identifier enumeration for the IDOR engine: numeric neighbours (value-1, value+1, 1..N) and a fixed short-slug set (admin, test, demo, guest); requires -idor, OFF by default (see docs/idor.md)")
 	idorEnumN := fs.Int("idor-enumerate-n", 0, "N for -idor-enumerate: how many low integers 1..N to try (default 5, ceiling 10)")
+	enableRoleParam := fs.Bool("role-param", false, "opt in to the access-control engine's client-controlled flag differential (case 20): fetch a privileged endpoint with a role-shaped query parameter/cookie absent and then set to an admin-like value, and confirm ONLY when the privileged admin action surface becomes reachable; GET only, same-origin, bounded — OFF by default (see docs/access-control.md)")
+	enableACP := fs.Bool("access-control-pages", false, "opt in to the access-control engine's page-disclosure pass: re-fetch discovered pages, extract administrative path literals from their OWN inline/same-origin scripts, and probe each disclosed path anonymously (case 19's unpredictable path); never a wordlist, GET only, bounded — OFF by default")
+	enableRoleWrite := fs.Bool("role-write", false, "opt in to the access-control engine's role-field slice (case 21): send the caller's OWN profile update with a client-supplied role field and confirm ONLY when a privileged surface denied before the write is reachable after it; requires an authenticated session and the server's -allow-state-changing — OFF by default (see docs/access-control.md)")
 	var proxyPool stringList
 	fs.Var(&proxyPool, "proxy", "proxy to route this scan's traffic through — raw HTTP and browser verification alike (repeatable, round-robin; http://host:port, https://host:port, or socks5://host:port, optionally with embedded user:pass@ creds); operator-supplied infrastructure only, off by default (see AGENTS.md §2.3)")
 	randomizeTLS := fs.Bool("randomize-tls-fingerprint", false, "randomize the raw HTTP engine's TLS ClientHello (JA3) via uTLS instead of Go's own default — OFF by default (see AGENTS.md §2.3); MUTUALLY EXCLUSIVE with -proxy (Go's transport never consults a custom TLS dialer for a proxied connection); has no effect on browser verification, which already uses a real browser's own TLS stack")
@@ -506,6 +509,15 @@ func (c *cli) scanCreate(args []string) error {
 		"quick_scan": *quick, "max_depth": *depth, "max_pages": *maxPages, "max_endpoints": *maxEndpoints,
 		"enable_evasion": *enableEvasion,
 		"enable_idor":    *enableIDOR,
+	}
+	if *enableRoleParam {
+		req["enable_role_param"] = true
+	}
+	if *enableACP {
+		req["enable_access_control_pages"] = true
+	}
+	if *enableRoleWrite {
+		req["enable_role_write"] = true
 	}
 	if *enableIDOREnum {
 		req["idor_enumerate"] = true

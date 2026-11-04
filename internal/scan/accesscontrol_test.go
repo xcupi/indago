@@ -47,7 +47,7 @@ func acEndpoint(t *testing.T, env *scanEnv, rawURL string, src domain.DiscoveryS
 
 func acJob(env *scanEnv, ep *domain.Endpoint) *domain.TestJob {
 	return &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobAccessControl,
-		Target:  domain.JobTarget{EndpointID: ep.ID, URL: ep.URL},
+		Target:   domain.JobTarget{EndpointID: ep.ID, URL: ep.URL},
 		Attempts: 1, MaxAttempts: 2}
 }
 
@@ -333,9 +333,9 @@ func TestEnqueueAccessControlProbesSelectsRobotsAndSitemapAdminPaths(t *testing.
 
 	admin := acEndpoint(t, env, "http://127.0.0.1:1/admin", domain.SourceRobots, domain.MethodGET)
 	dash := acEndpoint(t, env, "http://127.0.0.1:1/dashboard", domain.SourceSitemap, domain.MethodGET)
-	acEndpoint(t, env, "http://127.0.0.1:1/public", domain.SourceRobots, domain.MethodGET)          // not admin-like
-	acEndpoint(t, env, "http://127.0.0.1:1/administrator", domain.SourceCrawler, domain.MethodGET)   // not robots/sitemap
-	acEndpoint(t, env, "http://127.0.0.1:1/admin/delete", domain.SourceRobots, domain.MethodPOST)     // not a read
+	acEndpoint(t, env, "http://127.0.0.1:1/public", domain.SourceRobots, domain.MethodGET)         // not admin-like
+	acEndpoint(t, env, "http://127.0.0.1:1/administrator", domain.SourceCrawler, domain.MethodGET) // not robots/sitemap
+	acEndpoint(t, env, "http://127.0.0.1:1/admin/delete", domain.SourceRobots, domain.MethodPOST)  // not a read
 
 	c.enqueueAccessControlProbes(context.Background(), env.scanID)
 

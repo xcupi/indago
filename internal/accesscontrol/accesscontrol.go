@@ -41,6 +41,11 @@ const (
 )
 
 // ActionKind classifies a privileged administrative action found on a page.
+//
+// The four kinds are the ONE vocabulary every case of this engine uses:
+// case 19 reports them from an anonymous page, cases 20 and 21 require at
+// least one of them from the privileged surface that became reachable. A page
+// whose text merely says "admin" produces none of them.
 type ActionKind string
 
 const (
@@ -50,6 +55,14 @@ const (
 	// ActionUserList is a listing of user accounts (or a link to one) that a
 	// non-administrator is not meant to see.
 	ActionUserList ActionKind = "user_list"
+	// ActionPrivilegedAction is a link/form that targets a DEEPER operation
+	// under a privileged path than the page itself (…/admin/delete,
+	// …/admin/users/42/role). A link back to the privileged landing path is
+	// navigation, not a capability.
+	ActionPrivilegedAction ActionKind = "privileged_action"
+	// ActionRoleControl is a form control that lets the caller set a role or
+	// privilege to an admin-like value, or a role selector offering one.
+	ActionRoleControl ActionKind = "role_control"
 )
 
 // Action is one privileged action found in a response body.
@@ -240,10 +253,10 @@ func Decide(anon Snapshot, nonAdmin *Snapshot) Decision {
 // ---------------------------------------------------------------------------
 
 // adminKeywords identify a path segment that is administrative. Matching is a
-// substring test on the lower-cased segment, so /administrator, /wp-admin and
-// /admin.php all qualify. The list is deliberately tiny: there is no wordlist
-// and no guessing, only a fixed vocabulary.
-var adminKeywords = []string{"admin", "manage", "dashboard", "console", "backoffice", "backend", "cpanel"}
+// substring test on the lower-cased segment, so /administrator, /wp-admin,
+// /admin.php and /admin-8f3a2b all qualify. The list is deliberately tiny:
+// there is no wordlist and no guessing, only a fixed vocabulary.
+var adminKeywords = []string{"admin", "manage", "dashboard", "console", "backoffice", "backend", "cpanel", "panel"}
 
 // AdminLikePath reports whether a URL's path looks administrative. It is used
 // to bound which discovered paths the pass is willing to probe; the verdict
@@ -253,7 +266,13 @@ func AdminLikePath(raw string) bool {
 	if err != nil || u.Path == "" {
 		return false
 	}
-	for _, seg := range strings.Split(strings.ToLower(u.Path), "/") {
+	return adminPathLike(u.Path)
+}
+
+// adminPathLike is the path-only form of AdminLikePath, shared with the
+// disclosure layer (a script literal is a path, not a URL).
+func adminPathLike(path string) bool {
+	for _, seg := range strings.Split(strings.ToLower(path), "/") {
 		for _, kw := range adminKeywords {
 			if strings.Contains(seg, kw) {
 				return true
@@ -266,7 +285,7 @@ func AdminLikePath(raw string) bool {
 // isActionElement reports whether an element can carry a user-visible action.
 func isActionElement(tag string) bool {
 	switch tag {
-	case "a", "area", "button", "input", "form":
+	case "a", "area", "button", "input", "form", "select":
 		return true
 	}
 	return false
@@ -300,7 +319,113 @@ func classify(n *html.Node, tag string) (Action, bool) {
 	if pathDelete && pathUsers && AdminLikePath(target) {
 		return Action{Kind: ActionDeleteUser, Evidence: clip(elementText(n, tag, target), 160), Target: target}, true
 	}
+	// A role/privilege control the caller can set is itself an administrative
+	// capability: a page offering <select name="role"><option>admin</option>
+	// is handing out the role, not merely mentioning it. A control offering
+	// only "user" is a sign-up field, not a capability.
+	if c, ok := roleControl(n, tag); ok {
+		return c, true
+	}
+	// Any other link/form into a DEEPER operation under a privileged path is
+	// an actionable administrative surface. The privileged landing path itself
+	// is navigation, not a capability.
+	if ok := deeperPrivilegedTarget(target); ok {
+		return Action{Kind: ActionPrivilegedAction, Evidence: clip(elementText(n, tag, target), 160), Target: target}, true
+	}
 	return Action{}, false
+}
+
+// roleControl recognises a form control that lets the caller set a role or
+// privilege to an admin-like value. It is shared by all cases: case 19 needs
+// it to see such a control on an anonymous page, and cases 20/21 need it to
+// recognise the privileged surface's role-change affordance.
+func roleControl(n *html.Node, tag string) (Action, bool) {
+	switch tag {
+	case "input", "button", "select", "textarea":
+	default:
+		return Action{}, false
+	}
+	name := attr(n, "name")
+	if !RoleName(name) {
+		return Action{}, false
+	}
+	switch tag {
+	case "select":
+		var offered []string
+		var walk func(*html.Node)
+		walk = func(x *html.Node) {
+			if x.Type == html.ElementNode && strings.EqualFold(x.Data, "option") {
+				v := strings.TrimSpace(attr(x, "value"))
+				if v == "" {
+					v = strings.TrimSpace(nodeText(x, 40))
+				}
+				if AdminLikeValue(v) {
+					offered = append(offered, v)
+				}
+			}
+			for c := x.FirstChild; c != nil; c = c.NextSibling {
+				walk(c)
+			}
+		}
+		walk(n)
+		if len(offered) == 0 {
+			return Action{}, false
+		}
+		return Action{Kind: ActionRoleControl,
+			Evidence: clip(fmt.Sprintf("role select %q offers %q", name, offered[0]), 160), Target: name}, true
+	case "input":
+		switch strings.ToLower(attr(n, "type")) {
+		case "checkbox", "radio":
+			return Action{Kind: ActionRoleControl,
+				Evidence: clip(fmt.Sprintf("%s control %q", tag, name), 160), Target: name}, true
+		}
+		fallthrough
+	default:
+		if v := attr(n, "value"); AdminLikeValue(v) {
+			return Action{Kind: ActionRoleControl,
+				Evidence: clip(fmt.Sprintf("%s %q=%q", tag, name, v), 160), Target: name}, true
+		}
+	}
+	return Action{}, false
+}
+
+// nonCapabilityOps are route words that are navigation or session
+// management, never an administrative operation. A link to /admin/logout is
+// not evidence that /admin hands out administrative capability.
+var nonCapabilityOps = map[string]bool{
+	"logout": true, "log-out": true, "signout": true, "sign-out": true,
+	"login": true, "log-in": true, "signin": true, "sign-in": true,
+	"index": true, "home": true, "static": true, "assets": true,
+}
+
+// deeperPrivilegedTarget reports whether raw points at an operation DEEPER
+// than a privileged area's landing path (…/admin/delete, …/users/42/role).
+// The landing path itself is where the caller already is, so it is not a
+// capability.
+func deeperPrivilegedTarget(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, "#") || strings.HasPrefix(strings.ToLower(raw), "javascript:") {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Path == "" {
+		return false
+	}
+	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+	for i, seg := range segs {
+		if !adminPathLike(seg) {
+			continue
+		}
+		if i == len(segs)-1 {
+			continue // the privileged landing path itself
+		}
+		op := strings.ToLower(segs[i+1])
+		if nonCapabilityOps[op] || assetPath(u.Path) {
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 // elementLabel is the lower-cased text and attributes that describe an

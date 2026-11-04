@@ -396,7 +396,7 @@ func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.
 			evIDs = ids
 			tc.EvidenceIDs = appendUniqueIDs(tc.EvidenceIDs, ids)
 		}
-		dec := idor.Decide(d.CallerIdentity, cand.Value, resp.Status, resp.Body)
+		dec := idor.DecideWithBaseline(d.CallerIdentity, cand.Value, resp.Status, resp.Body, baseResp.Body)
 		// Evidence integrity: when an evidence store is configured, a
 		// Confirmed verdict must be reproducible from stored request A and
 		// request B blobs. A persistence failure downgrades the outcome

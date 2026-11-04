@@ -66,6 +66,19 @@ type execution struct {
 	// already been enqueued. It runs on the same quiet tick as the other
 	// protected passes and never gates on browser work.
 	accessControlPassDone atomic.Bool
+
+	// accessDisclosurePassDone marks that this execution's one-time
+	// page-disclosure pass (case 19's script-disclosed path) has been
+	// enqueued.
+	accessDisclosurePassDone atomic.Bool
+
+	// roleFlagPassDone marks the one-time client-controlled-flag differential
+	// pass (case 20) for scans that opted into it.
+	roleFlagPassDone atomic.Bool
+
+	// roleFieldPassDone marks the one-time role-field write pass (case 21) for
+	// scans that opted into it.
+	roleFieldPassDone atomic.Bool
 }
 
 // pause routes a scan pause to both the worker pool and discovery.
@@ -456,6 +469,28 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 	if !ex.accessControlPassDone.Load() {
 		ex.accessControlPassDone.Store(true)
 		c.enqueueAccessControlProbes(ctx, ex.scanID)
+		passes = true
+	}
+	// Case 19's second source: administrative paths a discovered page's OWN
+	// scripts disclose. Same anonymous GET probe, same bounds.
+	if !ex.accessDisclosurePassDone.Load() {
+		ex.accessDisclosurePassDone.Store(true)
+		c.enqueueAccessControlDisclosureProbes(ctx, ex.scanID)
+		passes = true
+	}
+	// Case 20: client-controlled flag differential. Opt-in (it may propose the
+	// conventional /admin path when discovery found no privileged endpoint).
+	if !ex.roleFlagPassDone.Load() {
+		ex.roleFlagPassDone.Store(true)
+		c.enqueueRoleFlagProbes(ctx, ex.scanID)
+		passes = true
+	}
+	// Case 21: role-field write on the caller's own profile. Opt-in AND
+	// state-changing opt-in; scan creation already refuses any other
+	// combination, and the executor re-checks before sending.
+	if !ex.roleFieldPassDone.Load() {
+		ex.roleFieldPassDone.Store(true)
+		c.enqueueRoleFieldProbes(ctx, ex.scanID)
 		passes = true
 	}
 	if passes {

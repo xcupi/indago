@@ -261,6 +261,17 @@ type createScanReq struct {
 	// ceiling 10). See docs/idor.md.
 	EnableIDOREnumeration     bool `json:"idor_enumerate"`
 	IDOREnumerationNeighbours int  `json:"idor_enumerate_n"`
+
+	// EnableRoleParam opts into the access-control engine's client-controlled
+	// flag differential (case 20). Off by default; GET only, bounded.
+	EnableRoleParam bool `json:"enable_role_param"`
+	// EnableAccessControlPages opts into page-script path disclosure (case
+	// 19's unpredictable path). Off by default; GET only, bounded.
+	EnableAccessControlPages bool `json:"enable_access_control_pages"`
+	// EnableRoleWrite opts into the access-control engine's role-field slice
+	// (case 21). Off by default; the server rejects it for an anonymous scan
+	// or when it was not started with -allow-state-changing.
+	EnableRoleWrite bool `json:"enable_role_write"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -339,6 +350,9 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		IDORCandidates:            req.IDORCandidates,
 		EnableIDOREnumeration:     req.EnableIDOREnumeration,
 		IDOREnumerationNeighbours: req.IDOREnumerationNeighbours,
+		EnableRoleParam:           req.EnableRoleParam,
+		EnableAccessControlPages:  req.EnableAccessControlPages,
+		EnableRoleWrite:           req.EnableRoleWrite,
 	})
 	if err != nil {
 		s.writeScanError(w, err)

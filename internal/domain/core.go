@@ -285,6 +285,37 @@ type ScanConfig struct {
 	// a numeric baseline. 0 means the engine default (5); the hard ceiling is
 	// internal/idor.MaxEnumerationNeighbours (10).
 	IDOREnumerationNeighbours int `json:"idor_enumerate_n,omitempty"`
+
+	// EnableRoleParam opts this scan into the access-control engine's
+	// client-controlled-flag differential (case 20): the SAME privileged
+	// endpoint is fetched with a role-shaped query parameter or cookie absent
+	// and then set to an admin-like value, and a finding is made only when the
+	// privileged admin action surface becomes reachable. GET only, same-origin,
+	// bounded, OFF by default (the engine may propose the conventional /admin
+	// path when discovery found no privileged endpoint). See
+	// docs/access-control.md.
+	EnableRoleParam bool `json:"enable_role_param,omitempty"`
+
+	// EnableAccessControlPages opts this scan into the access-control engine's
+	// page-disclosure pass (case 19's "unpredictable path" source): discovered
+	// HTML pages are re-fetched, the administrative path literals their OWN
+	// inline/same-origin scripts contain are extracted, and each disclosed
+	// path is probed anonymously for administrative actions. Off by default
+	// so a pre-existing scan sends exactly the same requests as before; the
+	// robots.txt/sitemap path pass needs no opt-in because discovery already
+	// registered those paths. Never a wordlist: only literals the target's own
+	// bytes contain. See docs/access-control.md.
+	EnableAccessControlPages bool `json:"enable_access_control_pages,omitempty"`
+
+	// EnableRoleWrite opts this scan into the access-control engine's
+	// role-field slice (case 21): the caller's OWN profile update is sent with
+	// one client-supplied role field, and a finding is made only when a
+	// privileged surface that was denied BEFORE the write is reachable AFTER
+	// it. It is state-changing, so it ALSO requires the server's explicit
+	// AllowStateChanging opt-in and an authenticated session — both are
+	// refused at scan creation, never enabled implicitly. It never targets
+	// another principal's profile.
+	EnableRoleWrite bool `json:"enable_role_write,omitempty"`
 }
 
 // StopMode controls when a scan stops relative to confirmed findings.

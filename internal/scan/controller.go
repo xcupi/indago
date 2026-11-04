@@ -324,6 +324,17 @@ type CreateScanParams struct {
 	// IDOR engine itself to be enabled.
 	EnableIDOREnumeration     bool
 	IDOREnumerationNeighbours int
+	// EnableRoleParam opts into the access-control engine's client-controlled
+	// flag differential (case 20). Off by default; GET only and bounded.
+	EnableRoleParam bool
+	// EnableAccessControlPages opts into the page-disclosure pass (case 19's
+	// script-disclosed path source). Off by default; bounded and GET only.
+	EnableAccessControlPages bool
+	// EnableRoleWrite opts into the access-control engine's role-field slice
+	// (case 21). Off by default; requires an authenticated session AND the
+	// server's AllowStateChanging opt-in because it writes the caller's own
+	// profile.
+	EnableRoleWrite bool
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -452,6 +463,12 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	if err := validateIDOREnumeration(cfg.EnableIDOR, cfg.EnableIDOREnumeration, cfg.IDOREnumerationNeighbours); err != nil {
 		return nil, err
 	}
+	// Access-control differentials. The flag differential is read-only; the
+	// role-field slice writes the caller's own profile and needs both the
+	// server's state-changing opt-in and a session to write from.
+	cfg.EnableRoleParam = p.EnableRoleParam
+	cfg.EnableAccessControlPages = p.EnableAccessControlPages
+	cfg.EnableRoleWrite = p.EnableRoleWrite
 
 	mode := p.AuthMode
 	if !mode.IsValid() {
@@ -467,6 +484,18 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	// can only skip.
 	if cfg.EnableIDOR && mode == domain.AuthAnonymous {
 		return nil, fmt.Errorf("%w: enable_idor requires an authenticated session (auth_mode %q has no caller identity); use -auth existing/-auth interactive/-auth mfa/-auth password", ErrBadConfig, mode)
+	}
+	// The role-field slice writes the caller's own profile and decides from
+	// that caller's privileged access. Without a session there is nobody to
+	// escalate, and without the server's state-changing opt-in the write would
+	// only ever be skipped — both are refused at creation instead.
+	if cfg.EnableRoleWrite {
+		if mode == domain.AuthAnonymous {
+			return nil, fmt.Errorf("%w: enable_role_write requires an authenticated session (auth_mode %q has no caller profile); use -auth existing/-auth interactive/-auth mfa/-auth password", ErrBadConfig, mode)
+		}
+		if !c.opts.Executor.AllowStateChanging {
+			return nil, fmt.Errorf("%w: enable_role_write requires the server's explicit -allow-state-changing opt-in; the engine writes the caller's own profile and is never enabled implicitly", ErrBadConfig)
+		}
 	}
 	stop := p.Stop
 	if !stop.Mode.IsValid() {
