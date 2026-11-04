@@ -94,6 +94,13 @@ type Candidate struct {
 	// breakoutQuotes), so a report can say which style a given attempt assumed
 	// — and therefore which style actually fired when one confirms.
 	Delimiter string `json:"delimiter,omitempty"`
+	// Separator names the whitespace byte this candidate joins its injected
+	// attributes with: "tab" for a TAB-separated sibling, empty for every
+	// canonical shape (a space). Only the raw-query TAB family sets it (see
+	// rawQueryTabSeparatorTemplates), exactly so a report — or any consumer —
+	// can tell the two siblings apart without diffing their bytes, the way
+	// Delimiter does for quote styles.
+	Separator string `json:"separator,omitempty"`
 	// Trigger is how this breakout could ever produce an execution signal:
 	// TriggerLoad fires on page load (what the passive browser verifier can
 	// observe), TriggerInteraction needs a user action (hover, click,
@@ -219,6 +226,14 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 		if rep.Location == domain.LocationRawQuery && categoryOf(loc.Context.Context) == CatURL {
 			tpls = append(tpls, htmlAttrTemplates(*loc.Context, marker)...)
 			tpls = append(tpls, urlHrefBreakoutTemplates(*loc.Context, marker)...)
+			// TAB-separated siblings of the shapes above. Some servers
+			// percent-encode a reflected SPACE inside the attribute value
+			// ("%20"), which leaves the whole space-separated shape as one
+			// attribute value — no injected attribute exists at all — while
+			// the same TAB is reflected raw and still parses as whitespace.
+			// Measured on the canonical-link lab; see
+			// rawQueryTabSeparatorTemplates.
+			tpls = append(tpls, rawQueryTabSeparatorTemplates(*loc.Context, marker)...)
 		}
 		if opts.EnableEvasion {
 			tpls = append(tpls, evasionTemplatesFor(*loc.Context, marker)...)
@@ -526,13 +541,34 @@ func inAttributeValue(a ContextAnalysis) bool {
 // Candidate.Delimiter and says so in its rationale, so a report can state which
 // one fired. Unquoted/attribute-name positions keep the unquoted shapes.
 func htmlAttrTemplates(a ContextAnalysis, m string) []candTemplate {
+	return expandQuoteStyles(a, func(q string) []candTemplate {
+		return htmlAttributeShapes(q, m, sepSpace)
+	})
+}
+
+// htmlAttrTabTemplates is the TAB-separated sibling of htmlAttrTemplates: the
+// same attribute pairs, with every separator sent as a raw TAB (see
+// rawQueryTabSeparatorTemplates for why a raw-query injection point needs it).
+// Only the shapes that actually join attributes have a sibling; the tag
+// breakout carries no attribute separator, so repeating it would add a request
+// without adding a mechanism.
+func htmlAttrTabTemplates(a ContextAnalysis, m string) []candTemplate {
+	return expandQuoteStyles(a, func(q string) []candTemplate {
+		return htmlAttributeTabShapes(q, m)
+	})
+}
+
+// expandQuoteStyles builds one family of shapes for every quote style the
+// site's evidence supports (one when the delimiter is proven, both when it is
+// not) and labels each shape with the style it assumes.
+func expandQuoteStyles(a ContextAnalysis, build func(q string) []candTemplate) []candTemplate {
 	styles := breakoutQuotes(a)
 	if len(styles) == 0 {
-		return htmlAttributeShapes("", m)
+		return build("")
 	}
 	out := make([]candTemplate, 0, len(styles)*3)
 	for _, style := range styles {
-		shapes := htmlAttributeShapes(quoteByte(style), m)
+		shapes := build(quoteByte(style))
 		for i := range shapes {
 			shapes[i].delimiter = style
 		}
@@ -553,46 +589,102 @@ func quoteByte(style string) string {
 	return ""
 }
 
+// separator is the whitespace byte that separates the attributes a breakout
+// injects into an element's tag. The canonical shapes use a space. A
+// raw-query injection point ALSO gets a TAB sibling (sepTab): when the server
+// percent-encodes the reflected space inside an attribute value ("%20"), the
+// shape collapses into ONE attribute value and no new attribute exists; a TAB
+// arrives as %09, decodes back to a real tab, and the HTML parser still sees
+// separate attributes. See rawQueryTabSeparatorTemplates.
+type separator string
+
+const (
+	sepSpace separator = " "
+	sepTab   separator = "	"
+)
+
+// tabSiblingPriority demotes a TAB sibling one point below its canonical
+// space-separated shape, so the canonical shape keeps its place in plan order
+// and the sibling follows it. It stays a sibling, not a replacement: both are
+// planned, and the profile cap is unchanged.
+func tabSiblingPriority(sep separator, base int) int {
+	if sep == sepTab {
+		return base - 1
+	}
+	return base
+}
+
+// separatorNote records that a variant separates its injected attributes with a
+// raw TAB, so a plan or report can tell the two siblings apart without diffing
+// their bytes.
+func separatorNote(rationale string) string {
+	return rationale + " (this variant separates its injected attributes with a raw TAB instead of a space: a server that percent-encodes the reflected space, leaving %20 as literal text, still parses these as separate attributes)"
+}
+
 // htmlAttributeShapes builds the canonical in-tag breakouts for ONE attribute
 // delimiter byte. q == "" means an unquoted value / attribute-name position.
-func htmlAttributeShapes(q, m string) []candTemplate {
+// sep is the byte joining the attributes the shape injects.
+func htmlAttributeShapes(q, m string, sep separator) []candTemplate {
 	var needs string
 	if q != "" {
 		needs = q
 	}
-
-	// Staying inside the tag and adding an event-handler attribute needs only the
-	// delimiter (not <,>), so it survives when < and > are encoded.
-	handler := q + " onmouseover=" + m
-	handlerRationale := "close the attribute and add an onmouseover handler referencing the marker, without needing < or >"
-	// autofocus+onfocus is the LOAD-TRIGGER sibling of onmouseover: a focusable
-	// element with the autofocus attribute fires onfocus automatically when the
-	// page loads — no click/hover needed — so, unlike onmouseover, this one CAN
-	// be Confirmed by the passive verifier. Same shape (new attribute inside the
-	// tag), same character requirement.
-	autofocusHandler := q + " autofocus onfocus=" + m
-	autofocusRationale := "close the attribute and add an autofocus element whose onfocus handler (fires automatically on page load) references the marker, without needing < or >"
-	if q == "" {
-		handler = " onmouseover=" + m + " "
-		handlerRationale = "add a new event-handler attribute (unquoted value ends at whitespace)"
-		autofocusHandler = " autofocus onfocus=" + m + " "
-		autofocusRationale = "add a new autofocus/onfocus attribute pair (fires automatically on page load; unquoted value ends at whitespace)"
-	} else {
-		handler += " x=" + q // swallow the original closing quote
-		autofocusHandler += " x=" + q
-		handlerRationale = delimiterNote(handlerRationale, q)
-		autofocusRationale = delimiterNote(autofocusRationale, q)
-	}
-
-	shapes := []candTemplate{
+	return []candTemplate{
 		onLoad(q+"><svg onload="+m+">", needs+"<>", 90,
 			delimiterNote("break out of the attribute and tag, then inject an <svg> element with an onload handler", q)),
-		onLoad(autofocusHandler, needs, 87, autofocusRationale),
-		// onmouseover needs a hover the passive verifier never simulates, so this
-		// documents attribute injection but cannot itself be Confirmed.
-		onInteraction(handler, needs, 85, handlerRationale),
+		attributeAutofocusShape(q, m, sep),
+		attributeHandlerShape(q, m, sep),
 	}
-	return shapes
+}
+
+// htmlAttributeTabShapes is the TAB-separated sibling set for ONE attribute
+// delimiter byte: exactly the shapes whose bytes join attributes with
+// whitespace. The tag breakout has no such separator, so it is absent here.
+func htmlAttributeTabShapes(q, m string) []candTemplate {
+	return []candTemplate{
+		attributeAutofocusShape(q, m, sepTab),
+		attributeHandlerShape(q, m, sepTab),
+	}
+}
+
+// attributeAutofocusShape is the load-trigger sibling of the handler shape: a
+// focusable element with the autofocus attribute fires onfocus automatically
+// when the page loads — no click/hover needed — so, unlike onmouseover, this one
+// CAN be Confirmed by the passive verifier. Same shape (new attribute inside the
+// tag), same character requirement.
+func attributeAutofocusShape(q, m string, sep separator) candTemplate {
+	why := "close the attribute and add an autofocus element whose onfocus handler (fires automatically on page load) references the marker, without needing < or >"
+	value := q + string(sep) + "autofocus" + string(sep) + "onfocus=" + m
+	if q == "" {
+		value = string(sep) + "autofocus" + string(sep) + "onfocus=" + m + string(sep)
+		why = "add a new autofocus/onfocus attribute pair (fires automatically on page load; the unquoted value ends at whitespace)"
+	} else {
+		value += string(sep) + "x=" + q
+		why = delimiterNote(why, q)
+	}
+	if sep == sepTab {
+		why = separatorNote(why)
+	}
+	return onLoad(value, q, tabSiblingPriority(sep, 87), why)
+}
+
+// attributeHandlerShape stays inside the tag and adds an event-handler
+// attribute, which needs only the delimiter (not <,>), so it survives when < and
+// > are encoded; it needs a hover the passive verifier never simulates.
+func attributeHandlerShape(q, m string, sep separator) candTemplate {
+	why := "close the attribute and add an onmouseover handler referencing the marker, without needing < or >"
+	value := q + string(sep) + "onmouseover=" + m
+	if q == "" {
+		value = string(sep) + "onmouseover=" + m + string(sep)
+		why = "add a new event-handler attribute (unquoted value ends at whitespace)"
+	} else {
+		value += string(sep) + "x=" + q // swallow the original closing quote
+		why = delimiterNote(why, q)
+	}
+	if sep == sepTab {
+		why = separatorNote(why)
+	}
+	return onInteraction(value, q, tabSiblingPriority(sep, 85), why)
 }
 
 // delimiterNote appends the provenance sentence that names the quote style a
@@ -694,8 +786,28 @@ func urlTemplates(a ContextAnalysis, m string) []candTemplate {
 // documents the position — and, because it reflects, still produces a finding —
 // but it can never be Confirmed by the verifier.
 func linkAttributeTemplates(a ContextAnalysis, m string) []candTemplate {
+	if tpl, ok := linkAccesskeyShape(a, m, sepSpace); ok {
+		return []candTemplate{tpl}
+	}
+	return nil
+}
+
+// linkAttributeTabTemplates is the TAB-separated sibling of
+// linkAttributeTemplates, planned only for a raw-query injection point (see
+// rawQueryTabSeparatorTemplates).
+func linkAttributeTabTemplates(a ContextAnalysis, m string) []candTemplate {
+	if tpl, ok := linkAccesskeyShape(a, m, sepTab); ok {
+		return []candTemplate{tpl}
+	}
+	return nil
+}
+
+// linkAccesskeyShape builds the interaction-class pair on the link element
+// itself for one quote style. sep joins the attributes it injects; ok is false
+// when the position is not a quotable link attribute at all.
+func linkAccesskeyShape(a ContextAnalysis, m string, sep separator) (candTemplate, bool) {
 	if a.Element != "link" || a.Attribute == "" {
-		return nil
+		return candTemplate{}, false
 	}
 	var q, needs string
 	switch a.Quote {
@@ -708,10 +820,14 @@ func linkAttributeTemplates(a ContextAnalysis, m string) []candTemplate {
 	default:
 		// No attribute delimiter was established, so this is not an attribute
 		// injection position at all.
-		return nil
+		return candTemplate{}, false
 	}
-	return []candTemplate{onInteraction(q+" accesskey=x onclick="+m+" y="+q, needs, 60,
-		"close the link's href attribute and add an accesskey/onclick pair on the link element itself (the canonical-link vector); it needs only the quote, so encoding < and > does not stop it, but it executes only after an activation keypress that the passive verifier never simulates, so it documents the position and is never Confirmed")}
+	why := "close the link's href attribute and add an accesskey/onclick pair on the link element itself (the canonical-link vector); it needs only the quote, so encoding < and > does not stop it, but it executes only after an activation keypress that the passive verifier never simulates, so it documents the position and is never Confirmed"
+	value := q + string(sep) + "accesskey=x" + string(sep) + "onclick=" + m + string(sep) + "y=" + q
+	if sep == sepTab {
+		why = separatorNote(why)
+	}
+	return onInteraction(value, needs, tabSiblingPriority(sep, 60), why), true
 }
 
 // urlHrefBreakoutTemplates covers a URL reflection nested inside an element's
@@ -746,6 +862,21 @@ func linkAttributeTemplates(a ContextAnalysis, m string) []candTemplate {
 // Candidate.Delimiter and names it in the rationale, so a report can say which
 // style fired.
 func urlHrefBreakoutTemplates(a ContextAnalysis, m string) []candTemplate {
+	return hrefBreakoutShapes(a, m, sepSpace, true)
+}
+
+// urlHrefTabBreakoutTemplates is the TAB-separated sibling of the href
+// accesskey shape (see rawQueryTabSeparatorTemplates). The load-class script
+// sibling carries no attribute separator at all, so it has no TAB twin: a copy
+// would add a request without adding a mechanism.
+func urlHrefTabBreakoutTemplates(a ContextAnalysis, m string) []candTemplate {
+	return hrefBreakoutShapes(a, m, sepTab, false)
+}
+
+// hrefBreakoutShapes builds the raw-query href family for every usable quote
+// style. sep joins the attributes the accesskey shape injects; withScript also
+// builds the load-class script breakout.
+func hrefBreakoutShapes(a ContextAnalysis, m string, sep separator, withScript bool) []candTemplate {
 	if a.Attribute != "href" || len(a.Chain) < 2 || a.Chain[0] != CtxHTMLAttrValue {
 		return nil
 	}
@@ -774,34 +905,70 @@ func urlHrefBreakoutTemplates(a ContextAnalysis, m string) []candTemplate {
 		if style == "double" {
 			filler = "y"
 		}
-		tpl := onInteractionStrict(q+"accesskey=x onclick="+m+" "+filler+"="+q, q, 78,
-			delimiterNote("close the href attribute value and add an accesskey/onclick pair on the element itself: accesskey names the element with the bare character x and onclick carries the benign marker as its whole body, so the single click activation browser verification performs dispatches it; the accesskey value is unquoted, so the shape needs only the site's delimiter raw and encoding <, > or either quote cannot stop it, and the shape is only planned when that delimiter arrives raw", style))
-		tpl.delimiter = style
-		out = append(out, tpl)
-
-		// The load-class sibling. Closing the attribute value and the tag with
-		// the site's own delimiter, then opening a <script> whose entire body
-		// is the marker, executes during parsing — no click, focus, keypress
-		// or other activation, which is the one thing this verifier
-		// deliberately never fakes and the reason the accesskey twin above can
-		// never confirm on a non-rendered element.
-		//
-		// `needs` declares the delimiter AND <>: ending the tag needs a raw
-		// '>', opening the script needs a raw '<'. Both stay soft — the
-		// transformation analysis records and deprioritizes a site that
-		// encodes them — while only the delimiter is the hard gate, because a
-		// style whose quote is encoded can never close the value (strictNeed).
-		// The marker is the whole script body, exactly as every other built-in
-		// candidate carries nothing but the benign marker: the browser
-		// evaluates it as an identifier, so a hit is a marker-specific
-		// ReferenceError and never an alert/cookie/network effect.
-		load := onLoad(q+"><script>"+m+"</script>", q+"<>", 89,
-			delimiterNote("close the href attribute value and the element's own tag, then open a <script> block whose whole body is the benign marker: the browser executes it while parsing, so the marker is evaluated as a JavaScript identifier and raises a marker-specific ReferenceError with no click, focus, keypress or other activation; it needs the delimiter, '<' and '>' raw, so a site that encodes them is reported as neutralized and deprioritized", style))
-		load.strict = true
-		load.strictNeed = q
-		load.delimiter = style
-		out = append(out, load)
+		out = append(out, hrefAccesskeyShape(q, m, filler, style, sep))
+		if withScript {
+			out = append(out, hrefScriptShape(q, m, style))
+		}
 	}
+	return out
+}
+
+// hrefAccesskeyShape is the interaction-class pair on the element itself,
+// closing the href value with the site's own delimiter. sep joins the
+// attributes it injects (the payload starts immediately after the closing
+// delimiter, so there is no leading separator).
+func hrefAccesskeyShape(q, m, filler, style string, sep separator) candTemplate {
+	why := "close the href attribute value and add an accesskey/onclick pair on the element itself: accesskey names the element with the bare character x and onclick carries the benign marker as its whole body, so the single click activation browser verification performs dispatches it; the accesskey value is unquoted, so the shape needs only the site's delimiter raw and encoding <, > or either quote cannot stop it, and the shape is only planned when that delimiter arrives raw"
+	if sep == sepTab {
+		why = separatorNote(why)
+	}
+	tpl := onInteractionStrict(q+"accesskey=x"+string(sep)+"onclick="+m+string(sep)+filler+"="+q, q,
+		tabSiblingPriority(sep, 78), delimiterNote(why, style))
+	tpl.delimiter = style
+	return tpl
+}
+
+// hrefScriptShape is the load-class sibling. Closing the attribute value and
+// the tag with the site's own delimiter, then opening a <script> whose entire
+// body is the marker, executes during parsing — no click, focus, keypress or
+// other activation, which is the one thing this verifier deliberately never
+// fakes and the reason the accesskey twin above can never confirm on a
+// non-rendered element.
+//
+// `needs` declares the delimiter AND <>: ending the tag needs a raw '>', and
+// opening the script needs a raw '<'. Both stay soft — the transformation
+// analysis records and deprioritizes a site that encodes them — while only the
+// delimiter is the hard gate, because a style whose quote is encoded can never
+// close the value (strictNeed). The marker is the whole script body, exactly as
+// every other built-in candidate carries nothing but the benign marker: the
+// browser evaluates it as an identifier, so a hit is a marker-specific
+// ReferenceError and never an alert/cookie/network effect.
+func hrefScriptShape(q, m, style string) candTemplate {
+	load := onLoad(q+"><script>"+m+"</script>", q+"<>", 89,
+		delimiterNote("close the href attribute value and the element's own tag, then open a <script> block whose whole body is the benign marker: the browser executes it while parsing, so the marker is evaluated as a JavaScript identifier and raises a marker-specific ReferenceError with no click, focus, keypress or other activation; it needs the delimiter, '<' and '>' raw, so a site that encodes them is reported as neutralized and deprioritized", style))
+	load.strict = true
+	load.strictNeed = q
+	load.delimiter = style
+	return load
+}
+
+// rawQueryTabSeparatorTemplates returns the TAB-separated siblings of every
+// attribute-injection shape that relies on whitespace, and is called ONLY for
+// a raw-query injection point: the measured canonical-link class reflects the
+// whole query blob into a single-quoted href and percent-encodes a space
+// ("%20"), which leaves the space-separated shape as ONE attribute value (no
+// onclick at all). A TAB is reflected raw, so it still separates attributes.
+//
+// The space-separated shapes stay exactly as they are — these are planned
+// alongside them, one priority point lower — because a site that reflects a
+// space intact is still best served by the canonical shape. Nothing here
+// bypasses the planner's gates: every sibling inherits its canonical shape's
+// `needs` (the delimiter) and, where the canonical shape is strict, is dropped
+// the same way when the site provably encodes that delimiter.
+func rawQueryTabSeparatorTemplates(a ContextAnalysis, m string) []candTemplate {
+	out := htmlAttrTabTemplates(a, m)
+	out = append(out, linkAttributeTabTemplates(a, m)...)
+	out = append(out, urlHrefTabBreakoutTemplates(a, m)...)
 	return out
 }
 

@@ -253,8 +253,8 @@ func TestPlanRawQueryURLHrefBreakoutDroppedWhenDelimiterEncoded(t *testing.T) {
 // TestURLAttributeBreakoutDefaultCandidateSetUnchanged freezes, byte for byte,
 // what the canonical-link position planned before these shapes existed — for a
 // NAMED parameter (the default scan) — and proves the raw-query plan is that
-// same frozen set plus the href-breakout shapes only, with nothing else
-// reordered, re-prioritized or removed.
+// same frozen set plus the href-breakout shapes and their TAB-separated
+// siblings only, with nothing else reordered, re-prioritized or removed.
 func TestURLAttributeBreakoutDefaultCandidateSetUnchanged(t *testing.T) {
 	m := urlAttrProbe.Token
 	body := hrefFixture("link", `"`, false, urlAttrProbe.Value())
@@ -264,13 +264,20 @@ func TestURLAttributeBreakoutDefaultCandidateSetUnchanged(t *testing.T) {
 		named: []string{
 			`url|" accesskey=x onclick=` + m + ` y="|60|interaction`,
 		},
+		// The canonical (space-separated) shapes, each followed by its
+		// TAB-separated sibling one priority point lower. The siblings are
+		// additive: every frozen shape above keeps its bytes and its priority.
 		rawQuery: []string{
 			`url|"><svg onload=` + m + `>|90|load`,
 			`url|"><script>` + m + `</script>|89|load`,
 			`url|" autofocus onfocus=` + m + ` x="|87|load`,
+			`url|"	autofocus	onfocus=` + m + `	x="|86|load`,
 			`url|" onmouseover=` + m + ` x="|85|interaction`,
+			`url|"	onmouseover=` + m + `	x="|84|interaction`,
 			`url|"accesskey=x onclick=` + m + ` y="|78|interaction`,
+			`url|"accesskey=x	onclick=` + m + `	y="|77|interaction`,
 			`url|" accesskey=x onclick=` + m + ` y="|60|interaction`,
+			`url|"	accesskey=x	onclick=` + m + `	y="|59|interaction`,
 		},
 	}
 	render := func(plan *detection.CandidatePlan) []string {

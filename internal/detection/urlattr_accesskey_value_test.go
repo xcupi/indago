@@ -84,11 +84,15 @@ func TestGeneratedAccessKeyValuesAreBareCharacters(t *testing.T) {
 	}{
 		{"named parameter, single-quoted link", hrefFixture("link", sq, false, urlAttrProbe.Value()), domain.LocationQuery, 0, 1},
 		{"named parameter, double-quoted link", hrefFixture("link", dq, false, urlAttrProbe.Value()), domain.LocationQuery, 0, 1},
-		{"raw query, single-quoted href", hrefFixture("link", sq, false, urlAttrProbe.Value()), domain.LocationRawQuery, 1, 2},
-		{"raw query, double-quoted href", hrefFixture("link", dq, false, urlAttrProbe.Value()), domain.LocationRawQuery, 1, 2},
+		// The raw-query plan also carries the TAB-separated sibling of every
+		// accesskey-bearing shape (href and link), so each of those candidates
+		// is inspected too: 2 href + 2 link.
+		{"raw query, single-quoted href", hrefFixture("link", sq, false, urlAttrProbe.Value()), domain.LocationRawQuery, 1, 4},
+		{"raw query, double-quoted href", hrefFixture("link", dq, false, urlAttrProbe.Value()), domain.LocationRawQuery, 1, 4},
 		// The analyser cannot prove the delimiter here, so BOTH styles are
 		// planned; each must still carry a clean value. Plus the link shape.
-		{"raw query, unproven delimiter", quoteFixture(dq, "angles", urlAttrProbe.Value()), domain.LocationRawQuery, 2, 3},
+		// With the TAB siblings: 2 href + 2 link per style, so 6 total.
+		{"raw query, unproven delimiter", quoteFixture(dq, "angles", urlAttrProbe.Value()), domain.LocationRawQuery, 2, 6},
 	}
 
 	for _, tc := range fixtures {

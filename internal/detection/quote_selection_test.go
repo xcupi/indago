@@ -56,11 +56,27 @@ func urlEncodedQuoteFixture(value string) []byte {
 		`<body><h1>Post</h1></body></html>`)
 }
 
-// hrefBreakouts returns the planned href attribute-breakout candidates.
+// hrefBreakouts returns the planned canonical (SPACE-separated) href
+// attribute-breakout candidates. The TAB-separated siblings are a separate
+// family (hrefTabBreakouts), so counting the canonical mechanism stays
+// meaningful.
 func hrefBreakouts(plan *detection.CandidatePlan) []detection.Candidate {
 	var out []detection.Candidate
 	for _, c := range plan.Candidates {
-		if hrefAccesskeyBreakout(c) {
+		if hrefAccesskeyBreakout(c) && !strings.Contains(c.Value, "	") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// hrefTabBreakouts returns the planned TAB-separated siblings of the href
+// accesskey breakout: same mechanism and quote style, attributes joined by a
+// raw TAB instead of a space.
+func hrefTabBreakouts(plan *detection.CandidatePlan) []detection.Candidate {
+	var out []detection.Candidate
+	for _, c := range plan.Candidates {
+		if hrefAccesskeyBreakout(c) && strings.Contains(c.Value, "	") {
 			out = append(out, c)
 		}
 	}
@@ -181,6 +197,13 @@ func TestUnprovenDelimiterDropsOnlyTheEncodedStyle(t *testing.T) {
 	got := hrefBreakouts(plan)
 	if len(got) != 1 || got[0].Delimiter != "single" {
 		t.Fatalf("want exactly the single-quote variant (the double quote is encoded), got %+v", got)
+	}
+	// The TAB sibling obeys the same per-variant strict guard: the encoded
+	// double quote cannot close the attribute, so only the single-quote TAB
+	// sibling may be planned.
+	tabs := hrefTabBreakouts(plan)
+	if len(tabs) != 1 || tabs[0].Delimiter != "single" {
+		t.Fatalf("want exactly the single-quote TAB sibling (the double quote is encoded), got %+v", tabs)
 	}
 }
 

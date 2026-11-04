@@ -364,6 +364,99 @@ pins the two quote families and the deprioritization when the angle brackets are
 encoded; `TestPlanURLHrefScriptBreakoutExecutesOnLoad` pins the exact bytes,
 `load` trigger and benign-marker-only body for each style.
 
+### Tab-separated attribute variants (raw query only)
+
+Measured on the live canonical-link lab: the page reflects the whole query blob
+into a **single-quoted** `href` and percent-encodes a space, so the
+space-separated shape above lands as:
+
+    href='…/?x='accesskey=x%20onclick=indMARKER%20x=''
+
+`%20` is literal text to the HTML parser, not whitespace, so it sees exactly one
+attribute (`accesskey` = `x%20onclick=indMARKER%20x=`) and **no `onclick` at
+all** — nothing the access-key activation can reach, and the candidate stays
+Rejected on a page that is genuinely injectable. The same request with a TAB
+instead of a space is reflected RAW:
+
+    href='…/?x='accesskey=x<TAB>onclick=indMARKER<TAB>x=''
+
+which parses into three separate attributes, so the handler exists and the
+activation fires. HTML treats TAB, LF and FF as ASCII whitespace between
+attributes exactly like a space.
+
+So, for `LocationRawQuery` only, the planner ALSO plans TAB-separated siblings
+of every attribute-injection shape that joins attributes with whitespace
+(`rawQueryTabSeparatorTemplates` in `internal/detection/candidate.go`):
+
+| canonical shape (space) | TAB sibling | trigger |
+|---|---|---|
+| `"accesskey=x onclick=M y="` (href family) | `"accesskey=x<TAB>onclick=M<TAB>y="` | `interaction` |
+| `" accesskey=x onclick=M y="` (link element) | `"<TAB>accesskey=x<TAB>onclick=M<TAB>y="` | `interaction` |
+| `" autofocus onfocus=M x="` | `"<TAB>autofocus<TAB>onfocus=M<TAB>x="` | `load` |
+| `" onmouseover=M x="` | `"<TAB>onmouseover=M<TAB>x="` | `interaction` |
+
+Both quote styles get the same treatment (the single-quoted family is the
+measured one; the double-quoted family is the established sibling), and the
+unquoted position gets the TAB form of its whitespace-terminated pairs. The two
+shapes that carry **no** attribute separator — the `"><svg onload=M>` tag
+breakout and the `"><script>M</script>` load breakout — deliberately have no TAB
+twin: a copy would add a request without adding a mechanism.
+
+Rules the siblings obey:
+
+- **The space shapes are untouched.** Same bytes, same priorities (90/89/87/85/
+  78/60), same dedup keys. Each TAB sibling is a separate candidate one priority
+  point lower (77/59/86/84), so the plan order stays canonical-first and its
+  `DedupKey` (category + value) is distinct.
+- **Provenance names the separator.** Every TAB sibling's rationale says it
+  separates its attributes with a raw TAB and why (a server that percent-encodes
+  the reflected space leaves `%20` as literal text), in the same way
+  `delimiterNote` names the quote style, so a report can tell which attempt
+  fired without diffing bytes.
+- **The wire form is a real tab.** `Candidate.Value` carries a literal TAB byte;
+  the raw-query request builder percent-encodes the payload with
+  `url.QueryEscape` (`internal/discovery.RawQueryQueryString`), which yields
+  `%09` — never `+` or `%20`, the exact bytes that collapsed the space shape.
+  Pinned by `TestRawQueryTabSeparatorSurvivesURLEncoding`.
+- **`needs` and the strict guard are inherited.** A TAB sibling declares the
+  same `needs` (the site's delimiter) as its canonical shape, and the href
+  accesskey sibling is strict exactly like its space twin: a site that provably
+  encodes the closing quote gets **neither** variant, because an entity-encoded
+  quote is decoded into the attribute value and can never end the attribute
+  (`TestRawQueryTabVariantsRespectEncodedDelimiterGuard`).
+- **The candidate cap is unchanged.** The standard profile still keeps 8, the
+  thorough profile 16, and the ceiling 32. On the measured position the 10
+  planned candidates keep the accesskey TAB sibling (priority 77) inside the
+  standard window, while both link-element shapes (60/59) fall outside it —
+  `TestTabVariantIsSentByTheStandardProfile` pins that exact selection.
+- **Benign marker only.** Every sibling carries nothing but the marker, exactly
+  like its canonical shape; no new activation, scheme or network effect.
+
+Default plans are untouched: the family is reachable only from the raw-query
+branch (`-raw-query-injection`, off by default), so a named-parameter plan is
+byte-identical — `TestURLAttributeBreakoutDefaultCandidateSetUnchanged` freezes
+both sides, and `TestNamedParameterPlanHasNoTabVariants` re-checks it directly.
+Opt-in evasion and variation packs are not touched by this slice.
+
+Real-browser regression (`TestTabSeparatedBreakoutConfirmsWhereSpaceStaysRejected`,
+`internal/detection/urlattr_tabsep_browser_test.go`): one local fixture replicates
+the measured escaping exactly (space -> `%20`, TAB raw) and reflects into a
+single-quoted canonical `href`. On that one page the TAB accesskey variant is
+Confirmed after the verifier's single `Alt+Shift+x` access-key press (the same
+dispatched-keyboard record as the canonical shape, with the injected
+`accesskey`/`onclick` pair in the post-activation DOM), while the
+space-separated variant — the shape planned before this slice — stays Rejected
+with the marker still reflected. The fixture also asserts its own escaping, so a
+GREEN cannot come from a page that quietly keeps the space intact.
+
+Limits, stated plainly: the reflection probe's canary cannot observe what a
+server does to a TAB (it only reports `< > " '`), so the sibling is planned
+ALONGSIDE its canonical shape rather than gated on proven tab survival — a
+server that strips or encodes tabs simply leaves the attempt reflected-but-not
+-executed, and the canonical shape still runs. This is a raw-query
+representation fix, not a new mechanism: it changes how the same attributes are
+separated, never which attributes or activation are used.
+
 ## Ordering and deduplication
 
 Candidates are deduplicated by `category + value`, keeping the highest-priority
