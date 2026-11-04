@@ -13,6 +13,7 @@ package detection_test
 // browser_integration tests in internal/scan.
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -20,11 +21,18 @@ import (
 )
 
 func TestDOMXSSAngularInterpolationCandidate(t *testing.T) {
-	const marker = "ANGULARMARKER42"
+	const marker = "angularmarker42"
 	for _, source := range detection.DOMXSSSources {
 		shapes := detection.DOMXSSPayloadsFor(source, detection.DOMSinkAngularExpression, marker)
-		if len(shapes) != 1 {
-			t.Fatalf("%s: angular_expression must plan exactly one shape, got %d: %+v", source, len(shapes), shapes)
+		// The query source also plans the parameter-NAME shape (below); every
+		// other source has no parameter name to deliver, so it plans exactly
+		// the interpolation.
+		wantShapes := 1
+		if source == detection.DOMSourceQuery {
+			wantShapes = 2
+		}
+		if len(shapes) != wantShapes {
+			t.Fatalf("%s: angular_expression must plan %d shape(s), got %d: %+v", source, wantShapes, len(shapes), shapes)
 		}
 		cand := shapes[0]
 		wantValue := "{{'" + marker[:len(marker)/2] + "' + '" + marker[len(marker)/2:] + "' + ($id ? '' : '')}}"
@@ -44,14 +52,89 @@ func TestDOMXSSAngularInterpolationCandidate(t *testing.T) {
 			string(cand.Context) != "angular_expression" || cand.ContextSub != string(source) || cand.Trigger != detection.TriggerLoad {
 			t.Fatalf("%s: wrong provenance/field repurposing: %+v", source, cand)
 		}
+		if cand.Shape != "angular_interpolation" || detection.DOMXSSShapeNeedsParameterName(cand.Shape) {
+			t.Fatalf("%s: the interpolation shape must be value-delivered, got shape %q", source, cand.Shape)
+		}
 		if !strings.Contains(cand.Rationale, "interpolation") || !strings.Contains(cand.Rationale, "never contain the marker contiguously") {
 			t.Fatalf("%s: rationale must state the text-node mechanism and the split-marker specificity, got %q", source, cand.Rationale)
 		}
 		if !strings.Contains(cand.Rationale, "csp_blocked") {
 			t.Fatalf("%s: rationale must name the distinct CSP outcome, got %q", source, cand.Rationale)
 		}
-		if again := detection.DOMXSSPayloadsFor(source, detection.DOMSinkAngularExpression, marker); len(again) != 1 || again[0] != cand {
+		if again := detection.DOMXSSPayloadsFor(source, detection.DOMSinkAngularExpression, marker); len(again) != wantShapes || again[0] != cand {
 			t.Fatalf("%s: planner is not deterministic", source)
+		}
+	}
+}
+
+// TestDOMXSSAngularParseExpressionShape covers the second, query-only shape:
+// the same sink reached through a page that hands each parameter NAME to
+// AngularJS's $parse. It must be a quote-free expression that rebuilds the
+// marker from number-to-string terms, must be delivered as a parameter NAME,
+// and must never carry the contiguous marker.
+func TestDOMXSSAngularParseExpressionShape(t *testing.T) {
+	const marker = "inddd525eb0320dca43"
+	got := detection.DOMXSSPayloadsFor(detection.DOMSourceQuery, detection.DOMSinkAngularExpression, marker)
+	if len(got) != 2 {
+		t.Fatalf("query source must plan the interpolation and the parameter-name shape, got %d: %+v", len(got), got)
+	}
+	cand := got[1]
+	if cand.Shape != "angular_parse_expression" {
+		t.Fatalf("second shape must be the parameter-name expression, got %q", cand.Shape)
+	}
+	if !detection.DOMXSSShapeNeedsParameterName(cand.Shape) {
+		t.Fatal("the executor must be told this shape needs parameter-name delivery")
+	}
+	// A page that rewrites both quote styles into character references inside
+	// its inline <script> leaves no usable string literal, so the expression
+	// must contain none — and it must not smuggle in an escape either.
+	for _, forbidden := range []string{"'", `"`, "`", "{{", "}}", "<", ">", "&", "$", "constructor", "prototype", "__proto__", "eval", "window", "document", "alert", "cookie"} {
+		if strings.Contains(cand.Value, forbidden) {
+			t.Fatalf("candidate must not contain %q: %q", forbidden, cand.Value)
+		}
+	}
+	if strings.Contains(cand.Value, marker) {
+		t.Fatalf("candidate must never contain the contiguous marker: %q", cand.Value)
+	}
+	// The terms must actually rebuild the marker: decode every term the same
+	// way Angular does (a number literal, rendered in base 36) and join them.
+	body := strings.TrimSuffix(strings.TrimPrefix(cand.Value, "["), "].join([])")
+	var built strings.Builder
+	for _, term := range strings.Split(body, ",") {
+		var digit int
+		if _, err := fmt.Sscanf(term, "(%d).toString(36)", &digit); err != nil || digit < 0 || digit >= 36 {
+			t.Fatalf("term %q is not a base-36 number-to-string term: %v", term, err)
+		}
+		if digit < 10 {
+			built.WriteByte(byte('0' + digit))
+		} else {
+			built.WriteByte(byte('a' + digit - 10))
+		}
+	}
+	if built.String() != marker {
+		t.Fatalf("expression rebuilds %q, want the marker %q", built.String(), marker)
+	}
+	if cand.Category != detection.CatDOMXSS || cand.ContextSub != string(detection.DOMSourceQuery) ||
+		string(cand.Context) != "angular_expression" || cand.Trigger != detection.TriggerLoad {
+		t.Fatalf("wrong provenance: %+v", cand)
+	}
+	if !strings.Contains(cand.Rationale, "query parameter NAME") || !strings.Contains(cand.Rationale, "never contain the marker contiguously") {
+		t.Fatalf("rationale must state the delivery channel and the marker specificity: %q", cand.Rationale)
+	}
+	if !strings.Contains(cand.Rationale, "csp_blocked") {
+		t.Fatalf("rationale must name the distinct CSP outcome: %q", cand.Rationale)
+	}
+	if cand.DedupKey == got[0].DedupKey {
+		t.Fatal("the two shapes must not share a dedup key")
+	}
+	// A marker the base-36 construction cannot represent must not produce a
+	// dead candidate: the interpolation shape is still planned, alone. (A
+	// marker that is not a valid DOM-XSS marker at all plans nothing, which
+	// the existing rejects-unusable-markers test already pins.)
+	for _, m := range []string{"UPPERmarker42", "mark_er42"} {
+		shapes := detection.DOMXSSPayloadsFor(detection.DOMSourceQuery, detection.DOMSinkAngularExpression, m)
+		if len(shapes) != 1 || shapes[0].Shape != "angular_interpolation" {
+			t.Fatalf("marker %q is not representable and must plan only the interpolation, got %+v", m, shapes)
 		}
 	}
 }

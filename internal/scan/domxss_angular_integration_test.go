@@ -28,6 +28,7 @@ import (
 	"html"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -57,7 +58,7 @@ func angularLab(t *testing.T) *httptest.Server {
 			w.Header().Set("Content-Type", "application/javascript")
 			_, _ = w.Write(angular)
 			return
-		case "/dom", "/noapp", "/plain", "/csp-angular", "/blocked", "/blocked-csp", "/textarea", "/parse-key", "/constant":
+		case "/dom", "/noapp", "/plain", "/csp-angular", "/blocked", "/blocked-csp", "/textarea", "/parse-key", "/constant", "/parse-name", "/name-echo":
 			if r.URL.Path == "/csp-angular" || r.URL.Path == "/blocked-csp" {
 				// Allows the page's own inline code and same-origin scripts,
 				// but NOT eval/new Function: the policy that stops a template
@@ -71,6 +72,28 @@ func angularLab(t *testing.T) *httptest.Server {
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			switch r.URL.Path {
+			case "/parse-name":
+				// The measured live lab shape (AngularJS 1.4.4, "sandbox escape
+				// without strings"): for EVERY query parameter the page emits
+				//     var key = '<NAME>';
+				//     $scope.query[key] = '<VALUE>';
+				//     $scope.value = $parse(key)($scope.query);
+				// with ' and " rewritten to character references inside the
+				// inline <script> (which the HTML parser does not decode), and
+				// the template renders {{value}}. The parameter VALUE is data
+				// and is never re-compiled; the parameter NAME is the Angular
+				// expression $parse compiles.
+				fmt.Fprintf(w, angularParseNamePage, angularParseNameBlocks(r.URL.RawQuery))
+				return
+			case "/name-echo":
+				// False-positive guard: Angular is present and the whole query
+				// string (names AND values, decoded) is rendered as text, but
+				// no parameter name is ever handed to $parse. A name-shaped
+				// candidate must not confirm merely because its own bytes are
+				// displayed.
+				fmt.Fprintf(w, `<!doctype html><html><body ng-app="labApp"><div id="out">You searched for: %s</div>
+<script src="/angular.js"></script></body></html>`, html.EscapeString(angularDecodedQuery(r.URL.RawQuery)))
+				return
 			case "/textarea":
 				// Angular compiles the textarea's text as template source, so
 				// the evaluated result lands in the textarea's value, never in
@@ -139,6 +162,74 @@ angular.module('lab', []).controller('C', function($scope, $compile) {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// angularParseNamePage is the parameter-NAME binding page: one
+// `var key … $scope.value = $parse(key)(…)` block per query parameter, and a
+// template that renders the last block's result. The blocks are in URL order,
+// exactly like the measured live lab.
+const angularParseNamePage = `<!doctype html><html><body ng-app="labApp">
+<script src="/angular.js"></script>
+<script>angular.module('labApp', []).controller('vulnCtrl', function($scope, $parse) {
+$scope.query = {};
+%s
+});</script>
+<h1 ng-controller="vulnCtrl">0 search results for {{value}}</h1></body></html>`
+
+// angularAttributeEscape reproduces the lab's escaping inside its inline
+// <script>: both quote styles become character references, so a string literal
+// cannot survive in either style (the HTML parser does not decode references in
+// raw-text script content). The live page emits &apos; / &quot;; Go's escaper
+// emits the numeric forms — both are the same character reference.
+var angularAttributeEscape = strings.NewReplacer(
+	"&#39;", "&apos;",
+	"&#34;", "&quot;",
+	"&#x27;", "&apos;",
+	"&#x22;", "&quot;",
+)
+
+func angularLabEscaped(s string) string {
+	return angularAttributeEscape.Replace(html.EscapeString(s))
+}
+
+// angularDecodedQuery returns the query string with names and values decoded,
+// in URL order, for the /name-echo guard page.
+func angularDecodedQuery(raw string) string {
+	var b strings.Builder
+	for _, pair := range strings.Split(raw, "&") {
+		if pair == "" {
+			continue
+		}
+		name, value, _ := strings.Cut(pair, "=")
+		if n, err := url.QueryUnescape(name); err == nil {
+			name = n
+		}
+		if v, err := url.QueryUnescape(value); err == nil {
+			value = v
+		}
+		b.WriteString(name + "=" + value + "&")
+	}
+	return b.String()
+}
+
+// angularParseNameBlocks emits the measured per-parameter blocks, in URL order.
+func angularParseNameBlocks(rawQuery string) string {
+	var b strings.Builder
+	for _, pair := range strings.Split(rawQuery, "&") {
+		if pair == "" {
+			continue
+		}
+		name, value, _ := strings.Cut(pair, "=")
+		if n, err := url.QueryUnescape(name); err == nil {
+			name = n
+		}
+		if v, err := url.QueryUnescape(value); err == nil {
+			value = v
+		}
+		fmt.Fprintf(&b, "var key = '%s';\n$scope.query[key] = '%s';\n$scope.value = $parse(key)($scope.query);\n",
+			angularLabEscaped(name), angularLabEscaped(value))
+	}
+	return b.String()
 }
 
 type angularResult struct {
@@ -213,6 +304,107 @@ func TestDOMAngularExpressionCompiled(t *testing.T) {
 	}
 	if !strings.Contains(f.Summary, "compiled interpolation RESULT") {
 		t.Fatalf("summary must say what confirmed: %q", f.Summary)
+	}
+}
+
+// TestDOMAngularExpressionParameterNameParse is the measured binding form:
+// the page stores each parameter VALUE as data and hands each parameter NAME
+// to $parse. The interpolation shape therefore stays inert text (an honest
+// Rejected, recorded as its own attempt) and the parameter-NAME shape, which
+// must survive the page rewriting both quote styles, is the one that confirms.
+func TestDOMAngularExpressionParameterNameParse(t *testing.T) {
+	mgr := newSourceSelectionBrowser(t)
+	defer mgr.Close()
+	lab := angularLab(t)
+	res := runAngularJob(t, mgr, lab.URL, "/parse-name", "location.search", true)
+	if len(res.findings) != 1 {
+		t.Fatalf("want exactly one angular finding, got %d: %+v", len(res.findings), res.findings)
+	}
+	f := res.findings[0]
+	if f.Verdict != domain.VerdictConfirmed {
+		t.Fatalf("the parameter-NAME expression evaluates to the marker and must Confirm, got %s: %q", f.Verdict, f.Summary)
+	}
+	if !strings.Contains(f.Summary, "outcome="+domXSSAngularOutcomeCompiled) {
+		t.Fatalf("confirmed finding must carry the compiled outcome: %q", f.Summary)
+	}
+	if !strings.Contains(f.Summary, "query parameter NAME") {
+		t.Fatalf("the summary must state which channel was compiled: %q", f.Summary)
+	}
+	if !strings.Contains(f.Summary, "not a sandbox escape") {
+		t.Fatalf("confirmation must state that no escape was attempted: %q", f.Summary)
+	}
+	// Reachability, then the interpolation shape's honest negative, then the
+	// parameter-NAME shape's confirmation.
+	if len(res.detail.Attempts) != 3 {
+		t.Fatalf("want reachability + interpolation + parameter-name attempts, got %+v", res.detail.Attempts)
+	}
+	if a := res.detail.Attempts[1]; a.Verdict != domain.VerdictRejected || !strings.Contains(a.Notes, domXSSAngularOutcomeInertText) {
+		t.Fatalf("the interpolation shape must stay Rejected(inert_text) on a value-as-data page, got %s: %q", a.Verdict, a.Notes)
+	}
+	if a := res.detail.Attempts[2]; a.Verdict != domain.VerdictConfirmed {
+		t.Fatalf("the parameter-name attempt must be the confirming one, got %s: %q", a.Verdict, a.Notes)
+	}
+	// The confirming navigation must really carry the candidate as a NAME.
+	nav, err := url.Parse(res.detail.Attempts[2].URL)
+	if err != nil {
+		t.Fatalf("confirmed attempt URL does not parse: %v (%q)", err, res.detail.Attempts[2].URL)
+	}
+	q := nav.Query()
+	if q.Get("q") != domXSSNamedExpressionAnchorValue {
+		t.Fatalf("the anchor parameter must keep its benign value, got %q from %q", q.Get("q"), nav.RawQuery)
+	}
+	var delivered string
+	for name := range q {
+		if strings.HasPrefix(name, "[(") && strings.HasSuffix(name, "].join([])") {
+			delivered = name
+		}
+	}
+	if delivered == "" {
+		t.Fatalf("no parameter-name expression found in %q", nav.RawQuery)
+	}
+	if strings.Contains(delivered, res.marker) {
+		t.Fatalf("the delivered expression must never contain the contiguous marker: %q", delivered)
+	}
+	if strings.ContainsAny(delivered, `'"`) {
+		t.Fatalf("the delivered expression must survive the page's quote encoding (no string literals): %q", delivered)
+	}
+	// Both shapes are recorded as candidates of the same finding (never a
+	// near-duplicate row), and the value one was tried first.
+	if len(res.detail.Candidates) != 2 {
+		t.Fatalf("want both shapes recorded on one finding, got %+v", res.detail.Candidates)
+	}
+	if res.detail.Candidates[0].Shape != "angular_interpolation" || res.detail.Candidates[1].Shape != "angular_parse_expression" {
+		t.Fatalf("candidate shapes must be ordered interpolation-then-name: %+v", res.detail.Candidates)
+	}
+	if len(f.EvidenceIDs) == 0 {
+		t.Fatal("a confirmed finding must carry evidence")
+	}
+}
+
+// TestDOMAngularExpressionNameEchoNeverConfirms is the false-positive guard
+// for the parameter-NAME channel: the page renders the whole decoded query
+// string — so the delivered parameter name appears in rendered text — but it
+// never hands that name to $parse. Demonstrating the bytes is not compiling
+// them, so the finding stays Rejected and no attempt may Confirm.
+func TestDOMAngularExpressionNameEchoNeverConfirms(t *testing.T) {
+	mgr := newSourceSelectionBrowser(t)
+	defer mgr.Close()
+	lab := angularLab(t)
+	res := runAngularJob(t, mgr, lab.URL, "/name-echo", "location.search", true)
+	if len(res.findings) != 1 {
+		t.Fatalf("want exactly one angular finding, got %d: %+v", len(res.findings), res.findings)
+	}
+	f := res.findings[0]
+	if f.Verdict == domain.VerdictConfirmed {
+		t.Fatalf("a page that only displays the parameter name must never Confirm: %q", f.Summary)
+	}
+	if f.Verdict != domain.VerdictRejected || !strings.Contains(f.Summary, domXSSAngularOutcomeInertText) {
+		t.Fatalf("the echoed interpolation source is an inert-text rejection, got %s: %q", f.Verdict, f.Summary)
+	}
+	for _, a := range res.detail.Attempts {
+		if a.Verdict == domain.VerdictConfirmed {
+			t.Fatalf("no attempt may Confirm on a page that never compiles the name: %+v", a)
+		}
 	}
 }
 
@@ -319,8 +511,17 @@ func TestDOMAngularExpressionCSPBlocked(t *testing.T) {
 	if !strings.Contains(f.Summary, "outcome="+domXSSAngularOutcomeCSPBlocked) || !strings.Contains(f.Summary, "script-src") || !strings.Contains(f.Summary, `blocked="eval"`) {
 		t.Fatalf("csp_blocked outcome must name the blocking directive and eval: %q", f.Summary)
 	}
-	if len(res.detail.Attempts) != 2 || res.detail.Attempts[1].Verdict != domain.VerdictInconclusive {
-		t.Fatalf("the verification attempt itself must carry the Inconclusive verdict: %+v", res.detail.Attempts)
+	// Reachability, the CSP-blocked interpolation, and the parameter-NAME
+	// shape's untested outcome. Neither attempt may upgrade the finding past
+	// csp_blocked: a policy refusal stays Inconclusive on every shape.
+	if len(res.detail.Attempts) != 3 {
+		t.Fatalf("want reachability + interpolation + parameter-name attempts: %+v", res.detail.Attempts)
+	}
+	if a := res.detail.Attempts[1]; a.Verdict != domain.VerdictInconclusive || !strings.Contains(a.Notes, "outcome="+domXSSAngularOutcomeCSPBlocked) {
+		t.Fatalf("the interpolation attempt must itself carry the csp_blocked Inconclusive verdict: %+v", a)
+	}
+	if a := res.detail.Attempts[2]; a.Verdict != domain.VerdictInconclusive {
+		t.Fatalf("a CSP-blocked page must not be upgraded by the parameter-name shape, got %s: %q", a.Verdict, a.Notes)
 	}
 }
 

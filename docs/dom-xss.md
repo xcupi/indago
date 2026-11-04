@@ -94,6 +94,81 @@ means the two false-positive guards are not symmetric, deliberately:
   treating every text-rendering page as an Angular candidate. The stronger,
   honest claim is that no Angular sink exists there.
 
+### The parameter-NAME binding — the measured "sandbox escape without strings" shape
+
+The third lab class reads the query string differently, and that difference is
+the whole reason it does not confirm with the interpolation shape. The live
+page (AngularJS **1.4.4**, `ng-app=labApp`) emits, **for every query
+parameter**, this three-line block into an inline `<script>`:
+
+```js
+var key = '<NAME>';
+$scope.query[key] = '<VALUE>';
+$scope.value = $parse(key)($scope.query);
+```
+
+and renders `<h1 ng-controller=vulnCtrl>… {{value}}</h1>`. Two consequences,
+both measured:
+
+- The parameter **VALUE is data**. It is stored in a scope object and rendered
+  by `{{value}}`; Angular never re-compiles an interpolation's *result*, so a
+  `{{…}}` candidate in the value stays literal text. That is the honest
+  `Rejected(inert_text)` the interpolation shape reports there — and it is still
+  the right verdict for that shape.
+- The parameter **NAME is compiled**. `$parse(key)` parses the name as an
+  Angular expression and assigns its result to the scope the template renders.
+  This is why the lab's own published payload is `?search=1&<expression>=1`: the
+  expression rides as the *name* of a second parameter, and the last block wins
+  the rendered value.
+
+The page also rewrites `'` → `&apos;` and `"` → `&quot;` inside that inline
+script (the HTML parser does not decode character references in raw-text script
+content), so **no string literal survives in either quote style**, and
+AngularJS 1.4.4's expression grammar has no hex literals. A marker expression
+for this binding therefore has to be built without quotes. The planner's
+second, query-only shape, `angular_parse_expression`, is that expression:
+
+```
+marker = "inddd525eb0320dca43"
+value  = [(18).toString(36),(23).toString(36),(13).toString(36),…].join([])
+```
+
+Each marker character is the base-36 digit of its own decimal number literal
+(`(18).toString(36)` is `"i"`), and `join([])` concatenates them because an
+array coerces to `""` as the separator. It contains no quote, no hex literal, no
+global, no `constructor`/`prototype`/`__proto__` access, no `$eval` chain and no
+side effect: it does not need a sandbox escape and performs none. The sandbox is
+still active — `search.__proto__` in the same position throws `isefcld`/
+`$parse:isefcfld` — and the candidate never touches it. The contiguous marker
+never appears in the expression bytes, so a marker in rendered text can only be
+the evaluated result.
+
+Delivery is part of the shape, and it is measured rather than assumed
+(`DOMXSSShapeNeedsParameterName`):
+
+- the discovered parameter is kept, with a **fixed marker-free value** (`1`) —
+  without it the measured page does not render the vulnerable block at all, and
+  a marker-carrying anchor would be indistinguishable from a confirmed result
+  if the page ignored the name channel;
+- the expression is appended as the **last** parameter in the raw query
+  (`domXSSQueryNameURL`). The page assigns the rendered value from the last
+  block it emits; the ordinary sorted encoding would place `[` before `search`
+  and the page would render the anchor instead.
+
+The shape is planned only for the `location.search` source (no other source has
+a parameter name) and **second**, so a page whose text-node interpolation
+compiles stops at the first shape and never receives this navigation. Both
+shapes are attempts of the *same* finding (identity stays endpoint/source/sink/
+selector), so confirming the name channel never creates a second row, and the
+interpolation's `inert_text` attempt and its evidence stay recorded.
+
+Its verdict rule (`decideDOMXSSAngularParse`) has no Rejected branch: on this
+binding the candidate bytes are compiled and never rendered as text, so "the
+marker did not appear" is untested, not disproved. Compiled → **Confirmed**
+(`outcome=compiled`); an enforced eval refusal → **Inconclusive**
+(`outcome=csp_blocked`, the same token as the interpolation shape); anything
+else → **Inconclusive** with its own `outcome=parse_unobserved`.
+
 ### False-positive guards (all real-browser fixtures)
 
 | fixture | outcome |
@@ -104,6 +179,10 @@ means the two false-positive guards are not symmetric, deliberately:
 | template compiler whose dynamic evaluator CSP refuses | **Inconclusive** — `outcome=csp_blocked` |
 | same blocked compiler with no CSP header | **Confirmed** — proves the block is the policy, not the fixture |
 | real AngularJS under `script-src 'self' 'unsafe-inline'` | **Confirmed**, *not* `csp_blocked` |
+| measured per-parameter `$parse(name)` page, both quotes entity-encoded | **Confirmed** — `outcome=compiled`, reached by the parameter-NAME shape after the interpolation shape's honest `inert_text` |
+| same page shape, value bound as data and never re-compiled (`$parse('search')`) | **Rejected** — `inert_text`; the added name attempt stays `parse_unobserved` and never upgrades the verdict |
+| page that renders the whole decoded query string (names included) with Angular present but never `$parse`s a name | **Rejected** — showing the candidate's bytes is not compiling them; no attempt Confirms |
+
 
 The last row matters: AngularJS probes `new Function` once and, when CSP
 refuses it, switches to its own CSP-safe interpreter, so the marker is not

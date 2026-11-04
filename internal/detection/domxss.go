@@ -223,7 +223,73 @@ const (
 	// side effect at all — it concatenates two string literals into the
 	// benign marker identifier — so compiling it is the test, not a payload.
 	domXSSShapeAngularInterpolation = "angular_interpolation"
+	// domXSSShapeAngularParseExpression is the same sink reached through a
+	// DIFFERENT binding: a page that reads each query parameter and hands its
+	// NAME to AngularJS's own $parse as the expression. That value is not
+	// interpolated, it is compiled, so a {{...}} payload stays inert text and
+	// the expression must travel as the parameter NAME. See
+	// domXSSAngularParseExpression for the quote-free construction.
+	domXSSShapeAngularParseExpression = "angular_parse_expression"
 )
+
+// DOMXSSShapeNeedsParameterName reports whether shape reaches its sink only
+// when it is delivered as a query parameter NAME. The executor must ask this
+// instead of inspecting the candidate value: the delivery is a property of the
+// mechanism, not of the bytes.
+func DOMXSSShapeNeedsParameterName(shape string) bool {
+	return shape == domXSSShapeAngularParseExpression
+}
+
+// domXSSAngularParseExpression builds the quote-free Angular expression for
+// marker that evaluates to the marker itself. AngularJS resolves an unknown
+// identifier to undefined and a bare literal is not marker-specific, so the
+// expression has to construct the marker string. On the measured binding form
+// it cannot use string literals at all: the page writes each parameter into an
+// inline <script> where ' and " are both rewritten to character references
+// (&apos; / &quot;, and the browser does not decode references inside
+// <script>), and AngularJS 1.4.4's expression grammar has no hex literals.
+//
+// The construction therefore uses only decimal number literals and
+// number-to-string conversion:
+//
+//	[ (18).toString(36), (23).toString(36), … ].join([])
+//
+// Each marker character is the base-36 digit of its own term, and join([])
+// concatenates them (an array coerces to "" as the separator, so no empty
+// string literal is needed). 'i' -> 18 -> (18).toString(36) == "i".
+//
+// Properties this keeps, all load-bearing:
+//   - the contiguous marker never appears in the expression bytes, so a marker
+//     observed in rendered text can only be the evaluated RESULT;
+//   - no quotes, no globals, no constructor/prototype access and no
+//     side effect: the sandbox's forbidden fields are never touched, so the
+//     expression does not need and does not perform a sandbox escape;
+//   - every character of the engine's marker alphabet ([0-9a-z]) is
+//     representable, and anything else refuses to plan rather than emitting a
+//     dead candidate.
+//
+// A short marker is refused for the same reason as the interpolation shape:
+// splitting it would produce meaningless fragments.
+func domXSSAngularParseExpression(marker string) (string, bool) {
+	if len(marker) < 4 {
+		return "", false
+	}
+	terms := make([]string, 0, len(marker))
+	for i := 0; i < len(marker); i++ {
+		c := marker[i]
+		var digit int
+		switch {
+		case c >= '0' && c <= '9':
+			digit = int(c - '0')
+		case c >= 'a' && c <= 'z':
+			digit = int(c-'a') + 10
+		default:
+			return "", false
+		}
+		terms = append(terms, "("+strconv.Itoa(digit)+").toString(36)")
+	}
+	return "[" + strings.Join(terms, ",") + "].join([])", true
+}
 
 // domXSSAngularInterpolation builds the {{...}} candidate for marker. The
 // marker is split in half and reassembled by the expression itself:
@@ -330,7 +396,18 @@ func DOMXSSPayloadsFor(source DOMXSSSource, sink DOMXSSSink, marker string) []Ca
 		if !ok {
 			return nil
 		}
-		return []Candidate{domXSSPayloadCandidate(source, sink, domXSSShapeAngularInterpolation, value, domXSSAngularRationale(source, sink))}
+		cands := []Candidate{domXSSPayloadCandidate(source, sink, domXSSShapeAngularInterpolation, value, domXSSAngularRationale(source, sink))}
+		// The parameter-NAME binding is a QUERY-source channel only: a
+		// parameter name is something a URL carries, and no other source has
+		// one. It is planned second, so a page whose text-node interpolation
+		// compiles stops at the first (confirmed) shape and never receives
+		// this navigation.
+		if source == DOMSourceQuery {
+			if expr, ok := domXSSAngularParseExpression(marker); ok {
+				cands = append(cands, domXSSPayloadCandidate(source, sink, domXSSShapeAngularParseExpression, expr, domXSSAngularParseRationale(source, sink)))
+			}
+		}
+		return cands
 	}
 	value := "<img src=x onerror=" + marker + ">"
 	if source == DOMSourceQuery && sink == DOMSinkDocumentWrite {
@@ -356,6 +433,7 @@ func domXSSPayloadCandidate(source DOMXSSSource, sink DOMXSSSink, shape, value, 
 		Context:    Context(sink),
 		ContextSub: string(source),
 		Value:      value,
+		Shape:      shape,
 		Trigger:    TriggerLoad,
 		Rationale:  rationale,
 		DedupKey:   "dom_xss\x00" + string(source) + "\x00" + string(sink) + "\x00" + shape + "\x00" + value,
@@ -2856,4 +2934,16 @@ func domXSSAngularRationale(source DOMXSSSource, sink DOMXSSSink) string {
 		"The candidate's only effect is to concatenate two string literals into the benign marker identifier, so compiling it is the detection signal and no sandbox escape, alert, cookie or network call is attempted. " +
 		"The candidate bytes never contain the marker contiguously ('MARK' + 'ER'), so observing the contiguous marker in rendered text cannot come from a page that merely echoes the source — it is the expression's evaluated result. " +
 		"Confirmation therefore requires that observed text result; a document whose Content-Security-Policy refuses dynamic evaluation is recorded as a distinct csp_blocked outcome, never as a rejection and never as a confirmation." + storageControlCaveat
+}
+
+// domXSSAngularParseRationale explains the parameter-NAME shape. It has to be
+// explicit that the payload travelled somewhere other than the parameter
+// value, or an operator reading the attempt would look in the wrong place.
+func domXSSAngularParseRationale(source DOMXSSSource, sink DOMXSSSink) string {
+	_, storageControlCaveat := domXSSSourceRoute(source)
+	return "the expression is delivered as the query parameter NAME, not its value, because this page reads each parameter and hands the NAME to AngularJS's own $parse: the parameter value is only stored as data and never re-compiled, so a {{...}} interpolation stays inert text there. " +
+		"$parse compiles the name as an Angular expression and assigns the result to the scope the template renders, so the marker appearing in rendered text can only be that evaluated result. " +
+		"The expression builds the marker from decimal number literals alone ((18).toString(36) is 'i', join([]) concatenates with an empty separator): the page rewrites both quote styles to character references inside its inline script and AngularJS 1.4.4 has no hex literals, so no string literal can be used. " +
+		"The candidate bytes never contain the marker contiguously, and no quote, global, constructor/prototype access, alert, cookie or network call is involved — this needs no sandbox escape and performs none. " +
+		"A document whose Content-Security-Policy refuses dynamic evaluation is reported as the same distinct csp_blocked outcome as the interpolation shape." + storageControlCaveat
 }

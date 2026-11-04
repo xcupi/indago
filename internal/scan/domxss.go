@@ -1009,6 +1009,58 @@ func domXSSQueryURL(endpointURL, param, value string) string {
 	return u.String()
 }
 
+// domXSSNamedExpressionAnchorValue is the fixed, marker-free value carried by
+// the ordinary parameter while a named-expression candidate is delivered. It is
+// what a human sends in the search box; it must not contain the marker, because
+// a page that ignores the name channel would render exactly this value and a
+// marker-carrying anchor would be indistinguishable from a confirmed result.
+const domXSSNamedExpressionAnchorValue = "1"
+
+// domXSSQueryNameURL builds the navigation URL that delivers expr as a query
+// parameter NAME (with a fixed benign value), keeping every other query
+// parameter and the fragment. Two details are load-bearing and measured:
+//
+//   - the ordinary parameter (anchorParam) must still be present, because a
+//     page that only emits the vulnerable binding when its search parameter
+//     exists renders nothing without it;
+//   - expr is appended LAST and never sorted. The measured page emits one
+//     `var key = '<NAME>'; …; $scope.value = $parse(key)(…)` block per
+//     parameter, in URL order, so the LAST block wins the rendered scope value.
+//     Sorting the names (as encodeDOMXSSQuery does for value delivery) would
+//     put an expression beginning with '[' before "search" and the page would
+//     render the anchor value instead of the expression's result.
+func domXSSQueryNameURL(endpointURL, anchorParam, anchorValue, expr string) string {
+	u, err := url.Parse(endpointURL)
+	if err != nil {
+		sep := "?"
+		if strings.Contains(endpointURL, "?") {
+			sep = "&"
+		}
+		return endpointURL + sep + anchorParam + "=" + url.QueryEscape(anchorValue) + "&" + url.QueryEscape(expr) + "=1"
+	}
+	q := u.Query()
+	if anchorParam != "" {
+		q.Set(anchorParam, anchorValue)
+	}
+	keys := make([]string, 0, len(q))
+	for key := range q {
+		if key == expr {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	pairs := make([]string, 0, len(keys)+1)
+	for _, key := range keys {
+		for _, value := range q[key] {
+			pairs = append(pairs, url.QueryEscape(key)+"="+strings.ReplaceAll(url.QueryEscape(value), "+", "%20"))
+		}
+	}
+	pairs = append(pairs, url.QueryEscape(expr)+"=1")
+	u.RawQuery = strings.Join(pairs, "&")
+	return u.String()
+}
+
 // encodeDOMXSSQuery keeps the selected payload's reserved slash literal in
 // addition to percent-encoding ordinary query syntax. Some pages call
 // decodeURI(location.href); by spec that decoder leaves an encoded "%2F"
@@ -1588,7 +1640,22 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 // page-controlled error or console text.
 func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, marker string, sink detection.DOMXSSSink, hashActivated bool, cand detection.Candidate, findingID domain.ID, label string) (bool, error) {
 	act := domXSSActivationForSink(sink, hashActivated)
-	obs2, payloadNavURL, activationApplied, verr := e.navigateSourceWithActivation(ctx, bctx, source, ep, selector, marker, cand.Value, act, false)
+	var obs2 domXSSObservation
+	var payloadNavURL string
+	var activationApplied bool
+	var verr error
+	if detection.DOMXSSShapeNeedsParameterName(cand.Shape) {
+		// A candidate that reaches its sink as a query parameter NAME cannot
+		// be delivered by any of the value-carrying routes: navigate it
+		// directly, and refuse the shape anywhere else rather than silently
+		// sending it as a value (which cannot reach the sink).
+		if source != detection.DOMSourceQuery {
+			return true, fmt.Errorf("dom-xss: shape %q requires the query source, got %s", cand.Shape, source)
+		}
+		obs2, payloadNavURL, verr = e.navigateNamedDOMXSSExpression(ctx, bctx, ep, selector, cand.Value, marker)
+	} else {
+		obs2, payloadNavURL, activationApplied, verr = e.navigateSourceWithActivation(ctx, bctx, source, ep, selector, marker, cand.Value, act, false)
+	}
 	verifyTC := e.newTestCase(ctx, job, payloadNavURL)
 	if errors.Is(verr, errDOMXSSSourceNotApplicable) {
 		verifyTC.Status = domain.TestCaseSkipped
@@ -1647,7 +1714,16 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 		cspViolations := parseDOMXSSCSPViolations(harness2)
 		cspBlocked, violation := domXSSEvalBlockedByCSP(cspViolations)
 		compiled, viaBinding := domXSSAngularResult(harness2, marker)
-		verdict, confidence, notes = decideDOMXSSAngular(compiled, viaBinding, domXSSAngularInertText(obs2.HTML, cand.Value), cspBlocked, violation)
+		if detection.DOMXSSShapeNeedsParameterName(cand.Shape) {
+			// The parameter-NAME binding never puts the candidate's bytes in a
+			// text node (they sit in the page's own inline script), so the
+			// interpolation shape's "inert text" test would be measuring the
+			// wrong place. Its absence of a result is therefore untested, not
+			// a rejection — see decideDOMXSSAngularParse.
+			verdict, confidence, notes = decideDOMXSSAngularParse(compiled, cspBlocked, violation)
+		} else {
+			verdict, confidence, notes = decideDOMXSSAngular(compiled, viaBinding, domXSSAngularInertText(obs2.HTML, cand.Value), cspBlocked, violation)
+		}
 	} else {
 		verdict, confidence, notes = verification.DecideWithProvenance(marker, matched, markerInDOM, obs2.Runtime)
 	}
@@ -1665,7 +1741,11 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 		notes += domXSSAttributionNotes(source, sink, observed)
 	}
 	if sink == detection.DOMSinkAngularExpression && verdict == domain.VerdictConfirmed {
-		notes += "; confirmation is the compiled interpolation RESULT, not a sandbox escape: no alert, cookie, network request or escape gadget was executed"
+		if detection.DOMXSSShapeNeedsParameterName(cand.Shape) {
+			notes += "; confirmation is the $parse evaluation RESULT of the parameter-name expression, not a sandbox escape: no alert, cookie, network request or escape gadget was executed"
+		} else {
+			notes += "; confirmation is the compiled interpolation RESULT, not a sandbox escape: no alert, cookie, network request or escape gadget was executed"
+		}
 	}
 	if source == detection.DOMSourceLocalStorage || source == detection.DOMSourceSessionStorage {
 		notes += "; attacker-relevant ability to write or poison this storage key is not established by this isolated probe and requires manual exploitability review unless the target flow demonstrates it"
@@ -1715,6 +1795,12 @@ const (
 	domXSSAngularOutcomeCSPBlocked = "csp_blocked"
 	domXSSAngularOutcomeInertText  = "inert_text"
 	domXSSAngularOutcomeUnobserved = "unobserved"
+	// domXSSAngularOutcomeParseUnobserved is the parameter-NAME binding's
+	// negative outcome. It is deliberately NOT domXSSAngularOutcomeInertText:
+	// the candidate bytes never reach a text node on this binding (they are
+	// compiled, not interpolated), so "the source is still rendered as text"
+	// says nothing about whether it was evaluated.
+	domXSSAngularOutcomeParseUnobserved = "parse_unobserved"
 )
 
 // domXSSAngularInertText reports whether the rendered page still carries the
@@ -1783,6 +1869,29 @@ func decideDOMXSSAngular(compiled, viaBinding, payloadPresent, cspBlocked bool, 
 	default:
 		return domain.VerdictInconclusive, domain.ConfidenceLow,
 			"outcome=" + domXSSAngularOutcomeUnobserved + ": neither the interpolation candidate nor its evaluated result could be re-observed in the rendered page, so compilation could not be attempted or ruled out"
+	}
+}
+
+// decideDOMXSSAngularParse is the parameter-NAME binding's verdict rule. Same
+// confidence and the same csp_blocked token as the interpolation shape, but no
+// Rejected branch: on this binding the candidate bytes are compiled by the
+// page's own $parse call and never occupy a text node, so "the marker did not
+// appear" proves only that this navigation did not observe a result — the page
+// may not emit the binding for an added parameter, or the result may not reach
+// a rendered node. That is untested, and it is recorded as its own outcome
+// rather than as a rejection derived from a signal that had no chance to appear.
+func decideDOMXSSAngularParse(compiled, cspBlocked bool, violation domXSSCSPViolation) (domain.Verdict, domain.Confidence, string) {
+	switch {
+	case compiled:
+		return domain.VerdictConfirmed, domain.ConfidenceHigh,
+			"outcome=" + domXSSAngularOutcomeCompiled + ": the page's own $parse call compiled the expression delivered as the query parameter NAME and its evaluated result was written into rendered text; the candidate never contains the marker contiguously, so the observed marker is the expression's evaluated result, not a reflection; confirmation is $parse evaluation, not a sandbox escape: no alert, cookie, network request or escape gadget was executed"
+	case cspBlocked:
+		return domain.VerdictInconclusive, domain.ConfidenceLow,
+			fmt.Sprintf("outcome=%s: the document's Content-Security-Policy refused dynamic script evaluation during this verification navigation (directive=%q blocked=%q), so the page's $parse call could not compile the expression delivered as the parameter name and the marker result was never produced; the sink was reachable, so this is not a rejection, and no compilation was observed, so it is not a confirmation",
+				domXSSAngularOutcomeCSPBlocked, violation.Directive, violation.Blocked)
+	default:
+		return domain.VerdictInconclusive, domain.ConfidenceLow,
+			"outcome=" + domXSSAngularOutcomeParseUnobserved + ": the expression was delivered as a query parameter NAME but neither its evaluated result nor a compilation refusal was observed in the rendered page (the page may not emit this binding for an added parameter, and this binding never renders the source as text); on this binding that is untested, not a rejection — the interpolation attempt's own verdict is recorded separately"
 	}
 }
 
@@ -1930,6 +2039,16 @@ func (e *domXSSExecutor) navigateSourceWithActivation(ctx context.Context, bctx 
 		obs, activated, err = e.navigate(ctx, bctx, navURL, marker, value, act, probeHashChange)
 	}
 	return obs, navURL, activated, err
+}
+
+// navigateNamedDOMXSSExpression delivers a candidate whose sink compiles a
+// query parameter NAME (see detection.DOMXSSShapeNeedsParameterName). The
+// ordinary parameter keeps a fixed benign value so the page still renders its
+// vulnerable binding, and the expression rides as the last parameter name.
+func (e *domXSSExecutor) navigateNamedDOMXSSExpression(ctx context.Context, bctx *browser.Context, ep *domain.Endpoint, selector, expr, marker string) (domXSSObservation, string, error) {
+	navURL := domXSSQueryNameURL(ep.URL, selector, domXSSNamedExpressionAnchorValue, expr)
+	obs, _, err := e.navigate(ctx, bctx, navURL, marker, "", domXSSActivateNone, false)
+	return obs, navURL, err
 }
 
 // sessionStatePathFor returns the scan's saved authenticated session

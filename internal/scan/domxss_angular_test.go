@@ -10,6 +10,7 @@ package scan
 // The real-browser behaviour lives in domxss_angular_integration_test.go.
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 
@@ -181,6 +182,86 @@ func TestDecideDOMXSSAngularOutcomesAreDistinct(t *testing.T) {
 			t.Fatalf("outcome notes must be distinct: %q", n)
 		}
 		seen[n] = true
+	}
+}
+
+// TestDOMXSSNamedExpressionURL pins the two measured ordering requirements of
+// the parameter-NAME delivery: the ordinary parameter must still be present
+// with a marker-free value, and the expression must be the LAST parameter in
+// the raw query — the page assigns its rendered scope value from the last
+// parameter block it emits, so a sorted order would render the anchor instead.
+func TestDOMXSSNamedExpressionURL(t *testing.T) {
+	expr := "[(18).toString(36),(23).toString(36)].join([])"
+	got := domXSSQueryNameURL("https://target.example/list?q=unused&z=9#frag", "q", domXSSNamedExpressionAnchorValue, expr)
+
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("built URL does not parse: %v (%q)", err, got)
+	}
+	if u.Fragment != "frag" {
+		t.Fatalf("endpoint fragment must be preserved, got %q from %q", u.Fragment, got)
+	}
+	if raw := u.RawQuery; !strings.HasSuffix(raw, url.QueryEscape(expr)+"=1") {
+		t.Fatalf("the expression must be the LAST parameter, got raw query %q", raw)
+	}
+	q := u.Query()
+	if q.Get("q") != domXSSNamedExpressionAnchorValue {
+		t.Fatalf("the anchor parameter must carry the fixed marker-free value, got %q", q.Get("q"))
+	}
+	if q.Get("z") != "9" {
+		t.Fatalf("other endpoint parameters must be preserved, got %q", q.Get("z"))
+	}
+	if q.Get(expr) != "1" {
+		t.Fatalf("the expression must arrive as a parameter NAME, decoded name %q missing from %v", expr, q)
+	}
+	if _, ok := q["1"]; ok {
+		t.Fatalf("the expression must not be delivered as a value, got %v", q["1"])
+	}
+	if domXSSNamedExpressionAnchorValue == "" || strings.Contains(domXSSNamedExpressionAnchorValue, "ind") {
+		t.Fatalf("the anchor value must be a benign constant that cannot carry a marker, got %q", domXSSNamedExpressionAnchorValue)
+	}
+}
+
+// TestDecideDOMXSSAngularParseNeverRejects pins the parameter-NAME verdict
+// rule: a compiled result confirms, a CSP refusal is the same distinct
+// csp_blocked outcome as the interpolation shape, and the absence of a result
+// is untested — never Rejected, because this binding never renders the
+// candidate source as text and therefore cannot produce the inert-text
+// evidence a rejection would need.
+func TestDecideDOMXSSAngularParseNeverRejects(t *testing.T) {
+	verdict, confidence, note := decideDOMXSSAngularParse(true, false, domXSSCSPViolation{})
+	if verdict != domain.VerdictConfirmed || confidence != domain.ConfidenceHigh {
+		t.Fatalf("a compiled parameter-name expression is Confirmed, got %s/%s", verdict, confidence)
+	}
+	if !strings.Contains(note, "outcome="+domXSSAngularOutcomeCompiled) || !strings.Contains(note, "query parameter NAME") {
+		t.Fatalf("confirmation must name the channel it used: %q", note)
+	}
+	if !strings.Contains(note, "not a sandbox escape") {
+		t.Fatalf("confirmation must state that no escape was attempted: %q", note)
+	}
+
+	cspVerdict, cspConfidence, cspNote := decideDOMXSSAngularParse(false, true, domXSSCSPViolation{Directive: "script-src", Blocked: "eval"})
+	if cspVerdict != domain.VerdictInconclusive || cspConfidence != domain.ConfidenceLow {
+		t.Fatalf("a CSP-refused compile is a low-confidence Inconclusive, got %s/%s", cspVerdict, cspConfidence)
+	}
+	if !strings.Contains(cspNote, "outcome="+domXSSAngularOutcomeCSPBlocked) || !strings.Contains(cspNote, "script-src") {
+		t.Fatalf("the CSP outcome must be explicitly recorded: %q", cspNote)
+	}
+
+	for _, csp := range []bool{true, false} {
+		verdict, confidence, note := decideDOMXSSAngularParse(false, csp, domXSSCSPViolation{})
+		if verdict == domain.VerdictRejected || verdict == domain.VerdictConfirmed {
+			t.Fatalf("an unobserved parameter-name result must never be a verdict of %s (csp=%v)", verdict, csp)
+		}
+		if confidence != domain.ConfidenceLow {
+			t.Fatalf("an unobserved parameter-name result must stay low confidence, got %s", confidence)
+		}
+		if csp && !strings.Contains(note, domXSSAngularOutcomeCSPBlocked) {
+			t.Fatalf("a blocked compile must say so: %q", note)
+		}
+		if !csp && !strings.Contains(note, domXSSAngularOutcomeParseUnobserved) {
+			t.Fatalf("an unobserved result must carry its own outcome token: %q", note)
+		}
 	}
 }
 

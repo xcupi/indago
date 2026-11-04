@@ -74,6 +74,15 @@ type Candidate struct {
 	// Value is the string to inject (benign marker embedded). It is a detection
 	// probe, not an exploit.
 	Value string `json:"value"`
+	// Shape names the deterministic mechanism this candidate uses — the same
+	// identifier the DOM-XSS planner encodes in DedupKey ("markup",
+	// "attr_breakout", "timer_expression", "angular_interpolation",
+	// "angular_parse_expression", …), empty for Reflected XSS candidates. The
+	// planner's dedup key already carries it; exposing it lets the DOM-XSS
+	// executor deliver a shape correctly when the delivery itself differs (an
+	// Angular expression the page hands to $parse must travel as the query
+	// parameter NAME, not as a parameter value) instead of sniffing the value.
+	Shape string `json:"shape,omitempty"`
 	// Transformation is what the site is expected to do to the characters this
 	// candidate depends on: "raw" (survive) or an encoding (html/url/js/stripped/
 	// mixed) that neutralizes them. Derived from the reflection encoding analysis.
