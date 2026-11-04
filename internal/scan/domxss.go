@@ -1326,13 +1326,19 @@ type domXSSExecutor struct {
 	limiter    *ratelimit.Limiter
 	proxyPool  []string
 	proxyNext  atomic.Uint64
+	// scripts is the per-SCAN bounded, content-addressed cache of same-origin
+	// external script bodies (and the recorder for everything that could not be
+	// read). One loader per scan is what makes the total-byte ceiling and the
+	// "same script analysed once" property hold across endpoints and workers.
+	scripts *detection.DOMXSSScriptLoader
 }
 
 func newDOMXSSExecutor(st store.Store, mgr *browser.Manager, ev evidence.Store, scope domain.Scope, log *slog.Logger, findingsMu *sync.Mutex) *domXSSExecutor {
 	if findingsMu == nil {
 		findingsMu = &sync.Mutex{}
 	}
-	return &domXSSExecutor{store: st, browser: mgr, evidence: ev, scope: scope, log: log, findingsMu: findingsMu}
+	return &domXSSExecutor{store: st, browser: mgr, evidence: ev, scope: scope, log: log, findingsMu: findingsMu,
+		scripts: detection.NewDOMXSSScriptLoader()}
 }
 
 func (e *domXSSExecutor) nextProxy() string {
@@ -1403,6 +1409,10 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	defer bctx.Close()
 
 	var selectors []domXSSQuerySelector
+	// pageScripts carries the served HTML and the same-origin external script
+	// bodies/skips from the ONE discovery load. It is empty for sources that do
+	// not read the query string.
+	var pageScripts domXSSPageScripts
 	switch source {
 	case detection.DOMSourceQuery:
 		selectors, err = e.queryParamSelectors(ctx, ep.ID)
@@ -1416,18 +1426,22 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 		// is a bounded discovery step, not another probe pipeline: one
 		// document load plus at most DOMXSSScriptFetchLimit same-origin
 		// script reads, and at most DOMXSSScriptParamLimit extra selectors.
-		scriptParams, scriptNote, scriptErr := e.discoverScriptQueryParams(ctx, bctx, ep.URL)
+		// The same load also hands the static pass the page HTML and the
+		// external script bodies it needs (see pageScripts below).
+		var scriptErr error
+		pageScripts, scriptErr = e.discoverScriptQueryParams(ctx, bctx, ep.URL)
 		if scriptErr != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			tc := e.newTestCase(ctx, job, ep.URL)
 			e.finishTestCase(ctx, tc, nil, "page-script query-name discovery failed ("+scriptErr.Error()+"); testing only parameters discovery already found")
-		} else if len(scriptParams) > 0 {
+			pageScripts = domXSSPageScripts{}
+		} else if len(pageScripts.Params) > 0 {
 			tc := e.newTestCase(ctx, job, ep.URL)
-			e.finishTestCase(ctx, tc, nil, scriptNote)
+			e.finishTestCase(ctx, tc, nil, pageScripts.Note)
 		}
-		selectors = mergeDOMXSSQuerySelectors(selectors, scriptParams)
+		selectors = mergeDOMXSSQuerySelectors(selectors, pageScripts.Params)
 		if len(selectors) == 0 {
 			tc := e.newTestCase(ctx, job, ep.URL)
 			tc.Status = domain.TestCaseSkipped
@@ -1479,7 +1493,7 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	// key's payload) must never be visible to the next selector's attempt, or
 	// execution caused by the first is attributed to the second.
 	for _, selector := range selectors {
-		if err := e.probeSelectorInFreshContext(ctx, newContext, job, ep, source, selector.Name, selector.Source, marker); err != nil {
+		if err := e.probeSelectorInFreshContext(ctx, newContext, job, ep, source, selector.Name, selector.Source, marker, pageScripts); err != nil {
 			return err
 		}
 	}
@@ -1535,7 +1549,7 @@ func mergeDOMXSSQuerySelectors(discovered []domXSSQuerySelector, scriptParams []
 	return out
 }
 
-func (e *domXSSExecutor) probeSelectorInFreshContext(ctx context.Context, newContext func() (*browser.Context, error), job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, paramSource, marker string) error {
+func (e *domXSSExecutor) probeSelectorInFreshContext(ctx context.Context, newContext func() (*browser.Context, error), job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, paramSource, marker string, pageScripts domXSSPageScripts) error {
 	sctx, err := newContext()
 	if err != nil {
 		tc := e.newTestCase(ctx, job, ep.URL)
@@ -1546,7 +1560,7 @@ func (e *domXSSExecutor) probeSelectorInFreshContext(ctx context.Context, newCon
 		return err
 	}
 	defer sctx.Close()
-	return e.probeDOMXSSCandidate(ctx, sctx, job, ep, source, selector, paramSource, marker)
+	return e.probeDOMXSSCandidate(ctx, sctx, job, ep, source, selector, paramSource, marker, pageScripts)
 }
 
 // queryParamSelectors returns every distinct discovered LocationQuery
@@ -1585,79 +1599,125 @@ func (e *domXSSExecutor) queryParamSelectors(ctx context.Context, endpointID dom
 	return out, nil
 }
 
+// domXSSPageScripts is everything ONE bounded document load of an endpoint
+// gave the DOM pass: the served HTML, the literal query-parameter names its
+// scripts read, and the same-origin external script bodies (or recorded skips).
+// It is discovery/advisory input, never evidence: the browser verdict still
+// decides whether any name reaches an executable sink.
+type domXSSPageScripts struct {
+	HTML    string
+	Params  []detection.DOMXSSScriptParam
+	Scripts []detection.DOMXSSExternalScript
+	Note    string
+}
+
 // discoverScriptQueryParams reads the literal query-parameter names the page's
-// own JavaScript reads — inline first, then same-origin external scripts —
-// from ONE bounded document load. It is discovery input, never evidence: the
-// browser verdict still decides whether any name reaches an executable sink.
+// own JavaScript reads — inline first, then same-origin external scripts — and
+// keeps the external bodies for the static pass, from ONE bounded document
+// load.
 //
-// Budget, stated exactly (docs/dom-xss.md "Names the page reads"):
+// Budget, stated exactly (docs/dom-xss.md "Same-origin external scripts"):
 //   - one document load of the endpoint in the already-open DOM context;
 //   - at most detection.DOMXSSScriptFetchLimit (8) same-origin external
-//     script bodies, each at most DOMXSSScriptByteLimit (256 KiB), read
-//     through the page itself so the scan's session, proxy and scope gate
-//     apply exactly as they do to every other browser request;
+//     script FILES per page, each at most DOMXSSScriptByteLimit (256 KiB), and
+//     at most detection.DOMXSSScriptScanByteBudget (4 MiB) of NEW script bytes
+//     per scan. A body over the per-file cap is skipped WHOLE, never truncated;
 //   - at most detection.DOMXSSScriptParamLimit (12) extra selectors, applied
 //     by the merge, and no name is ever invented: it must be a literal in a
 //     recognised read shape.
 //
+// Every fetch goes THROUGH the page itself (see domXSSPageScriptFetcher), so
+// the scan's session, proxy, rate limiter and the context's AllowRequest scope
+// gate apply exactly as they do to every other browser request. No new network
+// path is introduced, and no third-party host is ever contacted: only
+// same-origin references are resolved.
+//
 // A failure here is never fatal: the caller keeps the discovered selectors and
 // records why page-script discovery produced nothing.
-func (e *domXSSExecutor) discoverScriptQueryParams(ctx context.Context, bctx *browser.Context, targetURL string) ([]detection.DOMXSSScriptParam, string, error) {
+func (e *domXSSExecutor) discoverScriptQueryParams(ctx context.Context, bctx *browser.Context, targetURL string) (domXSSPageScripts, error) {
 	page, err := bctx.NewPage(ctx)
 	if err != nil {
-		return nil, "", err
+		return domXSSPageScripts{}, err
 	}
 	defer page.Close()
 	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
-		return nil, "", err
+		return domXSSPageScripts{}, err
 	}
 	html, err := page.Content(ctx)
 	if err != nil {
-		return nil, "", err
+		return domXSSPageScripts{}, err
 	}
 
 	params := detection.DOMXSSQueryParamNamesFromHTML(html)
 	inlineNames := len(params)
-	externalRead, externalSkipped := 0, 0
-	fetched := make(map[string]bool)
-	for _, raw := range detection.DOMXSSScriptSrcs(html) {
-		if externalRead >= detection.DOMXSSScriptFetchLimit {
-			externalSkipped++
-			continue
+
+	// The loader resolves only same-origin references, applies the per-page,
+	// per-file and per-scan ceilings, and caches by URL and content hash. A
+	// bare executor (tests construct one without the constructor) gets a
+	// throw-away loader rather than a nil dereference; its result is identical
+	// for that one page, it simply loses the cross-page cache.
+	loader := e.scripts
+	if loader == nil {
+		loader = detection.NewDOMXSSScriptLoader()
+	}
+	scripts := loader.ScriptsFor(domXSSPageScriptFetcher{ctx: ctx, page: page, limiter: e.limiter}, targetURL, detection.DOMXSSScriptSrcs(html))
+	var available, unavailable, foreign int
+	for _, s := range scripts {
+		switch {
+		case s.Err == detection.DOMXSSScriptSkipForeign:
+			foreign++
+		case s.Unavailable():
+			unavailable++
+		default:
+			available++
+			params = append(params, detection.DOMXSSQueryParamNamesFromScript(s.Body, s.URL)...)
 		}
-		src, ok := domXSSSameOriginScriptURL(raw, targetURL)
-		if !ok || fetched[src] {
-			continue
-		}
-		fetched[src] = true
-		body, ferr := e.readPageScript(ctx, page, src)
-		if ferr != nil {
-			externalSkipped++
-			continue
-		}
-		externalRead++
-		params = append(params, detection.DOMXSSQueryParamNamesFromScript(body, src)...)
 	}
 
 	params = detection.DOMXSSMergeScriptParams(params, detection.DOMXSSScriptParamLimit)
-	if len(params) == 0 {
-		return nil, "", nil
+	stats := loader.Stats()
+	note := fmt.Sprintf("page-script query-name discovery: %d literal name(s) read by the page's own scripts; %d inline name(s), %d same-origin external script(s) analysed (caps: %d files/page, %d KiB/file, %d MiB/scan; %d unreadable, %d third-party; scan total %d bytes in %d distinct bodies)",
+		len(params), inlineNames, available,
+		detection.DOMXSSScriptFetchLimit, detection.DOMXSSScriptByteLimit>>10, detection.DOMXSSScriptScanByteBudget>>20,
+		unavailable, foreign, stats.BytesRead, stats.Bodies)
+	if len(params) > 0 {
+		provenance := make([]string, 0, len(params))
+		for _, p := range params {
+			provenance = append(provenance, fmt.Sprintf("%s (%s line %d)", p.Name, p.Script, p.Line))
+		}
+		note = fmt.Sprintf("page-script query-name discovery: %d literal name(s) read by the page's own scripts: %s; %d inline name(s), %d same-origin external script(s) analysed (caps: %d files/page, %d KiB/file, %d MiB/scan; %d unreadable, %d third-party)",
+			len(params), strings.Join(provenance, ", "), inlineNames, available,
+			detection.DOMXSSScriptFetchLimit, detection.DOMXSSScriptByteLimit>>10, detection.DOMXSSScriptScanByteBudget>>20,
+			unavailable, foreign)
 	}
-	provenance := make([]string, 0, len(params))
-	for _, p := range params {
-		provenance = append(provenance, fmt.Sprintf("%s (%s line %d)", p.Name, p.Script, p.Line))
-	}
-	note := fmt.Sprintf("page-script query-name discovery: %d literal name(s) read by the page's own scripts: %s; %d inline name(s), %d same-origin external script(s) read (cap %d scripts, %d names per endpoint; %d skipped)",
-		len(params), strings.Join(provenance, ", "), inlineNames, externalRead,
-		detection.DOMXSSScriptFetchLimit, detection.DOMXSSScriptParamLimit, externalSkipped)
-	return params, note, nil
+	return domXSSPageScripts{HTML: html, Params: params, Scripts: scripts, Note: note}, nil
 }
 
-// readPageScript fetches one same-origin script body THROUGH the loaded page,
-// so the context's session cookies, proxy and scope gate are the same ones the
-// rest of the browser pass uses. The response is bounded client-side so a huge
-// bundle never crosses the driver boundary in full.
-func (e *domXSSExecutor) readPageScript(ctx context.Context, page *browser.Page, src string) (string, error) {
+// domXSSPageScriptFetcher reads one same-origin script body THROUGH the
+// already-loaded page, so the context's session cookies, proxy, rate limiter
+// and AllowRequest scope gate are the same ones the rest of the browser pass
+// uses. Nothing here widens what may be fetched: the URL has already been
+// resolved and origin-checked by detection.DOMXSSScriptLoader.
+//
+// The body is NEVER truncated. A response whose declared or actual length
+// exceeds DOMXSSScriptByteLimit is reported as ErrDOMXSSScriptTooLarge and the
+// loader skips it whole — half a minified bundle parses into nonsense, and a
+// nonsense "no sink" is worse than an explicit skip.
+type domXSSPageScriptFetcher struct {
+	ctx     context.Context
+	page    *browser.Page
+	limiter *ratelimit.Limiter
+}
+
+func (f domXSSPageScriptFetcher) FetchDOMXSSScript(src string) (string, error) {
+	// Every script read consumes one rate-limiter slot, so the bounded set of
+	// script fetches is paced by the same limiter as the scan's other requests
+	// instead of riding along unmetered on the page load.
+	if f.limiter != nil {
+		if err := f.limiter.Wait(f.ctx); err != nil {
+			return "", err
+		}
+	}
 	quoted, err := json.Marshal(src)
 	if err != nil {
 		return "", err
@@ -1666,41 +1726,59 @@ func (e *domXSSExecutor) readPageScript(ctx context.Context, page *browser.Page,
   const x = new XMLHttpRequest();
   x.open('GET', %s, false);
   x.send();
-  if (x.status < 200 || x.status >= 300) return '';
-  return String(x.responseText || '').slice(0, %d);
-} catch (e) { return ''; } })()`, quoted, detection.DOMXSSScriptByteLimit)
-	raw, err := page.Evaluate(ctx, expr)
+  if (x.status < 200 || x.status >= 300) return { error: 'HTTP ' + x.status };
+  const declared = Number(x.getResponseHeader('Content-Length') || '0');
+  if (declared > %d) return { tooLarge: true };
+  const body = String(x.responseText || '');
+  if (body.length > %d) return { tooLarge: true };
+  return { body: body };
+} catch (e) { return { error: String(e) }; } })()`, quoted, detection.DOMXSSScriptByteLimit, detection.DOMXSSScriptByteLimit)
+	raw, err := f.page.Evaluate(f.ctx, expr)
 	if err != nil {
 		return "", err
 	}
-	body, _ := raw.(string)
-	if len(body) > detection.DOMXSSScriptByteLimit {
-		body = body[:detection.DOMXSSScriptByteLimit]
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("script fetch returned an unexpected value (%T)", raw)
 	}
+	if v, ok := m["tooLarge"]; ok && v == true {
+		return "", detection.ErrDOMXSSScriptTooLarge
+	}
+	if v, ok := m["error"]; ok {
+		return "", fmt.Errorf("script fetch: %v", v)
+	}
+	body, _ := m["body"].(string)
 	return body, nil
 }
 
-// domXSSSameOriginScriptURL resolves raw against the endpoint URL and reports
-// whether it stays on the SAME origin (scheme + host + port). Only those are
-// read: a third-party bundle is not this endpoint's script, and testing a name
-// it happens to contain would test a name this page may never read.
+// domXSSSameOriginScriptURL is the scan-side name for the one origin policy,
+// which lives in detection with the rest of the bounded script layer.
 func domXSSSameOriginScriptURL(raw, base string) (string, bool) {
-	b, err := url.Parse(base)
-	if err != nil || b.Host == "" {
-		return "", false
+	return detection.DOMXSSSameOriginScriptURL(raw, base)
+}
+
+// domXSSStaticProvenanceNote renders the bounded static pass's view of where a
+// sink lives. It is ADVISORY (never a verdict): the browser's marker signal
+// remains the only confirmation. It exists so a "no sink observed" result names
+// the script the pass did find a path through, instead of implying the page has
+// no sink anywhere.
+func domXSSStaticProvenanceNote(res detection.DOMXSSStaticResult) string {
+	if len(res.Sites) > 0 {
+		site := res.Sites[0]
+		where := "an inline script"
+		if site.Script != "" {
+			where = site.Script
+		}
+		return fmt.Sprintf("static pass (advisory, no verdict): %s reachable at %s line %d", site.Sink, where, site.Line)
 	}
-	r, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || r.Scheme == "data" || r.Scheme == "blob" || r.Scheme == "javascript" {
-		return "", false
+	if len(res.ScriptProblems) > 0 {
+		return fmt.Sprintf("static pass (advisory, no verdict): %d referenced script(s) could not be analysed, e.g. %s, so absence of a sink is not established",
+			len(res.ScriptProblems), res.ScriptProblems[0].Describe())
 	}
-	u := b.ResolveReference(r)
-	if u.Scheme != b.Scheme || u.Host != b.Host {
-		return "", false
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", false
-	}
-	return u.String(), true
+	// Nothing the browser did not already say: a page whose external scripts
+	// were all analysed and contain no sink keeps exactly the note it had
+	// before this layer existed.
+	return ""
 }
 
 // paramNamesAt returns every distinct discovered parameter name at loc for
@@ -1759,12 +1837,24 @@ func domXSSCandidateForSelector(cand detection.Candidate, source detection.DOMXS
 	return cand
 }
 
-func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, paramSource, marker string) error {
+func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, paramSource, marker string, pageScripts domXSSPageScripts) error {
 	label := domXSSSelectorLabel(source, selector)
 	if paramSource == detection.ParameterSourcePageScript {
 		label += " (name read by the page's own script)"
 	}
 	canary := detection.DOMXSSCanary(marker)
+
+	// The bounded static pass gets the SAME source and selector the browser is
+	// about to probe, over the page bytes and the same-origin external script
+	// bodies the discovery load already fetched. It is advisory: it never
+	// creates a finding and never decides a verdict. It is consulted only for
+	// pages that actually have external scripts, so an inline-only page's
+	// recorded notes are byte-for-byte what they were before this layer.
+	staticNote := ""
+	if source == detection.DOMSourceQuery && pageScripts.HTML != "" && len(pageScripts.Scripts) > 0 {
+		static := detection.DOMXSSStaticReachabilityWithScripts(pageScripts.HTML, ep.URL, source, selector, pageScripts.Scripts)
+		staticNote = domXSSStaticProvenanceNote(static)
+	}
 
 	// --- Phase 1: reachability ---
 	// probeHashChange is phase-one only and hash-source only: a page that
@@ -1812,7 +1902,11 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 		return err
 	}
 	if len(reachable) == 0 {
-		e.finishTestCase(ctx, reachTC, nil, fmt.Sprintf("no implemented DOM-XSS sink reachable from %s (negative result)", label))
+		note := fmt.Sprintf("no implemented DOM-XSS sink reachable from %s (negative result)", label)
+		if staticNote != "" {
+			note += "; " + staticNote
+		}
+		e.finishTestCase(ctx, reachTC, nil, note)
 		return nil
 	}
 	// Bounded to the first reachable sink (deterministic: whichever the
@@ -1820,6 +1914,9 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	// factory is the one exception, explained on domXSSPrimarySink.
 	sink := domXSSPrimarySink(reachable)
 	reachNote := fmt.Sprintf("reachable sink: %s from %s (canary observed in the hooked setter/call)", sink, label)
+	if staticNote != "" {
+		reachNote += "; " + staticNote
+	}
 	if sink == detection.DOMSinkAngularExpression {
 		reachNote = fmt.Sprintf("reachable sink: %s from %s (the canary was observed as rendered text after the page's load event, the precondition for AngularJS text-node interpolation; this is reachability, not proof of compilation)", sink, label)
 	}

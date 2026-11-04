@@ -602,9 +602,15 @@ const DOMXSSStaticMaxDepth = 1
 // analysed source.
 type DOMXSSFlowSite struct {
 	Sink DOMXSSSink
-	// Line is the 1-based line in the analysed page where the sink call or
-	// assignment appears.
+	// Line is the 1-based line in the analysed script (inside the page for an
+	// inline script, inside the body for an external one) where the sink call
+	// or assignment appears.
 	Line int
+	// Script is the provenance of the sink: the resolved same-origin URL of
+	// the external script the body came from, or "" when it is an inline
+	// <script>. This is what lets a finding's evidence name /app.js instead of
+	// claiming the sink is in the page HTML.
+	Script string
 	// Hops is the number of user-defined function boundaries the tainted value
 	// crossed before reaching the sink (0..DOMXSSStaticMaxDepth).
 	Hops int
@@ -632,19 +638,64 @@ type DOMXSSStaticResult struct {
 	// even when Outcome is DOMXSSFlowTainted: sites prove what the pass could
 	// see, Unresolved says what it could not.
 	Unresolved []DOMXSSUnresolvedFlow
-	// ExternalScripts counts <script src=...> elements, whose bodies are not
-	// part of the page HTML and therefore not analysed.
+	// ExternalScripts counts <script src=...> elements on the page. When the
+	// caller supplied bodies (see DOMXSSStaticReachabilityWithScripts) the
+	// same-origin ones are analysed and AnalysedScripts says how many bodies
+	// the pass actually parsed.
 	ExternalScripts int
-	Notes           []string
+	// AnalysedScripts is the number of script BODIES the pass parsed: inline
+	// bodies plus same-origin external bodies, with identical external content
+	// counted once.
+	AnalysedScripts int
+	// ForeignScripts counts <script src> references that were not same-origin
+	// and were therefore never fetched or analysed.
+	ForeignScripts int
+	// ScriptProblems records every same-origin reference whose body could not
+	// be analysed (not fetched, over a cap, failed, unparsable). A non-empty
+	// list forces DOMXSSFlowUnresolved unless a site was found anyway, because
+	// an unanalysed script means absence was not established.
+	ScriptProblems []DOMXSSScriptProblem
+	Notes          []string
 }
 
 // DOMXSSStaticReachability runs the bounded static pass over pageHTML for one
 // client-side source and its selector (a query/fragment-route parameter name, a
 // storage key, or "" where the source has no selector).
 //
+// It analyses INLINE script bodies only. Use DOMXSSStaticReachabilityWithScripts
+// when the caller also has the bodies of the page's same-origin external
+// scripts: a sink that lives only in `/app.js` is invisible here, and the
+// honest reading of that result is "no tainted path in the inline scripts",
+// never "the page has no sink".
+//
 // The result is advisory only. It never confirms or rejects a finding; the
 // browser's own marker signal is the only verdict authority.
 func DOMXSSStaticReachability(pageHTML string, source DOMXSSSource, selector string) DOMXSSStaticResult {
+	return domXSSStaticReachability(pageHTML, "", source, selector, nil)
+}
+
+// DOMXSSStaticReachabilityWithScripts is DOMXSSStaticReachability plus the
+// bodies of the same-origin external scripts this page references, fetched by
+// the caller under its own scope/session/rate policy (see
+// DOMXSSScriptLoader). pageURL resolves relative src attributes.
+//
+// Script elements are analysed in DOCUMENT ORDER, external bodies in the
+// position their <script src> occupies, so a value one script binds is visible
+// to the next exactly as the browser would run them. Each site records the
+// script URL it was found in (DOMXSSFlowSite.Script). A reference that could
+// not be read or parsed is recorded in ScriptProblems and — unless a site was
+// found anyway — makes the outcome DOMXSSFlowUnresolved, never
+// DOMXSSFlowNoTaintedPath: an unanalysed script is not an absence of sinks.
+func DOMXSSStaticReachabilityWithScripts(pageHTML, pageURL string, source DOMXSSSource, selector string, scripts []DOMXSSExternalScript) DOMXSSStaticResult {
+	if pageURL == "" {
+		// Without a base URL no reference can be resolved, so fall back to the
+		// inline-only pass instead of reporting every script as unfetched.
+		return domXSSStaticReachability(pageHTML, "", source, selector, nil)
+	}
+	return domXSSStaticReachability(pageHTML, pageURL, source, selector, scripts)
+}
+
+func domXSSStaticReachability(pageHTML, pageURL string, source DOMXSSSource, selector string, external []DOMXSSExternalScript) DOMXSSStaticResult {
 	res := DOMXSSStaticResult{}
 	if !source.IsValid() {
 		res.Outcome = DOMXSSFlowUnresolved
@@ -652,10 +703,25 @@ func DOMXSSStaticReachability(pageHTML string, source DOMXSSSource, selector str
 		return res
 	}
 
-	scripts, external := dxsInlineScripts(pageHTML)
-	res.ExternalScripts = external
-	if external > 0 {
-		res.Notes = append(res.Notes, fmt.Sprintf("%d external <script src=...> element(s) were not analysed; this pass only sees inline script bodies", external))
+	var scripts []dxsScript
+	if pageURL == "" {
+		var externalCount int
+		scripts, externalCount = dxsInlineScripts(pageHTML)
+		res.ExternalScripts = externalCount
+		res.AnalysedScripts = len(scripts)
+		if externalCount > 0 {
+			res.Notes = append(res.Notes, fmt.Sprintf("%d external <script src=...> element(s) were not analysed; this pass only sees inline script bodies", externalCount))
+		}
+	} else {
+		var problems []DOMXSSScriptProblem
+		var analysedExternal int
+		scripts, res.ExternalScripts, res.ForeignScripts, analysedExternal, problems = dxsPageScriptBodies(pageHTML, pageURL, external)
+		res.ScriptProblems = problems
+		res.AnalysedScripts = len(scripts)
+		if res.ExternalScripts > 0 {
+			res.Notes = append(res.Notes, fmt.Sprintf("%d external <script src=...> element(s): %d same-origin body/bodies analysed, %d not same-origin, %d not analysable",
+				res.ExternalScripts, analysedExternal, res.ForeignScripts, len(problems)))
+		}
 	}
 
 	in := &dxsInterp{
@@ -672,9 +738,17 @@ func DOMXSSStaticReachability(pageHTML string, source DOMXSSSource, selector str
 
 	var gaps []DOMXSSUnresolvedFlow
 	for _, script := range scripts {
+		in.script = script.label
+		where := "the inline script"
+		if script.label != "" {
+			where = "the external script " + script.label
+		}
 		toks, err := dxsTokenize(script.body, script.line)
 		if err != nil {
-			gaps = append(gaps, DOMXSSUnresolvedFlow{Line: script.line, Reason: "unparsed script", Detail: "the inline script could not be tokenized: " + err.Error()})
+			gaps = append(gaps, DOMXSSUnresolvedFlow{Line: script.line, Reason: "unparsed script", Detail: where + " could not be tokenized: " + err.Error()})
+			if script.label != "" {
+				res.ScriptProblems = append(res.ScriptProblems, DOMXSSScriptProblem{URL: script.label, Reason: DOMXSSScriptSkipParseFailed, Detail: err.Error()})
+			}
 			continue
 		}
 		p := &dxsParser{toks: toks}
@@ -682,9 +756,13 @@ func DOMXSSStaticReachability(pageHTML string, source DOMXSSSource, selector str
 		for _, g := range p.gaps {
 			gaps = append(gaps, DOMXSSUnresolvedFlow{Line: g.line, Reason: "unparsed script", Detail: g.msg})
 		}
+		if script.label != "" && len(p.gaps) > 0 {
+			res.ScriptProblems = append(res.ScriptProblems, DOMXSSScriptProblem{URL: script.label, Reason: DOMXSSScriptSkipParseFailed, Detail: p.gaps[0].msg})
+		}
 		dxsCollectFuncs(prog, in.funcs)
 		in.execStmt(prog)
 	}
+	in.script = ""
 
 	res.Sites = in.sites
 	res.Unresolved = in.unresolved
@@ -697,7 +775,7 @@ func DOMXSSStaticReachability(pageHTML string, source DOMXSSSource, selector str
 	switch {
 	case len(res.Sites) > 0:
 		res.Outcome = DOMXSSFlowTainted
-	case len(res.Unresolved) > 0:
+	case len(res.Unresolved) > 0 || len(res.ScriptProblems) > 0:
 		res.Outcome = DOMXSSFlowUnresolved
 	default:
 		res.Outcome = DOMXSSFlowNoTaintedPath
@@ -794,6 +872,76 @@ func dxsInlineScripts(html string) ([]dxsScript, int) {
 		}
 	}
 	return out, external
+}
+
+// dxsPageScriptBodies returns the script bodies the static pass should analyse,
+// in DOCUMENT ORDER: each inline body where it appears, and the supplied body at
+// the position of its same-origin <script src> element. That order is what makes
+// a value one script binds visible to the next, exactly as the browser runs them.
+//
+// A same-origin reference with no supplied body, or with a recorded failure, is
+// returned in problems — never silently dropped -, so the pass can say "not
+// analysed" instead of "no sink". Third-party references are counted and never
+// resolved: the loader must not fetch them, so this pass cannot claim anything
+// about them either.
+//
+// Identical external CONTENT (same SHA-256) is analysed once even when several
+// URLs serve it; the first reference keeps the provenance.
+func dxsPageScriptBodies(html, pageURL string, external []DOMXSSExternalScript) (out []dxsScript, externalCount, foreign, analysedExternal int, problems []DOMXSSScriptProblem) {
+	bySrc := make(map[string]DOMXSSExternalScript, len(external))
+	byURL := make(map[string]DOMXSSExternalScript, len(external))
+	for _, s := range external {
+		if s.Src != "" {
+			bySrc[s.Src] = s
+		}
+		if s.URL != "" {
+			byURL[s.URL] = s
+		}
+	}
+	seenHash := make(map[string]bool)
+	for _, el := range dxsScriptElements(html) {
+		if el.src == "" {
+			if el.javaScript {
+				out = append(out, el)
+			}
+			continue
+		}
+		externalCount++
+		if !el.javaScript {
+			continue
+		}
+		resolved, ok := DOMXSSSameOriginScriptURL(el.src, pageURL)
+		if !ok {
+			foreign++
+			continue
+		}
+		s, ok := bySrc[el.src]
+		if !ok {
+			s, ok = byURL[resolved]
+		}
+		if !ok {
+			problems = append(problems, DOMXSSScriptProblem{
+				Src: el.src, URL: resolved, Reason: DOMXSSScriptSkipNotFetched,
+				Detail: "no body was supplied for this same-origin script, so it was not analysed",
+			})
+			continue
+		}
+		if s.Err != "" {
+			problems = append(problems, DOMXSSScriptProblem{Src: el.src, URL: resolved, Reason: s.Err})
+			continue
+		}
+		key := s.Hash
+		if key == "" {
+			key = domXSSContentHash(s.Body)
+		}
+		if seenHash[key] {
+			continue // identical content is analysed once
+		}
+		seenHash[key] = true
+		analysedExternal++
+		out = append(out, dxsScript{body: s.Body, line: 1, src: el.src, javaScript: true, label: resolved})
+	}
+	return out, externalCount, foreign, analysedExternal, problems
 }
 
 // dxsAttrValue returns the value of the named attribute as written, or "".
@@ -2324,6 +2472,10 @@ type dxsInterp struct {
 	funcs    map[string]*dxsFunc
 	active   map[*dxsFunc]int
 	ret      dxsTaint
+	// script is the provenance of the body currently being walked: "" for an
+	// inline <script>, the resolved same-origin URL for an external one. It is
+	// copied onto every site recorded while that body is being analysed.
+	script string
 
 	budget    int
 	exhausted bool
@@ -2344,7 +2496,7 @@ func (in *dxsInterp) tick() bool {
 }
 
 func (in *dxsInterp) recordSite(sink DOMXSSSink, t dxsTaint, line int) {
-	key := string(sink) + "\x00" + strconv.Itoa(line)
+	key := in.script + "\x00" + string(sink) + "\x00" + strconv.Itoa(line)
 	if in.siteSeen[key] {
 		return
 	}
@@ -2352,7 +2504,7 @@ func (in *dxsInterp) recordSite(sink DOMXSSSink, t dxsTaint, line int) {
 	chain := make([]string, 0, len(t.chain)+1)
 	chain = append(chain, t.chain...)
 	chain = append(chain, string(sink))
-	in.sites = append(in.sites, DOMXSSFlowSite{Sink: sink, Line: line, Hops: t.hops, Chain: chain})
+	in.sites = append(in.sites, DOMXSSFlowSite{Sink: sink, Line: line, Script: in.script, Hops: t.hops, Chain: chain})
 }
 
 func (in *dxsInterp) addUnresolved(line int, reason, detail string) {

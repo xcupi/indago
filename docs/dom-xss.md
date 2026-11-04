@@ -492,6 +492,21 @@ control remains unconfirmed. No new sink category was added. These fixes close
 the two measured false negatives on their exact targets, but the 29-unit
 benchmark remains a small, narrow corpus—not production-wide coverage.
 
+## Same-origin external scripts
+
+The static taint pass used to read inline `<script>` bodies only, so a sink that
+lives in `/app.js` produced `no_tainted_path` — an absence it had not
+established. The DOM pass now fetches the same-origin external scripts each
+analysed page references (through the already-loaded page, so the scan's
+session, proxy, rate limiter and scope gate apply), bounds the cost, caches by
+content hash, and feeds the bodies through the **same** taint pass. Each site
+records the script URL it came from; a script that cannot be read or parsed is
+recorded as unresolved instead of being folded into a negative. Caps: 8 files
+per page, 256 KiB per file (skip whole, never truncate), 4 MiB per scan. No
+verdict, payload, finding or dedup key changes. See
+[`dom-xss-external-scripts.md`](dom-xss-external-scripts.md) for the numbers,
+the validation record and the limits.
+
 ## P2.1: exactly two additional HTML sink methods
 
 Current HTML sinks: `innerHTML`, `outerHTML`, `document.write`/`writeln`,
