@@ -258,6 +258,57 @@ planned candidate), so this slice adds no requests at ordinary anchors; the
 `minimal` profile drops the candidate (it is load-trigger-only) exactly as it
 drops the sibling `onmouseover` template.
 
+### Raw-query `href` attribute breakout (measured: canonical-link class)
+
+A **raw query-string** injection point that lands inside an `href` needs a shape
+that actually leaves the attribute value. The `<link>` template above already
+does that for link metadata, but it is element-gated, so it cannot cover the
+general `href` position, and it does not exist for an anchor. `urlTemplates`
+plans nothing for a query/path/fragment component, so before this shape a
+raw-query URL site could reflect, be classified `url`, and still have no
+breakout at all — nothing to activate, nothing that could ever confirm.
+
+`urlHrefBreakoutTemplates` closes that gap with ONE shape, planned only when the
+site is a URL nested in an `href` attribute (`chain[0] == html_attr_value`,
+`attribute == href`) **and** the injection point is the raw query string:
+
+| template | value (double-quoted site shown) | trigger | confirms? |
+|---|---|---|---|
+| href attribute breakout | `"accesskey='x' onclick=M x="` (the site's own delimiter is used, single-quoted sites get `'…x='`) | `interaction` | yes, after the verifier's single click activation |
+
+How it works: the leading delimiter closes the `href` value; `accesskey='x'`
+names the element; `onclick=M` carries the benign marker as the handler's whole
+body; the trailing `x=` plus the site's own closing delimiter keeps the rest of
+the tag well-formed. Nothing but the marker is ever carried — activating it
+executes `<marker>`, an unresolved identifier, which the verifier observes as
+the marker-specific page error. The candidate declares `interaction`, so the
+existing activation step performs exactly one `element.click()` on the
+marker-carrying element; without that click the shape stays inert (and a page
+with no handler stays Rejected after the click).
+
+Quote handling is taken from the analyser, never assumed: a `double`- or
+`single`-quoted site gets its own delimiter, and any other position (including
+an unquoted value, which ends at whitespace rather than at a closable
+delimiter) gets no shape. The shape is **strict** about it:
+`strictSurvives` checks the delimiter with no entity-decoding exemption, because
+an HTML-encoded quote (`&quot;`) is decoded by the browser into the attribute
+*value*, where it is an ordinary character and can never terminate the
+attribute. When the reflection analysis proves the delimiter is encoded, the
+shape is **not planned at all** (dropped, not merely deprioritized) — sending it
+would only produce a request that cannot break out. Every other canonical
+template keeps `survives`' existing behaviour, unchanged.
+
+Gating and default behaviour: the shape is added only for `LocationRawQuery`,
+which is itself opt-in and off by default (`-raw-query-injection`), so a default
+named-parameter plan is byte-identical. `TestURLAttributeBreakoutDefaultCandidateSetUnchanged`
+freezes both sides: the named-parameter plan is exactly what it was, and the
+raw-query plan is that same frozen set plus this one shape. Real-browser proof:
+`TestURLHrefBreakoutConfirmsAfterOneClick` (raw delimiters → Confirmed, one
+dispatched click, injected pair in the rendered DOM) and
+`TestURLHrefBreakoutEncodedDelimiterStaysRejected` (HTML-encoded quotes → the
+shape is not planned, and forced through the verifier it stays Rejected with the
+marker still reflected).
+
 ## Ordering and deduplication
 
 Candidates are deduplicated by `category + value`, keeping the highest-priority
