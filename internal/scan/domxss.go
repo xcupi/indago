@@ -47,6 +47,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/indago/indago/internal/ratelimit"
+	"html"
 	"log/slog"
 	"net/url"
 	"sort"
@@ -210,6 +211,11 @@ type domXSSSinkReport struct {
 	// nodes were seen (evidence only).
 	Text  bool `json:"text,omitempty"`
 	Count int  `json:"count,omitempty"`
+	// Binding marks a text report that was read from Angular's own compiled
+	// interpolation function ($binding) with the element's scope instead of
+	// from a rendered body text node. Text is still true: it is an
+	// evaluated interpolation result, never a hooked setter call.
+	Binding bool `json:"binding,omitempty"`
 }
 
 // domXSSConsoleCSPPrefix tags a Content-Security-Policy violation the harness
@@ -279,14 +285,17 @@ func domXSSEvalBlockedByCSP(violations []domXSSCSPViolation) (bool, domXSSCSPVio
 	return false, domXSSCSPViolation{}
 }
 
-// hasDOMXSSAngularTextResult reports whether the installed harness observed
-// the marker as the content of a rendered text node. For the
-// angular_expression sink this is the confirmation signal: the candidate does
-// not contain the contiguous marker, so only evaluating the interpolation can
-// produce it.
-func hasDOMXSSAngularTextResult(msgs []browser.ConsoleMessage, marker string) bool {
+// domXSSAngularResult reports whether the installed harness observed this
+// attempt's evaluated interpolation result, and whether that result was read
+// from Angular's compiled binding (an element's $binding interpolate
+// function evaluated with its scope) rather than from a rendered text node.
+//
+// The marker-specificity rule is the same for both readings: the candidate
+// never contains the contiguous marker, so a marker named by the report can
+// only be the expression's evaluated result, not a reflection.
+func domXSSAngularResult(msgs []browser.ConsoleMessage, marker string) (compiled, viaBinding bool) {
 	if marker == "" {
-		return false
+		return false, false
 	}
 	for _, m := range msgs {
 		if !strings.HasPrefix(m.Text, domXSSConsolePrefix) {
@@ -296,11 +305,22 @@ func hasDOMXSSAngularTextResult(msgs []browser.ConsoleMessage, marker string) bo
 		if json.Unmarshal([]byte(strings.TrimPrefix(m.Text, domXSSConsolePrefix)), &rep) != nil {
 			continue
 		}
-		if rep.Text && rep.Sink == string(detection.DOMSinkAngularExpression) && strings.Contains(rep.Value, marker) {
-			return true
+		if !rep.Text || rep.Sink != string(detection.DOMSinkAngularExpression) || !strings.Contains(rep.Value, marker) {
+			continue
 		}
+		return true, rep.Binding
 	}
-	return false
+	return false, false
+}
+
+// hasDOMXSSAngularTextResult reports whether the installed harness observed
+// the marker as the content of a rendered text node or as the result of
+// Angular's own compiled interpolation binding. For the angular_expression
+// sink this is the confirmation signal: the candidate does not contain the
+// contiguous marker, so only evaluating the interpolation can produce it.
+func hasDOMXSSAngularTextResult(msgs []browser.ConsoleMessage, marker string) bool {
+	compiled, _ := domXSSAngularResult(msgs, marker)
+	return compiled
 }
 
 // parseDOMXSSReachability scans console messages the init-script harness
@@ -795,17 +815,28 @@ const domXSSHarnessTemplate = `(() => {
   });
   // angular_expression sink: AngularJS's text-node interpolation writes the
   // EVALUATED RESULT back into the text node, so there is no DOM setter call
-  // to hook (innerHTML/document.write never happen). The observation is the
-  // rendered text itself, taken at the page's load event and on every DOM
-  // mutation that brings the marker into text (MutationObserver, NOT a timer:
-  // the harness must not schedule anything a page or a native-contract test
-  // can observe). It is gated on AngularJS actually being present in the
-  // document: every page that displays a value as text looks identical from
-  // the DOM alone, so without that gate the engine would open a candidate on
-  // every reflected search page. Script/style/noscript/textarea/title text
-  // nodes are excluded (Angular does not interpolate there). The engine's
-  // candidate never contains the contiguous marker, so any hit on the
-  // verification navigation is the expression's evaluated result.
+  // to hook (innerHTML/document.write never happen). Two observations are
+  // taken, both at the page's load event and on every DOM mutation that
+  // brings the marker into text (MutationObserver, NOT a timer: the harness
+  // must not schedule anything a page or a native-contract test can observe):
+  //
+  //   1. the rendered text of the page, and
+  //   2. the result of the interpolate function Angular itself linked for a
+  //      text node whose source carries this attempt's split marker
+  //      ($binding), evaluated with that element's own scope. That is the
+  //      same value Angular writes into the text node, but it is still
+  //      readable when the write is not part of rendered body text (a
+  //      textarea/title binding, a node replaced later, a write that landed
+  //      before the text walk).
+  //
+  // Both are gated on AngularJS actually being present in the document:
+  // every page that displays a value as text looks identical from the DOM
+  // alone, so without that gate the engine would open a candidate on every
+  // reflected search page. Script/style/noscript text nodes are excluded
+  // from the text walk (Angular does not interpolate there); textarea/title
+  // are covered by the binding read instead. The engine's candidate never
+  // contains the contiguous marker, so any hit on the verification
+  // navigation is the expression's evaluated result.
   function angularPresent() {
     try {
       if (typeof window.angular !== 'undefined' && window.angular) return true;
@@ -830,17 +861,63 @@ const domXSSHarnessTemplate = `(() => {
       return hits;
     } catch (e) { return 0; }
   }
+  // angularBindingHits reads the result of the interpolate function Angular
+  // itself linked for this candidate's text node. Only bindings whose
+  // template source carries BOTH halves of the marker (so: our split-marker
+  // expression, never a page-authored binding such as {{value}}) are
+  // invoked, so the observation never evaluates page expressions and can
+  // only report this attempt's result. A page that did not compile the
+  // candidate has no such binding; one that compiled it returns the
+  // contiguous marker. Absence of fn.exp (an Angular build that does not
+  // expose it) means no hit — never a fabricated one.
+  function angularBindingHits() {
+    try {
+      if (typeof window.angular === 'undefined' || !window.angular ||
+          typeof window.angular.element !== 'function') return 0;
+      var root = document.body || document.documentElement;
+      if (!root) return 0;
+      var cut = Math.floor(MARKER.length / 2);
+      var head = MARKER.slice(0, cut), tail = MARKER.slice(cut);
+      var els = root.querySelectorAll('*');
+      var hits = 0;
+      for (var i = 0; i < els.length; i++) {
+        var bindings;
+        try { bindings = window.angular.element(els[i]).data('$binding'); } catch (e) { continue; }
+        if (!bindings || !bindings.length) continue;
+        var scope;
+        try { scope = window.angular.element(els[i]).scope(); } catch (e) { scope = null; }
+        if (!scope) continue;
+        for (var j = 0; j < bindings.length; j++) {
+          var fn = bindings[j];
+          if (typeof fn !== 'function') continue;
+          var src = typeof fn.exp === 'string' ? fn.exp : '';
+          if (src.indexOf(head) === -1 || src.indexOf(tail) === -1) continue;
+          if (src.indexOf(MARKER) !== -1) continue; // literal text, not this candidate's expression
+          var result;
+          try { result = fn(scope); } catch (e) { continue; }
+          if (typeof result === 'string' && result.indexOf(MARKER) !== -1) hits++;
+        }
+      }
+      return hits;
+    } catch (e) { return 0; }
+  }
   // One extra call frame for the same provenance reason as the CSP reporter:
   // a console call whose only frame is the installed function is not
   // attributed by the browser layer, and a load listener can be the top frame.
-  function emitAngularTextReport(hits) {
+  function emitAngularTextReport(hits, viaBinding) {
+    if (viaBinding) {
+      LOG(PREFIX + STRINGIFY({ sink: 'angular_expression', value: MARKER, text: true, binding: true, count: hits }));
+      return;
+    }
     LOG(PREFIX + STRINGIFY({ sink: 'angular_expression', value: MARKER, text: true, count: hits }));
   }
   function reportAngularText() {
     try {
       if (!angularPresent()) return;
       var hits = angularTextHits();
-      if (hits > 0) emitAngularTextReport(hits);
+      if (hits > 0) { emitAngularTextReport(hits, false); return; }
+      var bound = angularBindingHits();
+      if (bound > 0) emitAngularTextReport(bound, true);
     } catch (e) {}
   }
   try {
@@ -1569,8 +1646,8 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 		// its own outcome instead of being read as a negative.
 		cspViolations := parseDOMXSSCSPViolations(harness2)
 		cspBlocked, violation := domXSSEvalBlockedByCSP(cspViolations)
-		compiled := hasDOMXSSAngularTextResult(harness2, marker)
-		verdict, confidence, notes = decideDOMXSSAngular(compiled, strings.Contains(obs2.HTML, cand.Value), cspBlocked, violation)
+		compiled, viaBinding := domXSSAngularResult(harness2, marker)
+		verdict, confidence, notes = decideDOMXSSAngular(compiled, viaBinding, domXSSAngularInertText(obs2.HTML, cand.Value), cspBlocked, violation)
 	} else {
 		verdict, confidence, notes = verification.DecideWithProvenance(marker, matched, markerInDOM, obs2.Runtime)
 	}
@@ -1640,26 +1717,62 @@ const (
 	domXSSAngularOutcomeUnobserved = "unobserved"
 )
 
+// domXSSAngularInertText reports whether the rendered page still carries the
+// candidate's expression SOURCE as inert text, i.e. Angular never compiled
+// it. The rendered DOM is HTML, so a page that passed the value through an
+// HTML encoder shows character references instead of our exact bytes — the
+// measured without-strings lab stores '{{&apos;MARK…}}' in its scope and
+// renders that literal string as text, which a raw substring check misses.
+// Decode the serialization once (the browser's own serializer escapes '&' as
+// '&amp;', so one pass recovers the text the page actually holds), then
+// normalise the references that can stand in for the candidate's quotes. A
+// compiled interpolation replaces its source with the evaluated result, so
+// this cannot match a page that evaluated it; a page that both compiled the
+// candidate and echoed its source elsewhere is still Confirmed, because
+// decideDOMXSSAngular checks compiled first.
+func domXSSAngularInertText(renderedHTML, candidate string) bool {
+	if candidate == "" {
+		return false
+	}
+	if strings.Contains(renderedHTML, candidate) {
+		return true
+	}
+	text := html.UnescapeString(renderedHTML)
+	for _, ref := range [][2]string{
+		{"&apos;", "'"}, {"&#39;", "'"}, {"&#x27;", "'"},
+	} {
+		text = strings.ReplaceAll(text, ref[0], ref[1])
+	}
+	return strings.Contains(text, candidate)
+}
+
 // decideDOMXSSAngular is the angular_expression sink's single verdict rule. It
-// is a pure function of three observations:
+// is a pure function of four observations:
 //
 //   - compiled: the marker — which the candidate never contains contiguously —
-//     was observed as the content of a rendered text node, so the expression
-//     was evaluated. This is Confirmed; nothing further is executed.
+//     was observed as the result of the interpolation: either as the content
+//     of a rendered text node, or (viaBinding) as the value Angular's own
+//     compiled $binding function returns for the element that carries this
+//     candidate's expression. This is Confirmed; nothing further is executed.
 //   - cspBlocked: the document's own CSP refused dynamic evaluation during
 //     this navigation and no result appeared. The compile could not happen,
 //     so the honest outcome is Inconclusive with its own token — never a
 //     silent Rejected and never a Confirmed.
-//   - payloadPresent: the candidate text is in the rendered page but compiled
-//     is false, so the page echoed it as inert text. Rejected.
+//   - payloadPresent: the candidate's expression source is still in the
+//     rendered page (after HTML character references are normalised) but
+//     compiled is false, so the page carried it as inert text. Rejected.
 //
 // Anything else (the candidate could not even be re-observed) is
 // Inconclusive: the attempt had no chance to prove or disprove compilation.
-func decideDOMXSSAngular(compiled, payloadPresent, cspBlocked bool, violation domXSSCSPViolation) (domain.Verdict, domain.Confidence, string) {
+func decideDOMXSSAngular(compiled, viaBinding, payloadPresent, cspBlocked bool, violation domXSSCSPViolation) (domain.Verdict, domain.Confidence, string) {
 	switch {
 	case compiled:
+		how := "wrote its result into the rendered text node"
+		if viaBinding {
+			how = "produced the result through its compiled interpolation binding, read with the element's own scope because the write was not present in rendered body text"
+		}
 		return domain.VerdictConfirmed, domain.ConfidenceHigh,
-			"outcome=" + domXSSAngularOutcomeCompiled + ": AngularJS evaluated the double-brace interpolation and wrote its result into the rendered text node; the candidate never contains the marker contiguously, so the observed marker is the expression's evaluated result, not a reflection"
+			"outcome=" + domXSSAngularOutcomeCompiled + ": AngularJS evaluated the double-brace interpolation and " + how + "; the candidate never contains the marker contiguously, so the observed marker is the expression's evaluated result, not a reflection"
 	case cspBlocked:
 		return domain.VerdictInconclusive, domain.ConfidenceLow,
 			fmt.Sprintf("outcome=%s: the document's Content-Security-Policy refused dynamic script evaluation during this verification navigation (directive=%q blocked=%q), so AngularJS's expression compiler could not run and the marker result was never produced; the sink was reachable, so this is not a rejection, and no compilation was observed, so it is not a confirmation",

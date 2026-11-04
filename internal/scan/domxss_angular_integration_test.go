@@ -25,6 +25,7 @@ package scan
 import (
 	"context"
 	"fmt"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -56,7 +57,7 @@ func angularLab(t *testing.T) *httptest.Server {
 			w.Header().Set("Content-Type", "application/javascript")
 			_, _ = w.Write(angular)
 			return
-		case "/dom", "/noapp", "/plain", "/csp-angular", "/blocked", "/blocked-csp":
+		case "/dom", "/noapp", "/plain", "/csp-angular", "/blocked", "/blocked-csp", "/textarea", "/parse-key", "/constant":
 			if r.URL.Path == "/csp-angular" || r.URL.Path == "/blocked-csp" {
 				// Allows the page's own inline code and same-origin scripts,
 				// but NOT eval/new Function: the policy that stops a template
@@ -69,6 +70,48 @@ func angularLab(t *testing.T) *httptest.Server {
 				return
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			switch r.URL.Path {
+			case "/textarea":
+				// Angular compiles the textarea's text as template source, so
+				// the evaluated result lands in the textarea's value, never in
+				// a rendered body text node. The ng-bind echo is DATA (never
+				// template source) and is only the reachability signal.
+				value := html.EscapeString(r.URL.Query().Get("q"))
+				fmt.Fprintf(w, `<!doctype html><html><body ng-app ng-controller="C"><div id="echo" ng-bind="echo"></div>
+<textarea id="out">%s</textarea><script src="/angular.js"></script>
+<script>angular.module('lab', []).controller('C', function($scope) {
+  $scope.echo = new URLSearchParams(location.search).get('q') || '';
+});</script></body></html>`, value)
+				return
+			case "/parse-key":
+				// The measured without-strings lab shape: the server writes the
+				// query value into a scope string with its quotes HTML-encoded,
+				// the controller resolves the parameter NAME through $parse, and
+				// the template only interpolates {{value}} — the value is data,
+				// never re-compiled. Nothing can evaluate the candidate here.
+				q := strings.ReplaceAll(r.URL.Query().Get("q"), "'", "&apos;")
+				fmt.Fprintf(w, `<!doctype html><html><head><script src="/angular.js"></script></head>
+<body ng-app="labApp"><section class="blog-header">
+<script>angular.module('labApp', []).controller('vulnCtrl', function($scope, $parse) {
+  $scope.query = {};
+  var key = 'search';
+  $scope.query[key] = '%s';
+  $scope.value = $parse(key)($scope.query);
+});</script>
+<h1 ng-controller="vulnCtrl">0 search results for {{value}}</h1>
+</section></body></html>`, q)
+				return
+			case "/constant":
+				// ng-app is present, but ng-bind writes the value as DATA: a
+				// string containing {{...}} is not template source and must
+				// never be re-compiled by the observation.
+				fmt.Fprint(w, `<!doctype html><html><body ng-app="lab" ng-controller="C"><div id="out" ng-bind="value"></div>
+<script src="/angular.js"></script>
+<script>angular.module('lab', []).controller('C', function($scope, $location) {
+  $scope.value = $location.search().q || '';
+});</script></body></html>`)
+				return
+			}
 			app, script := " ng-app", `<script src="/angular.js"></script>`
 			switch r.URL.Path {
 			case "/noapp":
@@ -305,6 +348,83 @@ func TestDOMAngularExpressionFromHash(t *testing.T) {
 	}
 	if len(res.detail.Candidates) != 1 || res.detail.Candidates[0].ContextSub != "location.hash" {
 		t.Fatalf("hash provenance: %+v", res.detail.Candidates)
+	}
+}
+
+// TestDOMAngularExpressionBindingResult covers the class where Angular does
+// evaluate the interpolation but the write is not part of rendered body text:
+// a textarea's content is compiled as template source, so the marker reaches
+// the textarea's value and never a body text node. The harness must read the
+// result from the interpolation function Angular itself compiled instead of
+// giving up because the text walk cannot see it.
+func TestDOMAngularExpressionBindingResult(t *testing.T) {
+	mgr := newSourceSelectionBrowser(t)
+	defer mgr.Close()
+	lab := angularLab(t)
+	res := runAngularJob(t, mgr, lab.URL, "/textarea", "location.search", true)
+	if len(res.findings) != 1 {
+		t.Fatalf("want exactly one angular finding, got %d: %+v", len(res.findings), res.findings)
+	}
+	f := res.findings[0]
+	if f.Verdict != domain.VerdictConfirmed {
+		t.Fatalf("an evaluated textarea interpolation must Confirm via the binding read, got %s: %q", f.Verdict, f.Summary)
+	}
+	if !strings.Contains(f.Summary, "compiled interpolation binding") {
+		t.Fatalf("confirmation must say the result was read from Angular's binding: %q", f.Summary)
+	}
+	if !strings.Contains(f.Summary, "compiled interpolation RESULT") {
+		t.Fatalf("summary must say what confirmed: %q", f.Summary)
+	}
+	if len(res.detail.Attempts) != 2 || res.detail.Attempts[1].Verdict != domain.VerdictConfirmed {
+		t.Fatalf("want reachability + confirmed verification attempts: %+v", res.detail.Attempts)
+	}
+}
+
+// TestDOMAngularExpressionWithoutStringsLabShape pins the measured
+// without-strings lab: the server writes the query value into a scope string
+// with its quotes HTML-encoded, the controller resolves the parameter NAME
+// through $parse, and the template only interpolates {{value}}. The candidate
+// is therefore inert, entity-encoded data — never re-compiled — so the honest
+// verdict is Rejected(inert_text): not Confirmed, and no longer the old
+// "unobserved" that a raw substring check produced.
+func TestDOMAngularExpressionWithoutStringsLabShape(t *testing.T) {
+	mgr := newSourceSelectionBrowser(t)
+	defer mgr.Close()
+	lab := angularLab(t)
+	res := runAngularJob(t, mgr, lab.URL, "/parse-key", "location.search", true)
+	if len(res.findings) != 1 {
+		t.Fatalf("want exactly one angular finding, got %d: %+v", len(res.findings), res.findings)
+	}
+	f := res.findings[0]
+	if f.Verdict == domain.VerdictConfirmed {
+		t.Fatalf("a page that never re-compiles the value must never Confirm: %q", f.Summary)
+	}
+	if f.Verdict != domain.VerdictRejected {
+		t.Fatalf("the entity-encoded inert candidate must be Rejected, got %s: %q", f.Verdict, f.Summary)
+	}
+	if !strings.Contains(f.Summary, "outcome="+domXSSAngularOutcomeInertText) {
+		t.Fatalf("rejection must explain inert text: %q", f.Summary)
+	}
+}
+
+// TestDOMAngularExpressionNgBindConstantStaysRejected is the constant-value
+// guard: ng-app is present, but ng-bind writes the search value as DATA, so a
+// string containing {{...}} is never template source and must stay Rejected.
+// The binding read must not evaluate page-authored bindings either.
+func TestDOMAngularExpressionNgBindConstantStaysRejected(t *testing.T) {
+	mgr := newSourceSelectionBrowser(t)
+	defer mgr.Close()
+	lab := angularLab(t)
+	res := runAngularJob(t, mgr, lab.URL, "/constant", "location.search", true)
+	if len(res.findings) != 1 {
+		t.Fatalf("want exactly one angular finding, got %d: %+v", len(res.findings), res.findings)
+	}
+	f := res.findings[0]
+	if f.Verdict == domain.VerdictConfirmed {
+		t.Fatalf("ng-bind data is not template source and must never Confirm: %q", f.Summary)
+	}
+	if f.Verdict != domain.VerdictRejected || !strings.Contains(f.Summary, "outcome="+domXSSAngularOutcomeInertText) {
+		t.Fatalf("the constant bound string must stay Rejected(inert_text), got %s: %q", f.Verdict, f.Summary)
 	}
 }
 

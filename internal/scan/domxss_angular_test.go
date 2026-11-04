@@ -51,6 +51,57 @@ func TestDOMXSSAngularTextResultParsing(t *testing.T) {
 	}
 }
 
+func TestDOMXSSAngularBindingResultParsing(t *testing.T) {
+	const marker = "ANGULARBIND42"
+	text := domXSSConsolePrefix + `{"sink":"angular_expression","value":"` + marker + `","text":true,"count":1}`
+	if compiled, viaBinding := domXSSAngularResult([]browser.ConsoleMessage{angularReport(text)}, marker); !compiled || viaBinding {
+		t.Fatalf("a rendered-text report must be compiled and not binding-read, got %v/%v", compiled, viaBinding)
+	}
+	binding := domXSSConsolePrefix + `{"sink":"angular_expression","value":"` + marker + `","text":true,"binding":true,"count":1}`
+	if compiled, viaBinding := domXSSAngularResult([]browser.ConsoleMessage{angularReport(binding)}, marker); !compiled || !viaBinding {
+		t.Fatalf("a binding report must be compiled and binding-read, got %v/%v", compiled, viaBinding)
+	}
+	other := domXSSConsolePrefix + `{"sink":"angular_expression","value":"OTHER42","text":true,"binding":true,"count":1}`
+	if compiled, _ := domXSSAngularResult([]browser.ConsoleMessage{angularReport(other)}, marker); compiled {
+		t.Fatal("a binding report for another marker must not confirm")
+	}
+	if compiled, _ := domXSSAngularResult([]browser.ConsoleMessage{angularReport(binding)}, ""); compiled {
+		t.Fatal("an empty marker must not confirm")
+	}
+}
+
+// TestDOMXSSAngularInertText covers the without-strings lab shape: the page
+// passes the value through an HTML encoder, so the rendered DOM holds
+// '{{&apos;MARK…}}' instead of our exact bytes. The source must still count as
+// inert once the serialization is decoded, and a page whose source was
+// replaced by the evaluated result must not.
+func TestDOMXSSAngularInertText(t *testing.T) {
+	const marker = "ANGULARINERT42"
+	cand := "{{'" + marker[:len(marker)/2] + "' + '" + marker[len(marker)/2:] + "' + ($id ? '' : '')}}"
+	encoded := strings.ReplaceAll(cand, "'", "&apos;")
+	cases := []struct {
+		name string
+		html string
+		want bool
+	}{
+		{"literal echo", `<h1>0 search results for ` + cand + `</h1>`, true},
+		{"html-encoded echo", `<h1>0 search results for ` + encoded + `</h1>`, true},
+		{"serializer re-escaped", `<h1>0 search results for ` + strings.ReplaceAll(encoded, "&", "&amp;") + `</h1>`, true},
+		{"compiled away", `<h1>0 search results for ` + marker + `</h1>`, false},
+		{"not delivered", `<h1>0 search results for nothing</h1>`, false},
+		{"empty candidate", `<h1>x</h1>`, false},
+	}
+	for _, tc := range cases {
+		got := domXSSAngularInertText(tc.html, cand)
+		if tc.name == "empty candidate" {
+			got = domXSSAngularInertText(tc.html, "")
+		}
+		if got != tc.want {
+			t.Fatalf("%s: want %v, got %v", tc.name, tc.want, got)
+		}
+	}
+}
+
 func TestDOMXSSAngularCSPParsing(t *testing.T) {
 	eval := domXSSConsoleCSPPrefix + `{"directive":"script-src","blocked":"eval","disposition":"enforce"}`
 	inline := domXSSConsoleCSPPrefix + `{"directive":"script-src-elem","blocked":"inline","disposition":"enforce"}`
@@ -77,7 +128,7 @@ func TestDOMXSSAngularCSPParsing(t *testing.T) {
 }
 
 func TestDecideDOMXSSAngularOutcomesAreDistinct(t *testing.T) {
-	confirmed, confidence, note := decideDOMXSSAngular(true, true, true, domXSSCSPViolation{Directive: "script-src", Blocked: "eval"})
+	confirmed, confidence, note := decideDOMXSSAngular(true, false, true, true, domXSSCSPViolation{Directive: "script-src", Blocked: "eval"})
 	if confirmed != domain.VerdictConfirmed || confidence != domain.ConfidenceHigh {
 		t.Fatalf("a compiled interpolation is Confirmed, got %s/%s", confirmed, confidence)
 	}
@@ -85,7 +136,17 @@ func TestDecideDOMXSSAngularOutcomesAreDistinct(t *testing.T) {
 		t.Fatalf("compiled outcome token missing: %q", note)
 	}
 
-	cspVerdict, cspConfidence, cspNote := decideDOMXSSAngular(false, true, true, domXSSCSPViolation{Directive: "script-src", Blocked: "eval"})
+	// The same result read from Angular's compiled binding is equally
+	// Confirmed, and the note must say how it was read.
+	bound, boundConfidence, boundNote := decideDOMXSSAngular(true, true, false, false, domXSSCSPViolation{})
+	if bound != domain.VerdictConfirmed || boundConfidence != domain.ConfidenceHigh {
+		t.Fatalf("a binding-read interpolation result is Confirmed, got %s/%s", bound, boundConfidence)
+	}
+	if !strings.Contains(boundNote, "compiled interpolation binding") {
+		t.Fatalf("binding-read confirmation must name the reading: %q", boundNote)
+	}
+
+	cspVerdict, cspConfidence, cspNote := decideDOMXSSAngular(false, false, true, true, domXSSCSPViolation{Directive: "script-src", Blocked: "eval"})
 	if cspVerdict == domain.VerdictRejected || cspVerdict == domain.VerdictConfirmed {
 		t.Fatalf("CSP-blocked execution must be neither Rejected nor Confirmed, got %s", cspVerdict)
 	}
@@ -96,7 +157,7 @@ func TestDecideDOMXSSAngularOutcomesAreDistinct(t *testing.T) {
 		t.Fatalf("CSP outcome must be explicitly recorded, got %q", cspNote)
 	}
 
-	rejected, rejectedConfidence, rejectedNote := decideDOMXSSAngular(false, true, false, domXSSCSPViolation{})
+	rejected, rejectedConfidence, rejectedNote := decideDOMXSSAngular(false, false, true, false, domXSSCSPViolation{})
 	if rejected != domain.VerdictRejected || rejectedConfidence != domain.ConfidenceHigh {
 		t.Fatalf("inert echoed text is Rejected, got %s/%s", rejected, rejectedConfidence)
 	}
@@ -104,7 +165,7 @@ func TestDecideDOMXSSAngularOutcomesAreDistinct(t *testing.T) {
 		t.Fatalf("inert outcome token missing: %q", rejectedNote)
 	}
 
-	unknown, unknownConfidence, unknownNote := decideDOMXSSAngular(false, false, false, domXSSCSPViolation{})
+	unknown, unknownConfidence, unknownNote := decideDOMXSSAngular(false, false, false, false, domXSSCSPViolation{})
 	if unknown != domain.VerdictInconclusive || unknownConfidence != domain.ConfidenceLow {
 		t.Fatalf("an unobservable candidate is Inconclusive, got %s/%s", unknown, unknownConfidence)
 	}
@@ -115,7 +176,7 @@ func TestDecideDOMXSSAngularOutcomesAreDistinct(t *testing.T) {
 	// The four outcomes must be textually distinguishable, which is what makes
 	// csp_blocked a distinct result on every presentation surface.
 	seen := map[string]bool{}
-	for _, n := range []string{note, cspNote, rejectedNote, unknownNote} {
+	for _, n := range []string{note, boundNote, cspNote, rejectedNote, unknownNote} {
 		if seen[n] {
 			t.Fatalf("outcome notes must be distinct: %q", n)
 		}

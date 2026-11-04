@@ -2843,6 +2843,7 @@ func dxsKnownNonDOMGlobal(name string) bool {
 	}
 	return false
 }
+
 // domXSSAngularRationale explains the interpolation shape. Two things must be
 // unambiguous to an operator reading a report: (1) what was evaluated, and
 // (2) why the observation is marker-specific rather than a reflection match.
