@@ -229,7 +229,7 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 			// A strict template is only plannable when the delimiter it must
 			// insert arrives raw; otherwise the request could never break out,
 			// so it is dropped rather than sent (see urlHrefBreakoutTemplates).
-			if tpl.strict && !strictSurvives(loc, tpl.needs) {
+			if tpl.strict && !strictSurvives(loc, tpl.hardNeeds()) {
 				continue
 			}
 			plan.Generated++
@@ -364,6 +364,16 @@ type candTemplate struct {
 	// delimiter, rather than being sent as a request that cannot break out.
 	// False for every pre-existing template, so their behaviour is unchanged.
 	strict bool
+	// strictNeed narrows the hard gate to a subset of `needs` when the shape
+	// must close the delimiter AND also needs characters that leave the
+	// attribute (e.g. < and > to end the tag and open a <script>). Those
+	// extra characters stay in `needs`, so the transformation analysis records
+	// and deprioritizes a site that encodes them; only the delimiter is a
+	// gate, because it is the one character an injected value can never
+	// recover as syntax: an entity-encoded quote is decoded into the attribute
+	// value, never into a delimiter. Empty means the whole `needs` string is
+	// gated, which is the pre-existing strict behaviour.
+	strictNeed string
 }
 
 // templatesFor returns the built-in candidates for a site's context.
@@ -703,29 +713,35 @@ func linkAttributeTemplates(a ContextAnalysis, m string) []candTemplate {
 // linkAttributeTemplates already covers a <link> element at every location, but
 // it is deliberately element-gated (an anchor's href is navigated by the page
 // itself, so adding shapes there would send a new request at every reflected
-// anchor). This shape is the general href-position sibling the raw-query vector
-// needs: it closes the attribute value with the site's OWN delimiter and adds
-// an accesskey/onclick pair carrying nothing but the benign marker, so the one
-// click activation browser verification performs can fire it.
+// anchor). These are the general href-position siblings the raw-query vector
+// needs, planned per usable quote style:
 //
-// It is quote-aware (the delimiter comes from the analysed bytes, never assumed
-// to be a double quote) and strict: the closing delimiter must arrive RAW. An
-// HTML-encoded quote is decoded by the browser into the attribute VALUE, where
-// it is an ordinary character and can never terminate the attribute, so a site
-// that provably encodes its delimiter does not get this shape planned at all —
-// the shape is dropped, not merely deprioritized (see strictSurvives).
+//   - a load-class breakout that closes the attribute AND the tag, then opens
+//     a <script> block whose whole body is the benign marker. The browser
+//     executes it while parsing, so the marker is evaluated as a bare
+//     JavaScript identifier and raises a marker-specific ReferenceError with
+//     NO activation at all — the only mechanism that can confirm in a
+//     position the page never renders or navigates (a <link> has no box and
+//     never receives a click);
+//   - the interaction-class accesskey/onclick pair on the element itself,
+//     which documents the position and needs the one click activation
+//     browser verification performs (and therefore can never confirm on a
+//     non-rendered element).
 //
-// When the analyser could NOT prove the delimiter, ONE shape per quote style is
-// planned (see breakoutQuotes) instead of guessing: each variant closes its own
-// style, records it in Candidate.Delimiter, and names it in the rationale, so a
-// report can say which style fired. The strict guard is applied per variant, so
-// a style whose quote the site encodes is still dropped.
+// Quote handling is taken from the analyser, never assumed, and both shapes
+// mirror the same two quote families: a style whose quote is provably encoded
+// is not planned at all, because an HTML-encoded quote is decoded into the
+// attribute VALUE and can never terminate the attribute (see strictSurvives).
+// When the analyser could NOT prove the delimiter, ONE variant per quote style
+// is planned (see breakoutQuotes) instead of guessing; each records its style in
+// Candidate.Delimiter and names it in the rationale, so a report can say which
+// style fired.
 func urlHrefBreakoutTemplates(a ContextAnalysis, m string) []candTemplate {
 	if a.Attribute != "href" || len(a.Chain) < 2 || a.Chain[0] != CtxHTMLAttrValue {
 		return nil
 	}
 	styles := breakoutQuotes(a)
-	out := make([]candTemplate, 0, len(styles))
+	out := make([]candTemplate, 0, len(styles)*2)
 	for _, style := range styles {
 		q := quoteByte(style)
 		// The accesskey VALUE is quoted with the same delimiter the shape
@@ -750,6 +766,29 @@ func urlHrefBreakoutTemplates(a ContextAnalysis, m string) []candTemplate {
 			delimiterNote("close the href attribute value and add an accesskey/onclick pair on the element itself: accesskey names the element ('x') and onclick carries the benign marker as its whole body, so the single click activation browser verification performs dispatches it; the accesskey value is quoted with the site's own delimiter too, so the shape needs only that one quote raw and encoding <, > or the other quote cannot stop it, and the shape is only planned when that quote arrives raw", style))
 		tpl.delimiter = style
 		out = append(out, tpl)
+
+		// The load-class sibling. Closing the attribute value and the tag with
+		// the site's own delimiter, then opening a <script> whose entire body
+		// is the marker, executes during parsing — no click, focus, keypress
+		// or other activation, which is the one thing this verifier
+		// deliberately never fakes and the reason the accesskey twin above can
+		// never confirm on a non-rendered element.
+		//
+		// `needs` declares the delimiter AND <>: ending the tag needs a raw
+		// '>', opening the script needs a raw '<'. Both stay soft — the
+		// transformation analysis records and deprioritizes a site that
+		// encodes them — while only the delimiter is the hard gate, because a
+		// style whose quote is encoded can never close the value (strictNeed).
+		// The marker is the whole script body, exactly as every other built-in
+		// candidate carries nothing but the benign marker: the browser
+		// evaluates it as an identifier, so a hit is a marker-specific
+		// ReferenceError and never an alert/cookie/network effect.
+		load := onLoad(q+"><script>"+m+"</script>", q+"<>", 89,
+			delimiterNote("close the href attribute value and the element's own tag, then open a <script> block whose whole body is the benign marker: the browser executes it while parsing, so the marker is evaluated as a JavaScript identifier and raises a marker-specific ReferenceError with no click, focus, keypress or other activation; it needs the delimiter, '<' and '>' raw, so a site that encodes them is reported as neutralized and deprioritized", style))
+		load.strict = true
+		load.strictNeed = q
+		load.delimiter = style
+		out = append(out, load)
 	}
 	return out
 }
@@ -823,6 +862,14 @@ func closingPrefix(a ContextAnalysis) string {
 // characters the site neutralizes is annotated and deprioritized, not dropped.
 func transform(loc ReflectionLocation, tpl candTemplate, c *Candidate) (string, int) {
 	survive, form := survives(loc, tpl.needs)
+	// A strict template leaves the attribute value, so the attribute
+	// sub-language exemption does not apply to it: an entity there is decoded
+	// into the VALUE, never into a delimiter or a tag. Judging it with the
+	// exemption would report an encoded character as raw and keep its full
+	// priority.
+	if tpl.strict {
+		survive, form = survivesRaw(loc, tpl.needs)
+	}
 	if survive {
 		return "raw", tpl.priority
 	}
@@ -854,6 +901,15 @@ func survives(loc ReflectionLocation, needs string) (bool, string) {
 	return true, EncNone
 }
 
+// hardNeeds is the character set a strict template is gated on: the delimiter
+// it must close (strictNeed) when that is narrower than its full `needs`.
+func (t candTemplate) hardNeeds() string {
+	if t.strictNeed != "" {
+		return t.strictNeed
+	}
+	return t.needs
+}
+
 // strictSurvives is survives WITHOUT the attribute-sub-language entity
 // exemption. A shape that closes an attribute value depends on the delimiter
 // itself arriving raw: an HTML-encoded quote is decoded by the browser into the
@@ -862,12 +918,21 @@ func survives(loc ReflectionLocation, needs string) (bool, string) {
 // Used only by strict templates; the canonical set keeps survives' behaviour
 // unchanged.
 func strictSurvives(loc ReflectionLocation, needs string) bool {
+	ok, _ := survivesRaw(loc, needs)
+	return ok
+}
+
+// survivesRaw reports whether every declared character arrives RAW, with no
+// entity-decoding exemption. It is the honest judgement for a shape that
+// BREAKS OUT of an attribute: an entity-encoded '<', '>' or quote is decoded
+// into the attribute value, never back into markup or a delimiter.
+func survivesRaw(loc ReflectionLocation, needs string) (bool, string) {
 	for _, ch := range needs {
-		if charForm(loc, string(ch)) != EncNone {
-			return false
+		if form := charForm(loc, string(ch)); form != EncNone {
+			return false, form
 		}
 	}
-	return true
+	return true, EncNone
 }
 
 // charForm returns how a canary character came back at this site, from the

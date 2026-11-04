@@ -75,6 +75,34 @@ func hrefAccesskeyBreakout(c detection.Candidate) bool {
 	return c.Delimiter != "" && strings.Contains(c.Value, "accesskey=") && strings.Contains(c.Value, "onclick=")
 }
 
+// hrefScriptBreakout reports whether c is the LOAD-class href breakout: it
+// closes a quoted attribute value and ends the tag with '>', then opens a
+// <script> block. It needs no activation at all.
+func hrefScriptBreakout(c detection.Candidate) bool {
+	return c.Delimiter != "" && strings.Contains(c.Value, "><script>")
+}
+
+func hrefScriptBreakouts(plan *detection.CandidatePlan) []detection.Candidate {
+	var out []detection.Candidate
+	for _, c := range plan.Candidates {
+		if hrefScriptBreakout(c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// hrefScriptBreakoutValue is the exact load-class shape for one quote style:
+// the site's delimiter closes the attribute, '>' ends the element's tag, and a
+// <script> block whose entire body is the bare marker executes during parse.
+func hrefScriptBreakoutValue(style, marker string) string {
+	q := dq
+	if style == "single" {
+		q = sq
+	}
+	return q + "><script>" + marker + "</script>"
+}
+
 // hrefBreakoutValue is the exact shape the href family plans for one quote
 // style: the site's delimiter closes the value, the accesskey VALUE is quoted
 // with that same delimiter (so only that one quote byte must arrive raw), the
@@ -215,14 +243,17 @@ func TestPlanRawQueryURLHrefBreakoutDroppedWhenDelimiterEncoded(t *testing.T) {
 		if hrefAccesskeyBreakout(c) {
 			t.Fatalf("href attribute breakout planned against an encoded delimiter: %+v", c)
 		}
+		if hrefScriptBreakout(c) {
+			t.Fatalf("href script breakout planned against an encoded delimiter: %+v", c)
+		}
 	}
 }
 
 // TestURLAttributeBreakoutDefaultCandidateSetUnchanged freezes, byte for byte,
-// what the canonical-link position planned before this shape existed — for a
+// what the canonical-link position planned before these shapes existed — for a
 // NAMED parameter (the default scan) — and proves the raw-query plan is that
-// same frozen set plus exactly ONE added shape, with nothing else reordered,
-// re-prioritized or removed.
+// same frozen set plus the href-breakout shapes only, with nothing else
+// reordered, re-prioritized or removed.
 func TestURLAttributeBreakoutDefaultCandidateSetUnchanged(t *testing.T) {
 	m := urlAttrProbe.Token
 	body := hrefFixture("link", `"`, false, urlAttrProbe.Value())
@@ -234,6 +265,7 @@ func TestURLAttributeBreakoutDefaultCandidateSetUnchanged(t *testing.T) {
 		},
 		rawQuery: []string{
 			`url|"><svg onload=` + m + `>|90|load`,
+			`url|"><script>` + m + `</script>|89|load`,
 			`url|" autofocus onfocus=` + m + ` x="|87|load`,
 			`url|" onmouseover=` + m + ` x="|85|interaction`,
 			`url|"accesskey="x" onclick=` + m + ` y="|78|interaction`,
@@ -282,5 +314,116 @@ func TestPlanURLHrefBreakoutOnlyForHrefAttributes(t *testing.T) {
 		if hrefAccesskeyBreakout(c) {
 			t.Fatalf("href breakout leaked onto a non-href attribute: %+v", c)
 		}
+		if hrefScriptBreakout(c) {
+			t.Fatalf("href script breakout leaked onto a non-href attribute: %+v", c)
+		}
+	}
+}
+
+// TestPlanURLHrefScriptBreakoutExecutesOnLoad pins the load-class shape against
+// a page that echoes the value raw: the site's own delimiter closes the href
+// value, '>' ends the element's tag, and a <script> block carrying nothing but
+// the bare marker executes while the page is parsed. It needs NO activation,
+// which is what makes it confirmable on a <link> (no rendered box, never
+// clicked). Both quote families are pinned, each against its own proven
+// delimiter.
+func TestPlanURLHrefScriptBreakoutExecutesOnLoad(t *testing.T) {
+	m := urlAttrProbe.Token
+	for _, tc := range []struct{ quote, style string }{
+		{dq, "double"},
+		{sq, "single"},
+	} {
+		body := hrefFixture("link", tc.quote, false, urlAttrProbe.Value())
+		rep, plan := urlAttrPlan(t, body, domain.LocationRawQuery)
+
+		ctx := rep.Locations[0].Context
+		if ctx.Context != detection.CtxURL || ctx.Element != "link" || ctx.Attribute != "href" || ctx.Quote != tc.style || !ctx.QuoteProven {
+			t.Fatalf("%s fixture measured %s element=%q attr=%q quote=%q proven=%v", tc.style, ctx.Context, ctx.Element, ctx.Attribute, ctx.Quote, ctx.QuoteProven)
+		}
+
+		want := hrefScriptBreakoutValue(tc.style, m)
+		got := findCandidate(plan, want)
+		if got == nil {
+			t.Fatalf("%s fixture has no load-class href breakout %q: %+v", tc.style, want, plan.Candidates)
+		}
+		if got.Trigger != detection.TriggerLoad {
+			t.Fatalf("%s shape trigger = %q, want %q (verified during the page's own load, with no activation)", tc.style, got.Trigger, detection.TriggerLoad)
+		}
+		if got.Delimiter != tc.style {
+			t.Fatalf("%s shape delimiter = %q", tc.style, got.Delimiter)
+		}
+		if got.Category != detection.CatURL {
+			t.Fatalf("%s shape category = %q, want url", tc.style, got.Category)
+		}
+		if got.Transformation != "raw" || got.Priority != 89 {
+			t.Fatalf("%s shape transformation/priority = %q/%d, want raw/89", tc.style, got.Transformation, got.Priority)
+		}
+		// Nothing but the benign marker may be carried: the script body is
+		// exactly the marker token, so a browser that executes it raises a
+		// marker-specific ReferenceError and nothing else happens.
+		if !strings.HasSuffix(got.Value, "<script>"+m+"</script>") {
+			t.Fatalf("%s shape script body is not exactly the marker: %q", tc.style, got.Value)
+		}
+		lower := strings.ToLower(got.Value)
+		if strings.Contains(lower, "alert") || strings.Contains(lower, "cookie") || strings.Contains(lower, "http") || strings.Contains(lower, "src=") {
+			t.Fatalf("%s shape carries more than the benign marker: %q", tc.style, got.Value)
+		}
+		if !strings.Contains(got.Rationale, "no click") || !strings.Contains(got.Rationale, tc.style+"-quoted") {
+			t.Fatalf("%s shape rationale must state the load execution and name its delimiter, got %q", tc.style, got.Rationale)
+		}
+	}
+}
+
+// TestPlanURLHrefScriptBreakoutMirrorsBothQuoteStyles covers the unproven
+// delimiter: when the target rewrote the value, both quote families are planned
+// (exactly like the accesskey sibling), each closing its own delimiter, and
+// each is DEPRIORITIZED rather than dropped when the site provably encodes the
+// '<' and '>' the tag breakout needs — the needs analysis records the form.
+func TestPlanURLHrefScriptBreakoutMirrorsBothQuoteStyles(t *testing.T) {
+	m := urlAttrProbe.Token
+	body := quoteFixture(dq, "angles", urlAttrProbe.Value())
+	rep, plan := urlAttrPlan(t, body, domain.LocationRawQuery)
+
+	ctx := rep.Locations[0].Context
+	if ctx.QuoteProven {
+		t.Fatalf("an angle-encoded reflection must not prove the delimiter")
+	}
+	got := hrefScriptBreakouts(plan)
+	if len(got) != 2 {
+		t.Fatalf("unproven delimiter must plan exactly 2 load-class href breakouts, got %d: %+v", len(got), got)
+	}
+	styles := map[string]detection.Candidate{}
+	for _, c := range got {
+		if c.Delimiter != "double" && c.Delimiter != "single" {
+			t.Fatalf("load breakout %q has delimiter %q", c.Value, c.Delimiter)
+		}
+		if _, dup := styles[c.Delimiter]; dup {
+			t.Fatalf("two load variants assume the same delimiter %q", c.Delimiter)
+		}
+		styles[c.Delimiter] = c
+		if c.Value != hrefScriptBreakoutValue(c.Delimiter, m) {
+			t.Fatalf("%s variant = %q", c.Delimiter, c.Value)
+		}
+		if c.Trigger != detection.TriggerLoad {
+			t.Fatalf("%s variant trigger = %q, want load", c.Delimiter, c.Trigger)
+		}
+		if c.Transformation != detection.EncHTML || c.Priority >= 89 {
+			t.Fatalf("%s variant transformation/priority = %q/%d, want the encoded angle brackets recorded and deprioritized", c.Delimiter, c.Transformation, c.Priority)
+		}
+		if !strings.Contains(c.Rationale, "encodes/strips the characters this breakout needs") {
+			t.Fatalf("%s variant rationale must record the neutralized angle brackets, got %q", c.Delimiter, c.Rationale)
+		}
+	}
+	if _, ok := styles["double"]; !ok {
+		t.Fatalf("unproven delimiter did not plan the double-quote load variant: %+v", got)
+	}
+	if _, ok := styles["single"]; !ok {
+		t.Fatalf("unproven delimiter did not plan the single-quote load variant: %+v", got)
+	}
+	if v := styles["double"].Value; strings.Contains(v, "'") {
+		t.Fatalf("double variant depends on a raw single quote: %q", v)
+	}
+	if v := styles["single"].Value; strings.Contains(v, dq) {
+		t.Fatalf("single variant depends on a raw double quote: %q", v)
 	}
 }

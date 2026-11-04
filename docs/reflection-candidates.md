@@ -268,27 +268,41 @@ plans nothing for a query/path/fragment component, so before this shape a
 raw-query URL site could reflect, be classified `url`, and still have no
 breakout at all — nothing to activate, nothing that could ever confirm.
 
-`urlHrefBreakoutTemplates` closes that gap with ONE shape per usable quote
+`urlHrefBreakoutTemplates` closes that gap with two shapes per usable quote
 style, planned only when the site is a URL nested in an `href` attribute
 (`chain[0] == html_attr_value`, `attribute == href`) **and** the injection point
 is the raw query string:
 
 | template | value (double-quoted site shown) | trigger | confirms? |
 |---|---|---|---|
+| href script breakout | `"><script>M</script>` (single-quoted site: `'><script>M</script>`) | `load` | yes, with **no activation** — the browser executes it while parsing |
 | href attribute breakout | `"accesskey="x" onclick=M y="` (mirror shape; a single-quoted site gets `'accesskey='x' onclick=M x='` byte for byte) | `interaction` | yes, after the verifier's single click activation |
 
-How it works: the leading delimiter closes the `href` value; the accesskey
-attribute names the element — its VALUE is quoted with the same delimiter the
-shape closes, so the whole breakout needs exactly one quote byte (the site's
-own) to arrive raw — `onclick=M` carries the benign marker as the handler's
-whole body; the trailing dummy attribute (`y=` for the double-quote mirror,
-`x=` for the single-quote variant) plus the site's own closing delimiter keeps
-the rest of the tag well-formed. Nothing but the marker is ever carried —
-activating it executes `<marker>`, an unresolved identifier, which the verifier
-observes as the marker-specific page error. The candidate declares
-`interaction`, so the existing activation step performs exactly one
-`element.click()` on the marker-carrying element; without that click the shape
-stays inert (and a page with no handler stays Rejected after the click).
+How the script shape works: the leading delimiter closes the `href` value and
+`>` ends the element's own tag (a `<link>` is void; an `<a>` is left open but
+`<script>` is allowed in its content), then a `<script>` block whose entire body
+is the bare marker is parsed and executed immediately. The marker is evaluated
+as a JavaScript identifier, so an executable position raises the marker-specific
+`ReferenceError` that verification already attributes to this navigation — no
+click, focus, keypress or other activation is involved or simulated. This is the
+only mechanism that can confirm in a position the page never renders or
+navigates: a `<link>` has no box, so the accesskey/onclick sibling cannot fire
+there, which is exactly the failure that motivated this shape. Nothing but the
+benign marker is carried: no `alert`, no cookie access, no network call, no
+`src=`. The trailing bytes of the site's own template (its closing quote and
+`>`) are left as text after `</script>` and cannot execute.
+
+How the accesskey shape works: the leading delimiter closes the `href` value;
+the accesskey attribute names the element — its VALUE is quoted with the same
+delimiter the shape closes, so the whole breakout needs exactly one quote byte
+(the site's own) to arrive raw — `onclick=M` carries the benign marker as the
+handler's whole body; the trailing dummy attribute (`y=` for the double-quote
+mirror, `x=` for the single-quote variant) plus the site's own closing delimiter
+keeps the rest of the tag well-formed. The candidate declares `interaction`, so
+the existing activation step performs exactly one `element.click()` on the
+marker-carrying element; without that click the shape stays inert. On a
+non-rendered `<link>` that click dispatches nothing observable, so this shape
+documents the position and is never Confirmed there.
 
 Why the accesskey value mirrors the delimiter instead of always using single
 quotes: a double-quoted site commonly rewrites or filters `'` (HTML-encoding it
@@ -304,28 +318,43 @@ character anyway.
 Quote handling is taken from the analyser, never assumed: a `double`- or
 `single`-quoted site gets its own delimiter, and any other position (including
 an unquoted value, which ends at whitespace rather than at a closable
-delimiter) gets no shape. The shape is **strict** about it:
-`strictSurvives` checks the delimiter with no entity-decoding exemption, because
-an HTML-encoded quote (`&quot;`) is decoded by the browser into the attribute
-*value*, where it is an ordinary character and can never terminate the
-attribute. When the reflection analysis proves the delimiter is encoded, the
-shape is **not planned at all** (dropped, not merely deprioritized) — sending it
-would only produce a request that cannot break out. Every other canonical
-template keeps `survives`' existing behaviour, unchanged.
+delimiter) gets neither shape. Both shapes are **strict**, but about different
+characters. Their hard gate is the delimiter: `strictSurvives` checks it with no
+entity-decoding exemption, because an HTML-encoded quote (`&quot;`) is decoded
+by the browser into the attribute *value*, where it is an ordinary character and
+can never terminate the attribute. When the reflection analysis proves a
+style's delimiter is encoded, that style is **not planned at all** (dropped, not
+merely deprioritized) — sending it would only produce a request that cannot
+break out.
 
-Gating and default behaviour: the shape is added only for `LocationRawQuery`,
+The script shape additionally declares `<` and `>` in its `needs` (ending the
+tag needs a raw `>`, opening the script a raw `<`). Those are *soft*: the
+transformation analysis records and deprioritizes a site that encodes them, so
+the attempt is still documented and sent at reduced priority instead of
+silently vanishing. They are not part of the hard gate, because the gate exists
+for the one character an injected value can never recover — the delimiter — and
+because the same analysis already reports the angle brackets' form on the
+candidate (`Transformation=html`, lower priority). This is what lets the shape
+be planned for both quote families when the delimiter is unproven, exactly like
+the accesskey sibling.
+
+Gating and default behaviour: both shapes are added only for `LocationRawQuery`,
 which is itself opt-in and off by default (`-raw-query-injection`), so a default
 named-parameter plan is byte-identical. `TestURLAttributeBreakoutDefaultCandidateSetUnchanged`
 freezes both sides: the named-parameter plan is exactly what it was, and the
-raw-query plan is that same frozen set plus this one shape. Real-browser proof:
-`TestURLHrefBreakoutConfirmsAfterOneClick` (raw delimiters → Confirmed, one
-dispatched click, injected pair in the rendered DOM) and
-`TestURLHrefBreakoutEncodedDelimiterStaysRejected` (HTML-encoded quotes → the
-shape is not planned, and forced through the verifier it stays Rejected with the
-marker still reflected). `TestDoubleQuoteBreakoutNeedsOnlyTheDoubleQuote` pins
-the mirror's invariant against served bytes: a double-quoted `href` that
-HTML-encodes `'` still gets the click-class candidate, and that candidate
-contains no single quote.
+raw-query plan is that same frozen set plus these shapes only. Real-browser
+proof: `TestURLHrefScriptBreakoutConfirmsWithoutActivation` (a page reflecting
+into `href="…"` confirms with **no activation record at all** — the fixture's
+own click counter stays untouched, and the rendered DOM carries the injected
+script block), `TestURLHrefBreakoutConfirmsAfterOneClick` (the interaction shape:
+Confirmed after exactly one dispatched click, injected pair in the rendered DOM),
+`TestURLHrefScriptBreakoutEncodedDelimiterStaysRejected` and
+`TestURLHrefBreakoutEncodedDelimiterStaysRejected` (HTML-encoded quotes: neither
+shape is planned, and forced through the verifier they stay Rejected with the
+marker still reflected). `TestPlanURLHrefScriptBreakoutMirrorsBothQuoteStyles`
+pins the two quote families and the deprioritization when the angle brackets are
+encoded; `TestPlanURLHrefScriptBreakoutExecutesOnLoad` pins the exact bytes,
+`load` trigger and benign-marker-only body for each style.
 
 ## Ordering and deduplication
 

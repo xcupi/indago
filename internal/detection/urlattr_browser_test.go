@@ -193,10 +193,119 @@ func TestURLHrefBreakoutConfirmsAfterOneClick(t *testing.T) {
 	}
 }
 
-// TestURLHrefBreakoutEncodedDelimiterStaysRejected is the negative control: the
-// same fixture HTML-encodes the quote, so the shape is not planned (the
-// delimiter can never terminate the attribute) and, forced through anyway, it
-// stays Rejected — nothing observes the marker as code.
+// TestURLHrefScriptBreakoutConfirmsWithoutActivation is the load-class positive
+// fixture: the planned shape closes the href value AND the element's tag, then
+// opens a <script> whose whole body is the bare marker. Chromium executes it
+// while parsing, so the marker-specific ReferenceError is observed with NO
+// activation at all — no click, focus, keypress or animation. That is what
+// makes the position confirmable on a <link>, which has no rendered box and can
+// never receive the click its accesskey/onclick sibling needs.
+func TestURLHrefScriptBreakoutConfirmsWithoutActivation(t *testing.T) {
+	srv := urlAttrServer(t, false)
+	plan := urlAttrPlanFor(t, srv)
+
+	m := urlAttrProbe.Token
+	want := `"><script>` + m + `</script>`
+	var cand *detection.Candidate
+	for i := range plan.Candidates {
+		if plan.Candidates[i].Value == want {
+			cand = &plan.Candidates[i]
+		}
+	}
+	if cand == nil {
+		t.Fatalf("plan has no load-class href breakout %q: %+v", want, plan.Candidates)
+	}
+	if cand.Trigger != detection.TriggerLoad {
+		t.Fatalf("trigger = %q, want load (no activation)", cand.Trigger)
+	}
+
+	v := urlAttrVerifier(t)
+	res, err := v.Verify(context.Background(), verification.Input{
+		Candidate: *cand,
+		Marker:    m,
+		Method:    "GET",
+		URL:       urlAttrReplayURL(srv.URL+"/", cand.Value),
+		Scope:     domain.Scope{IncludeHosts: []string{"127.0.0.1"}},
+	})
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if res.Report == nil {
+		t.Fatal("no report")
+	}
+	if res.Verdict != domain.VerdictConfirmed {
+		t.Fatalf("verdict = %s, want confirmed; signal=%s inDOM=%v activation=%+v notes=%q",
+			res.Verdict, res.Report.Signal, res.Report.MarkerInDOM, res.Report.Activation, res.Notes)
+	}
+	if res.Report.Signal != verification.SignalPageError {
+		t.Fatalf("signal = %s, want page_error", res.Report.Signal)
+	}
+	// NO activation may have happened: the report carries no activation record,
+	// and the fixture's own click counter (which counts every dispatched click
+	// on the document) is absent.
+	if res.Report.Activation != nil {
+		t.Fatalf("activation = %+v, want none (the shape executes during parse)", res.Report.Activation)
+	}
+	if strings.Contains(res.Evidence.DOMHTML, `data-clicks="1"`) {
+		t.Fatal("the fixture observed a click dispatch; the load-class shape must need no activation")
+	}
+	if !strings.Contains(res.Evidence.DOMHTML, `<script>`+m+`</script>`) {
+		t.Fatalf("rendered DOM does not carry the injected script block: %s", res.Evidence.DOMHTML)
+	}
+}
+
+// TestURLHrefScriptBreakoutEncodedDelimiterStaysRejected is the encoded-quote
+// control for the load-class shape: the shape is not planned (an encoded quote
+// can never terminate the attribute) and, forced through anyway, it stays
+// Rejected — the encoded bytes are text in the attribute value, so no script
+// block is ever parsed.
+func TestURLHrefScriptBreakoutEncodedDelimiterStaysRejected(t *testing.T) {
+	srv := urlAttrServer(t, true)
+	plan := urlAttrPlanFor(t, srv)
+	for _, c := range plan.Candidates {
+		if hrefScriptBreakout(c) {
+			t.Fatalf("load-class shape planned against an encoded delimiter: %+v", c)
+		}
+	}
+
+	m := urlAttrProbe.Token
+	forced := detection.Candidate{
+		Source:    detection.SourceBuiltin,
+		Category:  detection.CatURL,
+		Value:     `"><script>` + m + `</script>`,
+		Trigger:   detection.TriggerLoad,
+		Delimiter: "double",
+	}
+	v := urlAttrVerifier(t)
+	res, err := v.Verify(context.Background(), verification.Input{
+		Candidate: forced,
+		Marker:    m,
+		Method:    "GET",
+		URL:       urlAttrReplayURL(srv.URL+"/", forced.Value),
+		Scope:     domain.Scope{IncludeHosts: []string{"127.0.0.1"}},
+	})
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if res.Verdict != domain.VerdictRejected {
+		t.Fatalf("verdict = %s, want rejected (encoded quotes cannot break out); notes %q", res.Verdict, res.Notes)
+	}
+	if res.Report == nil || !res.Report.MarkerInDOM {
+		t.Fatal("the marker should still be reflected in the DOM (encoded), proving this is not a no-reflection result")
+	}
+	if res.Report.Signal != verification.SignalNone {
+		t.Fatalf("signal = %s, want none", res.Report.Signal)
+	}
+	if res.Report.Activation != nil {
+		t.Fatalf("activation = %+v, want none", res.Report.Activation)
+	}
+}
+
+// TestURLHrefBreakoutEncodedDelimiterStaysRejected is the negative control for
+// the interaction-class shape: the same fixture HTML-encodes the quote, so the
+// shape is not planned (the delimiter can never terminate the attribute) and,
+// forced through anyway, it stays Rejected — nothing observes the marker as
+// code.
 func TestURLHrefBreakoutEncodedDelimiterStaysRejected(t *testing.T) {
 	srv := urlAttrServer(t, true)
 	plan := urlAttrPlanFor(t, srv)
