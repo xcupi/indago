@@ -54,6 +54,15 @@ const (
 	SourceLLM     = "llm" // reserved; advisory only, never authoritative
 )
 
+// Parameter sources. A DOM-XSS candidate's Parameter is normally a name
+// discovery found in a URL or a form; ParameterSourcePageScript marks a name
+// that exists in neither and was instead read out of the page's own JavaScript
+// (see DOMXSSQueryParamNamesFromScripts). The distinction is provenance only:
+// the candidate is planned, delivered and verified exactly the same way.
+const (
+	ParameterSourcePageScript = "page_script"
+)
+
 // Candidate is one planned breakout for one reflection site. It is serializable
 // and self-describing: it carries enough provenance to be acted on later without
 // the surrounding report.
@@ -62,14 +71,19 @@ type Candidate struct {
 	Category CandidateCategory `json:"category"`
 
 	// Provenance — scan, parameter, injection point, and the exact site.
-	ScanID           domain.ID            `json:"scan_id,omitempty"`
-	InjectionPointID domain.ID            `json:"injection_point_id,omitempty"`
-	Parameter        string               `json:"parameter,omitempty"`
-	Location         domain.ParamLocation `json:"location,omitempty"`
-	SiteIndex        int                  `json:"site_index"`
-	Offset           int                  `json:"offset"`
-	Context          Context              `json:"context"`
-	ContextSub       string               `json:"context_sub,omitempty"`
+	ScanID           domain.ID `json:"scan_id,omitempty"`
+	InjectionPointID domain.ID `json:"injection_point_id,omitempty"`
+	Parameter        string    `json:"parameter,omitempty"`
+	// ParameterSource explains where Parameter's NAME came from, when that is
+	// not the ordinary discovery path: ParameterSourcePageScript means the
+	// page's own JavaScript reads this literal query name even though no URL
+	// or form contained it. Empty for every discovery-found parameter.
+	ParameterSource string               `json:"parameter_source,omitempty"`
+	Location        domain.ParamLocation `json:"location,omitempty"`
+	SiteIndex       int                  `json:"site_index"`
+	Offset          int                  `json:"offset"`
+	Context         Context              `json:"context"`
+	ContextSub      string               `json:"context_sub,omitempty"`
 
 	// Value is the string to inject (benign marker embedded). It is a detection
 	// probe, not an exploit.

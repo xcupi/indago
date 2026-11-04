@@ -38,6 +38,12 @@ import (
 type findingDetail struct {
 	Method        domain.HTTPMethod `json:"method,omitempty"`
 	ParameterName string            `json:"parameter_name,omitempty"`
+	// ParameterSource records where a DOM-XSS selector's NAME came from when
+	// that is not ordinary URL/form discovery: "page_script" means the page's
+	// own JavaScript reads the literal query name (see
+	// docs/dom-xss.md "Names the page reads"). Empty everywhere else, so no
+	// existing detail blob changes meaning.
+	ParameterSource string `json:"parameter_source,omitempty"`
 	// Location mirrors Finding.Location into the engine detail. For a raw
 	// query-string injection point it is domain.LocationRawQuery and
 	// ParameterName is the reserved shape name ("(raw query)" /

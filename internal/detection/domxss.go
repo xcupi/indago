@@ -723,15 +723,22 @@ func dxsLimitUnresolved(in []DOMXSSUnresolvedFlow, notes *[]string) []DOMXSSUnre
 type dxsScript struct {
 	body string
 	line int // 1-based line of the first body character in the page
+	// src is the raw src attribute value; empty for an inline script.
+	src string
+	// javaScript reports whether the element's type attribute makes it
+	// executable JavaScript (absent type, the JavaScript MIME types, module).
+	javaScript bool
+	// label overrides the provenance label used by the query-name scanner;
+	// empty means "inline". It never affects the static taint pass.
+	label string
 }
 
-// dxsInlineScripts returns the bodies of executable inline <script> elements
-// and counts <script src=...> elements. It is an HTML fragment scanner, not a
-// parser: it only needs the script boundaries, and it deliberately skips
-// non-JavaScript type attributes so a data block is not fed to the tokenizer.
-func dxsInlineScripts(html string) ([]dxsScript, int) {
+// dxsScriptElements returns every <script> element's body, provenance and
+// attributes. It is an HTML fragment scanner, not a parser: it only needs the
+// script boundaries, and it deliberately records non-JavaScript types so the
+// caller can skip them.
+func dxsScriptElements(html string) []dxsScript {
 	var out []dxsScript
-	external := 0
 	for i := 0; i < len(html); {
 		rel := dxsIndexFold(html, "<script", i)
 		if rel < 0 {
@@ -760,15 +767,77 @@ func dxsInlineScripts(html string) ([]dxsScript, int) {
 			break // an unterminated script element is malformed HTML: no body to analyse
 		}
 		body := html[bodyStart : bodyStart+end]
-		if dxsHasAttr(attrs, "src") {
-			external++
-		} else if dxsIsJavaScriptType(attrs) {
-			line := 1 + strings.Count(html[:bodyStart], "\n")
-			out = append(out, dxsScript{body: body, line: line})
-		}
+		line := 1 + strings.Count(html[:bodyStart], "\n")
+		out = append(out, dxsScript{
+			body:       body,
+			line:       line,
+			src:        dxsAttrValue(html[after:after+gt], "src"),
+			javaScript: dxsIsJavaScriptType(attrs),
+		})
 		i = bodyStart + end + len("</script")
 	}
+	return out
+}
+
+// dxsInlineScripts returns the bodies of executable inline <script> elements
+// and counts <script src=...> elements.
+func dxsInlineScripts(html string) ([]dxsScript, int) {
+	var out []dxsScript
+	external := 0
+	for _, el := range dxsScriptElements(html) {
+		if el.src != "" {
+			external++
+			continue
+		}
+		if el.javaScript {
+			out = append(out, el)
+		}
+	}
 	return out, external
+}
+
+// dxsAttrValue returns the value of the named attribute as written, or "".
+// It scans attribute-name boundaries so `data-src` is not read as `src`.
+func dxsAttrValue(attrs, name string) string {
+	n := len(name)
+	for i := 0; i+n <= len(attrs); i++ {
+		if i > 0 {
+			c := attrs[i-1]
+			if !(c == ' ' || c == '	' || c == '\n' || c == '\r' || c == '/' || c == '\f') {
+				continue
+			}
+		}
+		if !strings.EqualFold(attrs[i:i+n], name) {
+			continue
+		}
+		j := i + n
+		for j < len(attrs) && (attrs[j] == ' ' || attrs[j] == '	' || attrs[j] == '\n' || attrs[j] == '\r') {
+			j++
+		}
+		if j >= len(attrs) || attrs[j] != '=' {
+			continue // a valueless `src` carries no URL
+		}
+		j++
+		for j < len(attrs) && (attrs[j] == ' ' || attrs[j] == '	' || attrs[j] == '\n' || attrs[j] == '\r') {
+			j++
+		}
+		if j >= len(attrs) {
+			return ""
+		}
+		if q := attrs[j]; q == '"' || q == '\'' {
+			k := strings.IndexByte(attrs[j+1:], q)
+			if k < 0 {
+				return ""
+			}
+			return attrs[j+1 : j+1+k]
+		}
+		k := j
+		for k < len(attrs) && attrs[k] != ' ' && attrs[k] != '	' && attrs[k] != '\n' && attrs[k] != '\r' && attrs[k] != '>' {
+			k++
+		}
+		return attrs[j:k]
+	}
+	return ""
 }
 
 // dxsIndexFold finds sub in s starting at from, comparing ASCII case
@@ -799,17 +868,6 @@ func dxsIndexFold(s, sub string, from int) int {
 		}
 	}
 	return -1
-}
-
-// dxsHasAttr reports whether an attribute list contains name as an attribute
-// (not as a substring of another attribute's value).
-func dxsHasAttr(attrs, name string) bool {
-	for _, field := range strings.FieldsFunc(attrs, func(r rune) bool { return r == ' ' || r == '	' || r == '\n' || r == '\r' }) {
-		if field == name || strings.HasPrefix(field, name+"=") {
-			return true
-		}
-	}
-	return false
 }
 
 // dxsIsJavaScriptType accepts an absent type and the JavaScript MIME types. A

@@ -1228,6 +1228,9 @@ func upsertDOMXSSFinding(ctx context.Context, st store.Store, scanID domain.ID, 
 		d.TestCaseIDs = appendUniqueID(d.TestCaseIDs, reachTestCaseID)
 		d.Candidates = appendUniqueCandidate(d.Candidates, cand)
 		d.Attempts = appendAttempt(d.Attempts, reachAttempt)
+		if d.ParameterSource == "" {
+			d.ParameterSource = cand.ParameterSource
+		}
 		f.Detail = d.encode()
 		f.UpdatedAt = now
 		if err := st.Findings().Update(ctx, f); err != nil {
@@ -1241,7 +1244,8 @@ func upsertDOMXSSFinding(ctx context.Context, st store.Store, scanID domain.ID, 
 		return nil, fmt.Errorf("load scan: %w", err)
 	}
 	d := findingDetail{
-		Method: ep.Method, ParameterName: parameterName, DedupKey: key, Occurrences: 1,
+		Method: ep.Method, ParameterName: parameterName, ParameterSource: cand.ParameterSource,
+		DedupKey: key, Occurrences: 1,
 		TestCaseIDs: []domain.ID{reachTestCaseID}, Candidates: []detection.Candidate{cand}, Attempts: []verificationAttempt{reachAttempt},
 	}
 	f := &domain.Finding{
@@ -1398,57 +1402,76 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	}
 	defer bctx.Close()
 
-	var selectors []string
+	var selectors []domXSSQuerySelector
 	switch source {
 	case detection.DOMSourceQuery:
-		selectors, err = e.queryParamNames(ctx, ep.ID)
+		selectors, err = e.queryParamSelectors(ctx, ep.ID)
 		if err != nil {
 			tc := e.newTestCase(ctx, job, ep.URL)
 			e.finishTestCase(ctx, tc, err, "query-string DOM-XSS parameter discovery")
 			return err
 		}
+		// The page's own scripts can read a name that appears in no URL or
+		// form at all (see detection.DOMXSSQueryParamNamesFromScripts). This
+		// is a bounded discovery step, not another probe pipeline: one
+		// document load plus at most DOMXSSScriptFetchLimit same-origin
+		// script reads, and at most DOMXSSScriptParamLimit extra selectors.
+		scriptParams, scriptNote, scriptErr := e.discoverScriptQueryParams(ctx, bctx, ep.URL)
+		if scriptErr != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			tc := e.newTestCase(ctx, job, ep.URL)
+			e.finishTestCase(ctx, tc, nil, "page-script query-name discovery failed ("+scriptErr.Error()+"); testing only parameters discovery already found")
+		} else if len(scriptParams) > 0 {
+			tc := e.newTestCase(ctx, job, ep.URL)
+			e.finishTestCase(ctx, tc, nil, scriptNote)
+		}
+		selectors = mergeDOMXSSQuerySelectors(selectors, scriptParams)
 		if len(selectors) == 0 {
 			tc := e.newTestCase(ctx, job, ep.URL)
 			tc.Status = domain.TestCaseSkipped
-			e.finishTestCase(ctx, tc, nil, "query-string DOM-XSS source not tested: no discovered query parameter on this endpoint")
+			e.finishTestCase(ctx, tc, nil, "query-string DOM-XSS source not tested: no discovered query parameter on this endpoint and no literal query name read by the page's own scripts")
 			return nil
 		}
 	case detection.DOMSourceLocalStorage, detection.DOMSourceSessionStorage:
-		selectors, err = e.discoverStorageKeys(ctx, bctx, source, ep.URL)
+		names, err := e.discoverStorageKeys(ctx, bctx, source, ep.URL)
 		if err != nil {
 			tc := e.newTestCase(ctx, job, ep.URL)
 			e.finishTestCase(ctx, tc, err, "storage key discovery")
 			return err
 		}
 		discoveryTC := e.newTestCase(ctx, job, ep.URL)
-		if len(selectors) == 0 {
+		if len(names) == 0 {
 			discoveryTC.Status = domain.TestCaseSkipped
 			e.finishTestCase(ctx, discoveryTC, nil, fmt.Sprintf("%s source not tested: no storage key was present and no getItem key was observed", source))
 			return nil
 		}
 		skipped := 0
-		if len(selectors) > domXSSStorageKeyLimit {
-			skipped = len(selectors) - domXSSStorageKeyLimit
-			selectors = selectors[:domXSSStorageKeyLimit]
+		if len(names) > domXSSStorageKeyLimit {
+			skipped = len(names) - domXSSStorageKeyLimit
+			names = names[:domXSSStorageKeyLimit]
 		}
-		discoveryNote := fmt.Sprintf("%s key discovery observed %d distinct key(s); deterministic ceiling=%d, testing %d", source, len(selectors)+skipped, domXSSStorageKeyLimit, len(selectors))
+		discoveryNote := fmt.Sprintf("%s key discovery observed %d distinct key(s); deterministic ceiling=%d, testing %d", source, len(names)+skipped, domXSSStorageKeyLimit, len(names))
 		if skipped > 0 {
 			discoveryNote += fmt.Sprintf("; skipped %d additional key(s)", skipped)
 		}
 		e.finishTestCase(ctx, discoveryTC, nil, discoveryNote)
+		selectors = domXSSSelectorsFromNames(names)
 	case detection.DOMSourceHash:
-		selectors, err = e.paramNamesAt(ctx, ep.ID, domain.LocationFragment)
+		names, err := e.paramNamesAt(ctx, ep.ID, domain.LocationFragment)
 		if err != nil {
 			tc := e.newTestCase(ctx, job, ep.URL)
 			e.finishTestCase(ctx, tc, err, "fragment-route parameter discovery")
 			return err
 		}
-		if len(selectors) == 0 {
+		if len(names) == 0 {
 			// No route parameter: keep the whole-fragment probe for plain hashes.
-			selectors = []string{""}
+			names = []string{""}
 		}
+		selectors = domXSSSelectorsFromNames(names)
 	default:
-		selectors = []string{""}
+		selectors = []domXSSQuerySelector{{}}
 	}
 
 	// Every selector gets a context of its own. Origin storage, cookies and
@@ -1456,14 +1479,63 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	// key's payload) must never be visible to the next selector's attempt, or
 	// execution caused by the first is attributed to the second.
 	for _, selector := range selectors {
-		if err := e.probeSelectorInFreshContext(ctx, newContext, job, ep, source, selector, marker); err != nil {
+		if err := e.probeSelectorInFreshContext(ctx, newContext, job, ep, source, selector.Name, selector.Source, marker); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (e *domXSSExecutor) probeSelectorInFreshContext(ctx context.Context, newContext func() (*browser.Context, error), job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, marker string) error {
+// domXSSQuerySelector is one selector the DOM pass will test, plus the
+// provenance of its NAME: empty for a parameter discovery found in a URL or
+// form, detection.ParameterSourcePageScript for a literal only the page's own
+// JavaScript reads.
+type domXSSQuerySelector struct {
+	Name   string
+	Source string
+}
+
+func domXSSSelectorsFromNames(names []string) []domXSSQuerySelector {
+	out := make([]domXSSQuerySelector, 0, len(names))
+	for _, name := range names {
+		out = append(out, domXSSQuerySelector{Name: name})
+	}
+	return out
+}
+
+// mergeDOMXSSQuerySelectors keeps the discovered selectors EXACTLY as they
+// were — same names, same order, same provenance — and appends only
+// script-derived names discovery did not already carry. That is what makes
+// the default plan for a page whose scripts read no query name unchanged: the
+// discovered list passes through untouched and nothing is appended. Additions
+// are bounded by DOMXSSScriptParamLimit, so a script that reads many names
+// cannot turn one endpoint into an unbounded number of browser attempts.
+func mergeDOMXSSQuerySelectors(discovered []domXSSQuerySelector, scriptParams []detection.DOMXSSScriptParam) []domXSSQuerySelector {
+	out := make([]domXSSQuerySelector, 0, len(discovered)+len(scriptParams))
+	seen := make(map[string]bool, len(discovered)+len(scriptParams))
+	for _, sel := range discovered {
+		if sel.Name == "" || seen[sel.Name] {
+			continue
+		}
+		seen[sel.Name] = true
+		out = append(out, sel)
+	}
+	added := 0
+	for _, p := range scriptParams {
+		if p.Name == "" || seen[p.Name] {
+			continue
+		}
+		if added >= detection.DOMXSSScriptParamLimit {
+			break
+		}
+		seen[p.Name] = true
+		added++
+		out = append(out, domXSSQuerySelector{Name: p.Name, Source: detection.ParameterSourcePageScript})
+	}
+	return out
+}
+
+func (e *domXSSExecutor) probeSelectorInFreshContext(ctx context.Context, newContext func() (*browser.Context, error), job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, paramSource, marker string) error {
 	sctx, err := newContext()
 	if err != nil {
 		tc := e.newTestCase(ctx, job, ep.URL)
@@ -1474,14 +1546,161 @@ func (e *domXSSExecutor) probeSelectorInFreshContext(ctx context.Context, newCon
 		return err
 	}
 	defer sctx.Close()
-	return e.probeDOMXSSCandidate(ctx, sctx, job, ep, source, selector, marker)
+	return e.probeDOMXSSCandidate(ctx, sctx, job, ep, source, selector, paramSource, marker)
 }
 
-// queryParamNames returns every distinct discovered LocationQuery parameter
-// for endpointID in lexicographic name order. Sorting makes probe ordering
-// deterministic even when a store implementation does not preserve row order.
-func (e *domXSSExecutor) queryParamNames(ctx context.Context, endpointID domain.ID) ([]string, error) {
-	return e.paramNamesAt(ctx, endpointID, domain.LocationQuery)
+// queryParamSelectors returns every distinct discovered LocationQuery
+// parameter for endpointID in lexicographic name order — exactly the selector
+// list the DOM pass used before page-script discovery existed. A parameter
+// discovery itself recorded from an inline script literal is marked as
+// page-script provenance too: the name already came from the page's script,
+// and a report should say so.
+func (e *domXSSExecutor) queryParamSelectors(ctx context.Context, endpointID domain.ID) ([]domXSSQuerySelector, error) {
+	params, err := e.store.Parameters().ListByEndpoint(ctx, endpointID)
+	if err != nil {
+		return nil, err
+	}
+	source := make(map[string]domain.DiscoverySource)
+	for _, p := range params {
+		if p == nil || p.Location != domain.LocationQuery || p.Name == "" {
+			continue
+		}
+		if _, ok := source[p.Name]; !ok {
+			source[p.Name] = p.Source
+		}
+	}
+	names := make([]string, 0, len(source))
+	for name := range source {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]domXSSQuerySelector, 0, len(names))
+	for _, name := range names {
+		sel := domXSSQuerySelector{Name: name}
+		if source[name] == domain.SourceScriptLiteral {
+			sel.Source = detection.ParameterSourcePageScript
+		}
+		out = append(out, sel)
+	}
+	return out, nil
+}
+
+// discoverScriptQueryParams reads the literal query-parameter names the page's
+// own JavaScript reads — inline first, then same-origin external scripts —
+// from ONE bounded document load. It is discovery input, never evidence: the
+// browser verdict still decides whether any name reaches an executable sink.
+//
+// Budget, stated exactly (docs/dom-xss.md "Names the page reads"):
+//   - one document load of the endpoint in the already-open DOM context;
+//   - at most detection.DOMXSSScriptFetchLimit (8) same-origin external
+//     script bodies, each at most DOMXSSScriptByteLimit (256 KiB), read
+//     through the page itself so the scan's session, proxy and scope gate
+//     apply exactly as they do to every other browser request;
+//   - at most detection.DOMXSSScriptParamLimit (12) extra selectors, applied
+//     by the merge, and no name is ever invented: it must be a literal in a
+//     recognised read shape.
+//
+// A failure here is never fatal: the caller keeps the discovered selectors and
+// records why page-script discovery produced nothing.
+func (e *domXSSExecutor) discoverScriptQueryParams(ctx context.Context, bctx *browser.Context, targetURL string) ([]detection.DOMXSSScriptParam, string, error) {
+	page, err := bctx.NewPage(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	defer page.Close()
+	if _, err := page.Navigate(ctx, targetURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
+		return nil, "", err
+	}
+	html, err := page.Content(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+
+	params := detection.DOMXSSQueryParamNamesFromHTML(html)
+	inlineNames := len(params)
+	externalRead, externalSkipped := 0, 0
+	fetched := make(map[string]bool)
+	for _, raw := range detection.DOMXSSScriptSrcs(html) {
+		if externalRead >= detection.DOMXSSScriptFetchLimit {
+			externalSkipped++
+			continue
+		}
+		src, ok := domXSSSameOriginScriptURL(raw, targetURL)
+		if !ok || fetched[src] {
+			continue
+		}
+		fetched[src] = true
+		body, ferr := e.readPageScript(ctx, page, src)
+		if ferr != nil {
+			externalSkipped++
+			continue
+		}
+		externalRead++
+		params = append(params, detection.DOMXSSQueryParamNamesFromScript(body, src)...)
+	}
+
+	params = detection.DOMXSSMergeScriptParams(params, detection.DOMXSSScriptParamLimit)
+	if len(params) == 0 {
+		return nil, "", nil
+	}
+	provenance := make([]string, 0, len(params))
+	for _, p := range params {
+		provenance = append(provenance, fmt.Sprintf("%s (%s line %d)", p.Name, p.Script, p.Line))
+	}
+	note := fmt.Sprintf("page-script query-name discovery: %d literal name(s) read by the page's own scripts: %s; %d inline name(s), %d same-origin external script(s) read (cap %d scripts, %d names per endpoint; %d skipped)",
+		len(params), strings.Join(provenance, ", "), inlineNames, externalRead,
+		detection.DOMXSSScriptFetchLimit, detection.DOMXSSScriptParamLimit, externalSkipped)
+	return params, note, nil
+}
+
+// readPageScript fetches one same-origin script body THROUGH the loaded page,
+// so the context's session cookies, proxy and scope gate are the same ones the
+// rest of the browser pass uses. The response is bounded client-side so a huge
+// bundle never crosses the driver boundary in full.
+func (e *domXSSExecutor) readPageScript(ctx context.Context, page *browser.Page, src string) (string, error) {
+	quoted, err := json.Marshal(src)
+	if err != nil {
+		return "", err
+	}
+	expr := fmt.Sprintf(`(() => { try {
+  const x = new XMLHttpRequest();
+  x.open('GET', %s, false);
+  x.send();
+  if (x.status < 200 || x.status >= 300) return '';
+  return String(x.responseText || '').slice(0, %d);
+} catch (e) { return ''; } })()`, quoted, detection.DOMXSSScriptByteLimit)
+	raw, err := page.Evaluate(ctx, expr)
+	if err != nil {
+		return "", err
+	}
+	body, _ := raw.(string)
+	if len(body) > detection.DOMXSSScriptByteLimit {
+		body = body[:detection.DOMXSSScriptByteLimit]
+	}
+	return body, nil
+}
+
+// domXSSSameOriginScriptURL resolves raw against the endpoint URL and reports
+// whether it stays on the SAME origin (scheme + host + port). Only those are
+// read: a third-party bundle is not this endpoint's script, and testing a name
+// it happens to contain would test a name this page may never read.
+func domXSSSameOriginScriptURL(raw, base string) (string, bool) {
+	b, err := url.Parse(base)
+	if err != nil || b.Host == "" {
+		return "", false
+	}
+	r, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || r.Scheme == "data" || r.Scheme == "blob" || r.Scheme == "javascript" {
+		return "", false
+	}
+	u := b.ResolveReference(r)
+	if u.Scheme != b.Scheme || u.Host != b.Host {
+		return "", false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", false
+	}
+	return u.String(), true
 }
 
 // paramNamesAt returns every distinct discovered parameter name at loc for
@@ -1515,7 +1734,14 @@ func domXSSSelectorLabel(source detection.DOMXSSSource, selector string) string 
 	}
 }
 
-func domXSSCandidateForSelector(cand detection.Candidate, source detection.DOMXSSSource, selector string) detection.Candidate {
+func domXSSCandidateForSelector(cand detection.Candidate, source detection.DOMXSSSource, selector, paramSource string) detection.Candidate {
+	cand.ParameterSource = paramSource
+	if paramSource == detection.ParameterSourcePageScript {
+		// Surfaced through the finding's Summary without any report change:
+		// the name exists only in the page's own script, so an operator
+		// cannot reproduce the attempt by looking at URLs or forms.
+		cand.Rationale += " The parameter name itself was read from the page's own JavaScript (a literal in an inline or same-origin external script), not from a URL or form, so it does not appear in discovery's parameter list."
+	}
 	if source == detection.DOMSourceHash && selector != "" {
 		cand.Parameter = selector
 		cand.Location = domain.LocationFragment
@@ -1533,8 +1759,11 @@ func domXSSCandidateForSelector(cand detection.Candidate, source detection.DOMXS
 	return cand
 }
 
-func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, marker string) error {
+func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, paramSource, marker string) error {
 	label := domXSSSelectorLabel(source, selector)
+	if paramSource == detection.ParameterSourcePageScript {
+		label += " (name read by the page's own script)"
+	}
 	canary := detection.DOMXSSCanary(marker)
 
 	// --- Phase 1: reachability ---
@@ -1607,7 +1836,7 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	// endpoint/source/sink/selector, never the payload value), so trying an
 	// extra shape never creates a near-duplicate row.
 	for _, shape := range detection.DOMXSSPayloadsFor(source, sink, marker) {
-		cand := domXSSCandidateForSelector(shape, source, selector)
+		cand := domXSSCandidateForSelector(shape, source, selector, paramSource)
 
 		e.findingsMu.Lock()
 		finding, err := upsertDOMXSSFinding(ctx, e.store, job.ScanID, ep, cand, canary, reachTC.ID)
