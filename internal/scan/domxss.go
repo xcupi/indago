@@ -758,6 +758,22 @@ const domXSSHarnessTemplate = `(() => {
   }
   hookProp(Element.prototype, 'innerHTML');
   hookProp(Element.prototype, 'outerHTML');
+  // eval reachability. A source value that reaches the eval argument is
+  // REACHABILITY only: it merely becomes part of the code eval parses, so it
+  // proves nothing about execution. Without this hook an XHR echo feeding
+  // eval (the measured page) never established reachability at all, because
+  // the benign canary is a string literal and therefore never executes.
+  // The payload shapes then attempt the marker breakout that does execute.
+  (function () {
+    try {
+      var origEval = window.eval;
+      if (typeof origEval !== 'function') return;
+      window.eval = function (v) {
+        try { report('eval', v); } catch (e) {}
+        return origEval.apply(this, arguments);
+      };
+    } catch (e) {}
+  })();
   // Diagnostic-only text sinks: see reportText. These hooks are installed
   // AFTER the HTML hooks so the HTML hooks stay first in this script, and they
   // are the reason a negative can name where the marker actually went.
