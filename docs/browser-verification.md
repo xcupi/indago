@@ -87,8 +87,48 @@ activates it on passive page load, so it must never read as confirmed.
 5. The page is waited for `load` (a real browser event, not an arbitrary
    sleep), then its console errors, uncaught exceptions, and rendered HTML are
    read back.
-6. The decision above is applied, and a screenshot, the rendered DOM, and the
+6. If the candidate declares a non-load trigger, reflected the marker, and
+   produced no load-time signal, ONE activation is performed — see
+   "Activation classes" below. It is methodology, never evidence: the verdict
+   still comes only from the marker-specific observation, so a page that
+   reflects the same value without a handler stays `Rejected` after it.
+7. The decision above is applied, and a screenshot, the rendered DOM, and the
    combined browser log are captured as evidence.
+
+## Activation classes
+
+A candidate's `Trigger` decides whether anything is activated at all.
+`TriggerLoad` (and an empty legacy trigger) is never activated; a declared
+interaction is activated once, by exactly one of:
+
+| class | method | used for |
+|---|---|---|
+| `focus` | `element.focus()` (or one `FocusEvent` when not focusable) | autofocus/onfocus |
+| `resize` | `window.dispatchEvent(new Event('resize'))` | onresize |
+| `click` | `element.click()` | `javascript:` URLs, onclick |
+| `animation` | `element.beginElement()` | SMIL onbegin |
+| `keyboard` | `keyboard.press('Alt+Shift+<k>')` | a candidate declaring `accesskey` |
+
+The keyboard class presses the platform's access-key shortcut
+(`Alt+Shift+<key>`; `Control+Alt+<key>` on macOS) for the key the candidate
+declares, through the browser's real input path — CDP
+`Input.dispatchKeyEvent` with `keyDown` carrying both `text` and
+`unmodifiedText`. That detail is load-bearing: Playwright's own
+`Keyboard.Press` leaves `unmodifiedText` empty for character keys, and
+Chromium's access-key matching reads exactly that field, so a Playwright press
+delivers a keydown that runs no access-key action. A page-side half of the
+class first locates the element that carries the marker and declares that exact
+key (read-only); if it is missing the record is `failed` with the error stated,
+and no chord is pressed.
+
+Activation is one attempt, never a retry loop, followed by the bounded
+`ActivationSettle` window (default 300 ms, hard cap 2 s) for the browser's
+asynchronous exception report. The persisted `Activation` record names the
+class, the exact method, the element, the attempt count, that window, and any
+failure — it is evidence about methodology, never a verdict input. Real-browser
+tests cover each class's positive case, a handler-stripped negative control, a
+removed-element failure, and that load-trigger candidates are never activated.
+
 
 **POST/JSON interpretation boundary:** `Confirmed` means the exact candidate
 marker executed in Chromium while parsing the response as a top-level document.

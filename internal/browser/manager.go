@@ -791,6 +791,39 @@ func (p *Page) AddInitScript(ctx context.Context, script string) error {
 	return callCtxErr(ctx, func() error { return p.handle.AddInitScript(script) })
 }
 
+// keyChordPresser is implemented by drivers that can dispatch real keyboard
+// input (needed for accesskey activation: a browser access-key shortcut is a
+// browser-level default action, so a synthetic KeyboardEvent dispatched from
+// page JS has no such action). It is a separate, OPTIONAL interface rather
+// than a new pageHandle method so a test fake that only implements pageHandle
+// keeps compiling unchanged; PressKeyChord reports ErrKeyboardUnsupported when
+// the concrete driver does not implement it.
+type keyChordPresser interface {
+	PressKeyChord(chord string) error
+}
+
+// ErrKeyboardUnsupported is returned by PressKeyChord when the underlying
+// driver cannot dispatch real keyboard input (e.g. a test fake).
+var ErrKeyboardUnsupported = errors.New("browser: this driver cannot dispatch keyboard input")
+
+// PressKeyChord presses exactly ONE key chord through the browser's real input
+// path (Playwright's Keyboard.Press, which is Chromium's own
+// Input.dispatchKeyEvent pipeline — ordinary keyboard input, not a DOM event
+// constructed by page script), for example "Alt+Shift+x". Modifiers are held
+// while the key is pressed, exactly as a physical shortcut is, and released
+// afterwards. This is neutral automation like Evaluate: the caller decides
+// whether performing it is appropriate, and this package makes no verdict.
+func (p *Page) PressKeyChord(ctx context.Context, chord string) error {
+	if chord == "" {
+		return errors.New("browser: empty key chord")
+	}
+	kp, ok := p.handle.(keyChordPresser)
+	if !ok {
+		return ErrKeyboardUnsupported
+	}
+	return callCtxErr(ctx, func() error { return kp.PressKeyChord(chord) })
+}
+
 // Evaluate runs a JavaScript expression in the page and returns its result.
 // It is the general escape hatch for driving and inspecting a loaded page —
 // used by UI/integration tests to click, fill, and read DOM state against the

@@ -239,7 +239,7 @@ delimiter:
 
 | template | value | trigger | confirms? |
 |---|---|---|---|
-| link attribute injection | `' accesskey=x onclick=M y='` (quote style follows the site) | `interaction` | **never** by the passive verifier |
+| link attribute injection | `' accesskey=x onclick=M y='` (quote style follows the site) | `interaction` | yes, after the verifier's single access-key keypress |
 
 Why this shape and not a tag injection: a `<link>` is metadata. It has no
 rendered box, the page never navigates its `href`, and no load-time event fires
@@ -247,9 +247,11 @@ on it, so neither `javascript:` nor `<svg onload>` can execute there. The value
 is still inside an HTML attribute, though, so the closing quote alone ends it —
 which is why encoding `<`/`>` does not stop this vector. That is the reported lab
 vector: an `accesskey`/`onclick` pair on the link element itself, executable only
-by an operator keypress. The passive verifier never simulates activation
-(AGENTS.md §3), so the finding is created (the candidate reflects and is sent)
-and honestly stays **Rejected**; the escaped control is Rejected too. Live
+by the victim's keypress. Verification performs that keypress once — the
+platform's access-key shortcut, through the browser's real keyboard input (see
+`docs/browser-verification.md`, "Activation classes") — and the finding is
+Confirmed only if the marker-specific runtime observation fires afterwards. The
+escaped control is Rejected. Live
 outcome, real Chromium: `TestReflectedCanonicalLinkVectorIsPlannedButNeedsActivation`.
 
 Boundaries: the gate is the `link` element only. The same URL-in-attribute
@@ -276,7 +278,7 @@ is the raw query string:
 | template | value (double-quoted site shown) | trigger | confirms? |
 |---|---|---|---|
 | href script breakout | `"><script>M</script>` (single-quoted site: `'><script>M</script>`) | `load` | yes, with **no activation** — the browser executes it while parsing |
-| href attribute breakout | `"accesskey="x" onclick=M y="` (mirror shape; a single-quoted site gets `'accesskey='x' onclick=M x='` byte for byte) | `interaction` | yes, after the verifier's single click activation |
+| href attribute breakout | `"accesskey="x" onclick=M y="` (mirror shape; a single-quoted site gets `'accesskey='x' onclick=M x='` byte for byte) | `interaction` | yes, after the verifier's single access-key keypress |
 
 How the script shape works: the leading delimiter closes the `href` value and
 `>` ends the element's own tag (a `<link>` is void; an `<a>` is left open but
@@ -284,10 +286,13 @@ How the script shape works: the leading delimiter closes the `href` value and
 is the bare marker is parsed and executed immediately. The marker is evaluated
 as a JavaScript identifier, so an executable position raises the marker-specific
 `ReferenceError` that verification already attributes to this navigation — no
-click, focus, keypress or other activation is involved or simulated. This is the
-only mechanism that can confirm in a position the page never renders or
-navigates: a `<link>` has no box, so the accesskey/onclick sibling cannot fire
-there, which is exactly the failure that motivated this shape. Nothing but the
+click, focus, keypress or other activation is involved or simulated. It is the
+only mechanism that confirms in a position the page never renders or navigates
+**without any activation at all**; the accesskey sibling reaches a `<link>` too,
+but only by the victim's keypress (measured: Chromium's access-key action
+dispatches the click on a box-less `<link>` all the same, and Playwright's own
+`Keyboard.Press` cannot trigger it because it leaves `unmodifiedText` empty).
+Nothing but the
 benign marker is carried: no `alert`, no cookie access, no network call, no
 `src=`. The trailing bytes of the site's own template (its closing quote and
 `>`) are left as text after `</script>` and cannot execute.
@@ -298,11 +303,13 @@ delimiter the shape closes, so the whole breakout needs exactly one quote byte
 (the site's own) to arrive raw — `onclick=M` carries the benign marker as the
 handler's whole body; the trailing dummy attribute (`y=` for the double-quote
 mirror, `x=` for the single-quote variant) plus the site's own closing delimiter
-keeps the rest of the tag well-formed. The candidate declares `interaction`, so
-the existing activation step performs exactly one `element.click()` on the
-marker-carrying element; without that click the shape stays inert. On a
-non-rendered `<link>` that click dispatches nothing observable, so this shape
-documents the position and is never Confirmed there.
+keeps the rest of the tag well-formed. The candidate declares `interaction` and
+names an access key, so verification presses the platform's access-key shortcut
+once (`Alt+Shift+x` on Chromium/Linux) through the browser's real keyboard
+input, the way the victim would; without that press the shape stays inert. The
+press does not confirm anything by itself: only the marker-specific runtime
+observation does, so a page that reflects the same bytes with the handler
+stripped stays Rejected after it.
 
 Why the accesskey value mirrors the delimiter instead of always using single
 quotes: a double-quoted site commonly rewrites or filters `'` (HTML-encoding it
@@ -347,7 +354,7 @@ proof: `TestURLHrefScriptBreakoutConfirmsWithoutActivation` (a page reflecting
 into `href="…"` confirms with **no activation record at all** — the fixture's
 own click counter stays untouched, and the rendered DOM carries the injected
 script block), `TestURLHrefBreakoutConfirmsAfterOneClick` (the interaction shape:
-Confirmed after exactly one dispatched click, injected pair in the rendered DOM),
+Confirmed after exactly one access-key keypress, injected pair in the rendered DOM),
 `TestURLHrefScriptBreakoutEncodedDelimiterStaysRejected` and
 `TestURLHrefBreakoutEncodedDelimiterStaysRejected` (HTML-encoded quotes: neither
 shape is planned, and forced through the verifier they stay Rejected with the

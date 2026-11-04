@@ -1,6 +1,7 @@
 package verification_test
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -86,6 +87,24 @@ func TestClassifyActivation(t *testing.T) {
 			want:   verification.ActivationUnsupported,
 			reason: "unknown trigger class",
 		},
+		{
+			name:   "accesskey plus onclick is keyboard-class",
+			cand:   detection.Candidate{Trigger: detection.TriggerInteraction, Value: `'accesskey='x' onclick=` + m + ` x='`},
+			want:   verification.ActivationKeyboard,
+			reason: "accesskey",
+		},
+		{
+			name:   "accesskey with an unquoted key is keyboard-class",
+			cand:   detection.Candidate{Trigger: detection.TriggerInteraction, Value: `accesskey=x onclick=` + m},
+			want:   verification.ActivationKeyboard,
+			reason: "keyboard-class",
+		},
+		{
+			name:   "accesskey with no usable key is not activatable",
+			cand:   detection.Candidate{Trigger: detection.TriggerInteraction, Value: `accesskey="" onclick=` + m},
+			want:   verification.ActivationUnsupported,
+			reason: "no single printable ASCII key",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -106,5 +125,47 @@ func TestClassifyActivation(t *testing.T) {
 				t.Fatalf("reason = %q, want it to state \"not activatable by this verifier\"", reason)
 			}
 		})
+	}
+}
+
+// TestDeclaredAccessKey locks the key reader to the three HTML attribute forms
+// (and to a single printable ASCII key), because the chord that is pressed is
+// derived from it. It is pure.
+func TestDeclaredAccessKey(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"single-quoted", `'accesskey='x' onclick=indM x='`, "x"},
+		{"double-quoted", `"accesskey="Q" onclick=indM y="`, "Q"},
+		{"unquoted", " accesskey=z onclick=indM", "z"},
+		{"spaced equals", "accesskey = 'k' onclick=indM", "k"},
+		{"case-insensitive attribute", "ACCESSKEY='a'", "a"},
+		{"first of a multi-key list", `accesskey="j k"`, "j"},
+		{"no accesskey", `onclick=indM`, ""},
+		{"empty value", `accesskey=""`, ""},
+		{"multi-character key", `accesskey="xx"`, ""},
+		{"non-ASCII key", `accesskey="é"`, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := verification.DeclaredAccessKey(tc.value); got != tc.want {
+				t.Fatalf("DeclaredAccessKey(%q) = %q, want %q", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAccessKeyChord pins the platform's access-key shortcut: Chromium uses
+// Alt+Shift+<k> everywhere except macOS.
+func TestAccessKeyChord(t *testing.T) {
+	got := verification.AccessKeyChord("x")
+	want := "Alt+Shift+x"
+	if runtime.GOOS == "darwin" {
+		want = "Control+Alt+x"
+	}
+	if got != want {
+		t.Fatalf("AccessKeyChord(\"x\") = %q, want %q", got, want)
 	}
 }

@@ -245,7 +245,7 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	var act *Activation
 	evidenceHTML := html
 	if !matched && markerInDOM && class != ActivationNone {
-		act = v.activate(ctx, page, token, class, classReason)
+		act = v.activate(ctx, page, token, in.Candidate.Value, class, classReason)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

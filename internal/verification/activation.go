@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -52,6 +53,12 @@ const (
 	ActivationClick ActivationClass = "click"
 	// ActivationAnimation: call beginElement() once on the SMIL animation.
 	ActivationAnimation ActivationClass = "animation"
+	// ActivationKeyboard: press the platform's access-key chord for the key the
+	// candidate declares (Alt+Shift+<k> on Chromium/Linux), through the browser's
+	// real keyboard input path — the activation a victim performs for an
+	// accesskey, and the only one that reaches an element that never renders a
+	// box (a <link> in <head>).
+	ActivationKeyboard ActivationClass = "keyboard"
 	// ActivationUnsupported: the candidate needs an interaction this verifier
 	// deliberately does not perform.
 	ActivationUnsupported ActivationClass = "unsupported"
@@ -92,6 +99,11 @@ type Activation struct {
 	// SettleMS is the bounded post-activation observation window in
 	// milliseconds. Zero when nothing was dispatched.
 	SettleMS int `json:"settle_ms,omitempty"`
+	// SettleBeforeMS is the bounded settle the keyboard class waits before it
+	// presses the chord, so the page's own load-time work (handler wiring,
+	// sanitizers) has finished. Zero for every other class, which are
+	// dispatched immediately after the rendered DOM is read back.
+	SettleBeforeMS int `json:"settle_before_ms,omitempty"`
 }
 
 // ClassifyActivation reports which activation (if any) a candidate needs, plus
@@ -116,6 +128,42 @@ func ClassifyActivation(c detection.Candidate) (ActivationClass, string) {
 // unsupported interaction can be named in the recorded reason.
 var eventAttrRE = regexp.MustCompile(`(?i)\bon([a-z]+)\s*=`)
 
+// accessKeyRE reads the KEY an accesskey declaration names, in any of the three
+// attribute-value forms HTML allows (double-quoted, single-quoted, unquoted).
+// It reads the value only: the candidate's bytes are never rewritten.
+var accessKeyRE = regexp.MustCompile(`(?i)\baccesskey\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'` + "`" + `<>]+))`)
+
+// DeclaredAccessKey returns the access key a candidate value declares, or ""
+// when it declares none this verifier can dispatch. A multi-key declaration
+// (the HTML spec allows a space-separated list) yields its first key, and only
+// a single printable ASCII character is usable as one key chord.
+func DeclaredAccessKey(v string) string {
+	m := accessKeyRE.FindStringSubmatch(v)
+	if m == nil {
+		return ""
+	}
+	key := m[1] + m[2] + m[3]
+	if i := strings.IndexAny(key, " 	\n\r"); i >= 0 {
+		key = key[:i]
+	}
+	runes := []rune(key)
+	if len(runes) != 1 || runes[0] <= 0x20 || runes[0] > 0x7e {
+		return ""
+	}
+	return key
+}
+
+// AccessKeyChord is the keyboard shortcut a platform uses to activate an
+// accesskey. Chromium uses Alt+Shift+<k> everywhere except macOS, where it is
+// Control+Alt+<k>. It is exposed so the activation record can state exactly
+// which chord was pressed.
+func AccessKeyChord(key string) string {
+	if runtime.GOOS == "darwin" {
+		return "Control+Alt+" + key
+	}
+	return "Alt+Shift+" + key
+}
+
 // classifyInteractionValue recognises the activation shape a TriggerInteraction
 // candidate's value expects. Recognition is by ATTRIBUTE NAME / SCHEME only —
 // it never rewrites or re-chooses the value.
@@ -126,16 +174,26 @@ func classifyInteractionValue(v string) (ActivationClass, string) {
 		return ActivationFocus, "focus-class: the candidate installs an autofocus/onfocus handler, so the injected element is focused once"
 	case strings.Contains(lower, "onbegin"):
 		return ActivationAnimation, "animation-class: the candidate installs a SMIL onbegin handler, so the marker-carrying animation is started once with beginElement()"
+	case strings.Contains(lower, "accesskey"):
+		// A declared accesskey is activated the way a victim activates it: the
+		// platform's access-key chord, pressed once through the browser's real
+		// keyboard input. This takes precedence over the click class because the
+		// accesskey is what the candidate itself declares as its activation, and
+		// because a keyboard press reaches elements that never render a box.
+		if key := DeclaredAccessKey(v); key != "" {
+			return ActivationKeyboard, fmt.Sprintf("keyboard-class: the candidate declares accesskey=%q, so the platform access-key shortcut %s is pressed once through real keyboard input (the victim's activation, not element.click())", key, AccessKeyChord(key))
+		}
+		return ActivationUnsupported, "the candidate declares an accesskey but its value carries no single printable ASCII key: no access-key shortcut can be dispatched, so it is not activatable by this verifier"
 	case containsJavascriptScheme(lower):
 		return ActivationClick, "click-class: the candidate installs a javascript: URL, so its element is clicked once"
-	case strings.Contains(lower, "onclick") || strings.Contains(lower, "accesskey"):
+	case strings.Contains(lower, "onclick"):
 		return ActivationClick, "click-class: the candidate installs a click handler, so its element is clicked once"
 	case strings.Contains(lower, "onresize"):
 		return ActivationResize, "resize-class: the candidate installs a resize handler (body onresize is a window-reflecting handler), so one resize Event is dispatched on window"
 	}
 	if m := eventAttrRE.FindStringSubmatch(v); m != nil {
 		event := strings.ToLower(m[1])
-		return ActivationUnsupported, fmt.Sprintf("interaction-class on%s: not activatable by this verifier (it activates only focus, resize, click and SMIL begin, and never simulates %s)", event, event)
+		return ActivationUnsupported, fmt.Sprintf("interaction-class on%s: not activatable by this verifier (it activates only focus, resize, click, keyboard accesskeys and SMIL begin, and never simulates %s)", event, event)
 	}
 	return ActivationUnsupported, "the candidate declares an interaction trigger but its value contains no recognisable event handler or activation shape: not activatable by this verifier"
 }
@@ -177,9 +235,15 @@ func decodeActivation(v any) (activationOutcome, error) {
 // APIs do the work (focus/click/dispatchEvent/beginElement), so the event is
 // delivered by the browser's normal dispatch path.
 //
+// The keyboard class is the one exception: its page-side half only LOCATES the
+// element that declares the access key (a read-only lookup) and returns
+// "keyboard_ready"; the caller then presses the chord through the browser's
+// real keyboard input, because an access-key shortcut is a browser-level action
+// that page script cannot perform.
+//
 // The script never retries: it performs at most one activation and returns a
 // status describing what happened, including any error.
-func activationScript(marker string, class ActivationClass) (string, error) {
+func activationScript(marker string, class ActivationClass, key string) (string, error) {
 	mb, err := json.Marshal(marker)
 	if err != nil {
 		return "", fmt.Errorf("marshal marker: %w", err)
@@ -188,9 +252,14 @@ func activationScript(marker string, class ActivationClass) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal class: %w", err)
 	}
+	kb, err := json.Marshal(key)
+	if err != nil {
+		return "", fmt.Errorf("marshal access key: %w", err)
+	}
 	const body = `
   const marker = %s;
   const cls = %s;
+  const key = %s;
   const out = {status: "failed", method: "", element: "", detail: "", error: ""};
   // Locating the target is isolated in its own function, with its own
   // try/catch. Its frame is gone before the activation below runs, and that is
@@ -220,8 +289,19 @@ func activationScript(marker string, class ActivationClass) (string, error) {
         const el = withMarker.find((e) => {
           const raw = attr(e, "href") || attr(e, "action") || attr(e, "formaction") || attr(e, "src") || "";
           return /^\s*javascript:/i.test(raw.replace(/[\t\n\r]/g, ""));
-        }) || withMarker.find((e) => has(e, "onclick") || has(e, "accesskey")) || smallest;
+        }) || withMarker.find((e) => has(e, "onclick")) || smallest;
         return el ? {kind: "click", el: el} : {error: "no element carrying the marker was found"};
+      }
+      if (cls === "keyboard") {
+        // Read-only lookup: the element must carry the marker AND declare the
+        // exact access key the candidate names (case-insensitively, which is
+        // how the browser matches access keys). Nothing is pressed here.
+        const want = String(key).toLowerCase();
+        const el = withMarker.find((e) => {
+          const k = attr(e, "accesskey");
+          return k !== null && String(k).toLowerCase() === want;
+        });
+        return el ? {kind: "keyboard", el: el} : {error: "no element carrying the marker declares accesskey=" + JSON.stringify(key)};
       }
       if (cls === "animation") {
         const smil = Array.prototype.slice
@@ -236,6 +316,16 @@ func activationScript(marker string, class ActivationClass) (string, error) {
     }
   })();
   if (target.error) { out.error = target.error; return out; }
+
+  if (target.kind === "keyboard") {
+    // The page's half of this activation is the lookup only: an access-key
+    // shortcut is a browser-level action, so the caller presses it through the
+    // browser's real keyboard input and records that as the method.
+    out.status = "keyboard_ready";
+    out.element = target.el.tagName.toLowerCase();
+    out.detail = "the element declaring the access key was located; the verifier now presses the platform access-key shortcut once through the browser's real keyboard input";
+    return out;
+  }
 
   if (target.kind === "resize") {
     window.dispatchEvent(new Event("resize"));
@@ -273,8 +363,13 @@ func activationScript(marker string, class ActivationClass) (string, error) {
   out.status = "dispatched";
   return out;
 `
-	return "(() => {" + fmt.Sprintf(body, string(mb), string(cb)) + "})()", nil
+	return "(() => {" + fmt.Sprintf(body, string(mb), string(cb), string(kb)) + "})()", nil
 }
+
+// activationStatusKeyboardReady is the page script's report that the element
+// declaring the access key was found; the chord press itself happens in the
+// driver, after the page-side lookup returned.
+const activationStatusKeyboardReady = "keyboard_ready"
 
 // activate performs at most ONE activation and returns its record. It never
 // returns nil and never leaves an error unrecorded: a driver failure, a
@@ -284,13 +379,22 @@ func activationScript(marker string, class ActivationClass) (string, error) {
 // The bounded settle after a dispatched activation is a fixed one-shot wait
 // (DefaultActivationSettle, hard-capped at maxActivationSettle) for the
 // browser's asynchronous exception report — never a poll or a retry.
-func (v *BrowserVerifier) activate(ctx context.Context, page *browser.Page, marker string, class ActivationClass, reason string) *Activation {
+func (v *BrowserVerifier) activate(ctx context.Context, page *browser.Page, marker, value string, class ActivationClass, reason string) *Activation {
 	act := &Activation{Class: class, Reason: reason}
 	if class == ActivationUnsupported {
 		act.Status = ActivationStatusSkipped
 		return act
 	}
-	script, err := activationScript(marker, class)
+	key := ""
+	if class == ActivationKeyboard {
+		key = DeclaredAccessKey(value)
+		if key == "" {
+			act.Status = ActivationStatusFailed
+			act.Error = "the candidate declares an accesskey but its value carries no single printable ASCII key, so no access-key shortcut could be pressed"
+			return act
+		}
+	}
+	script, err := activationScript(marker, class, key)
 	if err != nil {
 		act.Status = ActivationStatusFailed
 		act.Error = err.Error()
@@ -313,7 +417,27 @@ func (v *BrowserVerifier) activate(ctx context.Context, page *browser.Page, mark
 	if out.Detail != "" {
 		act.Reason = out.Detail
 	}
-	switch out.Status {
+	status := out.Status
+	if status == activationStatusKeyboardReady {
+		// A keyboard activation is the one a victim performs later, not during
+		// load, so the chord is pressed after a bounded settle: the page's own
+		// load handlers and any sanitizer have finished by then. The wait is the
+		// same fixed one-shot window used after the press — never a poll.
+		sleepBounded(ctx, v.cfg.ActivationSettle)
+		act.SettleBeforeMS = int(v.cfg.ActivationSettle / time.Millisecond)
+		// The access-key shortcut is the ONE press this activation performs. It
+		// goes through the browser's real keyboard input path; if the driver
+		// cannot dispatch it the attempt is recorded as failed, never as sent.
+		chord := AccessKeyChord(key)
+		if err := page.PressKeyChord(ctx, chord); err != nil {
+			act.Status = ActivationStatusFailed
+			act.Error = fmt.Sprintf("press access-key shortcut %s: %v", chord, err)
+			return act
+		}
+		act.Method = fmt.Sprintf("keyboard.press('%s')", chord)
+		status = ActivationStatusDispatched
+	}
+	switch status {
 	case ActivationStatusDispatched:
 		act.Status = ActivationStatusDispatched
 		act.SettleMS = int(v.cfg.ActivationSettle / time.Millisecond)

@@ -487,6 +487,111 @@ func (p *pwPage) Screenshot(fullPage bool) ([]byte, error) {
 	return p.p.Screenshot(pw.PageScreenshotOptions{FullPage: pw.Bool(fullPage)})
 }
 
+// cdpModifierBits maps chord modifier names to CDP's Input modifier mask.
+// (Input.dispatchKeyEvent's `modifiers` bit field: Alt=1, Control=2, Meta=4,
+// Shift=8.)
+var cdpModifierBits = map[string]int{"Alt": 1, "Control": 2, "Meta": 4, "Shift": 8}
+
+// parseKeyChord splits a chord like "Alt+Shift+x" into its modifier mask and
+// its single character key. It accepts at most one of each known modifier and
+// exactly one printable ASCII key, so a caller cannot smuggle a second key or
+// an unbounded sequence into what is documented as ONE press.
+func parseKeyChord(chord string) (mods int, key string, err error) {
+	parts := strings.Split(chord, "+")
+	if len(parts) < 2 || len(parts) > 5 {
+		return 0, "", fmt.Errorf("browser: key chord %q must be MODIFIER+...+key", chord)
+	}
+	key = parts[len(parts)-1]
+	runes := []rune(key)
+	if len(runes) != 1 || runes[0] <= 0x20 || runes[0] > 0x7e {
+		return 0, "", fmt.Errorf("browser: key chord %q has a non-printable-ASCII or multi-character key", chord)
+	}
+	seen := map[string]bool{}
+	for _, m := range parts[:len(parts)-1] {
+		bit, ok := cdpModifierBits[m]
+		if !ok {
+			return 0, "", fmt.Errorf("browser: key chord %q has unknown modifier %q", chord, m)
+		}
+		if seen[m] {
+			return 0, "", fmt.Errorf("browser: key chord %q repeats modifier %q", chord, m)
+		}
+		seen[m] = true
+		mods |= bit
+	}
+	return mods, key, nil
+}
+
+// keyCDPFields returns the CDP key identifiers for a single printable ASCII
+// key: its DOM `key`, `code`, and virtual key codes. Chromium's access-key
+// handling reads `unmodifiedText`, but the remaining fields are set so the
+// press also looks like ordinary input to page keydown listeners.
+func keyCDPFields(key string, shift bool) (code string, vk int, text string) {
+	r := rune(key[0])
+	switch {
+	case r >= 'a' && r <= 'z':
+		upper := r - 'a' + 'A'
+		text = string(r)
+		if shift {
+			text = string(upper)
+		}
+		return "Key" + string(upper), int(upper), text
+	case r >= 'A' && r <= 'Z':
+		text = string(r)
+		return "Key" + string(r), int(r), text
+	case r >= '0' && r <= '9':
+		return "Digit" + string(r), int(r), string(r)
+	}
+	return "", int(r), string(r)
+}
+
+// PressKeyChord presses one key chord through Chromium's real input pipeline.
+//
+// It dispatches CDP Input.dispatchKeyEvent directly (a keyDown carrying the
+// character and the "unmodified" character, then a keyUp): Playwright's own
+// Keyboard.Press does not populate unmodifiedText for character keys, and
+// Chromium's access-key matching reads exactly that field. The resulting events
+// are ordinary browser keyboard input with their native default actions
+// intact — unlike a KeyboardEvent constructed by page script, which can never
+// invoke an access key shortcut.
+func (p *pwPage) PressKeyChord(chord string) error {
+	mods, key, err := parseKeyChord(chord)
+	if err != nil {
+		return err
+	}
+	cdp, err := p.p.Context().NewCDPSession(p.p)
+	if err != nil {
+		return fmt.Errorf("browser: create CDP session for key press: %w", err)
+	}
+	code, vk, text := keyCDPFields(key, mods&cdpModifierBits["Shift"] != 0)
+	down := map[string]any{
+		"type":                  "keyDown",
+		"modifiers":             mods,
+		"key":                   key,
+		"code":                  code,
+		"windowsVirtualKeyCode": vk,
+		"nativeVirtualKeyCode":  vk,
+		"text":                  text,
+		"unmodifiedText":        key,
+	}
+	if _, err := cdp.Send("Input.dispatchKeyEvent", down); err != nil {
+		return fmt.Errorf("browser: key down: %w", err)
+	}
+	up := map[string]any{
+		"type":                  "keyUp",
+		"modifiers":             mods,
+		"key":                   key,
+		"code":                  code,
+		"windowsVirtualKeyCode": vk,
+		"nativeVirtualKeyCode":  vk,
+		"text":                  "",
+		"unmodifiedText":        "",
+	}
+	if _, err := cdp.Send("Input.dispatchKeyEvent", up); err != nil {
+		return fmt.Errorf("browser: key up: %w", err)
+	}
+	return nil
+}
+
 func (p *pwPage) Evaluate(script string, arg any) (any, error) {
 	if arg == nil {
 		return p.p.Evaluate(script)
