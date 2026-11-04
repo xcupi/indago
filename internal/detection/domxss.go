@@ -1525,7 +1525,11 @@ func (p *dxsParser) parseStatement() *dxsStmt {
 		case "return":
 			p.next()
 			st := &dxsStmt{kind: dxsStmtReturn, line: t.line}
-			if !p.is(";") && !p.is("}") && !p.eof() {
+			// `return` is a restricted production: a line break after the
+			// keyword ends the statement, so `return` + newline + `expr` returns
+			// nothing. Reading the next line as its operand would attribute a
+			// value to a return that never carried one.
+			if !p.is(";") && !p.is("}") && !p.eof() && !p.atLineBreak() {
 				st.exprs = []*dxsExpr{p.parseExpr()}
 			}
 			p.endStatement()
@@ -1559,12 +1563,31 @@ func (p *dxsParser) parseStatement() *dxsStmt {
 
 // endStatement consumes a statement terminator, or records a gap and skips to
 // a boundary so the rest of the script is still analysed.
+//
+// JavaScript also ends a statement at a line break (automatic semicolon
+// insertion), and real-world ES5 depends on it:
+//
+//	var searchTerm = searchResultsObj.searchTerm
+//	var h1 = document.createElement("h1");
+//
+// Without that rule the parser recorded "unparsed statement tail near \"var\""
+// and skipped the following statement, so the measured external script (plain
+// ES5: an XHR, an onreadystatechange function containing eval, and a second
+// function with `var` declarations, string concatenation, a for loop and a sink)
+// was reported as unparsable and its sinks were invisible.
+//
+// A line break only ends the statement here; the NEXT statement is still parsed,
+// nothing is discarded, and two statements on ONE line with no separator are
+// still a gap below (they are not valid JavaScript).
 func (p *dxsParser) endStatement() {
 	if p.is(";") {
 		p.next()
 		return
 	}
 	if p.eof() || p.is("}") {
+		return
+	}
+	if p.atLineBreak() {
 		return
 	}
 	p.gap(p.peek(), "unparsed statement tail near "+strconv.Quote(p.peek().text))
@@ -1574,6 +1597,18 @@ func (p *dxsParser) endStatement() {
 	if p.is(";") {
 		p.next()
 	}
+}
+
+// atLineBreak reports whether a line terminator separates the last consumed
+// token from the next one — the condition under which JavaScript inserts a
+// semicolon. Callers consult it only where the expression parser has already
+// stopped, so a continuation the grammar allows (`foo` + newline + `('x')`) is
+// still parsed as one statement rather than split.
+func (p *dxsParser) atLineBreak() bool {
+	if p.pos == 0 || p.pos >= len(p.toks) {
+		return false
+	}
+	return p.toks[p.pos-1].line < p.peek().line
 }
 
 func (p *dxsParser) parseVarStmt(semi bool) *dxsStmt {

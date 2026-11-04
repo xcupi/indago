@@ -89,6 +89,14 @@ Every same-origin reference that cannot be analysed becomes a
 cap`, `fetch failed`, `per-scan byte budget exhausted`, `not fetched`,
 `could not be parsed`.
 
+Statement ends follow JavaScript's automatic semicolon insertion: a line break
+ends a statement when the expression parser has stopped, and `return` followed
+by a line break returns nothing. Ordinary ES5 that omits semicolons (for
+example `var a = b.c` on one line and `var d = ...` on the next) therefore
+parses. Two statements on ONE line with no separator are still not valid and
+still produce `could not be parsed` (`unparsed statement tail near ...`); the
+rest of the script is never silently dropped.
+
 A page whose referenced script 404s therefore reports **"could not be
 analysed"**, not "no sink". Removing the reference altogether is the only clean
 negative.
