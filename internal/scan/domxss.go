@@ -1988,15 +1988,28 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 		e.finishTestCase(ctx, reachTC, err, "reachability probe for "+label)
 		return err
 	}
-	if len(reachable) == 0 {
+	// A text canary reaching a text-only sink does not establish that the page
+	// has no HTML sink: a page may route only markup-looking values to
+	// innerHTML. So before concluding negative, send the markup payload once
+	// and let the deterministic execution signal decide.
+	textSinks := parseDOMXSSTextSinks(domXSSHarnessMessages(obs1.Runtime), marker)
+	markupProbed, markupExecuted := false, false
+	if len(reachable) == 0 && len(textSinks) > 0 {
+		markupProbed = true
+		markupExecuted = e.probeDOMXSSMarkup(ctx, bctx, source, ep, selector, marker)
+	}
+	if len(reachable) == 0 && !markupExecuted {
 		note := fmt.Sprintf("no implemented DOM-XSS sink reachable from %s (negative result)", label)
-		if textSinks := parseDOMXSSTextSinks(domXSSHarnessMessages(obs1.Runtime), marker); len(textSinks) > 0 {
+		if len(textSinks) > 0 {
 			// The marker DID arrive in the page, but only in a position that
 			// cannot execute. Saying so keeps this negative honest: it
 			// distinguishes "the harness saw nothing" from "the value landed
 			// somewhere harmless", which is what the measured application page
 			// does (it writes the echoed term with innerText).
 			note += fmt.Sprintf("; the marker did reach a text-only sink (%s), which cannot execute, so the value arrived in the page but never reached an HTML or timer sink", strings.Join(textSinks, ", "))
+			if markupProbed {
+				note += "; a markup payload sent afterwards produced no marker execution either"
+			}
 		}
 		if obs1.SettleBusy {
 			note += fmt.Sprintf("; the bounded network settle (%s) expired with requests still in flight, so an async-driven sink may not have run yet", domXSSURLSourceObservationDelay(canaryNavURL)+domXSSNetworkSettleBudget)
@@ -2010,8 +2023,18 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	// Bounded to the first reachable sink (deterministic: whichever the
 	// page's own script used first) — see this file's header comment. jQuery's
 	// factory is the one exception, explained on domXSSPrimarySink.
-	sink := domXSSPrimarySink(reachable)
-	reachNote := fmt.Sprintf("reachable sink: %s from %s (canary observed in the hooked setter/call)", sink, label)
+	var sink detection.DOMXSSSink
+	var reachNote string
+	if len(reachable) == 0 {
+		// Only the markup payload reached an executable position; the text
+		// canary never did. The exact sink is not known, so the generic HTML
+		// shapes are verified under innerHTML.
+		sink = detection.DOMSinkInnerHTML
+		reachNote = fmt.Sprintf("reachable sink: %s from %s (the text canary only reached a text-only sink; a markup payload then executed the marker, so the page routes markup to an HTML sink)", sink, label)
+	} else {
+		sink = domXSSPrimarySink(reachable)
+		reachNote = fmt.Sprintf("reachable sink: %s from %s (canary observed in the hooked setter/call)", sink, label)
+	}
 	if staticNote != "" {
 		reachNote += "; " + staticNote
 	}
@@ -2050,6 +2073,23 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 		}
 	}
 	return nil
+}
+
+// probeDOMXSSMarkup navigates once with the benign markup payload and reports
+// whether the browser attributed a marker execution to it. It records nothing
+// and creates no finding: a true result only sends the caller on to the normal
+// shape verification, which does.
+func (e *domXSSExecutor) probeDOMXSSMarkup(ctx context.Context, bctx *browser.Context, source detection.DOMXSSSource, ep *domain.Endpoint, selector, marker string) bool {
+	cands := detection.DOMXSSPayloadsFor(source, detection.DOMSinkInnerHTML, marker)
+	if len(cands) == 0 {
+		return false
+	}
+	obs, _, _, err := e.navigateSourceWithActivation(ctx, bctx, source, ep, selector, marker, cands[0].Value, domXSSActivateNone, false)
+	if err != nil || requireDOMXSSProvenance(obs) != nil {
+		return false
+	}
+	_, _, matched := verification.MatchRuntimeExecution(marker, obs.Runtime)
+	return matched
 }
 
 // verifyDOMXSSShape runs phase 2 (VERIFICATION) for ONE candidate shape and

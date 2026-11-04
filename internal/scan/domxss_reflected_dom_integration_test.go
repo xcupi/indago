@@ -175,6 +175,57 @@ const reflectedDOMScriptInnerHTML = `function search(path) {
 }
 `
 
+// reflectedDOMScriptMarkupGated is the exploitable page a bare text canary
+// cannot expose: the term goes through innerHTML only once it looks like
+// markup, otherwise it is written as text. The canary therefore reaches a
+// text-only sink here even though the page has a real innerHTML sink.
+const reflectedDOMScriptMarkupGated = `function search(path) {
+    var xhr = new XMLHttpRequest();
+    xhr.onreadystatechange = function() {
+        if (this.readyState == 4 && this.status == 200) {
+            eval('var searchResultsObj = ' + this.responseText);
+            displaySearchResults(searchResultsObj);
+        }
+    };
+    xhr.open("GET", path + window.location.search);
+    xhr.send();
+
+    function displaySearchResults(searchResultsObj) {
+        var blogHeader = document.getElementsByClassName("blog-header")[0];
+        var searchTerm = searchResultsObj.searchTerm
+        if (searchTerm.indexOf("<") !== -1) {
+            blogHeader.innerHTML = "<h1>0 search results for '" + searchTerm + "'</h1>";
+        } else {
+            var h1 = document.createElement("h1");
+            h1.innerText = "0 search results for '" + searchTerm + "'";
+            blogHeader.appendChild(h1);
+        }
+    }
+}
+`
+
+// reflectedDOMScriptTextContent writes the term with textContent whatever it
+// looks like: a markup payload must stay inert here.
+const reflectedDOMScriptTextContent = `function search(path) {
+    var xhr = new XMLHttpRequest();
+    xhr.onreadystatechange = function() {
+        if (this.readyState == 4 && this.status == 200) {
+            eval('var searchResultsObj = ' + this.responseText);
+            displaySearchResults(searchResultsObj);
+        }
+    };
+    xhr.open("GET", path + window.location.search);
+    xhr.send();
+
+    function displaySearchResults(searchResultsObj) {
+        var blogHeader = document.getElementsByClassName("blog-header")[0];
+        var h1 = document.createElement("h1");
+        h1.textContent = "0 search results for '" + searchResultsObj.searchTerm + "'";
+        blogHeader.appendChild(h1);
+    }
+}
+`
+
 // reflectedDOMScriptInnerHTMLDecoded is the same innerHTML script but it
 // percent-decodes the echoed term first: the page, not the scanner, turns a
 // percent-encoded echo back into markup.
@@ -358,6 +409,34 @@ func TestDOMXSSReflectedDOMPageShape(t *testing.T) {
 
 	t.Run("HTML-encoded echo never confirms", func(t *testing.T) {
 		lab := newReflectedLab(t, reflectedLab{sink: reflectedDOMScriptInnerHTML, echo: reflectedEchoHTMLEscaped})
+		findings, _ := runReflectedDOMJob(t, mgr, lab.URL)
+		if reflectedDOMConfirmed(findings) {
+			t.Fatalf("an HTML-encoded echo is text, not markup: %s", reflectedDOMVerdicts(findings))
+		}
+	})
+
+	t.Run("text canary reaching a text sink does not clear an innerHTML sink: markup payload confirms", func(t *testing.T) {
+		lab := newReflectedLab(t, reflectedLab{sink: reflectedDOMScriptMarkupGated})
+		findings, cases := runReflectedDOMJob(t, mgr, lab.URL)
+		if !reflectedDOMConfirmed(findings) {
+			t.Fatalf("innerHTML sink reached only by a markup payload must confirm, findings=%s notes=%d", reflectedDOMVerdicts(findings), len(cases))
+		}
+	})
+
+	t.Run("textContent sink stays negative even with a markup payload", func(t *testing.T) {
+		lab := newReflectedLab(t, reflectedLab{sink: reflectedDOMScriptTextContent})
+		findings, cases := runReflectedDOMJob(t, mgr, lab.URL)
+		note := reflectedDOMReachabilityNote(t, cases)
+		if len(findings) != 0 {
+			t.Fatalf("textContent cannot execute markup: %s", reflectedDOMVerdicts(findings))
+		}
+		if !strings.Contains(note, "no implemented DOM-XSS sink reachable") || !strings.Contains(note, "text-only sink (textContent)") {
+			t.Fatalf("expected the honest negative naming textContent, got %q", note)
+		}
+	})
+
+	t.Run("innerHTML sink with an HTML-encoded echo stays negative under a markup payload", func(t *testing.T) {
+		lab := newReflectedLab(t, reflectedLab{sink: reflectedDOMScriptMarkupGated, echo: reflectedEchoHTMLEscaped})
 		findings, _ := runReflectedDOMJob(t, mgr, lab.URL)
 		if reflectedDOMConfirmed(findings) {
 			t.Fatalf("an HTML-encoded echo is text, not markup: %s", reflectedDOMVerdicts(findings))
