@@ -221,14 +221,7 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	}
 	observedAt := time.Now()
 
-	var consoleErrs []string
-	for _, cm := range sinceIndex(page.ConsoleMessages(), baseConsole) {
-		if cm.Type == "error" {
-			consoleErrs = append(consoleErrs, cm.Text)
-		}
-	}
-	pageErrs := sinceIndex(page.PageErrors(), basePageErrs)
-	dialogs := sinceIndex(page.DialogMessages(), baseDialogs)
+	consoleErrs, pageErrs, dialogs := collectPageLog(page, baseConsole, basePageErrs, baseDialogs)
 
 	token := in.Marker
 	provenance := page.RuntimeObservations()
@@ -261,6 +254,13 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 			if s, text, ok := MatchRuntimeExecution(token, provenance); ok {
 				sig, sigText, matched = s, text, true
 			}
+			// The page's own log can change DURING the activation: Chromium
+			// reports a Content-Security-Policy refusal to compile an inline
+			// event handler when the handler is first compiled, i.e. at
+			// dispatch. Re-read it so the persisted evidence and the CSP note
+			// below describe the same, post-activation state — a pre-activation
+			// snapshot can miss the one line that explains a Rejected verdict.
+			consoleErrs, pageErrs, dialogs = collectPageLog(page, baseConsole, basePageErrs, baseDialogs)
 			// Evidence DOM: the state the single activation left behind, so the
 			// recorded excerpt and the stored HTML describe the same moment.
 			if after, cerr := page.Content(ctx); cerr == nil {
@@ -274,6 +274,20 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	if provenanceErr != nil {
 		verdict, confidence = domain.VerdictInconclusive, domain.ConfidenceLow
 		notes = "execution provenance could not be enabled: " + provenanceErr.Error() + "; replay manually"
+	}
+	if !matched && verdict == domain.VerdictRejected && act != nil && act.Status == ActivationStatusDispatched {
+		// The page's own policy can refuse to compile the injected inline
+		// handler while the activation is dispatched exactly as intended. The
+		// verdict stays Rejected — a victim's browser would not run it either —
+		// but a bare "no signal" would send an operator looking for a broken
+		// activation. The browser's CSP report is already in the collected log;
+		// name it. Only a dispatched handler activation can be blocked this
+		// way: a load-trigger candidate, or one whose activation never ran,
+		// has no inline handler for the policy to refuse. See csp.go.
+		if line, blocked := cspInlineHandlerBlocked(append(append([]string(nil), consoleErrs...), pageErrs...)); blocked {
+			notes += "; the browser log records the page's Content-Security-Policy blocking an inline event handler (" +
+				line + "), so that handler could not run: a page policy block, not an activation failure"
+		}
 	}
 	if act != nil {
 		switch {
@@ -345,6 +359,20 @@ func sinceIndex[T any](all []T, baseline int) []T {
 		return nil
 	}
 	return all[baseline:]
+}
+
+// collectPageLog snapshots the page's error-shaped console messages, uncaught
+// exceptions and dialogs observed since baseline. Called right after navigation
+// and again after an activation, because some browser reports (notably a CSP
+// refusal to compile an inline event handler) only appear when the handler is
+// first dispatched.
+func collectPageLog(page *browser.Page, baseConsole, basePageErrs, baseDialogs int) (consoleErrs, pageErrs, dialogs []string) {
+	for _, cm := range sinceIndex(page.ConsoleMessages(), baseConsole) {
+		if cm.Type == "error" {
+			consoleErrs = append(consoleErrs, cm.Text)
+		}
+	}
+	return consoleErrs, sinceIndex(page.PageErrors(), basePageErrs), sinceIndex(page.DialogMessages(), baseDialogs)
 }
 
 // decide is the deterministic verdict rule — the one place a candidate is

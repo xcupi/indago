@@ -129,6 +129,45 @@ failure — it is evidence about methodology, never a verdict input. Real-browse
 tests cover each class's positive case, a handler-stripped negative control, a
 removed-element failure, and that load-trigger candidates are never activated.
 
+### Measured: the box-less `<link>` (and what a Rejected verdict means there)
+
+The canonical-link shape puts the injected `accesskey`/`onclick` pair on a
+`<link rel="canonical">` in `<head>`, an element Chromium never renders and a
+pointer can never reach. Whether the keyboard class can activate it is a
+property of the browser, not of the payload, so it was measured directly rather
+than assumed (`HANDOFF.md` records the harness and raw output). With the
+target's exact bytes — `<link rel="canonical" href='https://example/?x='…'>`,
+single-quoted href, attributes on the link, nothing else in `<head>` — every
+variant confirmed:
+
+| variant | dispatched | observed |
+|---|---|---|
+| production path, no focus help | one `Alt+Shift+x` via CDP `Input.dispatchKeyEvent` | keydown arrived, Chromium dispatched one click on the `<link>`, the marker was evaluated as code, `Confirmed` |
+| `BringToFront` + one real body click first | same chord | identical; `document.hasFocus()` was already `true`, and the body click changed nothing |
+| verified page as a BACKGROUND tab | same chord | identical — headless pages all report focus, and the chord is dispatched to that renderer regardless |
+| rendered `<a href>` in body (control) | same chord | identical, `Confirmed` |
+
+The same result held for all three Chromium binaries present here (Playwright's
+Chromium 151.0.7922.34, its `chrome-headless-shell` build, and the system Google
+Chrome 156.0.8078.79), and when the *planner's* candidate was fed to the
+*verifier* instead of a hand-built one. So the box-less position is reachable,
+focus is not the missing ingredient, and the existing activation is correct:
+a Rejected verdict on this shape is not evidence that the technique failed to
+run. Two real-page conditions were also measured: a page-level
+`keydown` `preventDefault()` did **not** suppress the access-key action, and the
+same marker landing in a second, smaller element (`<meta property="og:url">`)
+did not confuse the lookup.
+
+The one reproduced cause of a Rejected verdict with a correct activation is a
+page policy: under `Content-Security-Policy: script-src 'self'`, Chromium still
+parses the `onclick` attribute and still dispatches the access-key click, but
+refuses to compile the handler (`element.onclick` stays `null` — the attribute
+is present, the property is not) and reports `Executing inline event handler
+violates the following Content Security Policy directive … The action has been
+blocked.` The verdict stays `Rejected` — a victim's browser would not run the
+handler either — and the notes now name that policy block, using the report the
+verifier already captures. Verdict rules are unchanged; only the explanation is.
+
 
 **POST/JSON interpretation boundary:** `Confirmed` means the exact candidate
 marker executed in Chromium while parsing the response as a top-level document.
