@@ -1903,6 +1903,9 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	}
 	if len(reachable) == 0 {
 		note := fmt.Sprintf("no implemented DOM-XSS sink reachable from %s (negative result)", label)
+		if obs1.SettleBusy {
+			note += fmt.Sprintf("; the bounded network settle (%s) expired with requests still in flight, so an async-driven sink may not have run yet", domXSSURLSourceObservationDelay(canaryNavURL)+domXSSNetworkSettleBudget)
+		}
 		if staticNote != "" {
 			note += "; " + staticNote
 		}
@@ -2281,6 +2284,11 @@ type domXSSObservation struct {
 	HTML       string
 	Screenshot []byte
 	Runtime    browser.RuntimeObservations
+	// SettleBusy records that the network-quiet settle hit its hard bound with
+	// requests still in flight. The observation is still taken (bounded, never
+	// unbounded), but a negative must say so: async-driven sinks may simply not
+	// have run yet.
+	SettleBusy bool
 }
 
 // openObservedPage opens a fresh page, installs the sink-hook harness BEFORE
@@ -2305,10 +2313,14 @@ func (e *domXSSExecutor) openObservedPage(ctx context.Context, bctx *browser.Con
 	return page, nil
 }
 
-func observePage(ctx context.Context, page *browser.Page) domXSSObservation {
+func observePage(ctx context.Context, page *browser.Page, quiet time.Duration) (domXSSObservation, error) {
+	settled, err := settleDOMXSSObservation(ctx, page, quiet)
+	if err != nil {
+		return domXSSObservation{}, err
+	}
 	html, _ := page.Content(ctx)
 	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
-	return domXSSObservation{Console: page.ConsoleMessages(), PageErrors: page.PageErrors(), HTML: html, Screenshot: shot, Runtime: page.RuntimeObservations()}
+	return domXSSObservation{Console: page.ConsoleMessages(), PageErrors: page.PageErrors(), HTML: html, Screenshot: shot, Runtime: page.RuntimeObservations(), SettleBusy: !settled}, nil
 }
 
 // navigateSource performs ONE phase's navigation for source, injecting
@@ -2397,6 +2409,12 @@ const (
 	domXSSFragmentRouteObservationWindow = time.Second
 )
 
+// domXSSNetworkSettleBudget is how much time one observation may spend waiting
+// for in-flight network work BEYOND its own quiet window. quiet plus this
+// budget is the hard ceiling; a request that never finishes cannot hold a DOM
+// probe past it.
+const domXSSNetworkSettleBudget = 1250 * time.Millisecond
+
 func domXSSURLSourceObservationDelay(navURL string) time.Duration {
 	if i := strings.IndexByte(navURL, '#'); i >= 0 {
 		fragment := navURL[i+1:]
@@ -2407,14 +2425,44 @@ func domXSSURLSourceObservationDelay(navURL string) time.Duration {
 	return domXSSURLSourceObservationWindow
 }
 
-func waitForDOMXSSURLSourceObservationWindow(ctx context.Context, navURL string) error {
-	timer := time.NewTimer(domXSSURLSourceObservationDelay(navURL))
+// settleDOMXSSObservation gives asynchronous work the page itself started time
+// to finish before a sink observation is read back. The measured shape is an
+// XHR whose response is later written into an HTML sink: reading the page at
+// the load event would report "no sink reachable" while the response is still
+// in flight.
+//
+// quiet is the trailing period with no in-flight request that counts as
+// settled (the URL sources' existing fixed window, so a synchronous page keeps
+// paying exactly what it paid before). The hard ceiling is quiet +
+// domXSSNetworkSettleBudget, after which the observation is taken anyway and
+// the caller is told the page was still busy. A page with no async activity
+// pays quiet, never the ceiling.
+//
+// Sources run in separate DOM-XSS jobs on the browser worker group, so the
+// wait overlaps across sources; within one source the per-selector
+// navigations were already sequential.
+func settleDOMXSSObservation(ctx context.Context, page *browser.Page, quiet time.Duration) (bool, error) {
+	if quiet <= 0 {
+		quiet = domXSSURLSourceObservationWindow
+	}
+	settled, err := page.WaitNetworkIdle(ctx, quiet, quiet+domXSSNetworkSettleBudget)
+	if err == nil {
+		return settled, nil
+	}
+	if !errors.Is(err, browser.ErrNetworkIdleUnsupported) {
+		return false, err
+	}
+	// The driver cannot observe in-flight requests (test fakes, or a driver
+	// without CDP). Fall back to the same fixed bounded settle the probe used
+	// before network-quiet support: nothing is known about async work, and the
+	// caller is told the quiet period was not observed.
+	timer := time.NewTimer(quiet)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return false, ctx.Err()
 	case <-timer.C:
-		return nil
+		return false, nil
 	}
 }
 
@@ -2440,10 +2488,12 @@ func (e *domXSSExecutor) navigate(ctx context.Context, bctx *browser.Context, na
 	if _, err := page.Navigate(ctx, navURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
 		return domXSSObservation{}, false, err
 	}
-	if err := waitForDOMXSSURLSourceObservationWindow(ctx, navURL); err != nil {
+	// The quiet duration is the URL source's existing fixed observation
+	// window; network-quiet can only extend it, up to the hard bound.
+	obs, err := observePage(ctx, page, domXSSURLSourceObservationDelay(navURL))
+	if err != nil {
 		return domXSSObservation{}, false, err
 	}
-	obs := observePage(ctx, page)
 	if probeHashChange && act == domXSSActivateNone && len(parseDOMXSSReachability(domXSSHarnessMessages(obs.Runtime), marker)) == 0 {
 		act = domXSSActivateHashChange
 	}
@@ -2457,10 +2507,11 @@ func (e *domXSSExecutor) navigate(ctx context.Context, bctx *browser.Context, na
 	if !applied {
 		return obs, false, nil
 	}
-	if err := waitForDOMXSSURLSourceObservationWindow(ctx, navURL); err != nil {
+	post, err := observePage(ctx, page, domXSSURLSourceObservationDelay(navURL))
+	if err != nil {
 		return domXSSObservation{}, false, err
 	}
-	return observePage(ctx, page), true, nil
+	return post, true, nil
 }
 
 // navigateWithWindowName implements the ONE genuinely different mechanical
@@ -2502,7 +2553,7 @@ func (e *domXSSExecutor) navigateWithWindowName(ctx context.Context, bctx *brows
 	if err := e.finishSourceNavigation(ctx, page, act, marker, value); err != nil {
 		return domXSSObservation{}, err
 	}
-	return observePage(ctx, page), nil
+	return observePage(ctx, page, domXSSURLSourceObservationWindow)
 }
 
 // setWindowNameScript builds the Evaluate script that sets window.name to
@@ -2575,7 +2626,7 @@ func (e *domXSSExecutor) navigateWithPostMessage(ctx context.Context, bctx *brow
 	if err := e.finishSourceNavigation(ctx, page, act, marker, value); err != nil {
 		return domXSSObservation{}, err
 	}
-	return observePage(ctx, page), nil
+	return observePage(ctx, page, domXSSURLSourceObservationWindow)
 }
 
 // postMessageScript creates an opaque-origin sandboxed srcdoc sender and
@@ -2904,7 +2955,7 @@ func (e *domXSSExecutor) navigateWithReferrer(ctx context.Context, bctx *browser
 	if err := e.finishSourceNavigation(ctx, page, act, marker, value); err != nil {
 		return domXSSObservation{}, err
 	}
-	return observePage(ctx, page), nil
+	return observePage(ctx, page, domXSSURLSourceObservationWindow)
 }
 
 // navigateWithStorage implements BOTH the localStorage and sessionStorage
@@ -2954,7 +3005,7 @@ func (e *domXSSExecutor) navigateWithStorage(ctx context.Context, bctx *browser.
 	if err := e.finishSourceNavigation(ctx, page, act, marker, value); err != nil {
 		return domXSSObservation{}, err
 	}
-	return observePage(ctx, page), nil
+	return observePage(ctx, page, domXSSURLSourceObservationWindow)
 }
 
 // newTestCase creates and persists a running TestCase for one navigation

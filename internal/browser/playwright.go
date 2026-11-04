@@ -296,7 +296,7 @@ func (c *pwContext) NewPage() (pageHandle, error) {
 		_ = p.Close()
 		return nil, fmt.Errorf("install page redirect scope gate: %w", err)
 	}
-	return &pwPage{p: p, ctx: c}, nil
+	return &pwPage{p: p, ctx: c, netInflight: make(map[string]struct{}), netChange: make(chan struct{})}, nil
 }
 
 func (c *pwContext) AddCookies(cookies []Cookie) error {
@@ -358,6 +358,16 @@ type pwPage struct {
 	p            pw.Page
 	cdp          pw.CDPSession
 	ctx          *pwContext
+
+	// Network-idle observation (Page.WaitNetworkIdle). netInflight is keyed by
+	// CDP requestId and counts requests started but not yet finished/failed;
+	// netChange is closed and replaced on every change so a waiter can be woken
+	// without a condition variable that ignores context cancellation.
+	netMu         sync.Mutex
+	netInflight   map[string]struct{}
+	netChange     chan struct{}
+	netLastChange time.Time
+	netTracked    bool
 
 	bodyMu                 sync.Mutex
 	capturedJSONBodyBytes  int
@@ -779,7 +789,27 @@ func (p *pwPage) OnRequest(fn func(NetworkEvent), allow func(string) bool) error
 	if err != nil {
 		return fmt.Errorf("create CDP request observer: %w", err)
 	}
+	// In-flight accounts for Page.WaitNetworkIdle. It is fed by the same CDP
+	// session as the request observer, so no extra connection is opened.
+	track := func(kind string, params map[string]interface{}) {
+		id, _ := params["requestId"].(string)
+		if id == "" {
+			return
+		}
+		p.netMu.Lock()
+		switch kind {
+		case "start":
+			p.netInflight[id] = struct{}{}
+		case "end":
+			delete(p.netInflight, id)
+		}
+		p.netLastChange = time.Now()
+		close(p.netChange)
+		p.netChange = make(chan struct{})
+		p.netMu.Unlock()
+	}
 	cdp.On("Network.requestWillBeSent", func(params map[string]interface{}) {
+		track("start", params)
 		p.bodyMu.Lock()
 		bodyBudget := maxObservedJSONBodyBytesPerPage - p.capturedJSONBodyBytes
 		captureBody := p.capturedJSONBodyEvents < maxObservedJSONBodyEventsPerPage
@@ -797,13 +827,91 @@ func (p *pwPage) OnRequest(fn func(NetworkEvent), allow func(string) bool) error
 			fn(event)
 		}
 	})
+	cdp.On("Network.loadingFinished", func(params map[string]interface{}) { track("end", params) })
+	cdp.On("Network.loadingFailed", func(params map[string]interface{}) { track("end", params) })
 	if _, err := cdp.Send("Network.enable", map[string]interface{}{"maxPostDataSize": maxCapturedJSONPostDataBytes + 1}); err != nil {
 		// The owning Context.NewPage path closes the page target on observer
 		// setup failure; that also detaches this CDP session without a wait.
 		return fmt.Errorf("enable bounded CDP request observer: %w", err)
 	}
+	p.netMu.Lock()
+	p.netTracked = true
+	p.netLastChange = time.Now()
+	p.netMu.Unlock()
 	p.cdp = cdp
 	return nil
+}
+
+// WaitNetworkIdle implements networkIdleWaiter. It reports settled=true only
+// when no request has been in flight for quiet (measured from the last
+// start/finish/fail), and gives up at max. Requests aborted by the scope gate
+// arrive as loadingFailed and therefore also end their in-flight entry.
+func (p *pwPage) WaitNetworkIdle(quiet, max time.Duration) (bool, error) {
+	p.netMu.Lock()
+	tracked := p.netTracked
+	p.netMu.Unlock()
+	if !tracked {
+		return false, ErrNetworkIdleUnsupported
+	}
+	if quiet < 0 {
+		quiet = 0
+	}
+	if max <= 0 {
+		max = quiet
+	}
+	deadline := time.Now().Add(max)
+	for {
+		p.netMu.Lock()
+		inflight := len(p.netInflight)
+		last := p.netLastChange
+		change := p.netChange
+		p.netMu.Unlock()
+
+		if inflight == 0 {
+			idle := time.Since(last)
+			if idle >= quiet {
+				return true, nil
+			}
+			if wait := quiet - idle; wait > time.Until(deadline) {
+				wait = time.Until(deadline)
+			} else {
+				// Wake at the end of the quiet period, but still react to a
+				// request that starts before then.
+				timer := time.NewTimer(wait)
+				select {
+				case <-change:
+					if !timer.Stop() {
+						<-timer.C
+					}
+					continue
+				case <-timer.C:
+					p.netMu.Lock()
+					still := len(p.netInflight) == 0
+					p.netMu.Unlock()
+					return still, nil
+				}
+			}
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			p.netMu.Lock()
+			still := len(p.netInflight)
+			p.netMu.Unlock()
+			return still == 0, nil
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-change:
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
+			p.netMu.Lock()
+			still := len(p.netInflight)
+			p.netMu.Unlock()
+			return still == 0, nil
+		}
+	}
 }
 
 func (p *pwPage) OnConsole(fn func(ConsoleMessage)) {

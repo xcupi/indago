@@ -921,6 +921,30 @@ func (p *Page) PageErrors() []string {
 	return append([]string(nil), p.pageErrs...)
 }
 
+// ErrNetworkIdleUnsupported is returned by Page.WaitNetworkIdle when the
+// concrete driver cannot observe in-flight network requests (test fakes, or a
+// driver that predates the facility). Callers fall back to their own fixed
+// bounded settle rather than treating the page as already quiet.
+var ErrNetworkIdleUnsupported = errors.New("browser: network-idle observation is not supported by this driver")
+
+// WaitNetworkIdle waits until the page has had no in-flight network request
+// for quiet, or until max elapses, whichever comes first. It reports whether
+// the quiet period was actually observed (false means the bound was reached
+// with work still in flight, which is a bounded answer, not an error). The
+// context bounds the caller's wait; the driver call keeps its own max.
+func (p *Page) WaitNetworkIdle(ctx context.Context, quiet, max time.Duration) (bool, error) {
+	w, ok := p.handle.(networkIdleWaiter)
+	if !ok {
+		return false, ErrNetworkIdleUnsupported
+	}
+	type outcome struct{ settled bool }
+	out, err := callCtx(ctx, func() (outcome, error) {
+		settled, err := w.WaitNetworkIdle(quiet, max)
+		return outcome{settled: settled}, err
+	})
+	return out.settled, err
+}
+
 // NetworkEvents returns a copy of observed network requests.
 func (p *Page) NetworkEvents() []NetworkEvent {
 	p.mu.Lock()
