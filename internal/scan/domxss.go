@@ -2378,6 +2378,18 @@ func domXSSHarnessMessages(rt browser.RuntimeObservations) []browser.ConsoleMess
 	for _, report := range rt.Reports {
 		out = append(out, browser.ConsoleMessage{Type: "log", Text: report.Text})
 	}
+	for _, compilation := range rt.Compilations {
+		if compilation.Location.FrameID != rt.MainFrameID || rt.MainFrameID == "" {
+			continue
+		}
+		if compilation.Kind != string(detection.DOMSinkEval) && compilation.Kind != string(detection.DOMSinkFunction) {
+			continue
+		}
+		raw, err := json.Marshal(domXSSSinkReport{Sink: compilation.Kind, Value: compilation.SourceExcerpt})
+		if err == nil {
+			out = append(out, browser.ConsoleMessage{Type: "log", Text: domXSSConsolePrefix + string(raw)})
+		}
+	}
 	return out
 }
 

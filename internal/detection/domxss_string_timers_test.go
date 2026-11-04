@@ -41,7 +41,7 @@ func testDOMStringTimerPlan(t *testing.T, name string) {
 	for _, pair := range []struct {
 		source DOMXSSSource
 		sink   DOMXSSSink
-	}{{"bad-source", sink}, {DOMSourceHash, "eval"}, {DOMSourceHash, ""}} {
+	}{{"bad-source", sink}, {DOMSourceHash, "unsupported"}, {DOMSourceHash, ""}} {
 		if got, ok := DOMXSSPayloadFor(pair.source, pair.sink, "TIMER_MARKER_123"); ok || got != (Candidate{}) {
 			t.Fatal("invalid pair accepted")
 		}

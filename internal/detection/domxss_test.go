@@ -14,8 +14,8 @@ func TestDOMXSSSinkIsValid(t *testing.T) {
 			t.Fatalf("%s should be valid", s)
 		}
 	}
-	if detection.DOMXSSSink("eval").IsValid() {
-		t.Fatal("eval is out of scope for this slice and must not be a valid sink")
+	if !detection.DOMXSSSink("eval").IsValid() {
+		t.Fatal("eval must be a valid execution sink")
 	}
 	if detection.DOMXSSSink("").IsValid() {
 		t.Fatal("empty sink must not be valid")
@@ -132,7 +132,7 @@ func TestDOMXSSSourceIsValid(t *testing.T) {
 }
 
 func TestDOMXSSPayloadForRejectsUnknownSinkOrEmptyMarker(t *testing.T) {
-	if _, ok := detection.DOMXSSPayloadFor(detection.DOMSourceHash, detection.DOMXSSSink("eval"), "indabc"); ok {
+	if _, ok := detection.DOMXSSPayloadFor(detection.DOMSourceHash, detection.DOMXSSSink("unsupported"), "indabc"); ok {
 		t.Fatal("an out-of-scope sink must not produce a candidate")
 	}
 	if _, ok := detection.DOMXSSPayloadFor(detection.DOMXSSSource("eval"), detection.DOMSinkInnerHTML, "indabc"); ok {

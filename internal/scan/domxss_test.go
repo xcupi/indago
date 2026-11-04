@@ -50,10 +50,10 @@ func TestParseDOMXSSReachabilityIgnoresMismatchedMarker(t *testing.T) {
 func TestParseDOMXSSReachabilityIgnoresUnknownSink(t *testing.T) {
 	marker := "indabc123"
 	msgs := []browser.ConsoleMessage{
-		consoleLog(domXSSConsolePrefix + `{"sink":"eval","value":"indabc123"}`),
+		consoleLog(domXSSConsolePrefix + `{"sink":"unsupported","value":"indabc123"}`),
 	}
 	if got := parseDOMXSSReachability(msgs, marker); len(got) != 0 {
-		t.Fatalf("got %v, want none (eval is out of scope for this slice)", got)
+		t.Fatalf("got %v, want none (unknown sink)", got)
 	}
 }
 

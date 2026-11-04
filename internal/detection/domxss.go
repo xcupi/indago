@@ -136,6 +136,8 @@ const (
 	DOMSinkDocumentWrite            DOMXSSSink = "document.write"
 	DOMSinkInsertAdjacentHTML       DOMXSSSink = "insertAdjacentHTML"
 	DOMSinkCreateContextualFragment DOMXSSSink = "Range.createContextualFragment"
+	DOMSinkEval                     DOMXSSSink = "eval"
+	DOMSinkFunction                 DOMXSSSink = "Function"
 	DOMSinkSetTimeout               DOMXSSSink = "setTimeout"
 	DOMSinkSetInterval              DOMXSSSink = "setInterval"
 	// DOMSinkAngularExpression is AngularJS's text-node interpolation: a
@@ -166,7 +168,7 @@ const (
 // IsValid reports whether sink is one of this engine's implemented sinks.
 func (s DOMXSSSink) IsValid() bool {
 	switch s {
-	case DOMSinkInnerHTML, DOMSinkOuterHTML, DOMSinkDocumentWrite, DOMSinkInsertAdjacentHTML, DOMSinkCreateContextualFragment, DOMSinkSetTimeout, DOMSinkSetInterval, DOMSinkJQueryAttr, DOMSinkJQuerySelector, DOMSinkAngularExpression:
+	case DOMSinkEval, DOMSinkFunction, DOMSinkInnerHTML, DOMSinkOuterHTML, DOMSinkDocumentWrite, DOMSinkInsertAdjacentHTML, DOMSinkCreateContextualFragment, DOMSinkSetTimeout, DOMSinkSetInterval, DOMSinkJQueryAttr, DOMSinkJQuerySelector, DOMSinkAngularExpression:
 		return true
 	default:
 		return false
@@ -371,6 +373,21 @@ func DOMXSSPayloadFor(source DOMXSSSource, sink DOMXSSSink, marker string) (Cand
 func DOMXSSPayloadsFor(source DOMXSSSource, sink DOMXSSSink, marker string) []Candidate {
 	if !sink.IsValid() || !source.IsValid() || !validDOMXSSMarker(marker) {
 		return nil
+	}
+	if sink == DOMSinkEval || sink == DOMSinkFunction || (source == DOMSourceQuery && (sink == DOMSinkSetTimeout || sink == DOMSinkSetInterval)) {
+		rationale := fmt.Sprintf("%s reaches native %s compilation; only browser-attributed execution of the unresolved marker identifier confirms it", source, sink)
+		values := []struct{ shape, value string }{
+			{"execution_expression", marker},
+			{"execution_double_string", `";` + marker + ";//"},
+			{"execution_single_string", `';` + marker + ";//"},
+			{"execution_json_string", `"};` + marker + ";//"},
+			{"execution_json_backslash", `\"};` + marker + ";//"},
+		}
+		out := make([]Candidate, 0, len(values))
+		for _, v := range values {
+			out = append(out, domXSSPayloadCandidate(source, sink, v.shape, v.value, rationale))
+		}
+		return out
 	}
 	if sink == DOMSinkSetTimeout || sink == DOMSinkSetInterval {
 		// A timer evaluates JavaScript, not HTML.

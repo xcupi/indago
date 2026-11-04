@@ -77,12 +77,16 @@ func TestDOMXSSPayloadsForKeepsQueryDocumentWriteScriptShapeFirst(t *testing.T) 
 	}
 }
 
-func TestDOMXSSPayloadsForTimersKeepExactlyOneExpressionShape(t *testing.T) {
+func TestDOMXSSPayloadsForTimersKeepExpressionFirst(t *testing.T) {
 	const marker = "TIMERSHAPEMARKER"
 	for _, sink := range []detection.DOMXSSSink{detection.DOMSinkSetTimeout, detection.DOMSinkSetInterval} {
 		for _, source := range detection.DOMXSSSources {
 			shapes := detection.DOMXSSPayloadsFor(source, sink, marker)
-			if len(shapes) != 1 || shapes[0].Value != marker {
+			wantCount := 1
+			if source == detection.DOMSourceQuery {
+				wantCount = 5
+			}
+			if len(shapes) != wantCount || shapes[0].Value != marker {
 				t.Fatalf("%s/%s: a timer evaluates JavaScript only; want exactly the bare marker, got %+v", source, sink, shapes)
 			}
 			if strings.Contains(shapes[0].Value, "<") || strings.Contains(shapes[0].Value, `"`) {
@@ -105,7 +109,7 @@ func TestDOMXSSPayloadsForIsDeterministicAndRejectsInvalidInput(t *testing.T) {
 			}
 		}
 	}
-	if got := detection.DOMXSSPayloadsFor(detection.DOMSourceHash, detection.DOMXSSSink("eval"), "X"); got != nil {
+	if got := detection.DOMXSSPayloadsFor(detection.DOMSourceHash, detection.DOMXSSSink("unsupported"), "X"); got != nil {
 		t.Fatalf("unknown sink must produce no shape: %+v", got)
 	}
 	if got := detection.DOMXSSPayloadsFor(detection.DOMXSSSource("eval"), detection.DOMSinkInnerHTML, "X"); got != nil {

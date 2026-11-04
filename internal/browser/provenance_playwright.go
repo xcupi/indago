@@ -3,6 +3,7 @@ package browser
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,8 @@ type cdpScript struct {
 	Stack       cdpStack `json:"stackTrace"`
 }
 
+var compilationCallee = regexp.MustCompile(`\b(eval|Function)\s*\(\s*$`)
+
 func decodeCDP(v any, out any) { b, _ := json.Marshal(v); _ = json.Unmarshal(b, out) }
 
 func (p *pwPage) RuntimeObservations() RuntimeObservations {
@@ -62,6 +65,7 @@ func (p *pwPage) RuntimeObservations() RuntimeObservations {
 	p.provenanceMu.Lock()
 	defer p.provenanceMu.Unlock()
 	r := p.provenance
+	r.Compilations = append([]RuntimeCompilation(nil), r.Compilations...)
 	r.Exceptions = append([]RuntimeException(nil), r.Exceptions...)
 	r.Reports = append([]InstrumentationReport(nil), r.Reports...)
 	return r
@@ -168,12 +172,75 @@ func (p *pwPage) EnableRuntimeProvenance(marker, initScript string) error {
 		var s cdpScript
 		decodeCDP(v, &s)
 		stateMu.Lock()
-		defer stateMu.Unlock()
 		if len(scripts) >= provenanceScriptLimit {
+			stateMu.Unlock()
 			p.noteProvenance("script metadata budget exceeded; later scripts cannot be attributed")
 			return
 		}
 		scripts[s.ID] = s
+		stateMu.Unlock()
+		// Observe native compilation rather than replacing eval: a wrapper
+		// turns direct eval into indirect eval and destroys lexical semantics.
+		if initScript == "" || len(s.Stack.Frames) == 0 {
+			return
+		}
+		p.provInflight.Add(1)
+		defer p.provInflight.Add(-1)
+		caller := s.Stack.Frames[0]
+		callerCode, ok := source(caller.ScriptID)
+		if !ok || isInstalledInitScript(callerCode, initScript) {
+			return
+		}
+		stateMu.RLock()
+		parent := scripts[caller.ScriptID]
+		stateMu.RUnlock()
+		line, column := caller.Line-parent.StartLine, caller.Column
+		if line == 0 {
+			column -= parent.StartColumn
+		}
+		offset, ok := v8Offset(callerCode, line, column)
+		if !ok {
+			return
+		}
+		kind := ""
+		call := strings.TrimSpace(callerCode[offset:])
+		if strings.HasPrefix(call, "eval(") || strings.HasPrefix(call, "eval (") {
+			kind = "eval"
+		}
+		if strings.HasPrefix(call, "new Function(") || strings.HasPrefix(call, "Function(") {
+			kind = "Function"
+		}
+		if kind == "" {
+			// V8 may put the creation position at the first argument,
+			// rather than the callee token.
+			if m := compilationCallee.FindStringSubmatch(callerCode[:offset]); len(m) > 1 {
+				kind = m[1]
+			}
+		}
+		if kind == "" {
+			return
+		}
+		code, ok := source(s.ID)
+		at := strings.Index(code, marker)
+		if !ok || marker == "" || at < 0 {
+			return
+		}
+		lo, hi := at-160, at+len(marker)+160
+		if lo < 0 {
+			lo = 0
+		}
+		if hi > len(code) {
+			hi = len(code)
+		}
+		loc := location(s.ID, s.StartLine, s.StartColumn)
+		loc.SourceSHA256 = sourceDigest(code)
+		rep := RuntimeCompilation{Kind: kind, Location: loc,
+			Caller: location(caller.ScriptID, caller.Line, caller.Column), SourceExcerpt: code[lo:hi]}
+		p.provenanceMu.Lock()
+		if len(p.provenance.Compilations) < provenanceEventLimit {
+			p.provenance.Compilations = append(p.provenance.Compilations, rep)
+		}
+		p.provenanceMu.Unlock()
 	})
 	session.On("Debugger.paused", func(v map[string]any) {
 		p.provInflight.Add(1)

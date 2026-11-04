@@ -40,12 +40,22 @@ type InstrumentationReport struct {
 	NodeIDs  []int           `json:"node_ids,omitempty"`
 }
 
+// RuntimeCompilation is marker-bearing code compiled by the native JS engine.
+// Compilation is reachability only, including a Function body never invoked.
+type RuntimeCompilation struct {
+	Kind          string          `json:"kind"`
+	Location      RuntimeLocation `json:"location"`
+	Caller        RuntimeLocation `json:"caller"`
+	SourceExcerpt string          `json:"source_excerpt"`
+}
+
 type RuntimeObservations struct {
-	Available   bool                    `json:"available"`
-	Note        string                  `json:"note,omitempty"`
-	MainFrameID string                  `json:"main_frame_id"`
-	Exceptions  []RuntimeException      `json:"exceptions,omitempty"`
-	Reports     []InstrumentationReport `json:"reports,omitempty"`
+	Compilations []RuntimeCompilation    `json:"compilations,omitempty"`
+	Available    bool                    `json:"available"`
+	Note         string                  `json:"note,omitempty"`
+	MainFrameID  string                  `json:"main_frame_id"`
+	Exceptions   []RuntimeException      `json:"exceptions,omitempty"`
+	Reports      []InstrumentationReport `json:"reports,omitempty"`
 }
 
 // EnableRuntimeProvenance observes execution without evaluating payloads or

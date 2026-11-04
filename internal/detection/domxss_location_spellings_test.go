@@ -301,7 +301,11 @@ func TestDOMXSSPayloadGoldensUnchanged(t *testing.T) {
 		if got := payloadValues(DOMXSSPayloadsFor(source, DOMSinkJQueryAttr, m)); !equalStrings(got, []string{"javascript:" + m}) {
 			t.Fatalf("%s/jQuery.attr plan moved: got %v", source, got)
 		}
-		if got := payloadValues(DOMXSSPayloadsFor(source, DOMSinkSetTimeout, m)); !equalStrings(got, []string{m}) {
+		wantTimer := []string{m}
+		if source == DOMSourceQuery {
+			wantTimer = []string{m, `";` + m + ";//", `';` + m + ";//", `"};` + m + ";//", `\"};` + m + ";//"}
+		}
+		if got := payloadValues(DOMXSSPayloadsFor(source, DOMSinkSetTimeout, m)); !equalStrings(got, wantTimer) {
 			t.Fatalf("%s/setTimeout plan moved: got %v", source, got)
 		}
 	}
