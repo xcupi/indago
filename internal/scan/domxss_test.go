@@ -57,6 +57,52 @@ func TestParseDOMXSSReachabilityIgnoresUnknownSink(t *testing.T) {
 	}
 }
 
+// --- text-only (diagnostic) reports ---
+//
+// A text write can never execute. The harness reports it so a negative can say
+// where the marker actually went, but no text report may ever be mistaken for
+// sink reachability - not even a forged one that names a real HTML sink.
+
+func TestParseDOMXSSTextSinksNamesWhereTheMarkerWent(t *testing.T) {
+	marker := "indabc123"
+	msgs := []browser.ConsoleMessage{
+		consoleLog("unrelated page log"),
+		consoleLog(domXSSConsolePrefix + `{"sink":"innerText","value":"0 results for 'indabc123'","text_only":true}`),
+		consoleLog(domXSSConsolePrefix + `{"sink":"textContent","value":"indabc123","text_only":true}`),
+		consoleLog(domXSSConsolePrefix + `{"sink":"innerText","value":"again indabc123","text_only":true}`),
+	}
+	got := parseDOMXSSTextSinks(msgs, marker)
+	if len(got) != 2 || got[0] != "innerText" || got[1] != "textContent" {
+		t.Fatalf("got %v, want [innerText textContent] in first-seen order, deduplicated", got)
+	}
+}
+
+func TestParseDOMXSSTextSinksRequiresMarkerAndAllowList(t *testing.T) {
+	marker := "indabc123"
+	msgs := []browser.ConsoleMessage{
+		// no marker in the value: the diagnostic is marker-gated
+		consoleLog(domXSSConsolePrefix + `{"sink":"innerText","value":"nothing here","text_only":true}`),
+		// a page-invented sink name must never be echoed as a sink
+		consoleLog(domXSSConsolePrefix + `{"sink":"innerHTML","value":"indabc123","text_only":true}`),
+		consoleLog(domXSSConsolePrefix + `{"sink":"totally-made-up","value":"indabc123","text_only":true}`),
+	}
+	if got := parseDOMXSSTextSinks(msgs, marker); len(got) != 0 {
+		t.Fatalf("got %v, want none", got)
+	}
+}
+
+func TestParseDOMXSSReachabilityIgnoresTextOnlyReports(t *testing.T) {
+	marker := "indabc123"
+	msgs := []browser.ConsoleMessage{
+		// A text write labelled with a REAL HTML sink name: still not
+		// reachability, because text_only is authoritative.
+		consoleLog(domXSSConsolePrefix + `{"sink":"innerHTML","value":"indabc123","text_only":true}`),
+	}
+	if got := parseDOMXSSReachability(msgs, marker); len(got) != 0 {
+		t.Fatalf("a text-only report must never be reachable, got %v", got)
+	}
+}
+
 func TestParseDOMXSSReachabilityIgnoresMalformedJSON(t *testing.T) {
 	marker := "indabc123"
 	msgs := []browser.ConsoleMessage{

@@ -216,6 +216,49 @@ type domXSSSinkReport struct {
 	// from a rendered body text node. Text is still true: it is an
 	// evaluated interpolation result, never a hooked setter call.
 	Binding bool `json:"binding,omitempty"`
+	// TextOnly marks the DIAGNOSTIC innerText/textContent report: the marker
+	// reached a text write, which cannot execute. Such a report is never
+	// reachability and never evidence of a sink; it only lets a negative say
+	// where the marker actually went.
+	TextOnly bool `json:"text_only,omitempty"`
+}
+
+// domXSSTextSink is one text-only write the harness observed. A closed
+// allow-list: a page-authored report cannot invent a sink name that reads as
+// something this engine executes.
+var domXSSTextSinks = map[string]bool{
+	"innerText":   true,
+	"textContent": true,
+}
+
+// parseDOMXSSTextSinks returns the distinct text-only sinks that received a
+// marker-containing value, in first-seen order. These are DIAGNOSTIC: they are
+// never reachability (see parseDOMXSSReachability, which skips them) and never
+// influence a verdict.
+func parseDOMXSSTextSinks(msgs []browser.ConsoleMessage, marker string) []string {
+	if marker == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range msgs {
+		if !strings.HasPrefix(m.Text, domXSSConsolePrefix) {
+			continue
+		}
+		var rep domXSSSinkReport
+		if json.Unmarshal([]byte(strings.TrimPrefix(m.Text, domXSSConsolePrefix)), &rep) != nil {
+			continue
+		}
+		if !rep.TextOnly || !domXSSTextSinks[rep.Sink] || seen[rep.Sink] {
+			continue
+		}
+		if !strings.Contains(rep.Value, marker) {
+			continue
+		}
+		seen[rep.Sink] = true
+		out = append(out, rep.Sink)
+	}
+	return out
 }
 
 // domXSSConsoleCSPPrefix tags a Content-Security-Policy violation the harness
@@ -346,6 +389,11 @@ func parseDOMXSSReachability(msgs []browser.ConsoleMessage, marker string) []det
 			continue
 		}
 		if !strings.Contains(rep.Value, marker) {
+			continue
+		}
+		// A text-only report is diagnostic, never reachability: text writes
+		// cannot execute (see parseDOMXSSTextSinks).
+		if rep.TextOnly {
 			continue
 		}
 		sink := detection.DOMXSSSink(rep.Sink)
@@ -658,6 +706,40 @@ const domXSSHarnessTemplate = `(() => {
       LOG(PREFIX + STRINGIFY({ sink: sink, value: excerpt(v, at), connected: connected === true }));
     } catch (e) {}
   }
+  // Text-only sinks (innerText/textContent). These are DIAGNOSTIC: a text write
+  // can never execute, so this report never counts as sink reachability and
+  // never reaches a verdict. It exists so a negative can say the marker DID
+  // arrive in the page (in a position that cannot execute) instead of implying
+  // the harness observed nothing at all - the measured page puts the echoed
+  // term into innerText, and "no sink reachable" alone read like a blind hook.
+  // text_only=true is what keeps the two apart in the parsers below.
+  function reportText(sink, value) {
+    try {
+      var v = TOSTRING(value);
+      var at = v.indexOf(MARKER);
+      if (at === -1) return;
+      LOG(PREFIX + STRINGIFY({ sink: sink, value: excerpt(v, at), text_only: true }));
+    } catch (e) {}
+  }
+  // Native-first, observational. Only a primitive string is inspected: the
+  // setter's own coercion must not be repeated or replaced.
+  function hookTextSink(proto, prop, label) {
+    try {
+      var desc = Object.getOwnPropertyDescriptor(proto, prop);
+      if (!desc || !desc.set) return;
+      var origSet = desc.set;
+      Object.defineProperty(proto, prop, {
+        configurable: true,
+        enumerable: desc.enumerable,
+        get: desc.get,
+        set: function (v) {
+          var result = origSet.call(this, v);
+          if (typeof v === 'string') reportText(label, v);
+          return result;
+        }
+      });
+    } catch (e) {}
+  }
   function hookProp(proto, prop) {
     try {
       var desc = Object.getOwnPropertyDescriptor(proto, prop);
@@ -676,6 +758,11 @@ const domXSSHarnessTemplate = `(() => {
   }
   hookProp(Element.prototype, 'innerHTML');
   hookProp(Element.prototype, 'outerHTML');
+  // Diagnostic-only text sinks: see reportText. These hooks are installed
+  // AFTER the HTML hooks so the HTML hooks stay first in this script, and they
+  // are the reason a negative can name where the marker actually went.
+  if (typeof HTMLElement === 'function') hookTextSink(HTMLElement.prototype, 'innerText', 'innerText');
+  try { hookTextSink(Node.prototype, 'textContent', 'textContent'); } catch (e) {}
   // Native-first, observational string timer hook. Strict mode preserves even
   // null/undefined receivers for native Web IDL validation. Never coerce a
   // handler, replace a callback, evaluate code, or schedule an extra timer.
@@ -1903,6 +1990,14 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	}
 	if len(reachable) == 0 {
 		note := fmt.Sprintf("no implemented DOM-XSS sink reachable from %s (negative result)", label)
+		if textSinks := parseDOMXSSTextSinks(domXSSHarnessMessages(obs1.Runtime), marker); len(textSinks) > 0 {
+			// The marker DID arrive in the page, but only in a position that
+			// cannot execute. Saying so keeps this negative honest: it
+			// distinguishes "the harness saw nothing" from "the value landed
+			// somewhere harmless", which is what the measured application page
+			// does (it writes the echoed term with innerText).
+			note += fmt.Sprintf("; the marker did reach a text-only sink (%s), which cannot execute, so the value arrived in the page but never reached an HTML or timer sink", strings.Join(textSinks, ", "))
+		}
 		if obs1.SettleBusy {
 			note += fmt.Sprintf("; the bounded network settle (%s) expired with requests still in flight, so an async-driven sink may not have run yet", domXSSURLSourceObservationDelay(canaryNavURL)+domXSSNetworkSettleBudget)
 		}
