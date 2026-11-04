@@ -41,6 +41,14 @@ func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope, 
 	// writes the SAME Findings() rows. It is a raw-HTTP engine (GET/HEAD
 	// reads), never a browser job.
 	h[domain.JobIDOR] = newIDORExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log, findingsMu, idorCandidates, enum)
+	// Access control shares findingsMu too. hasSession decides whether the
+	// anonymous probe gets the non-admin comparison request: a scan with no
+	// saved session can still confirm anonymous access to an admin action.
+	hasSession := false
+	if se, ok := eng.(*scopedEngine); ok && se != nil && len(se.cookies) > 0 {
+		hasSession = true
+	}
+	h[domain.JobAccessControl] = newAccessControlExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log, findingsMu, hasSession)
 	return h
 }
 
@@ -81,6 +89,7 @@ func (c *Controller) verifier() verification.Verifier {
 //	JobVerify    → verifyExecutor: browser verification of a reflected candidate
 //	JobDOMXSS    → domXSSExecutor: DOM-XSS reachability + payload verification
 //	JobIDOR      → idorExecutor: object-identifier differential (GET/HEAD reads)
+//	JobAccessControl → accessControlExecutor: anonymous-vs-non-admin admin-path probe
 func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 	noop := func(kind domain.JobType) worker.Handler {
 		return worker.HandlerFunc(func(ctx context.Context, job *domain.TestJob) error {
@@ -89,10 +98,11 @@ func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 		})
 	}
 	return map[domain.JobType]worker.Handler{
-		domain.JobDiscovery: noop(domain.JobDiscovery),
-		domain.JobTest:      noop(domain.JobTest),
-		domain.JobVerify:    noop(domain.JobVerify),
-		domain.JobDOMXSS:    noop(domain.JobDOMXSS),
-		domain.JobIDOR:      noop(domain.JobIDOR),
+		domain.JobDiscovery:     noop(domain.JobDiscovery),
+		domain.JobTest:          noop(domain.JobTest),
+		domain.JobVerify:        noop(domain.JobVerify),
+		domain.JobDOMXSS:        noop(domain.JobDOMXSS),
+		domain.JobIDOR:          noop(domain.JobIDOR),
+		domain.JobAccessControl: noop(domain.JobAccessControl),
 	}
 }

@@ -291,9 +291,13 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 
 	// Per-call redirect capture keeps the Client concurrency-safe.
 	var chain []string
+	jar := c.jar
+	if req.NoCookies {
+		jar = nil // genuinely anonymous: nothing from a previous response
+	}
 	client := &http.Client{
 		Transport: c.transport,
-		Jar:       c.jar,
+		Jar:       jar,
 		CheckRedirect: func(r *http.Request, via []*http.Request) error {
 			chain = append(chain, r.URL.String())
 			if !c.followRedirects {
@@ -377,9 +381,11 @@ func (c *Client) buildRequest(ctx context.Context, req *Request) (*http.Request,
 	if hr.Header.Get("Content-Type") == "" && req.ContentType != "" {
 		hr.Header.Set("Content-Type", req.ContentType)
 	}
-	for _, ck := range req.Cookies {
-		if ck != nil {
-			hr.AddCookie(ck)
+	if !req.NoCookies {
+		for _, ck := range req.Cookies {
+			if ck != nil {
+				hr.AddCookie(ck)
+			}
 		}
 	}
 	return hr, nil

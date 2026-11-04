@@ -96,7 +96,12 @@ func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpen
 		// Rebuild the cookie list for this URL on every hop. Session cookies
 		// carry storage-state scope metadata; request-specific overrides remain
 		// first so a targeted injection wins over a same-named session cookie.
-		cur.Cookies = s.cookiesForURL(cur.URL, req.URL, requestCookies, hop == 0)
+		// A NoCookies request is a deliberate anonymous probe: attach nothing.
+		if cur.NoCookies {
+			cur.Cookies = nil
+		} else {
+			cur.Cookies = s.cookiesForURL(cur.URL, req.URL, requestCookies, hop == 0)
+		}
 		resp, err := s.inner.Do(ctx, &cur)
 		if err != nil {
 			return nil, err

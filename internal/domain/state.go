@@ -253,12 +253,18 @@ const (
 	// the raw HTTP engine (GET/HEAD reads only) and is dispatched to the
 	// HTTP worker group.
 	JobIDOR JobType = "idor"
+	// JobAccessControl probes one discovered admin-like path for missing
+	// function-level authorization: it sends an anonymous GET and, when the
+	// scan has a session, the same GET as the authenticated non-admin, then
+	// decides from the response bodies (see internal/accesscontrol and
+	// internal/scan/accesscontrol.go). Raw HTTP, GET only.
+	JobAccessControl JobType = "access_control"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl:
 		return true
 	default:
 		return false

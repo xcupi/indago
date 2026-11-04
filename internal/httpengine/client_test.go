@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -173,6 +174,58 @@ func TestCookieJarPersistsAcrossRequests(t *testing.T) {
 	}
 	if string(resp.Body) != "session123" {
 		t.Fatalf("jar did not persist cookie, body=%q status=%d", resp.Body, resp.Status)
+	}
+}
+
+func TestNoCookiesRequestIsAnonymous(t *testing.T) {
+	var mu sync.Mutex
+	var sawCookie []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/set", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "sid", Value: "session123", Path: "/"})
+	})
+	mux.HandleFunc("/check", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		sawCookie = append(sawCookie, r.Header.Get("Cookie"))
+		mu.Unlock()
+		if _, err := r.Cookie("sid"); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := mustClient(t, httpengine.DefaultConfig())
+	if _, err := c.Do(context.Background(), httpengine.GET(srv.URL+"/set")); err != nil {
+		t.Fatal(err)
+	}
+	// The jar really does carry the cookie for an ordinary request.
+	resp, err := c.Do(context.Background(), httpengine.GET(srv.URL+"/check"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != http.StatusOK {
+		t.Fatalf("ordinary request status = %d, want 200 (jar should carry the cookie)", resp.Status)
+	}
+
+	// NoCookies must bypass the jar AND any explicitly supplied cookies.
+	req := httpengine.GET(srv.URL + "/check")
+	req.NoCookies = true
+	req.Cookies = []*http.Cookie{{Name: "sid", Value: "explicit"}}
+	resp, err = c.Do(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != http.StatusUnauthorized {
+		t.Fatalf("NoCookies request status = %d, want 401 (a genuinely anonymous request)", resp.Status)
+	}
+	mu.Lock()
+	last := sawCookie[len(sawCookie)-1]
+	mu.Unlock()
+	if last != "" {
+		t.Fatalf("NoCookies request sent Cookie header %q, want none", last)
 	}
 }
 

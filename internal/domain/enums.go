@@ -15,12 +15,18 @@ const (
 	// identifiers selecting another principal's object). Function/role-level
 	// access control (family B) is not part of this class yet.
 	VulnIDOR VulnClass = "idor"
+	// VulnAccessControl is function-/role-level access control: a surface
+	// that applies no authorization to an already-privileged administrative
+	// function (the "unprotected admin functionality" class). It is decided
+	// from the response content an anonymous request receives, never from an
+	// LLM. See docs/access-control.md.
+	VulnAccessControl VulnClass = "access_control"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl:
 		return true
 	default:
 		return false

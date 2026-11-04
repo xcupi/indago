@@ -60,6 +60,12 @@ type execution struct {
 	// idor.go's enqueueIDORProbes) has already been enqueued. It runs after
 	// the DOM-XSS pass, for scans that explicitly enabled the engine.
 	idorPassDone atomic.Bool
+
+	// accessControlPassDone marks that this execution's one-time access-control
+	// probe pass (see accesscontrol.go's enqueueAccessControlProbes) has
+	// already been enqueued. It runs on the same quiet tick as the other
+	// protected passes and never gates on browser work.
+	accessControlPassDone atomic.Bool
 }
 
 // pause routes a scan pause to both the worker pool and discovery.
@@ -441,6 +447,15 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 	if !ex.idorPassDone.Load() {
 		ex.idorPassDone.Store(true)
 		c.enqueueIDORProbes(ctx, ex.scanID)
+		passes = true
+	}
+	// Access control: bounded by robots.txt/sitemap provenance and a fixed
+	// admin-path vocabulary (see accesscontrol.go). No opt-in flag: every
+	// request is a single in-scope GET of a path discovery already disclosed,
+	// and the pass never sends a state-changing method.
+	if !ex.accessControlPassDone.Load() {
+		ex.accessControlPassDone.Store(true)
+		c.enqueueAccessControlProbes(ctx, ex.scanID)
 		passes = true
 	}
 	if passes {

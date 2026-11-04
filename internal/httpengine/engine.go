@@ -35,7 +35,12 @@ type Request struct {
 	URL     string            // absolute http(s) URL
 	Headers map[string]string // request headers (single value each)
 	Cookies []*http.Cookie    // request-scoped cookies (in addition to any jar)
-	Body    []byte            // raw request body
+	// NoCookies makes this request genuinely anonymous: the configured cookie
+	// jar is bypassed AND Cookies is ignored, so nothing a previous response
+	// stored can authenticate it. Used by differential probes that must
+	// compare an anonymous request with an authenticated one.
+	NoCookies bool
+	Body      []byte // raw request body
 	// ContentType, when set and no explicit Content-Type header is present, is
 	// used as the request's Content-Type. The POSTForm/POSTJSON constructors set
 	// it for you.
