@@ -278,7 +278,7 @@ is the raw query string:
 | template | value (double-quoted site shown) | trigger | confirms? |
 |---|---|---|---|
 | href script breakout | `"><script>M</script>` (single-quoted site: `'><script>M</script>`) | `load` | yes, with **no activation** — the browser executes it while parsing |
-| href attribute breakout | `"accesskey="x" onclick=M y="` (mirror shape; a single-quoted site gets `'accesskey='x' onclick=M x='` byte for byte) | `interaction` | yes, after the verifier's single access-key keypress |
+| href attribute breakout | `"accesskey=x onclick=M y="` (single-quoted site: `'accesskey=x onclick=M x='`) | `interaction` | yes, after the verifier's single access-key keypress |
 
 How the script shape works: the leading delimiter closes the `href` value and
 `>` ends the element's own tag (a `<link>` is void; an `<a>` is left open but
@@ -298,11 +298,11 @@ benign marker is carried: no `alert`, no cookie access, no network call, no
 `>`) are left as text after `</script>` and cannot execute.
 
 How the accesskey shape works: the leading delimiter closes the `href` value;
-the accesskey attribute names the element — its VALUE is quoted with the same
-delimiter the shape closes, so the whole breakout needs exactly one quote byte
-(the site's own) to arrive raw — `onclick=M` carries the benign marker as the
+the accesskey attribute names the element — its value is the bare character `x`
+and carries no quote of its own, so the delimiter that closes the `href` stays
+outside it — `onclick=M` carries the benign marker as the
 handler's whole body; the trailing dummy attribute (`y=` for the double-quote
-mirror, `x=` for the single-quote variant) plus the site's own closing delimiter
+variant, `x=` for the single-quote variant) plus the site's own closing delimiter
 keeps the rest of the tag well-formed. The candidate declares `interaction` and
 names an access key, so verification presses the platform's access-key shortcut
 once (`Alt+Shift+x` on Chromium/Linux) through the browser's real keyboard
@@ -311,16 +311,17 @@ press does not confirm anything by itself: only the marker-specific runtime
 observation does, so a page that reflects the same bytes with the handler
 stripped stays Rejected after it.
 
-Why the accesskey value mirrors the delimiter instead of always using single
-quotes: a double-quoted site commonly rewrites or filters `'` (HTML-encoding it
-is routine) while leaving its own `"` raw. A hardcoded `accesskey='x'` on such
-a site closes the attribute fine but the encoded value is decoded into the
-attribute VALUE as the literal characters `'x'`, so the keybinding is lost
-while the candidate still looks plannable. Mirroring removes that second,
-undeclared dependency: the double-quote family carries no single quote at all,
-and the single-quote variant keeps its historical bytes exactly (including
-`accesskey='x'`), because there the delimiter and the value quote are the same
-character anyway.
+Why the value is unquoted instead of quoted with the delimiter: quoting it
+(`accesskey='x'` for a single-quoted site, `accesskey="x"` for a double-quoted
+one) glues a quote byte to the value. A site that entity-encodes that quote
+(`&#39;`) decodes it into the attribute value as a literal character, and any
+reader that takes the value's bytes as the declared key — the verifier's key
+derivation included — then sees `'x` rather than `x`, so it dispatches `'`
+instead of `x` and the keypress never reaches the handler even though the
+attribute breakout itself succeeded. The unquoted form removes the second,
+undeclared dependency entirely: the two variants differ only in the one
+delimiter the breakout closes, the value is always exactly `x`, and encoding
+either quote cannot change the key that is dispatched.
 
 Quote handling is taken from the analyser, never assumed: a `double`- or
 `single`-quoted site gets its own delimiter, and any other position (including

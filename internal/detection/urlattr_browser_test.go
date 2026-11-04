@@ -141,7 +141,7 @@ func TestURLHrefBreakoutConfirmsAfterOneClick(t *testing.T) {
 	plan := urlAttrPlanFor(t, srv)
 
 	m := urlAttrProbe.Token
-	want := `"accesskey="x" onclick=` + m + ` y="`
+	want := `"accesskey=x onclick=` + m + ` y="`
 	if strings.Contains(want, "'") {
 		t.Fatalf("the double-quote variant must not depend on a raw single quote: %q", want)
 	}
@@ -319,7 +319,7 @@ func TestURLHrefBreakoutEncodedDelimiterStaysRejected(t *testing.T) {
 	forced := detection.Candidate{
 		Source:   detection.SourceBuiltin,
 		Category: detection.CatURL,
-		Value:    `"accesskey="x" onclick=` + m + ` y="`,
+		Value:    `"accesskey=x onclick=` + m + ` y="`,
 		Trigger:  detection.TriggerInteraction,
 	}
 	v := urlAttrVerifier(t)

@@ -753,26 +753,29 @@ func urlHrefBreakoutTemplates(a ContextAnalysis, m string) []candTemplate {
 	out := make([]candTemplate, 0, len(styles)*2)
 	for _, style := range styles {
 		q := quoteByte(style)
-		// The accesskey VALUE is quoted with the same delimiter the shape
-		// closes, so the whole breakout depends on exactly one quote byte
-		// arriving raw: the site's own. The previous double-quote variant
-		// hardcoded a single-quoted value (accesskey='x'), which added a
-		// second, undeclared dependency: on a double-quoted site that rewrites
-		// or filters the single quote the keybinding is destroyed even though
-		// the attribute breakout itself succeeded. The double-quote family
-		// therefore plans the mirror shape, "accesskey="x" onclick=M y=",
-		// which carries no single quote at all.
+		// The accesskey VALUE is the bare character x, never a quoted one:
+		// the delimiter that closes the href stays outside the value, and the
+		// value itself carries no quote at all. Quoting it — the historical
+		// accesskey='x' / accesskey="x" — glues a quote byte to the value:
+		// a reader that takes the value literally (an entity-decoding HTML
+		// parser, or the verification layer deriving the key to dispatch)
+		// then sees 'x and presses the wrong key, so the handler is never
+		// reached even though the attribute breakout itself succeeded. The
+		// unquoted form is identical for both quote families: the breakout
+		// depends on exactly one quote byte (the site's own delimiter) and
+		// carries no value-delimiter quote that could be encoded, rewritten
+		// or misread.
 		//
 		// The trailing dummy attribute swallows the site's own closing quote;
 		// its name is inert. The single-quote variant keeps its historical
-		// name (x) byte for byte; the double-quote mirror uses y, matching
+		// name (x); the double-quote mirror uses y, matching
 		// the link-attribute shape.
 		filler := "x"
 		if style == "double" {
 			filler = "y"
 		}
-		tpl := onInteractionStrict(q+"accesskey="+q+"x"+q+" onclick="+m+" "+filler+"="+q, q, 78,
-			delimiterNote("close the href attribute value and add an accesskey/onclick pair on the element itself: accesskey names the element ('x') and onclick carries the benign marker as its whole body, so the single click activation browser verification performs dispatches it; the accesskey value is quoted with the site's own delimiter too, so the shape needs only that one quote raw and encoding <, > or the other quote cannot stop it, and the shape is only planned when that quote arrives raw", style))
+		tpl := onInteractionStrict(q+"accesskey=x onclick="+m+" "+filler+"="+q, q, 78,
+			delimiterNote("close the href attribute value and add an accesskey/onclick pair on the element itself: accesskey names the element with the bare character x and onclick carries the benign marker as its whole body, so the single click activation browser verification performs dispatches it; the accesskey value is unquoted, so the shape needs only the site's delimiter raw and encoding <, > or either quote cannot stop it, and the shape is only planned when that delimiter arrives raw", style))
 		tpl.delimiter = style
 		out = append(out, tpl)
 

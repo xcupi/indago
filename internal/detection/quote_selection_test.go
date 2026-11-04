@@ -113,7 +113,7 @@ func TestUnprovenDelimiterPlansBothQuoteStyles(t *testing.T) {
 	if strings.Contains(styles["double"], "'") {
 		t.Fatalf("double variant depends on a raw single quote: %q", styles["double"])
 	}
-	if styles["single"] != "'accesskey='x' onclick="+m+" x='" {
+	if styles["single"] != "'accesskey=x onclick="+m+" x='" {
 		t.Fatalf("single variant = %q", styles["single"])
 	}
 }

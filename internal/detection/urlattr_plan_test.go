@@ -104,18 +104,19 @@ func hrefScriptBreakoutValue(style, marker string) string {
 }
 
 // hrefBreakoutValue is the exact shape the href family plans for one quote
-// style: the site's delimiter closes the value, the accesskey VALUE is quoted
-// with that same delimiter (so only that one quote byte must arrive raw), the
-// handler body is the bare marker, and an inert trailing attribute swallows
-// the site's closing quote. The single-quote variant keeps its historical
-// trailing name (x) byte for byte; the double-quote mirror uses y.
+// style: the site's delimiter closes the value, the accesskey VALUE is the bare
+// character x with no quote of its own (so no reader can mistake a delimiter
+// byte for the declared key), the handler body is the bare marker, and an inert
+// trailing attribute swallows the site's closing quote. The single-quote
+// variant keeps its historical trailing name (x); the double-quote mirror uses
+// y.
 func hrefBreakoutValue(style, marker string) string {
 	q := dq
 	filler := "y"
 	if style == "single" {
 		q, filler = sq, "x"
 	}
-	return q + "accesskey=" + q + "x" + q + " onclick=" + marker + " " + filler + "=" + q
+	return q + "accesskey=x onclick=" + marker + " " + filler + "=" + q
 }
 
 // TestPlanRawQueryURLHrefBreakoutShapeDoubleQuote pins the exact shape for the
@@ -179,7 +180,7 @@ func TestPlanRawQueryURLHrefBreakoutShapeSingleQuote(t *testing.T) {
 	if loc.Quote != "single" || loc.Context != detection.CtxURL {
 		t.Fatalf("measured context = %s quote=%q; this test pins the single-quoted position", loc.Context, loc.Quote)
 	}
-	want := `'accesskey='x' onclick=` + m + ` x='`
+	want := `'accesskey=x onclick=` + m + ` x='`
 	if got := findCandidate(plan, want); got == nil {
 		t.Fatalf("single-quoted href plan has no %q candidate: %+v", want, plan.Candidates)
 	}
@@ -268,7 +269,7 @@ func TestURLAttributeBreakoutDefaultCandidateSetUnchanged(t *testing.T) {
 			`url|"><script>` + m + `</script>|89|load`,
 			`url|" autofocus onfocus=` + m + ` x="|87|load`,
 			`url|" onmouseover=` + m + ` x="|85|interaction`,
-			`url|"accesskey="x" onclick=` + m + ` y="|78|interaction`,
+			`url|"accesskey=x onclick=` + m + ` y="|78|interaction`,
 			`url|" accesskey=x onclick=` + m + ` y="|60|interaction`,
 		},
 	}
