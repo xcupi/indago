@@ -60,7 +60,7 @@ func urlEncodedQuoteFixture(value string) []byte {
 func hrefBreakouts(plan *detection.CandidatePlan) []detection.Candidate {
 	var out []detection.Candidate
 	for _, c := range plan.Candidates {
-		if strings.Contains(c.Value, "accesskey='x' onclick=") {
+		if hrefAccesskeyBreakout(c) {
 			out = append(out, c)
 		}
 	}
@@ -107,10 +107,13 @@ func TestUnprovenDelimiterPlansBothQuoteStyles(t *testing.T) {
 			t.Fatalf("rationale must name the delimiter the variant assumes, got %q", c.Rationale)
 		}
 	}
-	if styles["double"] != dq+"accesskey='x' onclick="+m+" x="+dq {
+	if styles["double"] != hrefBreakoutValue("double", m) {
 		t.Fatalf("double variant = %q", styles["double"])
 	}
-	if styles["single"] != sq+"accesskey='x' onclick="+m+" x="+sq {
+	if strings.Contains(styles["double"], "'") {
+		t.Fatalf("double variant depends on a raw single quote: %q", styles["double"])
+	}
+	if styles["single"] != "'accesskey='x' onclick="+m+" x='" {
 		t.Fatalf("single variant = %q", styles["single"])
 	}
 }
@@ -137,7 +140,7 @@ func TestProvenDelimiterPlansOnlyThatStyle(t *testing.T) {
 		if got[0].Delimiter != tc.style {
 			t.Fatalf("%s fixture: planned delimiter = %q", tc.style, got[0].Delimiter)
 		}
-		want := tc.quote + "accesskey='x' onclick=" + m + " x=" + tc.quote
+		want := hrefBreakoutValue(tc.style, m)
 		if got[0].Value != want {
 			t.Fatalf("%s fixture: value = %q, want %q", tc.style, got[0].Value, want)
 		}

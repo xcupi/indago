@@ -65,9 +65,35 @@ func findCandidate(plan *detection.CandidatePlan, want string) *detection.Candid
 	return nil
 }
 
+// hrefAccesskeyBreakout reports whether c belongs to the href
+// attribute-breakout family (urlHrefBreakoutTemplates): an accesskey/onclick
+// pair that closes a quoted attribute value. The link-attribute shape also
+// carries accesskey/onclick, but it does not close a quote of its own
+// (Candidate.Delimiter is empty), so the delimiter label separates the two
+// families without depending on the exact bytes of either.
+func hrefAccesskeyBreakout(c detection.Candidate) bool {
+	return c.Delimiter != "" && strings.Contains(c.Value, "accesskey=") && strings.Contains(c.Value, "onclick=")
+}
+
+// hrefBreakoutValue is the exact shape the href family plans for one quote
+// style: the site's delimiter closes the value, the accesskey VALUE is quoted
+// with that same delimiter (so only that one quote byte must arrive raw), the
+// handler body is the bare marker, and an inert trailing attribute swallows
+// the site's closing quote. The single-quote variant keeps its historical
+// trailing name (x) byte for byte; the double-quote mirror uses y.
+func hrefBreakoutValue(style, marker string) string {
+	q := dq
+	filler := "y"
+	if style == "single" {
+		q, filler = sq, "x"
+	}
+	return q + "accesskey=" + q + "x" + q + " onclick=" + marker + " " + filler + "=" + q
+}
+
 // TestPlanRawQueryURLHrefBreakoutShapeDoubleQuote pins the exact shape for the
 // measured double-quoted position: it closes the href value with the site's own
-// delimiter and adds accesskey/onclick carrying only the marker.
+// delimiter and adds accesskey/onclick carrying only the marker. The accesskey
+// VALUE is double-quoted too, so the shape needs no single quote at all.
 func TestPlanRawQueryURLHrefBreakoutShapeDoubleQuote(t *testing.T) {
 	m := urlAttrProbe.Token
 	body := hrefFixture("link", `"`, false, urlAttrProbe.Value())
@@ -79,10 +105,13 @@ func TestPlanRawQueryURLHrefBreakoutShapeDoubleQuote(t *testing.T) {
 			loc.Context, loc.Sub, loc.Element, loc.Attribute, loc.Quote)
 	}
 
-	want := `"accesskey='x' onclick=` + m + ` x="`
+	want := hrefBreakoutValue("double", m)
 	got := findCandidate(plan, want)
 	if got == nil {
 		t.Fatalf("raw-query URL plan has no href attribute breakout %q: %+v", want, plan.Candidates)
+	}
+	if got.Delimiter != "double" {
+		t.Fatalf("delimiter = %q, want double", got.Delimiter)
 	}
 	if got.Trigger != detection.TriggerInteraction {
 		t.Fatalf("trigger = %q, want %q (the verifier must activate it)", got.Trigger, detection.TriggerInteraction)
@@ -92,6 +121,12 @@ func TestPlanRawQueryURLHrefBreakoutShapeDoubleQuote(t *testing.T) {
 	}
 	if got.Transformation != "raw" {
 		t.Fatalf("transformation = %q, want raw (the delimiter survived, so the shape is plannable)", got.Transformation)
+	}
+	// The mirror must depend on exactly ONE quote byte (the site's delimiter):
+	// a single-quote site encodes or filters ' as a matter of course, and a
+	// hardcoded accesskey='x' would lose the keybinding there.
+	if strings.Contains(got.Value, "'") {
+		t.Fatalf("double-quote mirror carries a single quote, so it depends on a second quote arriving raw: %q", got.Value)
 	}
 	// Benign-marker only: the handler body is the bare marker and nothing else,
 	// exactly like every other built-in candidate.
@@ -104,7 +139,9 @@ func TestPlanRawQueryURLHrefBreakoutShapeDoubleQuote(t *testing.T) {
 }
 
 // TestPlanRawQueryURLHrefBreakoutShapeSingleQuote proves the shape follows the
-// delimiter the analyser reports instead of assuming a double quote.
+// delimiter the analyser reports instead of assuming a double quote, and that
+// the single-quote variant is byte-identical to what it was before the mirror
+// existed.
 func TestPlanRawQueryURLHrefBreakoutShapeSingleQuote(t *testing.T) {
 	m := urlAttrProbe.Token
 	body := hrefFixture("link", `'`, false, urlAttrProbe.Value())
@@ -118,8 +155,43 @@ func TestPlanRawQueryURLHrefBreakoutShapeSingleQuote(t *testing.T) {
 	if got := findCandidate(plan, want); got == nil {
 		t.Fatalf("single-quoted href plan has no %q candidate: %+v", want, plan.Candidates)
 	}
-	if got := findCandidate(plan, `"accesskey='x' onclick=`+m+` x="`); got != nil {
+	if got := findCandidate(plan, hrefBreakoutValue("double", m)); got != nil {
 		t.Fatalf("single-quoted site was planned a double-quote breakout: %+v", got)
+	}
+}
+
+// TestDoubleQuoteBreakoutNeedsOnlyTheDoubleQuote is the measured-gap
+// regression: a double-quoted href that HTML-encodes the single quote (but
+// leaves its own double quote raw) still gets a click-class breakout, and that
+// breakout contains no single quote to be rewritten. The planner must not
+// substitute a single-quoted accesskey VALUE here: the attribute would close
+// fine, but the keybinding would be rewritten in place.
+func TestDoubleQuoteBreakoutNeedsOnlyTheDoubleQuote(t *testing.T) {
+	m := urlAttrProbe.Token
+	value := strings.ReplaceAll(urlAttrProbe.Value(), "'", "&#39;")
+	body := []byte(`<!doctype html><html><head><link rel="canonical" href="https://lab.example/post?search=` +
+		value + `"><title>Post</title></head><body><h1>Post</h1></body></html>`)
+	rep, plan := urlAttrPlan(t, body, domain.LocationRawQuery)
+
+	loc := rep.Locations[0].Context
+	if loc.Quote != "double" {
+		t.Fatalf("delimiter = %q, want double", loc.Quote)
+	}
+	if rep.Locations[0].PerChar["'"] != detection.EncHTML {
+		t.Fatalf("fixture must HTML-encode the single quote, per-char form = %q", rep.Locations[0].PerChar["'"])
+	}
+	want := hrefBreakoutValue("double", m)
+	got := findCandidate(plan, want)
+	if got == nil {
+		t.Fatalf("double-quoted href with an encoded single quote has no click-class breakout %q: %+v", want, plan.Candidates)
+	}
+	if got.Transformation != "raw" {
+		t.Fatalf("transformation = %q, want raw (the shape needs only the double quote, which survived)", got.Transformation)
+	}
+	for _, c := range plan.Candidates {
+		if hrefAccesskeyBreakout(c) && strings.Contains(c.Value, "'") {
+			t.Fatalf("href breakout depends on the encoded single quote: %+v", c)
+		}
 	}
 }
 
@@ -127,6 +199,7 @@ func TestPlanRawQueryURLHrefBreakoutShapeSingleQuote(t *testing.T) {
 // guard: when the site provably HTML-encodes the quote, an injected quote can
 // never terminate the attribute, so the shape is NOT planned (not merely
 // deprioritized). Sending it would only produce a request that cannot break out.
+// It holds for both quote families.
 func TestPlanRawQueryURLHrefBreakoutDroppedWhenDelimiterEncoded(t *testing.T) {
 	body := hrefFixture("link", `"`, true, urlAttrProbe.Value())
 	rep, plan := urlAttrPlan(t, body, domain.LocationRawQuery)
@@ -139,7 +212,7 @@ func TestPlanRawQueryURLHrefBreakoutDroppedWhenDelimiterEncoded(t *testing.T) {
 		t.Fatalf("fixture must prove the quote is HTML-encoded, per-char form = %q", rep.Locations[0].PerChar[`"`])
 	}
 	for _, c := range plan.Candidates {
-		if strings.Contains(c.Value, "accesskey='x'") {
+		if hrefAccesskeyBreakout(c) {
 			t.Fatalf("href attribute breakout planned against an encoded delimiter: %+v", c)
 		}
 	}
@@ -163,7 +236,7 @@ func TestURLAttributeBreakoutDefaultCandidateSetUnchanged(t *testing.T) {
 			`url|"><svg onload=` + m + `>|90|load`,
 			`url|" autofocus onfocus=` + m + ` x="|87|load`,
 			`url|" onmouseover=` + m + ` x="|85|interaction`,
-			`url|"accesskey='x' onclick=` + m + ` x="|78|interaction`,
+			`url|"accesskey="x" onclick=` + m + ` y="|78|interaction`,
 			`url|" accesskey=x onclick=` + m + ` y="|60|interaction`,
 		},
 	}
@@ -181,7 +254,7 @@ func TestURLAttributeBreakoutDefaultCandidateSetUnchanged(t *testing.T) {
 			strings.Join(got, "\n"), strings.Join(want.named, "\n"))
 	}
 	for _, c := range named.Candidates {
-		if strings.Contains(c.Value, "accesskey='x'") {
+		if hrefAccesskeyBreakout(c) {
 			t.Fatalf("default plan gained the raw-query href breakout: %+v", c)
 		}
 	}
@@ -206,7 +279,7 @@ func TestPlanURLHrefBreakoutOnlyForHrefAttributes(t *testing.T) {
 		t.Fatalf("fixture classified element=%q attr=%q, want img/src", el, attr)
 	}
 	for _, c := range plan.Candidates {
-		if strings.Contains(c.Value, "accesskey='x'") {
+		if hrefAccesskeyBreakout(c) {
 			t.Fatalf("href breakout leaked onto a non-href attribute: %+v", c)
 		}
 	}

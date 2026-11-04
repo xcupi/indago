@@ -141,7 +141,10 @@ func TestURLHrefBreakoutConfirmsAfterOneClick(t *testing.T) {
 	plan := urlAttrPlanFor(t, srv)
 
 	m := urlAttrProbe.Token
-	want := `"accesskey='x' onclick=` + m + ` x="`
+	want := `"accesskey="x" onclick=` + m + ` y="`
+	if strings.Contains(want, "'") {
+		t.Fatalf("the double-quote variant must not depend on a raw single quote: %q", want)
+	}
 	var cand *detection.Candidate
 	for i := range plan.Candidates {
 		if plan.Candidates[i].Value == want {
@@ -185,7 +188,7 @@ func TestURLHrefBreakoutConfirmsAfterOneClick(t *testing.T) {
 	if !strings.Contains(res.Evidence.DOMHTML, `data-clicks="1"`) {
 		t.Fatal("post-activation DOM does not show exactly one click dispatch")
 	}
-	if !strings.Contains(res.Evidence.DOMHTML, "accesskey") || !strings.Contains(res.Evidence.DOMHTML, `onclick="`+m+`"`) {
+	if !strings.Contains(res.Evidence.DOMHTML, `accesskey="x"`) || !strings.Contains(res.Evidence.DOMHTML, `onclick="`+m+`"`) {
 		t.Fatalf("post-activation DOM does not carry the injected accesskey/onclick pair: %s", res.Evidence.DOMHTML)
 	}
 }
@@ -198,7 +201,7 @@ func TestURLHrefBreakoutEncodedDelimiterStaysRejected(t *testing.T) {
 	srv := urlAttrServer(t, true)
 	plan := urlAttrPlanFor(t, srv)
 	for _, c := range plan.Candidates {
-		if strings.Contains(c.Value, "accesskey='x'") {
+		if hrefAccesskeyBreakout(c) {
 			t.Fatalf("shape planned against an encoded delimiter: %+v", c)
 		}
 	}
@@ -207,7 +210,7 @@ func TestURLHrefBreakoutEncodedDelimiterStaysRejected(t *testing.T) {
 	forced := detection.Candidate{
 		Source:   detection.SourceBuiltin,
 		Category: detection.CatURL,
-		Value:    `"accesskey='x' onclick=` + m + ` x="`,
+		Value:    `"accesskey="x" onclick=` + m + ` y="`,
 		Trigger:  detection.TriggerInteraction,
 	}
 	v := urlAttrVerifier(t)

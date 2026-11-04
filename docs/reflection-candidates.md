@@ -268,23 +268,38 @@ plans nothing for a query/path/fragment component, so before this shape a
 raw-query URL site could reflect, be classified `url`, and still have no
 breakout at all — nothing to activate, nothing that could ever confirm.
 
-`urlHrefBreakoutTemplates` closes that gap with ONE shape, planned only when the
-site is a URL nested in an `href` attribute (`chain[0] == html_attr_value`,
-`attribute == href`) **and** the injection point is the raw query string:
+`urlHrefBreakoutTemplates` closes that gap with ONE shape per usable quote
+style, planned only when the site is a URL nested in an `href` attribute
+(`chain[0] == html_attr_value`, `attribute == href`) **and** the injection point
+is the raw query string:
 
 | template | value (double-quoted site shown) | trigger | confirms? |
 |---|---|---|---|
-| href attribute breakout | `"accesskey='x' onclick=M x="` (the site's own delimiter is used, single-quoted sites get `'…x='`) | `interaction` | yes, after the verifier's single click activation |
+| href attribute breakout | `"accesskey="x" onclick=M y="` (mirror shape; a single-quoted site gets `'accesskey='x' onclick=M x='` byte for byte) | `interaction` | yes, after the verifier's single click activation |
 
-How it works: the leading delimiter closes the `href` value; `accesskey='x'`
-names the element; `onclick=M` carries the benign marker as the handler's whole
-body; the trailing `x=` plus the site's own closing delimiter keeps the rest of
-the tag well-formed. Nothing but the marker is ever carried — activating it
-executes `<marker>`, an unresolved identifier, which the verifier observes as
-the marker-specific page error. The candidate declares `interaction`, so the
-existing activation step performs exactly one `element.click()` on the
-marker-carrying element; without that click the shape stays inert (and a page
-with no handler stays Rejected after the click).
+How it works: the leading delimiter closes the `href` value; the accesskey
+attribute names the element — its VALUE is quoted with the same delimiter the
+shape closes, so the whole breakout needs exactly one quote byte (the site's
+own) to arrive raw — `onclick=M` carries the benign marker as the handler's
+whole body; the trailing dummy attribute (`y=` for the double-quote mirror,
+`x=` for the single-quote variant) plus the site's own closing delimiter keeps
+the rest of the tag well-formed. Nothing but the marker is ever carried —
+activating it executes `<marker>`, an unresolved identifier, which the verifier
+observes as the marker-specific page error. The candidate declares
+`interaction`, so the existing activation step performs exactly one
+`element.click()` on the marker-carrying element; without that click the shape
+stays inert (and a page with no handler stays Rejected after the click).
+
+Why the accesskey value mirrors the delimiter instead of always using single
+quotes: a double-quoted site commonly rewrites or filters `'` (HTML-encoding it
+is routine) while leaving its own `"` raw. A hardcoded `accesskey='x'` on such
+a site closes the attribute fine but the encoded value is decoded into the
+attribute VALUE as the literal characters `'x'`, so the keybinding is lost
+while the candidate still looks plannable. Mirroring removes that second,
+undeclared dependency: the double-quote family carries no single quote at all,
+and the single-quote variant keeps its historical bytes exactly (including
+`accesskey='x'`), because there the delimiter and the value quote are the same
+character anyway.
 
 Quote handling is taken from the analyser, never assumed: a `double`- or
 `single`-quoted site gets its own delimiter, and any other position (including
@@ -307,7 +322,10 @@ raw-query plan is that same frozen set plus this one shape. Real-browser proof:
 dispatched click, injected pair in the rendered DOM) and
 `TestURLHrefBreakoutEncodedDelimiterStaysRejected` (HTML-encoded quotes → the
 shape is not planned, and forced through the verifier it stays Rejected with the
-marker still reflected).
+marker still reflected). `TestDoubleQuoteBreakoutNeedsOnlyTheDoubleQuote` pins
+the mirror's invariant against served bytes: a double-quoted `href` that
+HTML-encodes `'` still gets the click-class candidate, and that candidate
+contains no single quote.
 
 ## Ordering and deduplication
 
