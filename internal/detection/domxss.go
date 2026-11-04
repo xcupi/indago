@@ -2623,7 +2623,7 @@ func (in *dxsInterp) evalCall(e *dxsExpr) dxsTaint {
 
 	if e.isNew {
 		switch {
-		case path == "URLSearchParams":
+		case path == "URLSearchParams", path == "window.URLSearchParams":
 			return in.searchParamsTaint(args)
 		case path == "Function":
 			if tainted.on {
@@ -2663,7 +2663,7 @@ func (in *dxsInterp) evalCall(e *dxsExpr) dxsTaint {
 			in.addUnresolved(e.line, "dynamic code evaluation", "eval receives a value derived from "+string(in.source)+", so the executed code cannot be analysed")
 		}
 		return dxsTaint{}
-	case "URLSearchParams":
+	case "URLSearchParams", "window.URLSearchParams":
 		return in.searchParamsTaint(args)
 	}
 
@@ -2870,6 +2870,22 @@ func dxsSinkForAssignment(name string) (DOMXSSSink, bool) {
 	return "", false
 }
 
+// dxsLocationPrefixes lists the ways a page reaches the SAME Location object
+// as the document the scan navigates: the bare global and the window, self and
+// document aliases. They are spellings, not distinct sources, so each location
+// member is accepted under every prefix.
+var dxsLocationPrefixes = []string{"", "window.", "self.", "document."}
+
+// dxsIsLocationMember reports whether path is `[alias.]location.<part>`.
+func dxsIsLocationMember(path, part string) bool {
+	for _, prefix := range dxsLocationPrefixes {
+		if path == prefix+"location."+part {
+			return true
+		}
+	}
+	return false
+}
+
 // dxsSourceTaint answers "does this statically named value carry THIS source?".
 // Every other source is deliberately untainted: a query probe must not be
 // credited by a hash read, and a storage key must match its selector.
@@ -2877,16 +2893,14 @@ func (in *dxsInterp) sourceTaint(path string) (dxsTaint, bool) {
 	t := dxsTaint{on: true, chain: []string{path}}
 	switch in.source {
 	case DOMSourceQuery:
-		switch path {
-		case "location.search", "window.location.search", "document.location.search":
+		if dxsIsLocationMember(path, "search") {
 			return t, true
 		}
 		if dxsIsFullURLPath(path) {
 			return t.with("query in URL"), true
 		}
 	case DOMSourceHash:
-		switch path {
-		case "location.hash", "window.location.hash", "document.location.hash":
+		if dxsIsLocationMember(path, "hash") {
 			return t, true
 		}
 		if dxsIsFullURLPath(path) {
@@ -2923,8 +2937,11 @@ func (in *dxsInterp) sourceTaint(path string) (dxsTaint, bool) {
 }
 
 func dxsIsFullURLPath(path string) bool {
+	if dxsIsLocationMember(path, "href") {
+		return true
+	}
 	switch path {
-	case "location.href", "window.location.href", "document.location.href", "document.URL", "window.document.URL":
+	case "document.URL", "window.document.URL":
 		return true
 	}
 	return false

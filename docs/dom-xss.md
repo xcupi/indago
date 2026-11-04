@@ -954,6 +954,56 @@ TestCase saying `location.search` was **not tested** because no candidate
 parameter was available. This is not a clean negative and is not silently
 reported as safe.
 
+## Static flow diagnostic: accepted source spellings
+
+`detection.DOMXSSStaticReachability` is a pure, bounded taint pass over the
+page's inline scripts (see its doc comment). It is a **diagnostic**, never a
+verdict: it can explain why a probe reached no sink, and it distinguishes
+"the analysed scripts contain no supported tainted path" from "the analysis
+could not see far enough" (`unresolved_flow`). Only the browser's own
+marker-specific signal confirms anything.
+
+Every way a page reaches the same `Location` object for the document the scan
+navigates is accepted, for each of the three members the pass models:
+
+| member | accepted spellings | source |
+|---|---|---|
+| `location.search` | `location.`, `window.location.`, `document.location.`, `self.location.` | `DOMSourceQuery` |
+| `location.hash` | same four prefixes | `DOMSourceHash` |
+| `location.href` | same four prefixes, plus `document.URL` / `window.document.URL` | query **and** hash (a full-URL read carries both) |
+
+The aliases are spellings, not separate sources, so source isolation still
+holds: a query probe is never credited by a `location.hash` read, and a hash
+probe is never credited by a `location.search` read, whichever alias the page
+used. `top.`/`parent.` are deliberately **not** accepted — in a framed document
+they name a different window, so crediting them would over-claim.
+
+`URLSearchParams` is accepted with or without `new`, with or without wrapping
+parentheses, qualified as `window.URLSearchParams`, and when the object is
+assigned to a variable and `.get(name)` is called later. `.get()` keeps its
+literal-name requirement (a computed name is `dynamic selector`, an explicit
+unknown) and its selector match against the parameter under test. The depth
+bound is unchanged: exactly one user-defined function boundary.
+
+### The measured lab page (and what it does not prove)
+
+The exact measured page — `trackSearch(query)` writing into `document.write`,
+`var query = (new URLSearchParams(window.location.search)).get('search')`,
+`if (query) { trackSearch(query); }` — is reproduced byte-for-byte in
+`internal/detection/domxss_location_spellings_test.go`. At the base revision it
+is already `tainted_path` with the `document.write` site and `hops == 1`: the
+`window.` prefix was accepted before this slice, and the real-browser fixture
+(`domxss_lab_page_browser_test.go`) confirms the planner's `document.write`
+candidate on that page in Chromium for the bare, `window.`, `document.` and
+`self.` spellings. So a live `no implemented DOM-XSS sink reachable from
+location.search parameter "search"` result is **not** explained by this pass:
+the alias blind spot this slice fixed was `self.location.…`, and the measured
+page does not use it.
+
+Known limits of the pass (unchanged): inline `<script>` bodies only, no
+shadowing resolution (a local variable named `location`/`self` is still read as
+the global), no escaping model, branches and loop bodies evaluated once.
+
 ## Wiring into the scan (extended)
 
 - `enqueueDOMXSSProbes` now enqueues one `JobDOMXSS` per
