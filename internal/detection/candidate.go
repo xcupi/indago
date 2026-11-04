@@ -78,6 +78,13 @@ type Candidate struct {
 	// candidate depends on: "raw" (survive) or an encoding (html/url/js/stripped/
 	// mixed) that neutralizes them. Derived from the reflection encoding analysis.
 	Transformation string `json:"transformation"`
+	// Delimiter names the attribute quote style this candidate closes:
+	// "double" or "single" for a quoted-attribute breakout, empty for every
+	// candidate that does not close a quote. It is set on the variants planned
+	// when the analyser could NOT prove the site's delimiter (see
+	// breakoutQuotes), so a report can say which style a given attempt assumed
+	// — and therefore which style actually fired when one confirms.
+	Delimiter string `json:"delimiter,omitempty"`
 	// Trigger is how this breakout could ever produce an execution signal:
 	// TriggerLoad fires on page load (what the passive browser verifier can
 	// observe), TriggerInteraction needs a user action (hover, click,
@@ -238,6 +245,7 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 				Context:          loc.Context.Context,
 				ContextSub:       loc.Context.Sub,
 				Value:            tpl.value,
+				Delimiter:        tpl.delimiter,
 				Trigger:          tpl.trigger,
 				Technique:        tpl.technique,
 				Variation:        tpl.variation,
@@ -343,6 +351,10 @@ type candTemplate struct {
 	trigger   string // TriggerLoad / TriggerInteraction / TriggerNone
 	technique string // "" for every canonical template; see evasion.go
 	variation string // "" for every canonical/evasion template; see variation.go
+	// delimiter is the attribute quote style the shape closes ("double" or
+	// "single"), empty when it closes no quote. Copied into Candidate.Delimiter
+	// so a plan (and a report) can say which style an attempt assumed.
+	delimiter string
 	// strict marks a template whose `needs` are DELIMITERS the breakout must
 	// receive literally, with no entity-decoding exemption (see
 	// strictSurvives). A template that closes an attribute value with a quote
@@ -438,15 +450,96 @@ func htmlTextTemplates(a ContextAnalysis, m string) []candTemplate {
 	}
 }
 
-func htmlAttrTemplates(a ContextAnalysis, m string) []candTemplate {
-	var q, needs string
+// breakoutQuotes returns the quoted attribute delimiters a quote-closing
+// breakout may use at this site.
+//
+// The list is ONE style when the analyser PROVED the site's delimiter
+// (ContextAnalysis.QuoteProven: the reflection came back raw, so the quote
+// bytes around the site are the template's own) — that is the pre-existing
+// behaviour, byte for byte.
+//
+// It is BOTH styles when the delimiter is not proven: the target rewrote the
+// value (encoded/transformed/stripped/unknown), so the quote in force while the
+// probe was parsed is a product of that rewrite applied to OUR payload, not
+// proof of the delimiter the next payload will meet. A single-style plan then
+// guesses, and a wrong guess can never close the attribute — exactly the
+// measured live-lab failure. Both variants are planned instead; the per-variant
+// strict guard still drops any style whose quote the site provably encodes, so
+// a site that encodes both still plans neither.
+//
+// A site inside an attribute value for which no delimiter was established at
+// all (Quote == "") is unproven too, and gets both. An unquoted value, an
+// attribute-name/tag-name position, or any position outside an attribute yields
+// no styles: a quote cannot close a value that has no delimiter.
+func breakoutQuotes(a ContextAnalysis) []string {
 	switch a.Quote {
+	case "double", "single":
+		if a.QuoteProven {
+			return []string{a.Quote}
+		}
+		return []string{"double", "single"}
+	case "":
+		if inAttributeValue(a) {
+			return []string{"double", "single"}
+		}
+	}
+	return nil
+}
+
+// inAttributeValue reports whether the site sits inside an HTML attribute
+// value, either as the innermost context or as an enclosing layer of the chain
+// (a URL/CSS/JS site nested in an attribute keeps the attribute in the chain).
+func inAttributeValue(a ContextAnalysis) bool {
+	if a.Context == CtxHTMLAttrValue {
+		return true
+	}
+	for _, c := range a.Chain {
+		if c == CtxHTMLAttrValue {
+			return true
+		}
+	}
+	return false
+}
+
+// htmlAttrTemplates expands the in-tag attribute breakouts over every quote
+// style the site's evidence supports: one style when the delimiter is proven,
+// both when it is not (see breakoutQuotes). Each variant carries its style in
+// Candidate.Delimiter and says so in its rationale, so a report can state which
+// one fired. Unquoted/attribute-name positions keep the unquoted shapes.
+func htmlAttrTemplates(a ContextAnalysis, m string) []candTemplate {
+	styles := breakoutQuotes(a)
+	if len(styles) == 0 {
+		return htmlAttributeShapes("", m)
+	}
+	out := make([]candTemplate, 0, len(styles)*3)
+	for _, style := range styles {
+		shapes := htmlAttributeShapes(quoteByte(style), m)
+		for i := range shapes {
+			shapes[i].delimiter = style
+		}
+		out = append(out, shapes...)
+	}
+	return out
+}
+
+// quoteByte maps an analyser quote style to the delimiter byte a candidate must
+// send. "" for anything that is not a quoted style.
+func quoteByte(style string) string {
+	switch style {
 	case "double":
-		q, needs = `"`, `"`
+		return `"`
 	case "single":
-		q, needs = `'`, `'`
-	default: // unquoted (or a tag/attr-name position)
-		q, needs = "", ""
+		return `'`
+	}
+	return ""
+}
+
+// htmlAttributeShapes builds the canonical in-tag breakouts for ONE attribute
+// delimiter byte. q == "" means an unquoted value / attribute-name position.
+func htmlAttributeShapes(q, m string) []candTemplate {
+	var needs string
+	if q != "" {
+		needs = q
 	}
 
 	// Staying inside the tag and adding an event-handler attribute needs only the
@@ -468,16 +561,29 @@ func htmlAttrTemplates(a ContextAnalysis, m string) []candTemplate {
 	} else {
 		handler += " x=" + q // swallow the original closing quote
 		autofocusHandler += " x=" + q
+		handlerRationale = delimiterNote(handlerRationale, q)
+		autofocusRationale = delimiterNote(autofocusRationale, q)
 	}
 
-	return []candTemplate{
+	shapes := []candTemplate{
 		onLoad(q+"><svg onload="+m+">", needs+"<>", 90,
-			"break out of the attribute and tag, then inject an <svg> element with an onload handler"),
+			delimiterNote("break out of the attribute and tag, then inject an <svg> element with an onload handler", q)),
 		onLoad(autofocusHandler, needs, 87, autofocusRationale),
 		// onmouseover needs a hover the passive verifier never simulates, so this
 		// documents attribute injection but cannot itself be Confirmed.
 		onInteraction(handler, needs, 85, handlerRationale),
 	}
+	return shapes
+}
+
+// delimiterNote appends the provenance sentence that names the quote style a
+// variant assumes. It is only reached for quote-closing variants, so a report
+// reading a candidate can always tell which delimiter that attempt tried.
+func delimiterNote(rationale, q string) string {
+	if q == "" {
+		return rationale
+	}
+	return rationale + " (this variant closes the " + quoteWord(q) + " attribute delimiter)"
 }
 
 func jsTemplates(a ContextAnalysis, m string) []candTemplate {
@@ -608,24 +714,26 @@ func linkAttributeTemplates(a ContextAnalysis, m string) []candTemplate {
 // it is an ordinary character and can never terminate the attribute, so a site
 // that provably encodes its delimiter does not get this shape planned at all —
 // the shape is dropped, not merely deprioritized (see strictSurvives).
+//
+// When the analyser could NOT prove the delimiter, ONE shape per quote style is
+// planned (see breakoutQuotes) instead of guessing: each variant closes its own
+// style, records it in Candidate.Delimiter, and names it in the rationale, so a
+// report can say which style fired. The strict guard is applied per variant, so
+// a style whose quote the site encodes is still dropped.
 func urlHrefBreakoutTemplates(a ContextAnalysis, m string) []candTemplate {
 	if a.Attribute != "href" || len(a.Chain) < 2 || a.Chain[0] != CtxHTMLAttrValue {
 		return nil
 	}
-	var q string
-	switch a.Quote {
-	case "double":
-		q = `"`
-	case "single":
-		q = `'`
-	default:
-		// No quoted attribute delimiter was established. An unquoted value
-		// ends at whitespace, not at a delimiter this shape could close, so
-		// this is not the position the shape targets.
-		return nil
+	styles := breakoutQuotes(a)
+	out := make([]candTemplate, 0, len(styles))
+	for _, style := range styles {
+		q := quoteByte(style)
+		tpl := onInteractionStrict(q+"accesskey='x' onclick="+m+" x="+q, q, 78,
+			delimiterNote("close the href attribute value and add an accesskey/onclick pair on the element itself: accesskey names the element ('x') and onclick carries the benign marker as its whole body, so the single click activation browser verification performs dispatches it; it needs only the attribute's own quote, which encoding < and > does not affect, and the shape is only planned when that quote arrives raw", style))
+		tpl.delimiter = style
+		out = append(out, tpl)
 	}
-	return []candTemplate{onInteractionStrict(q+"accesskey='x' onclick="+m+" x="+q, q, 78,
-		"close the href attribute value and add an accesskey/onclick pair on the element itself: accesskey names the element ('x') and onclick carries the benign marker as its whole body, so the single click activation browser verification performs dispatches it; it needs only the attribute's own quote, which encoding < and > does not affect, and the shape is only planned when that quote arrives raw")}
+	return out
 }
 
 func cssTemplates(a ContextAnalysis, m string) []candTemplate {
