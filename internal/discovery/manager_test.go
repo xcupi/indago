@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -221,6 +222,123 @@ func (f fakeBrowser) Render(_ context.Context, url string, _ browser.RenderOptio
 	return &browser.RenderResult{FinalURL: url, Status: 200, Network: f.xhr}, nil
 }
 func (fakeBrowser) Close() error { return nil }
+
+type recordingNetworkSink struct {
+	endpoints []discovery.EndpointCandidate
+	params    []discovery.ParamCandidate
+}
+
+func (s *recordingNetworkSink) AddEndpoint(_ context.Context, ep discovery.EndpointCandidate) (domain.ID, error) {
+	s.endpoints = append(s.endpoints, ep)
+	return domain.NewID(), nil
+}
+func (s *recordingNetworkSink) AddParameter(_ context.Context, p discovery.ParamCandidate) error {
+	s.params = append(s.params, p)
+	return nil
+}
+
+func TestNetworkSourceDiscoversTopLevelJSONBodyParams(t *testing.T) {
+	srv := newSite(t)
+	body := `{"query":"hello","page":2,"options":{"sort":"newest"}}`
+	fb := fakeBrowser{xhr: []browser.NetworkEvent{
+		{
+			URL: srv.URL + "/api/search", Method: "POST", ResourceType: "fetch",
+			ContentType: "application/json; charset=utf-8", PostData: body,
+		},
+		{
+			URL: "https://evil.example/api/search", Method: "POST", ResourceType: "fetch",
+			ContentType: "application/json", PostData: body,
+		},
+		{
+			URL: srv.URL + "/favicon.ico", Method: "GET", ResourceType: "other",
+			ContentType: "image/x-icon",
+		},
+	}}
+	sink := &recordingNetworkSink{}
+	src := discovery.NewNetworkSource(fb, discovery.DefaultConfig())
+	if err := src.Run(context.Background(), discovery.Input{Scope: scopeFor(srv), SeedURLs: []string{srv.URL}}, sink); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.endpoints) != 1 || sink.endpoints[0].Method != domain.MethodPOST || sink.endpoints[0].ContentType != "application/json; charset=utf-8" {
+		t.Fatalf("JSON API endpoint = %#v, want one POST endpoint with observed content type", sink.endpoints)
+	}
+	want := []discovery.ParamCandidate{
+		{EndpointURL: srv.URL + "/api/search", EndpointMethod: domain.MethodPOST, Name: "options", Location: domain.LocationJSON, Example: `{"sort":"newest"}`, Source: domain.SourceBrowserNetwork},
+		{EndpointURL: srv.URL + "/api/search", EndpointMethod: domain.MethodPOST, Name: "page", Location: domain.LocationJSON, Example: `2`, Source: domain.SourceBrowserNetwork},
+		{EndpointURL: srv.URL + "/api/search", EndpointMethod: domain.MethodPOST, Name: "query", Location: domain.LocationJSON, Example: `"hello"`, Source: domain.SourceBrowserNetwork},
+	}
+	if !reflect.DeepEqual(sink.params, want) {
+		t.Fatalf("JSON body params = %#v, want %#v", sink.params, want)
+	}
+}
+
+func TestManagerNetworkJSONBodyCreatesJSONInjectionPoints(t *testing.T) {
+	srv := newSite(t)
+	body := `{"query":"hello","page":2,"options":{"sort":"newest"}}`
+	fb := fakeBrowser{xhr: []browser.NetworkEvent{{
+		URL: srv.URL + "/api/search", Method: "POST", ResourceType: "fetch",
+		ContentType: "application/json", PostData: body,
+	}}}
+	cfg := discovery.DefaultConfig()
+	registry := discovery.NewRegistry()
+	registry.Register(discovery.NewNetworkSource(fb, cfg))
+	st, q := memory.New(), queue.NewMemory()
+	manager := discovery.NewManager(st, q, registry, cfg, quiet())
+	scanID := domain.NewID()
+	if _, err := manager.Run(context.Background(), discovery.RunParams{ScanID: scanID, Scope: scopeFor(srv), SeedURLs: []string{srv.URL}}); err != nil {
+		t.Fatal(err)
+	}
+
+	endpoints, err := st.Endpoints().ListByScan(context.Background(), scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var api *domain.Endpoint
+	for _, endpoint := range endpoints {
+		if endpoint.URL == srv.URL+"/api/search" {
+			api = endpoint
+		}
+	}
+	if api == nil || api.Method != domain.MethodPOST || api.ContentType != "application/json" {
+		t.Fatalf("discovered JSON endpoint = %#v", api)
+	}
+	params, err := st.Parameters().ListByScan(context.Background(), scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jsonParams []*domain.Parameter
+	for _, param := range params {
+		if param.Location == domain.LocationJSON {
+			jsonParams = append(jsonParams, param)
+		}
+	}
+	if len(jsonParams) != 3 {
+		t.Fatalf("JSON parameters = %#v, want all three top-level fields", jsonParams)
+	}
+	for _, param := range jsonParams {
+		if param.EndpointID != api.ID || param.Source != domain.SourceBrowserNetwork {
+			t.Fatalf("JSON parameter not tied to the observed POST endpoint: %#v", param)
+		}
+	}
+	ips, err := st.InjectionPoints().ListByScan(context.Background(), scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jsonIPs []*domain.InjectionPoint
+	for _, ip := range ips {
+		if ip.Location == domain.LocationJSON {
+			jsonIPs = append(jsonIPs, ip)
+		}
+	}
+	if len(jsonIPs) != 3 {
+		t.Fatalf("JSON injection points = %d, want 3", len(jsonIPs))
+	}
+	for _, ip := range jsonIPs {
+		if ip.EndpointID != api.ID {
+			t.Fatalf("JSON injection point not registered for API endpoint: %#v", ip)
+		}
+	}
+}
 
 func TestManagerNetworkDiscovery(t *testing.T) {
 	srv := newSite(t)

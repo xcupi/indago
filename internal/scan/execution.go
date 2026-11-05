@@ -3,12 +3,14 @@ package scan
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 
 	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/idor"
 	"github.com/indago/indago/internal/ratelimit"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/worker"
@@ -53,6 +55,30 @@ type execution struct {
 	// enqueued — the SAME "run once when the queue goes quiet" shape
 	// combinedPassDone uses, checked right after it in evaluate().
 	domXSSPassDone atomic.Bool
+
+	// idorPassDone marks that this execution's one-time IDOR probe pass (see
+	// idor.go's enqueueIDORProbes) has already been enqueued. It runs after
+	// the DOM-XSS pass, for scans that explicitly enabled the engine.
+	idorPassDone atomic.Bool
+
+	// accessControlPassDone marks that this execution's one-time access-control
+	// probe pass (see accesscontrol.go's enqueueAccessControlProbes) has
+	// already been enqueued. It runs on the same quiet tick as the other
+	// protected passes and never gates on browser work.
+	accessControlPassDone atomic.Bool
+
+	// accessDisclosurePassDone marks that this execution's one-time
+	// page-disclosure pass (case 19's script-disclosed path) has been
+	// enqueued.
+	accessDisclosurePassDone atomic.Bool
+
+	// roleFlagPassDone marks the one-time client-controlled-flag differential
+	// pass (case 20) for scans that opted into it.
+	roleFlagPassDone atomic.Bool
+
+	// roleFieldPassDone marks the one-time role-field write pass (case 21) for
+	// scans that opted into it.
+	roleFieldPassDone atomic.Bool
 }
 
 // pause routes a scan pause to both the worker pool and discovery.
@@ -97,7 +123,8 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 
 	handlers := c.opts.Handlers
 	if handlers == nil {
-		handlers = c.defaultHandlers(eng, scope, sc.Config.ProxyPool, limiter)
+		handlers = c.defaultHandlers(eng, scope, sc.Config.ProxyPool, limiter, sc.Config.IDORCandidates,
+			idor.EnumerationOptions{Enabled: sc.Config.EnableIDOREnumeration, Neighbours: sc.Config.IDOREnumerationNeighbours})
 	}
 	pool := worker.New(c.queue, handlers, c.poolConfig(sc), c.log)
 	if err := pool.Start(runCtx); err != nil {
@@ -193,6 +220,16 @@ func (c *Controller) discoveryConfig(sc *domain.Scan) discovery.Config {
 	if sc.Config.QuickScan {
 		cfg.MaxDepth = 0 // seeds only: do not follow links
 	}
+	// Recon level is per scan (set at creation). An unparseable/absent value
+	// means off: the safe default.
+	if level, err := discovery.ParseReconLevel(sc.Config.ReconLevel); err == nil {
+		cfg.ReconLevel = level
+	}
+	// Raw query-string injection is per scan and off unless explicitly set. An
+	// unparseable/absent stored value means off, exactly like recon.
+	if mode, err := discovery.ParseRawQueryMode(sc.Config.RawQueryInjection); err == nil {
+		cfg.RawQueryInjection = mode
+	}
 	return cfg
 }
 
@@ -265,7 +302,8 @@ func (c *Controller) runDiscovery(ctx context.Context, ex *execution, sc *domain
 	}
 	ex.discFinished.Store(true)
 	c.log.Info("discovery complete", "scan", sc.ID,
-		"endpoints", res.Endpoints, "parameters", res.Parameters, "jobs", res.Jobs)
+		"endpoints", res.Endpoints, "parameters", res.Parameters, "jobs", res.Jobs,
+		"recon", res.Recon)
 }
 
 // stopExecution tears an execution down and waits for its goroutines. The caller
@@ -375,6 +413,16 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		return false
 	}
 	if q.Pending() > 0 {
+		// Work is outstanding. Normally that just means "wait". But a queue
+		// holding jobs of a type this execution can never run — no handler, no
+		// worker group that names it — will never drain, no matter how long the
+		// monitor waits. Fail the scan with a reason instead of leaving it
+		// running forever.
+		if stuck, reason := c.noRunnableJob(ctx, ex); stuck {
+			c.log.Warn("scan cannot make progress; reaching a terminal state instead of running forever",
+				"scan", ex.scanID, "reason", reason)
+			return c.failExecution(ctx, ex, reason)
+		}
 		return false
 	}
 	// Bounded, one-time combined (multi-parameter) candidate fallback pass
@@ -389,19 +437,134 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		c.enqueueCombinedCandidates(ctx, ex.scanID)
 		return false
 	}
-	// Bounded, one-time DOM-XSS probe pass (see domxss.go): runs right
-	// after the combined pass, the SAME "go quiet, run once, let its own
-	// jobs drain before finishing" shape. Only one source/sink category
-	// is implemented (see docs/dom-xss.md) — this is genuinely cheap
-	// (bounded by discovered endpoints, not candidates), so it never
-	// gates behind "single-parameter testing failed" the way combined
-	// does; it runs for every GET/HEAD-navigable endpoint regardless.
+	// Bounded, one-time probe passes. They are enqueued on the SAME quiet
+	// tick and are independent of each other: DOM-XSS probing is
+	// browser-group work (slow, and able to stall when no usable browser
+	// worker is available), while IDOR probing is raw HTTP on the ordinary
+	// HTTP group. Letting the IDOR pass wait for DOM jobs to drain is how a
+	// single stuck DOM job starved object-authorization testing entirely
+	// (observed with browser_concurrency=0), so neither pass gates the
+	// other. The one-time flags keep both to one pass per execution.
+	passes := false
+	// DOM-XSS: only one source/sink category is implemented (see
+	// docs/dom-xss.md) — genuinely cheap (bounded by discovered endpoints,
+	// not candidates), so it never gates behind "single-parameter testing
+	// failed" the way combined does; it runs for every GET/HEAD-navigable
+	// endpoint regardless.
 	if !ex.domXSSPassDone.Load() {
 		ex.domXSSPassDone.Store(true)
 		c.enqueueDOMXSSProbes(ctx, ex.scanID)
+		passes = true
+	}
+	// IDOR: only for a scan that opted into the engine (see idor.go).
+	if !ex.idorPassDone.Load() {
+		ex.idorPassDone.Store(true)
+		c.enqueueIDORProbes(ctx, ex.scanID)
+		passes = true
+	}
+	// Access control: bounded by robots.txt/sitemap provenance and a fixed
+	// admin-path vocabulary (see accesscontrol.go). No opt-in flag: every
+	// request is a single in-scope GET of a path discovery already disclosed,
+	// and the pass never sends a state-changing method.
+	if !ex.accessControlPassDone.Load() {
+		ex.accessControlPassDone.Store(true)
+		c.enqueueAccessControlProbes(ctx, ex.scanID)
+		passes = true
+	}
+	// Case 19's second source: administrative paths a discovered page's OWN
+	// scripts disclose. Same anonymous GET probe, same bounds.
+	if !ex.accessDisclosurePassDone.Load() {
+		ex.accessDisclosurePassDone.Store(true)
+		c.enqueueAccessControlDisclosureProbes(ctx, ex.scanID)
+		passes = true
+	}
+	// Case 20: client-controlled flag differential. Opt-in (it may propose the
+	// conventional /admin path when discovery found no privileged endpoint).
+	if !ex.roleFlagPassDone.Load() {
+		ex.roleFlagPassDone.Store(true)
+		c.enqueueRoleFlagProbes(ctx, ex.scanID)
+		passes = true
+	}
+	// Case 21: role-field write on the caller's own profile. Opt-in AND
+	// state-changing opt-in; scan creation already refuses any other
+	// combination, and the executor re-checks before sending.
+	if !ex.roleFieldPassDone.Load() {
+		ex.roleFieldPassDone.Store(true)
+		c.enqueueRoleFieldProbes(ctx, ex.scanID)
+		passes = true
+	}
+	if passes {
 		return false
 	}
 	return c.finish(ctx, ex, false)
+}
+
+// noRunnableJob reports whether every outstanding job of the scan is one that
+// this execution can never run: no registered handler, no worker group that
+// names its type. It only answers true when nothing is active — a job a worker
+// is currently running is governed by the pool's per-job deadline, and a queued
+// job whose type the pool serves will run either now, once its retry backoff
+// elapses, or once an operator reconfigures a zero-sized group. None of those
+// is a permanent stall.
+func (c *Controller) noRunnableJob(ctx context.Context, ex *execution) (bool, string) {
+	jobs, err := c.queue.Jobs(ctx, ex.scanID)
+	if err != nil {
+		if ctx.Err() == nil {
+			c.log.Warn("monitor: list jobs", "scan", ex.scanID, "err", err)
+		}
+		return false, ""
+	}
+	pending := 0
+	for _, j := range jobs {
+		if j.State.IsTerminal() {
+			continue
+		}
+		if j.State.IsActive() {
+			return false, "" // a worker holds it; the pool deadline bounds it
+		}
+		pending++
+	}
+	if pending == 0 {
+		return false, ""
+	}
+	for _, j := range jobs {
+		if j.State.IsTerminal() {
+			continue
+		}
+		if ex.pool.Serves(j.Type) {
+			return false, ""
+		}
+	}
+	return true, fmt.Sprintf("%d queued job(s) remain but no worker group serves their type", pending)
+}
+
+// failExecution records a terminal failure for a scan whose queue can never
+// drain. It takes ownership of the execution under mu (so a concurrent
+// pause/cancel wins cleanly), tears it down, cancels the jobs that can never
+// run, and only then persists the terminal state. Called from the monitor
+// goroutine, hence waitMonitor=false.
+func (c *Controller) failExecution(ctx context.Context, ex *execution, reason string) bool {
+	c.mu.Lock()
+	if c.running[ex.scanID] != ex {
+		c.mu.Unlock()
+		return true // Cancel/Shutdown took ownership
+	}
+	sc, err := c.store.Scans().Get(ctx, ex.scanID)
+	if err != nil || sc.State != domain.ScanRunning {
+		c.mu.Unlock()
+		return false // paused/awaiting auth (or unreadable): keep the execution
+	}
+	delete(c.running, ex.scanID)
+	c.mu.Unlock()
+
+	c.stopExecution(ex, false) // we ARE the monitor goroutine
+
+	bg := context.Background()
+	if _, err := c.queue.CancelScan(bg, ex.scanID); err != nil {
+		c.log.Warn("fail scan: cancel remaining jobs", "scan", ex.scanID, "err", err)
+	}
+	c.failScan(ex.scanID, "scan stalled: "+reason)
+	return true
 }
 
 // finish completes the scan from the monitor. When cancelJobs is set (stop

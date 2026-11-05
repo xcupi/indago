@@ -25,6 +25,11 @@ func TestDOMXSSSourceSelectionTestsEveryQueryParameter(t *testing.T) {
 	ctx := context.Background()
 	lab := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if r.URL.Path == "/noquery" {
+			// A page whose scripts read no query name at all.
+			fmt.Fprint(w, `<!doctype html><div id="sink">static</div>`)
+			return
+		}
 		fmt.Fprint(w, `<!doctype html><div id="sink"></div><script>
 const value = new URLSearchParams(location.search).get('x');
 document.getElementById('sink').innerHTML = value || '';
@@ -74,20 +79,32 @@ document.getElementById('sink').innerHTML = value || '';
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidateTests := 0
+	candidateTests, discoveryCases := 0, 0
 	for _, tc := range queryCases {
-		if tc.JobID == queryJob.ID {
-			candidateTests++
+		if tc.JobID != queryJob.ID {
+			continue
 		}
+		// The observation-only case naming the parameters the page's own
+		// scripts read is separate from the per-parameter attempts.
+		if strings.HasPrefix(tc.Note, "page-script query-name discovery:") {
+			discoveryCases++
+			continue
+		}
+		candidateTests++
+	}
+	if discoveryCases != 1 {
+		t.Fatalf("query-name discovery cases = %d, want exactly 1", discoveryCases)
 	}
 	if candidateTests != 3 {
 		t.Fatalf("query candidate attempts = %d, want 3 (one inert name + x reachability and verification; duplicate name is skipped)", candidateTests)
 	}
 
 	// An endpoint URL may contain query text without any corresponding
-	// discovered LocationQuery parameter. It must be explicitly skipped,
-	// never treated as a clean negative.
-	noParams := env.endpoint(lab.URL+"/query?first=unused&x=unused", domain.MethodGET)
+	// discovered LocationQuery parameter AND without any literal query name read
+	// by the page's own scripts (those are tested, see the page-script
+	// discovery above). It must be explicitly skipped, never treated as a clean
+	// negative.
+	noParams := env.endpoint(lab.URL+"/noquery?first=unused&x=unused", domain.MethodGET)
 	noParamExec := newDOMXSSExecutor(env.st, manager, env.ev, sourceSelectionScope(t, lab.URL), execLog(), &sync.Mutex{})
 	noParamJob := sourceSelectionJob(t, env.scanID, noParams, detectionSourceQuery)
 	if err := noParamExec.Handle(ctx, noParamJob); err != nil {

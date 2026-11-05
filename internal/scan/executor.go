@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -464,6 +465,21 @@ func putEvidenceBlob(ctx context.Context, st store.Store, ev evidence.Store, sca
 // request construction
 // ---------------------------------------------------------------------------
 
+// observedJSONContentType preserves an observed JSON media type only when it is
+// valid JSON (application/json or a +json subtype); otherwise it uses the
+// standard application/json fallback.
+func observedJSONContentType(raw string) string {
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return "application/json"
+	}
+	mediaType = strings.ToLower(mediaType)
+	if mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") {
+		return raw
+	}
+	return "application/json"
+}
+
 // buildRequest builds the baseline request for an endpoint: its URL with every
 // known query parameter present at its observed value, and — for body-carrying
 // methods — a form or JSON body of the known form/JSON parameters at their
@@ -485,9 +501,16 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 
 	q := u.Query()
 	form := url.Values{}
-	jsonBody := map[string]string{}
+	jsonBody := map[string]json.RawMessage{}
 	var headerOverride map[string]string
 	var cookieOverride []*http.Cookie
+	// rawQuery/hasRawQuery carry a raw query-string injection (LocationRawQuery):
+	// the ENTIRE query string is replaced by the pseudo-parameter's shape plus
+	// its encoded payload, instead of q carrying name=value pairs. It is applied
+	// after the loop so a raw-query injection deterministically wins over any
+	// named parameter, regardless of iteration order.
+	var rawQuery string
+	var hasRawQuery bool
 	for _, p := range sorted {
 		val := p.Example
 		injectedA := inj != nil && inj.param != nil && p.ID == inj.param.ID
@@ -504,13 +527,33 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 			switch {
 			case injected:
 				q.Set(p.Name, val) // override the observed value with the marker
+			case isDynamicTokenName(p.Name) && val != "":
+				// A rotating anti-CSRF value. refreshDynamicParams put the
+				// server's CURRENT token in Example, so it must replace a stale
+				// copy the endpoint URL still carries; keeping the URL's copy
+				// sends a rejected token and the request never reaches the code
+				// under test. If the refresh failed, Example is the discovery-time
+				// value, exactly as stale as the URL's, so nothing is lost. An empty
+				// value (a hidden field a script fills in later) never erases a
+				// token the URL already carries.
+				q.Set(p.Name, val)
 			case !q.Has(p.Name): // a value already in the URL is the observed one
 				q.Set(p.Name, val)
 			}
 		case domain.LocationForm:
 			form.Set(p.Name, val)
 		case domain.LocationJSON:
-			jsonBody[p.Name] = val
+			if !injected && p.Source == domain.SourceBrowserNetwork && json.Valid([]byte(p.Example)) {
+				// Network discovery stores a bounded raw JSON value in Example so
+				// non-focused fields keep their original JSON type/shape.
+				jsonBody[p.Name] = json.RawMessage(p.Example)
+			} else {
+				raw, err := json.Marshal(val)
+				if err != nil {
+					return nil, err
+				}
+				jsonBody[p.Name] = raw
+			}
 		case domain.LocationHeader:
 			// Only the mutated/candidate request overrides a header — the
 			// baseline must never disturb any header the scan relies on
@@ -545,9 +588,25 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 					}
 				}
 			}
+		case domain.LocationRawQuery:
+			// The whole query string is the injection point. The reserved
+			// pseudo-parameter name selects the shape (bare "?<payload>" or
+			// named "?x=<payload>"); the payload is encoded exactly like a
+			// named value, so the server sees the same bytes. A non-injected
+			// raw-query parameter is a no-op, which keeps every baseline and
+			// every named-parameter request byte-identical.
+			if injected {
+				if rs, ok := discovery.RawQueryQueryString(p.Name, val); ok {
+					rawQuery, hasRawQuery = rs, true
+				}
+			}
 		}
 	}
-	u.RawQuery = q.Encode()
+	if hasRawQuery {
+		u.RawQuery = rawQuery
+	} else {
+		u.RawQuery = q.Encode()
+	}
 
 	req := &httpengine.Request{Method: string(ep.Method), URL: u.String()}
 	if len(headerOverride) > 0 {
@@ -569,7 +628,7 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 			return nil, err
 		}
 		req.Body = b
-		req.ContentType = "application/json"
+		req.ContentType = observedJSONContentType(ep.ContentType)
 	}
 	return req, nil
 }
@@ -583,19 +642,16 @@ func isSafeMethod(m domain.HTTPMethod) bool {
 	}
 }
 
-// canBrowserVerify reports whether method+location is something the browser
-// verifier can replay as a real navigation: ordinary GET/HEAD, or POST with a
-// form-encoded (application/x-www-form-urlencoded) body — replayed as a real
-// <form> submission (see browser.Page.NavigateForm) so a POST/form candidate
-// gets the same chance to execute on page load a GET one already gets.
-// POST+JSON has no browser-navigable form (an HTML form cannot carry
-// application/json) and stays unsupported — that Finding stays Pending.
+// canBrowserVerify reports whether method+location has an in-scope browser
+// document replay: ordinary GET/HEAD, POST/form via a real form submission, or
+// POST/JSON via a one-shot top-level navigation request override. Other
+// body-carrying methods remain unsupported and their Findings stay Pending.
 func canBrowserVerify(method domain.HTTPMethod, loc domain.ParamLocation) bool {
 	switch method {
 	case domain.MethodGET, domain.MethodHEAD, "":
 		return true
 	case domain.MethodPOST:
-		return loc == domain.LocationForm
+		return loc == domain.LocationForm || loc == domain.LocationJSON
 	default:
 		return false
 	}

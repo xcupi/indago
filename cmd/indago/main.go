@@ -34,6 +34,7 @@ import (
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/llm"
 	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/store/sqlite"
@@ -68,7 +69,7 @@ func main() {
 		err = cmdServe(args)
 	case "evidence":
 		err = cmdEvidence(args)
-	case "project", "target", "scope", "scan", "finding", "endpoint", "auth", "report":
+	case "project", "target", "scope", "scan", "finding", "endpoint", "auth", "report", "config":
 		err = newCLI(defaultServer(), os.Stdout).runClient(cmd, args)
 	case "help", "-h", "--help":
 		usage()
@@ -115,6 +116,12 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER_URL, default htt
   report create -scan <scan-id|prefix> -format json|markdown|html [-mode all|confirmed|selected] [-finding ID]... [-out FILE]
   report list -scan <scan-id|prefix> [-json]
   report show <report-id|prefix> [-out FILE] [-download]
+
+Local configuration (reads/writes -data directly; no server needed):
+  config llm set -provider deepseek|openai|custom -api-key KEY [-model M] [-base-url URL] [-data DIR]
+                 (the key is stored 0600 under DIR/llm/; prefer $INDAGO_LLM_API_KEY over -api-key)
+  config llm show|clear|test [-data DIR]
+                 (test makes ONE small request to the configured provider; nothing else does)
 
 Local maintenance (reads -data directly; no server needed):
   evidence prune -older-than DURATION [-data DIR] [-scan ID] [-include-sessions] [-include-reports] [-apply]
@@ -304,6 +311,7 @@ func cmdServe(args []string) error {
 			statePath := filepath.Join(sessionsDir, "login-"+string(domain.NewID())+".json")
 			res, err := bm.InteractiveLogin(ctx, browser.LoginOptions{
 				LoginURL:         p.LoginURL,
+				AllowRequest:     p.AllowRequest,
 				SuccessURLGlob:   p.SuccessURL,
 				StorageStatePath: statePath,
 			})
@@ -340,7 +348,16 @@ func cmdServe(args []string) error {
 	defer stop()
 
 	srv := web.NewServer(db, ctrl, version, log, evStore, cfg.ReportsDir())
+	// LLM provider settings are local-only: the store writes under the same
+	// data directory (0600 files in a 0700 directory) and the web handlers
+	// never return the key. Configuration-only: nothing here calls a provider.
+	srv.SetLLMStore(llm.NewStore(filepath.Join(cfg.DataDir, "llm")))
 	srv.SetLoginFunc(loginFn) // nil unless -browser: endpoint then reports unavailable
+	srv.SetCapabilities(web.Capabilities{
+		BrowserEnabled:       *useBrowser,
+		BrowserSandbox:       *useBrowser && !*browserNoSandbox,
+		StateChangingAllowed: *allowUnsafe,
+	})
 	if err := srv.SetRateLimit(cfg.Server.APIRate, cfg.Server.APIBurst); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}

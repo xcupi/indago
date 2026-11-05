@@ -6,10 +6,13 @@ import (
 )
 
 // sessionTerminatingPath matches URL path segments that look like a
-// logout/sign-out endpoint. Word-bounded so it catches "logout.php",
-// "/auth/sign-out", "/user/log_off" etc. without flagging an unrelated word
-// that merely contains one of these as a substring.
-var sessionTerminatingPath = regexp.MustCompile(`(?i)\b(log[-_]?off|log[-_]?out|sign[-_]?out)\b`)
+// logout/sign-out endpoint. Bounded by anything that is not a letter or digit,
+// so it catches "logout.php", "/auth/sign-out", "/user/log_off", "user_logout"
+// and "logout_user" (an underscore is a separator here, unlike in regexp's \b)
+// without flagging an unrelated word that merely contains one of these as a
+// substring ("blog/outstanding", "catalog_outlet"). CamelCase names such as
+// "LogoutServlet" are not recognized.
+var sessionTerminatingPath = regexp.MustCompile(`(?i)(^|[^a-z0-9])(log[-_]?off|log[-_]?out|sign[-_]?out)([^a-z0-9]|$)`)
 
 // looksSessionTerminating reports whether a URL's path looks like a
 // logout/sign-out endpoint — one that, if requested, would likely end an

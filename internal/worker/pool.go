@@ -28,6 +28,11 @@ import (
 // error is treated as transient and retried subject to the job's MaxAttempts.
 var ErrPermanent = errors.New("worker: permanent failure")
 
+// ErrJobTimeout marks an attempt the pool abandoned because it outlived the
+// configured per-job deadline. It is retryable (a fresh worker gets the next
+// attempt); only an exhausted MaxAttempts makes the job terminal.
+var ErrJobTimeout = errors.New("worker: job deadline exceeded")
+
 // Handler executes a single job. Handlers must honor ctx cancellation.
 type Handler interface {
 	Handle(ctx context.Context, job *domain.TestJob) error
@@ -63,6 +68,20 @@ type Config struct {
 	// warning and returns anyway, abandoning that handler's goroutine rather
 	// than waiting on it indefinitely.
 	ShutdownTimeout time.Duration
+	// JobTimeout bounds one handler attempt. When a handler outlives it the
+	// pool stops the attempt (cancels its context, which also stops lease
+	// heartbeating), records a retryable failure, and abandons the handler
+	// goroutine so the worker slot is freed: a wedged browser/driver call must
+	// not hold a whole worker group hostage until the process exits. The job
+	// is retried on a fresh worker, up to its MaxAttempts, then becomes dead.
+	// Zero uses the default (15 minutes).
+	JobTimeout time.Duration
+	// RecordTimeout bounds the write that records a job's outcome. It is
+	// deliberately independent of the worker's own context: that context is
+	// already canceled when a stopping worker records "this attempt did not
+	// finish", and a canceled context makes a SQLite write fail, leaving the
+	// job active and invisible until lease expiry.
+	RecordTimeout time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -77,6 +96,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.ShutdownTimeout <= 0 {
 		c.ShutdownTimeout = 30 * time.Second
+	}
+	if c.JobTimeout <= 0 {
+		c.JobTimeout = 15 * time.Minute
+	}
+	if c.RecordTimeout <= 0 {
+		c.RecordTimeout = 15 * time.Second
 	}
 	return c
 }
@@ -185,6 +210,28 @@ func (p *Pool) Sizes() map[string]int {
 	return out
 }
 
+// Serves reports whether this pool is configured to run type t at all: a
+// registered handler and a worker group that names it. The group's current size
+// is deliberately ignored — a zero-sized group is an operator-reconfigurable
+// state (the scan can be given workers later), not proof that the job can never
+// run. A type with no handler and no group, by contrast, can never be leased by
+// anything, which is what a caller uses to detect a queue that cannot drain.
+func (p *Pool) Serves(t domain.JobType) bool {
+	if _, ok := p.handlers[t]; !ok {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, g := range p.groups {
+		for _, gt := range g.spec.Types {
+			if gt == t {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Stop cancels all workers and waits for them to exit.
 func (p *Pool) Stop() {
 	p.mu.Lock()
@@ -268,12 +315,18 @@ func (p *Pool) runWorker(ctx context.Context, spec GroupSpec, workerID string) {
 	}
 }
 
-// process runs a job's handler with lease heartbeating and records the outcome.
+// process runs a job's handler with lease heartbeating, a hard per-attempt
+// deadline, and records the outcome. The deadline matters as much as the
+// heartbeat: a handler wedged in a browser/driver call that never returns
+// would otherwise keep its lease alive forever and monopolize its worker group,
+// starving every job queued behind it.
 func (p *Pool) process(ctx context.Context, spec GroupSpec, job *domain.TestJob) {
 	handler, ok := p.handlers[job.Type]
 	if !ok {
 		p.log.Error("no handler for job type", "type", job.Type, "job", job.ID)
-		_ = p.q.Fail(ctx, job.ID, "no handler registered for type "+string(job.Type), false)
+		p.recordCtx(ctx, func(rctx context.Context) {
+			_ = p.q.Fail(rctx, job.ID, "no handler registered for type "+string(job.Type), false)
+		})
 		return
 	}
 
@@ -281,31 +334,112 @@ func (p *Pool) process(ctx context.Context, spec GroupSpec, job *domain.TestJob)
 	defer hcancel()
 	go p.heartbeat(hctx, job.ID)
 
-	err := handler.Handle(ctx, job)
-	hcancel()
-
-	if err != nil {
-		retry := !errors.Is(err, ErrPermanent)
-		if ferr := p.q.Fail(ctx, job.ID, err.Error(), retry); ferr != nil {
-			p.logRecordErr(ctx, "mark job failed", job.ID, ferr)
-		}
+	err, finished := p.runHandler(hctx, job, handler)
+	if !finished {
+		// Stop the heartbeat BEFORE recording anything: this attempt is over,
+		// and the record write itself releases the lease. The handler
+		// goroutine is abandoned deliberately — waiting for it is what let one
+		// wedged browser call stall an entire scan.
+		hcancel()
+		p.recordFail(ctx, job, fmt.Errorf("%w after %s", ErrJobTimeout, p.cfg.JobTimeout))
 		return
 	}
-	if cerr := p.q.Complete(ctx, job.ID); cerr != nil {
-		p.logRecordErr(ctx, "mark job complete", job.ID, cerr)
+
+	if err != nil {
+		if ctx.Err() != nil {
+			// The worker itself is stopping, not the job failing. Leave the
+			// lease exactly as it is: restart recovery (Queue.Recover) and the
+			// controller's lease reaper are the documented paths for that, and
+			// writing here with a canceled context would either silently abort
+			// (SQLite) or consume an attempt for a non-failure (in-memory).
+			p.logRecordErr(ctx, "leave job for recovery", job.ID, err)
+			return
+		}
+		p.recordFail(ctx, job, err)
+		return
+	}
+	if ctx.Err() != nil {
+		// The handler returned success, but the worker was stopped mid-attempt:
+		// any side effect it had not finished (child jobs still being enqueued,
+		// evidence still being written) may be incomplete, so "succeeded" is
+		// not trustworthy. Leave it active and let recovery replay the whole
+		// attempt — the same contract as a failed attempt during shutdown.
+		p.logRecordErr(ctx, "leave job for recovery", job.ID, ctx.Err())
+		return
+	}
+	p.recordComplete(ctx, job)
+}
+
+// runHandler executes one attempt and reports whether it finished within the
+// per-job deadline. A handler that outlives its deadline is left running in its
+// own goroutine (it may be blocked in a driver call that ignores context); the
+// buffered result channel means it can still return later without leaking.
+func (p *Pool) runHandler(ctx context.Context, job *domain.TestJob, handler Handler) (error, bool) {
+	done := make(chan error, 1)
+	go func() { done <- handler.Handle(ctx, job) }()
+
+	t := time.NewTimer(p.cfg.JobTimeout)
+	defer t.Stop()
+	select {
+	case err := <-done:
+		return err, true
+	case <-t.C:
+		// The handler may have finished at the same instant the deadline
+		// fired; prefer its real result over a spurious timeout.
+		select {
+		case err := <-done:
+			return err, true
+		default:
+			return nil, false
+		}
 	}
 }
 
-// logRecordErr logs a failure to record a job's outcome. When the worker's
-// own context has ended (shutdown or scan cancel), that failure is the
-// expected path — the job stays active and is requeued by restart recovery
-// (Queue.Recover) or lease reaping — so it is not a warning.
+// recordFail marks the job failed using a context that can still write. It is
+// used for authoritative failures (a handler error, or the per-job deadline),
+// and the write must not be lost just because the worker's own context was
+// canceled at the same moment: a canceled context makes a SQLite write abort
+// silently, leaving the job active with a lease nothing will extend or release.
+func (p *Pool) recordFail(ctx context.Context, job *domain.TestJob, cause error) {
+	retry := !errors.Is(cause, ErrPermanent)
+	p.recordCtx(ctx, func(rctx context.Context) {
+		if ferr := p.q.Fail(rctx, job.ID, cause.Error(), retry); ferr != nil {
+			p.logRecordErr(ctx, "mark job failed", job.ID, ferr)
+		}
+	})
+}
+
+// recordComplete marks the job succeeded, under the same write-safe context.
+func (p *Pool) recordComplete(ctx context.Context, job *domain.TestJob) {
+	p.recordCtx(ctx, func(rctx context.Context) {
+		if cerr := p.q.Complete(rctx, job.ID); cerr != nil {
+			p.logRecordErr(ctx, "mark job complete", job.ID, cerr)
+		}
+	})
+}
+
+// recordCtx runs one outcome write with a fresh bounded context derived from
+// ctx (values preserved, cancellation/deadline dropped).
+func (p *Pool) recordCtx(ctx context.Context, write func(context.Context)) {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.cfg.RecordTimeout)
+	defer cancel()
+	write(rctx)
+}
+
+// logRecordErr logs a failure to record a job's outcome. ErrNotLeasable is
+// expected when the job already reached a terminal state (cancel won the race,
+// or another worker reclaimed an expired lease) — it must not be retried or
+// resurrected, but it must still be visible. The worker's own cancellation is
+// also expected during shutdown.
 func (p *Pool) logRecordErr(ctx context.Context, msg string, jobID domain.ID, err error) {
-	if ctx.Err() != nil {
-		p.log.Info(msg+": worker stopping; job left for recovery", "job", jobID, "err", err)
-		return
+	switch {
+	case errors.Is(err, queue.ErrNotLeasable):
+		p.log.Info(msg+": job is no longer active (completed, cancelled, or reclaimed)", "job", jobID, "err", err)
+	case ctx.Err() != nil:
+		p.log.Info(msg+": execution stopping", "job", jobID, "err", err)
+	default:
+		p.log.Warn(msg, "job", jobID, "err", err)
 	}
-	p.log.Warn(msg, "job", jobID, "err", err)
 }
 
 // heartbeat periodically extends the job's lease until ctx is canceled. A

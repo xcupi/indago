@@ -40,8 +40,22 @@ type contextHandle interface {
 	Close() error
 }
 
+// networkIdleWaiter is an OPTIONAL pageHandle capability: it reports when the
+// page has had no in-flight network request for a given quiet period. It is a
+// separate interface rather than a pageHandle method so test fakes that only
+// implement pageHandle keep compiling; Page.WaitNetworkIdle reports
+// ErrNetworkIdleUnsupported when the concrete driver does not implement it.
+type networkIdleWaiter interface {
+	// WaitNetworkIdle blocks until no request has been in flight for quiet, or
+	// max elapses, whichever comes first. settled reports whether the quiet
+	// period was actually observed.
+	WaitNetworkIdle(quiet, max time.Duration) (settled bool, err error)
+}
+
 // pageHandle is a single page/tab within a context.
 type pageHandle interface {
+	EnableRuntimeProvenance(marker, initScript string) error
+	RuntimeObservations() RuntimeObservations
 	// Goto navigates to url and returns the HTTP status and final URL.
 	// referer, when non-empty, overrides the Referer HTTP header sent with
 	// this navigation (Playwright's own PageGotoOptions.Referer) — used by
@@ -57,7 +71,7 @@ type pageHandle interface {
 	// result (used for localStorage/sessionStorage access).
 	Evaluate(script string, arg any) (any, error)
 	// OnRequest registers a network-request observer (call before navigation).
-	OnRequest(func(NetworkEvent))
+	OnRequest(func(NetworkEvent), func(string) bool) error
 	// OnConsole registers a console observer.
 	OnConsole(func(ConsoleMessage))
 	// OnDialog registers a dialog observer; the driver dismisses the dialog after

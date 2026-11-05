@@ -51,7 +51,8 @@
 
   <footer class="footer">
     Indago — local-first, single-user web application security hunting platform. Authorized use only.
-    Reflected XSS is discovered <em>and</em> verified in a real browser; results are backed by stored evidence.
+    Reflected and DOM XSS are verified in a real browser when the server runs with the browser engine (<code>-browser</code>);
+    without it, DOM probes are skipped and nothing is confirmed. Results are backed by stored evidence.
   </footer>
 
   <script src="app.js"></script>

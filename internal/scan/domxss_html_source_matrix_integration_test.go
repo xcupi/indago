@@ -100,17 +100,18 @@ func TestDOMHTMLSourceMatrix(t *testing.T) {
 				}
 				defer bc.Close()
 				cand, _ := detection.DOMXSSPayloadFor(detection.DOMSourcePostMessage, detection.DOMXSSSink(sc.sink), marker)
-				console, pageErrors, html, _, _, err := ex.navigateSource(ctx, bc, detection.DOMSourcePostMessage, ep, "", marker, cand.Value)
+				obs, _, err := ex.navigateSource(ctx, bc, detection.DOMSourcePostMessage, ep, "", marker, cand.Value)
 				if err != nil {
 					t.Fatal(err)
 				}
+				html := obs.HTML
 				if !strings.Contains(html, `data-sender-origin="null"`) || !strings.Contains(html, `data-source-is-window="false"`) || !strings.Contains(html, `data-rejected="true"`) {
 					t.Fatalf("opaque non-self sender did not actually reach rejecting handler: %s", html)
 				}
-				if len(parseDOMXSSReachability(console, marker)) != 0 {
+				if len(parseDOMXSSReachability(domXSSHarnessMessages(obs.Runtime), marker)) != 0 {
 					t.Fatal("rejected sender reached sink")
 				}
-				if _, _, matched := verification.MatchExecutionSignal(marker, pageErrors, nil); matched {
+				if _, _, matched := verification.MatchRuntimeExecution(marker, obs.Runtime); matched {
 					t.Fatal("rejected sender executed marker")
 				}
 				return
@@ -124,13 +125,40 @@ func TestDOMHTMLSourceMatrix(t *testing.T) {
 			if parameter == "" {
 				parameter = sc.source
 			}
-			if len(d.Candidates) != 1 || string(d.Candidates[0].Context) != sc.sink || d.Candidates[0].ContextSub != sc.source || d.Candidates[0].Parameter != selector || d.ParameterName != parameter {
-				t.Fatalf("wrong source/sink/selector attribution: %+v", d)
+			if len(d.Candidates) == 0 || len(d.Candidates) > 2 {
+				t.Fatalf("want the bounded candidate shapes (markup, then attribute breakout at most): %+v", d)
 			}
-			if len(d.Attempts) != 2 || d.Attempts[1].Verdict == domain.VerdictPending || len(d.TestCaseIDs) != 2 || d.Attempts[1].VerifyTestCaseID.Empty() {
+			for _, cand := range d.Candidates {
+				if string(cand.Context) != sc.sink || cand.ContextSub != sc.source || cand.Parameter != selector {
+					t.Fatalf("wrong source/sink/selector attribution: %+v", d)
+				}
+			}
+			if d.ParameterName != parameter {
+				t.Fatalf("wrong parameter attribution: %+v", d)
+			}
+			// One reachability attempt plus exactly one verification attempt per
+			// candidate shape: each distinct shape is tried at most once, and
+			// every shape that was tried produced a real (non-pending) verdict
+			// with its own test case.
+			last := d.Attempts[len(d.Attempts)-1]
+			if len(d.Attempts) != 1+len(d.Candidates) || last.Verdict == domain.VerdictPending || len(d.TestCaseIDs) != len(d.Attempts) || last.VerifyTestCaseID.Empty() {
 				t.Fatalf("control did not complete payload verification: %+v", d)
 			}
-			wantCases := 2
+			wantCases := 1 + len(d.Candidates)
+			if sc.source == "location.search" {
+				// The page's own scripts name the query parameter: a separate
+				// observation-only discovery case precedes the sink probes.
+				wantCases++
+				discovery := 0
+				for _, tc := range cases {
+					if strings.HasPrefix(tc.Note, "page-script query-name discovery:") && strings.Contains(tc.Note, selector) {
+						discovery++
+					}
+				}
+				if discovery != 1 {
+					t.Fatalf("want exactly one query-name discovery case naming %q, got %d", selector, discovery)
+				}
+			}
 			if strings.HasSuffix(sc.source, "Storage") {
 				wantCases++ // observation-only key discovery is a separate case
 				if !strings.Contains(f.Summary, "attacker-relevant ability to write or poison") || !strings.Contains(d.Candidates[0].Rationale, "manual exploitability review") {
@@ -141,7 +169,7 @@ func TestDOMHTMLSourceMatrix(t *testing.T) {
 				t.Fatalf("test cases=%d, want %d", len(cases), wantCases)
 			}
 			if sc.control == "positive" {
-				if f.Verdict != domain.VerdictConfirmed || !strings.Contains(d.Attempts[1].Notes, marker+" is not defined") {
+				if f.Verdict != domain.VerdictConfirmed || !strings.Contains(last.Notes, marker+" is not defined") {
 					t.Fatalf("expected one Confirmed with actual marker error: %+v", f)
 				}
 			} else if f.Verdict == domain.VerdictConfirmed {
@@ -150,7 +178,11 @@ func TestDOMHTMLSourceMatrix(t *testing.T) {
 			if (sc.control == "escaped" || sc.control == "forged") && f.Verdict != domain.VerdictRejected {
 				t.Fatalf("escaped marker must be re-observed and rejected, not missing: %+v", f)
 			}
-			bodies := htmlSourceMatrixEvidence(t, env, f, d.Attempts[1].VerifyTestCaseID)
+			var attemptIDs []domain.ID
+			for _, a := range d.Attempts {
+				attemptIDs = append(attemptIDs, a.VerifyTestCaseID)
+			}
+			bodies := htmlSourceMatrixEvidenceFor(t, env, f, last.VerifyTestCaseID, attemptIDs...)
 			log := bodies[domain.EvidenceBrowserLog]
 			html := bodies[domain.EvidenceDOM]
 			if sc.control == "positive" {
@@ -190,7 +222,7 @@ func TestDOMHTMLSourceMatrix(t *testing.T) {
 				if strings.Contains(log, `"connected":true`) || !strings.Contains(f.Summary, "target insertion of the parsed fragment was not observed") {
 					t.Fatal("fragment control lost insertion guard")
 				}
-				if sc.control == "innocent-sibling" && !strings.Contains(html, `id="sink">safe-prefix</div>`) {
+				if sc.control == "innocent-sibling" && !strings.Contains(html, `id="sink">safe-prefix`) {
 					t.Fatal("innocent sibling was not actually inserted")
 				}
 			}
@@ -237,13 +269,30 @@ func htmlSourceMatrixPage(sink, source, control string) string {
 
 func htmlSourceMatrixEvidence(t *testing.T, env *scanEnv, f *domain.Finding, verifyTestCaseID domain.ID) map[domain.EvidenceKind]string {
 	t.Helper()
+	return htmlSourceMatrixEvidenceFor(t, env, f, verifyTestCaseID, verifyTestCaseID)
+}
+
+// htmlSourceMatrixEvidenceFor validates every evidence row on a finding and
+// returns the bodies of the decisive attempt only. A finding unions the evidence
+// of every verification attempt (finding correlation never discards raw
+// evidence), so each row must be attributed to SOME attempt's verify test case
+// (attempts), while the log/DOM/screenshot assertions are made on the decisive one.
+func htmlSourceMatrixEvidenceFor(t *testing.T, env *scanEnv, f *domain.Finding, decisive domain.ID, attempts ...domain.ID) map[domain.EvidenceKind]string {
+	t.Helper()
 	out := make(map[domain.EvidenceKind]string)
 	for _, id := range f.EvidenceIDs {
 		ev, err := env.st.Evidence().Get(context.Background(), id)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if ev.ScanID != env.scanID || ev.BlobPath == "" || verifyTestCaseID.Empty() || !strings.Contains(ev.Note, fmt.Sprintf("test_case=%s", verifyTestCaseID)) || ev.MediaType == "" {
+		attributed, isDecisive := false, false
+		for _, tcID := range attempts {
+			if !tcID.Empty() && strings.Contains(ev.Note, fmt.Sprintf("test_case=%s", tcID)) {
+				attributed = true
+			}
+		}
+		isDecisive = !decisive.Empty() && strings.Contains(ev.Note, fmt.Sprintf("test_case=%s", decisive))
+		if ev.ScanID != env.scanID || ev.BlobPath == "" || !attributed || ev.MediaType == "" {
 			t.Fatalf("missing evidence attribution/metadata: %+v", ev)
 		}
 		r, err := env.ev.Open(ev.BlobPath)
@@ -258,7 +307,9 @@ func htmlSourceMatrixEvidence(t *testing.T, env *scanEnv, f *domain.Finding, ver
 		if len(body) == 0 || int64(len(body)) != ev.Size || fmt.Sprintf("%x", sha256.Sum256(body)) != ev.SHA256 {
 			t.Fatalf("evidence size/hash mismatch: %+v", ev)
 		}
-		out[ev.Kind] = string(body)
+		if isDecisive {
+			out[ev.Kind] = string(body)
+		}
 	}
 	for _, kind := range []domain.EvidenceKind{domain.EvidenceScreenshot, domain.EvidenceDOM} {
 		if out[kind] == "" {

@@ -129,6 +129,10 @@ StopPolicy{ Mode StopMode; ConfirmedLimit int }
 
 Scope is enforced at **scan creation** and again at **start** (defense in depth).
 
+The matcher compares the **hostname** only (not port, scheme, or the resolved IP),
+and path prefixes are plain string prefixes. See
+[scope-semantics.md](scope-semantics.md) for the exact behaviour and its limits.
+
 ---
 
 ## 7. Provenance & evidence

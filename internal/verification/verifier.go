@@ -22,11 +22,10 @@ import (
 // ErrNotImplemented indicates the Phase 0 stub with no behavior.
 var ErrNotImplemented = errors.New("verification: not implemented in Phase 0")
 
-// ErrUnsupportedMethod is returned when Input.Method is not browser-navigable
-// (browser navigation carries no request body, so only GET/HEAD/OPTIONS
-// candidates can be replayed this way). The caller should treat this as "not
-// attempted", not as a failed verification.
-var ErrUnsupportedMethod = errors.New("verification: only GET-navigable candidates can be browser-verified")
+// ErrUnsupportedMethod is returned when the method/body representation cannot
+// be replayed as a browser document navigation (currently GET/HEAD, POST/form,
+// and bounded POST/JSON are supported). The caller treats this as not attempted.
+var ErrUnsupportedMethod = errors.New("verification: request method or body representation is not supported for browser navigation")
 
 // Input is the context for one verification attempt: the candidate that
 // reflected, the exact request that produced the reflection, and the
@@ -45,11 +44,9 @@ type Input struct {
 	// searched for in the rendered DOM.
 	Marker string
 	// Method and URL are the exact request that produced the reflection.
-	// Browser navigation is GET/HEAD, or POST when Location is LocationForm and
-	// FormValues is set (replayed as a real <form> submission — see
-	// browser.Page.NavigateForm); any other Method/Location combination (in
-	// particular POST+JSON, which no HTML form can carry) yields
-	// ErrUnsupportedMethod.
+	// Browser document replay supports GET/HEAD, POST with LocationForm and
+	// FormValues, or POST with LocationJSON, JSONBody and ContentType. Other
+	// body-carrying method/location combinations are not attempted.
 	Method   string
 	URL      string
 	Location domain.ParamLocation
@@ -58,6 +55,12 @@ type Input struct {
 	// field holding the candidate's own value) — only consulted when Method is
 	// POST and Location is LocationForm.
 	FormValues map[string]string
+	// JSONBody carries the exact, already-mutated JSON request body produced by
+	// the HTTP candidate step. It is replayed only for POST + LocationJSON.
+	JSONBody []byte
+	// ContentType is the observed request media type (including parameters such
+	// as charset); JSON verification requires application/json or a +json type.
+	ContentType string
 	// ExtraHeaders, when set, carries a Header-location candidate's header
 	// override (name -> the candidate's value) that must reach the
 	// verifying browser context BEFORE navigation — see

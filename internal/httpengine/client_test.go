@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -173,6 +174,169 @@ func TestCookieJarPersistsAcrossRequests(t *testing.T) {
 	}
 	if string(resp.Body) != "session123" {
 		t.Fatalf("jar did not persist cookie, body=%q status=%d", resp.Body, resp.Status)
+	}
+}
+
+func TestNoCookiesRequestIsAnonymous(t *testing.T) {
+	var mu sync.Mutex
+	var sawCookie []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/set", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "sid", Value: "session123", Path: "/"})
+	})
+	mux.HandleFunc("/check", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		sawCookie = append(sawCookie, r.Header.Get("Cookie"))
+		mu.Unlock()
+		if _, err := r.Cookie("sid"); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := mustClient(t, httpengine.DefaultConfig())
+	if _, err := c.Do(context.Background(), httpengine.GET(srv.URL+"/set")); err != nil {
+		t.Fatal(err)
+	}
+	// The jar really does carry the cookie for an ordinary request.
+	resp, err := c.Do(context.Background(), httpengine.GET(srv.URL+"/check"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != http.StatusOK {
+		t.Fatalf("ordinary request status = %d, want 200 (jar should carry the cookie)", resp.Status)
+	}
+
+	// NoCookies must bypass the jar AND any explicitly supplied cookies.
+	req := httpengine.GET(srv.URL + "/check")
+	req.NoCookies = true
+	req.Cookies = []*http.Cookie{{Name: "sid", Value: "explicit"}}
+	resp, err = c.Do(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != http.StatusUnauthorized {
+		t.Fatalf("NoCookies request status = %d, want 401 (a genuinely anonymous request)", resp.Status)
+	}
+	mu.Lock()
+	last := sawCookie[len(sawCookie)-1]
+	mu.Unlock()
+	if last != "" {
+		t.Fatalf("NoCookies request sent Cookie header %q, want none", last)
+	}
+}
+
+// TestJarlessRequestSendsExplicitCookiesAndIgnoresTheJar: a jarless request
+// sends only the cookies the caller supplied — nothing the jar stored, and its
+// own Set-Cookie is not stored either.
+func TestJarlessRequestSendsExplicitCookiesAndIgnoresTheJar(t *testing.T) {
+	var mu sync.Mutex
+	var sawCookie []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/set", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "jar", Value: "stored", Path: "/"})
+	})
+	mux.HandleFunc("/probe", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		sawCookie = append(sawCookie, r.Header.Get("Cookie"))
+		mu.Unlock()
+		http.SetCookie(w, &http.Cookie{Name: "kept", Value: "nope", Path: "/"})
+		_, _ = io.WriteString(w, "ok")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := mustClient(t, httpengine.DefaultConfig())
+	if _, err := c.Do(context.Background(), httpengine.GET(srv.URL+"/set")); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httpengine.GET(srv.URL + "/probe")
+	req.Jarless = true
+	req.Cookies = []*http.Cookie{{Name: "explicit", Value: "only"}}
+	if _, err := c.Do(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	got := sawCookie[len(sawCookie)-1]
+	mu.Unlock()
+	if got != "explicit=only" {
+		t.Fatalf("jarless request sent Cookie header %q, want only the explicit cookie", got)
+	}
+
+	// The jarless response's cookie must not have been stored for later
+	// requests: the ordinary request sees the jar cookie, not "kept".
+	mu.Lock()
+	sawCookie = nil
+	mu.Unlock()
+	if _, err := c.Do(context.Background(), httpengine.GET(srv.URL+"/probe")); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	ordinary := sawCookie[len(sawCookie)-1]
+	mu.Unlock()
+	if ordinary != "jar=stored" {
+		t.Fatalf("ordinary request sent Cookie header %q, want only the jar cookie", ordinary)
+	}
+}
+
+// TestNoJarRequestSendsExplicitCookiesAndLeavesTheJarAlone: a NoJar request
+// still sends the cookies the caller supplied, but neither receives the jar's
+// contents nor stores its own Set-Cookie. It is the transport primitive a
+// disclosure fetch uses so its response cookie can be handed to exactly one
+// follow-up probe instead of a process-wide jar.
+func TestNoJarRequestSendsExplicitCookiesAndLeavesTheJarAlone(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.URL.Path] = r.Header.Get("Cookie")
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/set":
+			http.SetCookie(w, &http.Cookie{Name: "jar", Value: "stored", Path: "/"})
+		case "/probe":
+			http.SetCookie(w, &http.Cookie{Name: "kept", Value: "nope", Path: "/"})
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	c := mustClient(t, httpengine.DefaultConfig())
+	if _, err := c.Do(context.Background(), httpengine.GET(srv.URL+"/set")); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httpengine.GET(srv.URL + "/probe")
+	req.NoJar = true
+	req.Cookies = []*http.Cookie{{Name: "explicit", Value: "only"}}
+	if _, err := c.Do(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	got := seen["/probe"]
+	mu.Unlock()
+	if got != "explicit=only" {
+		t.Fatalf("NoJar request sent Cookie header %q, want only the explicit cookie", got)
+	}
+
+	// Its Set-Cookie must not have been stored: the ordinary request sees the
+	// cookie /set stored, never "kept".
+	mu.Lock()
+	delete(seen, "/probe")
+	mu.Unlock()
+	if _, err := c.Do(context.Background(), httpengine.GET(srv.URL+"/probe")); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	ordinary := seen["/probe"]
+	mu.Unlock()
+	if ordinary != "jar=stored" {
+		t.Fatalf("ordinary request sent Cookie header %q, want only the jar cookie", ordinary)
 	}
 }
 

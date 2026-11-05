@@ -96,7 +96,21 @@ func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpen
 		// Rebuild the cookie list for this URL on every hop. Session cookies
 		// carry storage-state scope metadata; request-specific overrides remain
 		// first so a targeted injection wins over a same-named session cookie.
-		cur.Cookies = s.cookiesForURL(cur.URL, req.URL, requestCookies, hop == 0)
+		// A NoCookies request is a deliberate anonymous probe: attach nothing.
+		// A Jarless request carries ONLY the cookies the caller supplied, each
+		// evaluated against this hop by its own scope metadata — the scan's
+		// session cookies and the ambient jar are deliberately out of it.
+		// A NoJar request takes the default path below (explicit saved session
+		// cookies included): the transport hides the jar in both directions,
+		// which is the one thing that separates it from Jarless.
+		switch {
+		case cur.NoCookies:
+			cur.Cookies = nil
+		case cur.Jarless:
+			cur.Cookies = jarlessCookiesForURL(cur.URL, req.URL, requestCookies, hop == 0)
+		default:
+			cur.Cookies = s.cookiesForURL(cur.URL, req.URL, requestCookies, hop == 0)
+		}
 		resp, err := s.inner.Do(ctx, &cur)
 		if err != nil {
 			return nil, err
@@ -187,6 +201,38 @@ func (s *scopedEngine) cookiesForURL(rawURL, initialURL string, requestCookies [
 	return out
 }
 
+// jarlessCookiesForURL filters a jarless request's own cookies against one hop
+// URL. A cookie carrying its own browser scope (Domain and Path — this is how
+// continuityCookies hands its result over) is re-evaluated on every hop, so it
+// follows a same-origin redirect exactly where a browser would send it. A
+// cookie without scope metadata is a single-hop override.
+//
+// RFC 6265 cookie scope ignores ports, but a replay set is stricter on purpose:
+// it was issued by ONE origin, so it is dropped as soon as a hop leaves that
+// origin (scheme, host and effective port), never merely the host.
+func jarlessCookiesForURL(rawURL, initialURL string, requestCookies []*http.Cookie, firstHop bool) []*http.Cookie {
+	out := make([]*http.Cookie, 0, len(requestCookies))
+	sameOrigin := sameOriginURL(initialURL, rawURL)
+	for _, requestCookie := range requestCookies {
+		if requestCookie == nil {
+			continue
+		}
+		if requestCookie.Domain == "" || requestCookie.Path == "" {
+			if firstHop {
+				out = append(out, requestCookie)
+			}
+			continue
+		}
+		if !sameOrigin {
+			continue
+		}
+		if cookiePermitsURL(requestCookie, rawURL) {
+			out = append(out, requestCookie)
+		}
+	}
+	return out
+}
+
 // cookiePermitsURL implements the storage-state cookie checks needed by a raw
 // HTTP request. A leading dot in Domain denotes a Domain cookie (and permits
 // subdomains); a domain without a leading dot is host-only, matching the
@@ -210,22 +256,9 @@ func cookiePermitsURL(c *http.Cookie, rawURL string) bool {
 		return false
 	}
 
-	cookieDomain, domainCookie, ok := cookieDomainParts(c.Domain)
-	if !ok {
+	if !cookieDomainPermitsHost(c.Domain, u.Hostname()) {
 		return false
 	}
-	host, ok := normalizedCookieHost(u.Hostname())
-	if !ok {
-		return false
-	}
-	if domainCookie {
-		if host != cookieDomain && !strings.HasSuffix(host, "."+cookieDomain) {
-			return false
-		}
-	} else if host != cookieDomain {
-		return false
-	}
-
 	requestPath := u.EscapedPath()
 	if requestPath == "" {
 		requestPath = "/"

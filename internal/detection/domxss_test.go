@@ -14,8 +14,8 @@ func TestDOMXSSSinkIsValid(t *testing.T) {
 			t.Fatalf("%s should be valid", s)
 		}
 	}
-	if detection.DOMXSSSink("eval").IsValid() {
-		t.Fatal("eval is out of scope for this slice and must not be a valid sink")
+	if !detection.DOMXSSSink("eval").IsValid() {
+		t.Fatal("eval must be a valid execution sink")
 	}
 	if detection.DOMXSSSink("").IsValid() {
 		t.Fatal("empty sink must not be valid")
@@ -32,6 +32,17 @@ func TestDOMXSSCanaryContainsMarker(t *testing.T) {
 	// a reachability probe is never a payload): no "<" or ">" at all.
 	if strings.ContainsAny(canary, "<>") {
 		t.Fatalf("canary %q must be inert, not a markup breakout", canary)
+	}
+}
+
+func TestDOMXSSDocumentWriteCandidateUsesScriptBodyWithoutReservedAttributes(t *testing.T) {
+	marker := "indxssdw1"
+	cand, ok := detection.DOMXSSPayloadFor(detection.DOMSourceQuery, detection.DOMSinkDocumentWrite, marker)
+	if !ok {
+		t.Fatal("expected document.write candidate")
+	}
+	if want := "<script>" + marker + "</script>"; cand.Value != want {
+		t.Fatalf("document.write candidate = %q, want %q for decodeURI + select context", cand.Value, want)
 	}
 }
 
@@ -121,7 +132,7 @@ func TestDOMXSSSourceIsValid(t *testing.T) {
 }
 
 func TestDOMXSSPayloadForRejectsUnknownSinkOrEmptyMarker(t *testing.T) {
-	if _, ok := detection.DOMXSSPayloadFor(detection.DOMSourceHash, detection.DOMXSSSink("eval"), "indabc"); ok {
+	if _, ok := detection.DOMXSSPayloadFor(detection.DOMSourceHash, detection.DOMXSSSink("unsupported"), "indabc"); ok {
 		t.Fatal("an out-of-scope sink must not produce a candidate")
 	}
 	if _, ok := detection.DOMXSSPayloadFor(detection.DOMXSSSource("eval"), detection.DOMSinkInnerHTML, "indabc"); ok {

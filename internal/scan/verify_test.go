@@ -173,15 +173,12 @@ func TestEnqueueVerificationOnReflectedCandidate(t *testing.T) {
 	}
 }
 
-// A candidate reflecting on a state-changing (POST) endpoint still gets a
-// Pending finding either way (it is just as real a candidate as a GET one).
-// Whether a browser-verify job is ALSO enqueued now depends on whether the
-// parameter is form-encoded: POST+JSON still never gets one (browser
-// navigation has no way to carry a JSON body — see docs/scan-orchestration.md)
-// while POST+FORM now does, replayed as a real <form> submission (see
-// browser.Page.NavigateForm) — the same chance at confirmation a GET
-// candidate already gets.
-func TestEnqueueVerificationSkippedForStateChangingJSONEndpoint(t *testing.T) {
+// A candidate reflecting on a state-changing JSON endpoint still gets a
+// Pending finding and a browser-verify job when state-changing requests are
+// explicitly enabled. The verifier must replay the same JSON request in a real
+// top-level browser navigation; with the opt-in off, candidate execution itself
+// remains skipped and no verify job is queued.
+func TestEnqueueVerificationSendsVerifyJobForStateChangingJSONEndpoint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		b, _ := io.ReadAll(r.Body)
@@ -207,8 +204,19 @@ func TestEnqueueVerificationSkippedForStateChangingJSONEndpoint(t *testing.T) {
 	if len(findings) != 1 || findings[0].Verdict != domain.VerdictPending {
 		t.Fatalf("expected exactly one Pending finding for the POST+JSON candidate, got %+v", findings)
 	}
-	if st, _ := q.Stats(context.Background(), env.scanID); st.Total() != 0 {
-		t.Fatalf("no verify job should be enqueued for a POST+JSON candidate, queue total = %d", st.Total())
+	if st, _ := q.Stats(context.Background(), env.scanID); st.Total() != 1 {
+		t.Fatalf("one verify job should be enqueued for an opt-in POST+JSON candidate, queue total = %d", st.Total())
+	}
+	vj, err := q.Lease(context.Background(), "w", env.scanID, []domain.JobType{domain.JobVerify}, time.Minute)
+	if err != nil {
+		t.Fatalf("lease verify job: %v", err)
+	}
+	parsed, err := parseVerifyJob(vj)
+	if err != nil {
+		t.Fatalf("verify payload: %v", err)
+	}
+	if parsed.FindingID != findings[0].ID || parsed.Candidate.Value != cand.Value || parsed.Marker != m {
+		t.Fatalf("verify payload = %+v", parsed)
 	}
 }
 
@@ -243,6 +251,59 @@ func TestEnqueueVerificationSendsVerifyJobForStateChangingFormEndpoint(t *testin
 	}
 	if st, _ := q.Stats(context.Background(), env.scanID); st.Total() != 1 {
 		t.Fatalf("a verify job should be enqueued for a POST+form candidate now, queue total = %d", st.Total())
+	}
+}
+
+func TestVerifyExecutorPassesPOSTJSONRequestToBrowserVerifier(t *testing.T) {
+	env := newScanEnv(t)
+	const contentType = "application/vnd.api+json; charset=utf-8"
+	ep := &domain.Endpoint{
+		ID: domain.NewID(), ScanID: env.scanID, URL: "http://127.0.0.1/api/search",
+		Method: domain.MethodPOST, ContentType: contentType, Source: domain.SourceBrowserNetwork, CreatedAt: time.Now(),
+	}
+	if err := env.st.Endpoints().Create(context.Background(), ep); err != nil {
+		t.Fatal(err)
+	}
+	focus := &domain.Parameter{
+		ID: domain.NewID(), ScanID: env.scanID, EndpointID: ep.ID, Name: "q",
+		Location: domain.LocationJSON, Example: `"hello"`, Source: domain.SourceBrowserNetwork, CreatedAt: time.Now(),
+	}
+	other := &domain.Parameter{
+		ID: domain.NewID(), ScanID: env.scanID, EndpointID: ep.ID, Name: "page",
+		Location: domain.LocationJSON, Example: `2`, Source: domain.SourceBrowserNetwork, CreatedAt: time.Now(),
+	}
+	for _, p := range []*domain.Parameter{focus, other} {
+		if err := env.st.Parameters().Create(context.Background(), p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ip := env.injection(ep, focus)
+	f := env.pendingFinding(ep, ip)
+	candidateValue := "<svg onload=mk>"
+	cand := detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: candidateValue, Priority: 90, DedupKey: "json-post"}
+	fv := &fakeVerifier{result: rejectedResult()}
+	vx := env.verifyExec(fv, openScope(), ExecutorConfig{AllowStateChanging: true})
+	job := env.verifyJobFor(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, cand, f.ID)
+	if err := vx.Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if fv.callCount() != 1 {
+		t.Fatalf("verifier called %d times, want one POST/JSON verification", fv.callCount())
+	}
+	in := fv.lastInput()
+	if in.Method != http.MethodPost || in.Location != domain.LocationJSON || in.ContentType != contentType {
+		t.Fatalf("verifier request metadata = method %q location %q content-type %q", in.Method, in.Location, in.ContentType)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(in.JSONBody, &got); err != nil {
+		t.Fatalf("verifier JSON body is invalid: %v", err)
+	}
+	var q string
+	if err := json.Unmarshal(got["q"], &q); err != nil || q != candidateValue {
+		t.Fatalf("focus field = %q (err %v), want candidate %q", q, err, candidateValue)
+	}
+	if string(got["page"]) != "2" {
+		t.Fatalf("non-focused numeric field type changed: page=%s, want raw number 2", got["page"])
 	}
 }
 
@@ -455,17 +516,14 @@ func TestVerifyHandleStateChangingGuard(t *testing.T) {
 	}
 }
 
-// Even with AllowStateChanging on, browser verification itself only supports
-// GET/HEAD navigation or a POST with a FORM-encoded body (replayed as a real
-// <form> submission — see browser.Page.NavigateForm): a defensive second gate
-// independent of the one in executor.go that decides whether to enqueue at
-// all. A POST+JSON candidate has no browser-navigable form (a <form> cannot
-// carry application/json) and still can never reach the verifier.
-func TestVerifyHandleNonGETSkippedEvenIfAllowed(t *testing.T) {
+// Even with AllowStateChanging on, the verifier keeps unsupported body methods
+// skipped. POST+JSON is supported by a bounded top-level browser navigation;
+// PUT/PATCH/DELETE remain Pending in this phase.
+func TestVerifyHandleUnsupportedBodyMethodSkippedEvenIfAllowed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "ok") }))
 	defer srv.Close()
 	env := newScanEnv(t)
-	ep := env.endpoint(srv.URL+"/submit", domain.MethodPOST)
+	ep := env.endpoint(srv.URL+"/submit", domain.MethodPUT)
 	focus := env.param(ep, "q", domain.LocationJSON, "hi")
 	ip := env.injection(ep, focus)
 	f := env.pendingFinding(ep, ip)
@@ -477,7 +535,7 @@ func TestVerifyHandleNonGETSkippedEvenIfAllowed(t *testing.T) {
 		t.Fatalf("skipped job must succeed: %v", err)
 	}
 	if fv.callCount() != 0 {
-		t.Fatal("a POST+JSON target must never reach the browser verifier (no HTML form can carry application/json)")
+		t.Fatal("a PUT+JSON target must remain unsupported and never reach the browser verifier")
 	}
 	tc := env.only()
 	if tc.Status != domain.TestCaseSkipped {
@@ -486,8 +544,8 @@ func TestVerifyHandleNonGETSkippedEvenIfAllowed(t *testing.T) {
 }
 
 // A POST candidate whose parameter is FORM-encoded now DOES reach the browser
-// verifier (replayed as a real <form method=post> submission), unlike
-// POST+JSON above — the capability this phase adds.
+// verifier (replayed as a real <form method=post> submission), unlike the
+// unsupported PUT+JSON body method above.
 func TestVerifyHandlePostFormReachesVerifier(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "ok") }))
 	defer srv.Close()

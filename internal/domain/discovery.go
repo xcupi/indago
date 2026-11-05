@@ -27,7 +27,7 @@ type Parameter struct {
 	EndpointID ID              `json:"endpoint_id"`
 	Name       string          `json:"name"`
 	Location   ParamLocation   `json:"location"`
-	Example    string          `json:"example,omitempty"` // a sample/observed value
+	Example    string          `json:"example,omitempty"` // sample/observed value; browser-network JSON examples store a serialized JSON literal
 	Source     DiscoverySource `json:"source"`
 	CreatedAt  time.Time       `json:"created_at"`
 }

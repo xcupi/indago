@@ -4,21 +4,31 @@ import (
 	"net/url"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/indago/indago/internal/domain"
 )
 
 // URLInfo is a normalized, canonical view of a URL used for deduplication and
-// scope checks.
+// scope checks. Canonical preserves a recognized SPA route path in the fragment
+// (but not its fragment-query values); plain anchors remain omitted.
 type URLInfo struct {
-	Canonical  string     // full canonical URL (sorted query, no fragment, default port dropped)
+	Canonical  string     // canonical URL; recognized SPA route paths are preserved without fragment-query values
 	Scheme     string     // lowercased, http or https
 	Host       string     // lowercased host without default port
 	HostPort   string     // host[:port] with default ports dropped
 	Path       string     // cleaned path (dot-segments resolved; leading slash)
 	Query      url.Values // parsed query
 	ParamNames []string   // sorted, unique query parameter names
+
+	// FragmentRoute is the path of a single-page-app route fragment such as
+	// "/search" for "#/search?q=hello". Empty when the fragment is not a
+	// route with a query string (a plain anchor is not a route).
+	FragmentRoute string
+	// FragmentParams are the sorted, unique query parameter names carried
+	// inside the route fragment (e.g. "q" for "#/search?q=hello").
+	FragmentParams []string
 }
 
 // defaultPort reports the default port for a scheme.
@@ -100,6 +110,17 @@ func normalizeParsed(u *url.URL) (URLInfo, error) {
 	if enc := q.Encode(); enc != "" { // url.Values.Encode sorts by key
 		canonical += "?" + enc
 	}
+	fragRoute, fragParams := parseFragmentRoute(u.EscapedFragment())
+	if fragRoute != "" {
+		canonical += "#" + fragRoute
+		if len(fragParams) > 0 {
+			encodedNames := make([]string, 0, len(fragParams))
+			for _, name := range fragParams {
+				encodedNames = append(encodedNames, url.QueryEscape(name)+"=")
+			}
+			canonical += "?" + strings.Join(encodedNames, "&")
+		}
+	}
 
 	return URLInfo{
 		Canonical:  canonical,
@@ -109,14 +130,70 @@ func normalizeParsed(u *url.URL) (URLInfo, error) {
 		Path:       cleaned,
 		Query:      q,
 		ParamNames: names,
+
+		FragmentRoute:  fragRoute,
+		FragmentParams: fragParams,
 	}, nil
 }
 
-// EndpointKey is the deduplication key for an endpoint: method plus the URL with
-// query parameter *names* only (values stripped). This collapses value
-// permutations (e.g. ?q=a and ?q=b) into one endpoint while preserving the
-// parameter set, preventing crawl explosion.
+// parseFragmentRoute reads a single-page-app route from the URL's escaped
+// fragment representation. Keeping reserved escapes intact until ParseQuery is
+// important: only literal '?', '&', and '=' delimit route/query syntax; escaped
+// delimiters belong to the route or parameter name. Anything else (a plain
+// "#section", or "#/about" without a query) is not a route.
+func parseFragmentRoute(escapedFragment string) (string, []string) {
+	if !strings.HasPrefix(escapedFragment, "/") {
+		return "", nil
+	}
+	i := strings.IndexByte(escapedFragment, '?')
+	if i < 0 {
+		return "", nil
+	}
+	q, err := url.ParseQuery(escapedFragment[i+1:])
+	if err != nil {
+		return "", nil
+	}
+	names := make([]string, 0, len(q))
+	for k := range q {
+		if k != "" {
+			names = append(names, k)
+		}
+	}
+	if len(names) == 0 {
+		return "", nil
+	}
+	sort.Strings(names)
+	return escapedFragment[:i], names
+}
+
+// EndpointKey is the deduplication key for an endpoint. Legacy non-fragment
+// endpoint keys retain their existing form; fragment-route keys use a versioned,
+// length-prefixed tuple so path, route, and parameter names cannot collide.
 func EndpointKey(method domain.HTTPMethod, info URLInfo) string {
+	if info.FragmentRoute != "" {
+		var b strings.Builder
+		b.WriteString("v2:")
+		writePart := func(value string) {
+			b.WriteString(strconv.Itoa(len(value)))
+			b.WriteByte(':')
+			b.WriteString(value)
+		}
+		writePart(string(method))
+		writePart(info.Scheme)
+		writePart(info.HostPort)
+		writePart(info.Path)
+		writePart(strconv.Itoa(len(info.ParamNames)))
+		for _, name := range info.ParamNames {
+			writePart(name)
+		}
+		writePart(info.FragmentRoute)
+		writePart(strconv.Itoa(len(info.FragmentParams)))
+		for _, name := range info.FragmentParams {
+			writePart(name)
+		}
+		return b.String()
+	}
+
 	var b strings.Builder
 	b.WriteString(string(method))
 	b.WriteString("|")
@@ -125,8 +202,12 @@ func EndpointKey(method domain.HTTPMethod, info URLInfo) string {
 	b.WriteString(info.HostPort)
 	b.WriteString(info.Path)
 	if len(info.ParamNames) > 0 {
+		encodedNames := make([]string, 0, len(info.ParamNames))
+		for _, name := range info.ParamNames {
+			encodedNames = append(encodedNames, url.QueryEscape(name))
+		}
 		b.WriteString("?")
-		b.WriteString(strings.Join(info.ParamNames, "&"))
+		b.WriteString(strings.Join(encodedNames, "&"))
 	}
 	return b.String()
 }

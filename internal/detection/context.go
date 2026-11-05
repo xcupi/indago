@@ -79,6 +79,19 @@ type ContextAnalysis struct {
 	Element   string `json:"element,omitempty"`   // enclosing element, lowercased
 	Attribute string `json:"attribute,omitempty"` // enclosing attribute, lowercased
 	Quote     string `json:"quote,omitempty"`     // HTML attribute delimiter: double|single|unquoted
+	// QuoteProven records whether Quote is PROVEN by the served bytes rather
+	// than merely the delimiter in force while the probe was parsed. It is set
+	// only for a quoted value whose reflection came back RAW (Form == FormRaw):
+	// the target echoed the probe value verbatim, so no encoder sat between the
+	// request and the page and the quote bytes around the site are the
+	// template's own. When the target rewrote the value (HTML/URL/JS encoding,
+	// transformation, stripping, or an unknown result) the quote observed for
+	// THIS payload is not proof of the delimiter the NEXT payload will meet, so
+	// the planner treats the delimiter as unproven and plans both quote styles
+	// for a breakout that must close it (see candidate.go: breakoutQuotes).
+	// False for unquoted values, non-attribute positions, and every site the
+	// analyser could not settle.
+	QuoteProven bool `json:"quote_proven,omitempty"`
 
 	Confidence domain.Confidence `json:"confidence"`
 	// Reason is a deterministic, human-readable justification.
@@ -224,6 +237,20 @@ func (c *classifier) classifySite(p Probe, loc *ReflectionLocation) ContextAnaly
 	a.TokenEnd = loc.Offset + tokenLen
 	a.TailOffset = loc.TailOffset
 	a.Form = formOf(loc.Encoding)
+	// A quoted attribute delimiter is proven only by a raw echo: the value came
+	// back verbatim, so the quote bytes around the site are the template's own
+	// and the delimiter the probe saw is the one the next payload will meet.
+	// Every encoded/transformed form means the target rewrote the value, and
+	// the quote in force then belongs to that rewrite of THIS payload; the
+	// planner must therefore plan both styles rather than guess one.
+	if a.Quote == "single" || a.Quote == "double" {
+		a.QuoteProven = a.Form == FormRaw
+		if a.QuoteProven {
+			a.Signals = append(a.Signals, "delimiter:proven")
+		} else {
+			a.Signals = append(a.Signals, "delimiter:unproven")
+		}
+	}
 	return a
 }
 

@@ -42,10 +42,11 @@ candidate + its TestCase ID, deduplicated by candidate value so a retried
 attempt doesn't bloat the list) instead of creating a new row.
 
 A Finding is created **regardless of HTTP method**: a POST/JSON candidate
-reflecting is just as real as a GET one, even though it can never be browser-
-verified (navigation has no request body) and so stays `pending` forever —
-see `docs/scan-orchestration.md`. Only the browser-verify job's enqueue is
-gated on the method, not the correlation itself.
+reflecting is just as real as a GET one. Supported GET/HEAD, POST/form, and
+bounded POST/JSON requests can reach browser verification; unsupported
+body-carrying methods still remain `Pending` — see
+`docs/scan-orchestration.md`. Only the browser-verify job's enqueue is gated
+on the method/body capability, not the correlation itself.
 
 This lookup-then-write is not atomic at the store layer, so `executor` and
 `verifyExecutor` share one `*sync.Mutex` (constructed once per scan in

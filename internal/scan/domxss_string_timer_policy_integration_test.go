@@ -56,7 +56,7 @@ func TestDOMStringTimerControlPlane(t *testing.T) {
 			scope := domain.Scope{IncludeHosts: []string{"timer-policy.invalid"}, IncludePathPrefixes: []string{"/allowed"}}
 			c := &Controller{store: env.st, opts: Options{Browser: mgr, Evidence: env.ev}, log: execLog()}
 			lim := ratelimit.New(1)
-			ex := c.defaultHandlers(nil, scope, []string{proxy.URL}, lim)[domain.JobDOMXSS]
+			ex := c.defaultHandlers(nil, scope, []string{proxy.URL}, lim, nil)[domain.JobDOMXSS]
 			ep := env.endpoint("http://timer-policy.invalid/allowed", domain.MethodGET)
 			if err := lim.Wait(ctx); err != nil {
 				t.Fatal(err)

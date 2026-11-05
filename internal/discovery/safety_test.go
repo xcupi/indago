@@ -15,11 +15,17 @@ func TestLooksSessionTerminating(t *testing.T) {
 		{"http://example.com/user/log-off", true},
 		{"http://example.com/user/log_off", true},
 		{"http://example.com/api/logoff", true},
+		{"http://example.com/user_logout", true},
+		{"http://example.com/logout_user.php", true},
+		{"http://example.com/do_sign_out/now", true},
 		// Should NOT false-positive on unrelated words/paths.
 		{"http://example.com/vulnerabilities/xss_r/", false},
 		{"http://example.com/blog/outstanding-bug", false},
 		{"http://example.com/catalog/outlet", false},
 		{"http://example.com/login.php", false},
+		{"http://example.com/catalog_outlet", false},
+		{"http://example.com/blog_outstanding", false},
+		{"http://example.com/LogoutServlet", false},
 		{"http://example.com/", false},
 		// Query string content must not trigger it (path-only check).
 		{"http://example.com/search?q=logout", false},

@@ -81,6 +81,9 @@ type RunResult struct {
 	Parameters int
 	Jobs       int
 	Errors     []error
+	// Recon tallies the candidates the wordlist recon produced, keyed
+	// "list/level" (e.g. "paths/standard"). Empty when recon did not run.
+	Recon map[string]int
 }
 
 // Run executes all registered sources concurrently and returns when they finish
@@ -129,7 +132,7 @@ func (m *Manager) Run(ctx context.Context, p RunParams) (*RunResult, error) {
 	wg.Wait()
 
 	eps, params, jobs := collector.Counts()
-	res := &RunResult{Endpoints: eps, Parameters: params, Jobs: jobs, Errors: errs}
+	res := &RunResult{Endpoints: eps, Parameters: params, Jobs: jobs, Errors: errs, Recon: collector.ReconCounts()}
 	if ctx.Err() != nil {
 		return res, ctx.Err()
 	}

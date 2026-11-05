@@ -78,7 +78,15 @@ func assertScanIntegrity(t *testing.T, st store.Store, ev evidence.Store, q queu
 		t.Fatal(err)
 	}
 	if len(ips) != wantInjectionPoints {
-		t.Fatalf("injection points = %d, want %d", len(ips), wantInjectionPoints)
+		details := make([]string, 0, len(ips))
+		for _, ip := range ips {
+			ep, endpointErr := st.Endpoints().Get(ctx, ip.EndpointID)
+			param, paramErr := st.Parameters().Get(ctx, ip.ParameterID)
+			if endpointErr == nil && paramErr == nil {
+				details = append(details, fmt.Sprintf("%s %s %s:%s", ep.Method, ep.URL, param.Location, param.Name))
+			}
+		}
+		t.Fatalf("injection points = %d, want %d: %s", len(ips), wantInjectionPoints, strings.Join(details, "; "))
 	}
 	tested := map[domain.ID]bool{}
 	cases, err := st.TestCases().ListByScan(ctx, scanID)

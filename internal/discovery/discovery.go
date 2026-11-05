@@ -43,6 +43,11 @@ type EndpointCandidate struct {
 	Method      domain.HTTPMethod
 	Source      domain.DiscoverySource
 	ContentType string
+	// Provenance is set only for endpoints guessed by a wordlist (recon): it
+	// says which list and which level produced the guess, so a record can
+	// distinguish "linked" (crawler) from "guessed" (wordlist). Nil for every
+	// non-wordlist source.
+	Provenance *ReconProvenance
 }
 
 // ParamCandidate is a discovered parameter proposed to the Sink. The endpoint is
@@ -55,6 +60,17 @@ type ParamCandidate struct {
 	Location       domain.ParamLocation
 	Example        string
 	Source         domain.DiscoverySource
+	// Provenance is set for parameters found by wordlist mining (recon).
+	Provenance *ReconProvenance
+}
+
+// ReconProvenance records where a wordlist guess came from: which embedded
+// list ("paths", "paths:extensions", "paths:recursive", "params") and which
+// recon level was active. It never influences a verdict; it exists so evidence
+// and reporting can tell an operator that an endpoint was guessed, not linked.
+type ReconProvenance struct {
+	List  string     `json:"list"`
+	Level ReconLevel `json:"level"`
 }
 
 // Sink receives discovered items. Implementations normalize, scope-check,
@@ -66,6 +82,21 @@ type Sink interface {
 	AddEndpoint(ctx context.Context, ep EndpointCandidate) (domain.ID, error)
 	// AddParameter registers a parameter on an endpoint (resolved by URL+method).
 	AddParameter(ctx context.Context, param ParamCandidate) error
+}
+
+// fetchGuard is an optional Sink capability: veto a request BEFORE it is sent.
+// Registering an endpoint is not the same as requesting it, and a request to a
+// session-terminating URL is itself the harm on an authenticated scan, so a
+// Source must ask first whenever it is about to GET a URL it discovered.
+type fetchGuard interface {
+	AllowFetch(rawURL string, source domain.DiscoverySource) bool
+}
+
+// allowFetch reports whether a Source may request rawURL. A Sink without the
+// guard capability never vetoes.
+func allowFetch(sink Sink, rawURL string, source domain.DiscoverySource) bool {
+	g, ok := sink.(fetchGuard)
+	return !ok || g.AllowFetch(rawURL, source)
 }
 
 // Input is the per-scan context a Source runs within.
@@ -148,6 +179,20 @@ type Config struct {
 	Wordlist            []string // content-discovery words
 	ParamWordlist       []string // parameter-name guesses applied to endpoints
 	EnqueueEndpointJobs bool     // enqueue a test job per endpoint (not just per param)
+
+	// ReconLevel selects the built-in, opt-in wordlist recon (see
+	// wordlists.go). Zero value == ReconOff: no wordlist requests at all, so a
+	// scan that does not ask for recon behaves exactly as before. The levels
+	// are cumulative:
+	//	off        nothing (only an explicitly supplied Wordlist/ParamWordlist runs)
+	//	safe       core path list, soft-404 calibrated
+	//	standard   + parameter mining + file-extension probes
+	//	aggressive + extended path list + one level of directory recursion
+	ReconLevel ReconLevel
+	// MaxReconRequests is the hard per-scan ceiling on recon HTTP requests
+	// (calibration + every probe + every mining request). 0 means
+	// DefaultMaxReconRequests.
+	MaxReconRequests int
 	// SessionCookies are every valid cookie from the scan's saved storage
 	// state. scopedEngine applies each cookie's URL scope on every request and
 	// redirect hop. The Collector registers Cookie injection points for names
@@ -155,6 +200,12 @@ type Config struct {
 	// still limited by the stored cookie's scope when sent. Empty for an
 	// anonymous scan (or one with no saved session material).
 	SessionCookies []*http.Cookie
+
+	// RawQueryInjection opts into the raw query-string injection point (see
+	// rawquery.go and docs/raw-query-injection.md). Zero value / RawQueryOff
+	// registers nothing, so every pre-existing scan is unchanged. Read at
+	// discovery time, like the crawl controls.
+	RawQueryInjection RawQueryMode
 }
 
 // DefaultConfig returns conservative discovery defaults.
@@ -165,6 +216,9 @@ func DefaultConfig() Config {
 		MaxPages:            500,
 		Concurrency:         4,
 		EnqueueEndpointJobs: true,
+		// ReconOff is the zero value; stating it here keeps the default
+		// explicit: no wordlist requests unless a scan asks for them.
+		ReconLevel: ReconOff,
 	}
 }
 

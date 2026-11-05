@@ -68,6 +68,11 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		s.writeInternalError(w, "load project", err)
 		return
 	}
+	coverage, err := s.scanCompleteness(r.Context(), scanID, sc.State)
+	if err != nil {
+		s.writeInternalError(w, "scan completeness", err)
+		return
+	}
 
 	var req createReportReq
 	if err := readJSON(r, &req); err != nil {
@@ -127,6 +132,7 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		ToolVersion:  s.version,
 		Selection:    mode,
 		ScanFindings: len(all),
+		Completeness: coverage,
 		AISummary:    aiSummary,
 	}
 	if err := gen.Generate(&buf, data); err != nil {
@@ -284,6 +290,43 @@ func resolveSelection(all []*domain.Finding, rawMode string, ids []string) ([]*d
 	default:
 		return nil, mode, "unknown mode " + rawMode + " (want all, confirmed, or selected)"
 	}
+}
+
+// scanCompleteness summarizes how much of the scan actually ran, from the
+// scan's own persisted jobs and test cases. A report over a scan that is not
+// finished — or that left dead/failed/canceled jobs or errored/timed-out test
+// cases behind — must say so: an empty result from such a scan is not evidence
+// the target is clean. A store error propagates so the handler fails the
+// report instead of silently claiming complete coverage.
+func (s *Server) scanCompleteness(ctx context.Context, scanID domain.ID, state domain.ScanState) (report.Completeness, error) {
+	c := report.Completeness{State: state}
+	jobs, err := s.store.Jobs().ListByScan(ctx, scanID)
+	if err != nil {
+		return c, fmt.Errorf("list jobs: %w", err)
+	}
+	for _, j := range jobs {
+		switch j.State {
+		case domain.JobDead:
+			c.DeadJobs++
+		case domain.JobFailed:
+			c.FailedJobs++
+		case domain.JobCanceled:
+			c.CanceledJobs++
+		}
+	}
+	cases, err := s.store.TestCases().ListByScan(ctx, scanID)
+	if err != nil {
+		return c, fmt.Errorf("list test cases: %w", err)
+	}
+	for _, tc := range cases {
+		switch tc.Outcome {
+		case domain.OutcomeError:
+			c.ErrorTestCases++
+		case domain.OutcomeTimeout:
+			c.TimeoutTestCases++
+		}
+	}
+	return c, nil
 }
 
 // selectionSummary is the report summary plus how its findings were chosen.

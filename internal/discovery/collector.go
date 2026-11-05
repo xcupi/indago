@@ -31,6 +31,10 @@ type Collector struct {
 	endpointCount int
 	paramCount    int
 	jobCount      int
+	reconCounts   map[string]int // "list/level" → candidates recorded by recon
+	// rawQueryProbes counts raw-query injection points registered so far,
+	// hydrated from persisted rows and capped by MaxRawQueryProbesPerScan.
+	rawQueryProbes int
 }
 
 var _ Sink = (*Collector)(nil)
@@ -53,7 +57,37 @@ func NewCollector(st store.Store, q queue.Queue, scanID domain.ID, scope domain.
 		cfg:           cfg.withDefaults(),
 		seenEndpoints: make(map[string]domain.ID),
 		seenParams:    make(map[string]struct{}),
+		reconCounts:   make(map[string]int),
 	}
+}
+
+// noteRecon tallies a wordlist guess by list and level. The tally is exposed
+// through ReconCounts so a discovery run can report "paths/standard=12" — the
+// distinguishing record between an endpoint that was linked and one that was
+// guessed. Nothing here affects scope, testing, or any verdict.
+func (c *Collector) noteRecon(p *ReconProvenance) {
+	if p == nil || p.List == "" {
+		return
+	}
+	key := p.List
+	if p.Level != "" {
+		key += "/" + string(p.Level)
+	}
+	c.mu.Lock()
+	c.reconCounts[key]++
+	c.mu.Unlock()
+}
+
+// ReconCounts returns a copy of the wordlist-provenance tally ("list/level" →
+// count of candidates recorded this run).
+func (c *Collector) ReconCounts() map[string]int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]int, len(c.reconCounts))
+	for k, v := range c.reconCounts {
+		out[k] = v
+	}
+	return out
 }
 
 // Hydrate rebuilds the collector's deduplication state from what is already
@@ -72,10 +106,10 @@ func NewCollector(st store.Store, q queue.Queue, scanID domain.ID, scope domain.
 // run's sources rediscover the endpoint, hit the dedup check, and never
 // register its parameters or enqueue its jobs, so it is silently never tested
 // and the scan still completes. Hydrate therefore finishes every incomplete
-// sequence it finds: an endpoint with no endpoint-level job gets one, an
-// endpoint missing any of its own URL's query parameters gets them, a
-// parameter with no injection point gets one, and an injection point with no
-// test job gets one. Hydrate is idempotent.
+// registration sequence it finds: an endpoint with no endpoint-level job gets
+// one, an endpoint missing any query or fragment-route parameters from its own
+// URL gets them, a parameter with no injection point gets one, and an injection
+// point with no test job gets one. Hydrate is idempotent.
 func (c *Collector) Hydrate(ctx context.Context) error {
 	endpoints, err := c.store.Endpoints().ListByScan(ctx, c.scanID)
 	if err != nil {
@@ -110,6 +144,11 @@ func (c *Collector) Hydrate(ctx context.Context) error {
 		fp, ok := fingerprintByID[p.EndpointID]
 		if !ok {
 			continue
+		}
+		if isRawQueryLocation(p.Location) {
+			// Restore the per-scan raw-query budget across a restart; the
+			// persisted rows are the authority on what was already sent.
+			c.rawQueryProbes++
 		}
 		key := fp + "#" + string(p.Location) + ":" + p.Name
 		if _, dup := c.seenParams[key]; !dup {
@@ -170,6 +209,9 @@ func (c *Collector) reconcile(ctx context.Context, endpoints []*domain.Endpoint,
 		for _, name := range info.ParamNames {
 			c.registerParam(ctx, e.ID, e.Method, info, name, domain.LocationQuery, info.Query.Get(name), e.Source)
 		}
+		for _, name := range info.FragmentParams {
+			c.registerParam(ctx, e.ID, e.Method, info, name, domain.LocationFragment, "", e.Source)
+		}
 		// Header/Cookie/Path registration is also reconciled on every Hydrate
 		// pass — registerParam's own dedup makes this a no-op for anything
 		// already persisted, so this only fills in what a prior run (or a
@@ -177,9 +219,14 @@ func (c *Collector) reconcile(ctx context.Context, endpoints []*domain.Endpoint,
 		c.registerHeaderInjectionPoints(ctx, e.ID, e.Method, info, e.Source)
 		c.registerCookieInjectionPoints(ctx, e.ID, e.Method, info, e.Source)
 		c.registerPathInjectionPoints(ctx, e.ID, e.Method, info, e.Source)
+		c.registerRawQueryInjectionPoints(ctx, e.ID, e.Method, info, e.Source)
 	}
 
 	for _, p := range params {
+		if p.Location == domain.LocationFragment {
+			// DOM-only parameters must never be reconciled into HTTP injection points.
+			continue
+		}
 		ep, ok := endpointByID[p.EndpointID]
 		if !ok {
 			continue
@@ -211,6 +258,14 @@ func (c *Collector) Counts() (endpoints, params, jobs int) {
 	return c.endpointCount, c.paramCount, c.jobCount
 }
 
+// AllowFetch implements fetchGuard: on an authenticated scan a discovered URL
+// that looks like it ends the session must be neither registered nor
+// requested. An operator-provided seed is explicit intent and always allowed;
+// an unauthenticated scan has no session to lose.
+func (c *Collector) AllowFetch(rawURL string, source domain.DiscoverySource) bool {
+	return !(c.authenticated && source != domain.SourceUserProvided && looksSessionTerminating(rawURL))
+}
+
 // AddEndpoint implements Sink.
 func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (domain.ID, error) {
 	info, err := Normalize(ep.URL)
@@ -236,7 +291,7 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 	// explicit intent (e.g. deliberately testing the logout endpoint
 	// itself), not an accidental link-follow. Unauthenticated scans have no
 	// session to lose, so nothing is skipped for them either.
-	if c.authenticated && ep.Source != domain.SourceUserProvided && looksSessionTerminating(info.Canonical) {
+	if !c.AllowFetch(info.Canonical, ep.Source) {
 		c.log.Debug("discovery: skipping likely session-terminating link", "url", info.Canonical, "source", ep.Source)
 		return "", nil
 	}
@@ -276,6 +331,14 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 		return "", err
 	}
 
+	if ep.Provenance != nil {
+		// Structured record of the guess: which embedded list and level
+		// produced this endpoint (see ReconProvenance).
+		c.log.Debug("discovery: wordlist endpoint recorded",
+			"url", info.Canonical, "list", ep.Provenance.List, "level", ep.Provenance.Level)
+		c.noteRecon(ep.Provenance)
+	}
+
 	if c.cfg.EnqueueEndpointJobs {
 		_ = c.enqueueJob(ctx, domain.JobTarget{EndpointID: id, URL: info.Canonical})
 	}
@@ -284,11 +347,18 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 	for _, name := range info.ParamNames {
 		c.registerParam(ctx, id, method, info, name, domain.LocationQuery, info.Query.Get(name), ep.Source)
 	}
+	// Fragment route parameters are DOM-only selectors. Register them at the
+	// endpoint boundary so crawler-discovered links and operator seeds behave
+	// identically; registerParam deliberately creates no HTTP injection point.
+	for _, name := range info.FragmentParams {
+		c.registerParam(ctx, id, method, info, name, domain.LocationFragment, "", ep.Source)
+	}
 	// Header/Cookie/Path injection points (see extra_locations.go /
 	// path_segments.go) — location-agnostic coverage alongside Query/Form/JSON.
 	c.registerHeaderInjectionPoints(ctx, id, method, info, ep.Source)
 	c.registerCookieInjectionPoints(ctx, id, method, info, ep.Source)
 	c.registerPathInjectionPoints(ctx, id, method, info, ep.Source)
+	c.registerRawQueryInjectionPoints(ctx, id, method, info, ep.Source)
 	return id, nil
 }
 
@@ -327,21 +397,24 @@ func (c *Collector) AddParameter(ctx context.Context, p ParamCandidate) error {
 		loc = domain.LocationQuery
 	}
 	c.registerParam(ctx, endpointID, method, info, p.Name, loc, p.Example, p.Source)
+	c.noteRecon(p.Provenance)
 	return nil
 }
 
 // registerParam persists a parameter + injection point and enqueues a test job,
-// deduplicating by parameter key.
-func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, method domain.HTTPMethod, info URLInfo, name string, loc domain.ParamLocation, example string, source domain.DiscoverySource) {
+// deduplicating by parameter key. It reports whether a NEW parameter was
+// persisted (false for a duplicate), which the raw-query registrar needs to
+// charge its per-scan budget only for real probes.
+func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, method domain.HTTPMethod, info URLInfo, name string, loc domain.ParamLocation, example string, source domain.DiscoverySource) bool {
 	if name == "" {
-		return
+		return false
 	}
 	pkey := ParamKey(method, info, name, loc)
 
 	c.mu.Lock()
 	if _, ok := c.seenParams[pkey]; ok {
 		c.mu.Unlock()
-		return
+		return false
 	}
 	c.seenParams[pkey] = struct{}{}
 	c.paramCount++
@@ -364,9 +437,13 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 		c.paramCount--
 		c.mu.Unlock()
 		c.log.Warn("discovery: persist parameter", "err", err)
-		return
+		return false
 	}
 
+	if loc == domain.LocationFragment {
+		// DOM-only: no HTTP injection point, so no HTTP engine ever sends it.
+		return true
+	}
 	ip := &domain.InjectionPoint{
 		ID:          domain.NewID(),
 		ScanID:      c.scanID,
@@ -377,7 +454,7 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 	}
 	if err := c.store.InjectionPoints().Create(ctx, ip); err != nil {
 		c.log.Warn("discovery: persist injection point", "err", err)
-		return
+		return false
 	}
 
 	_ = c.enqueueJob(ctx, domain.JobTarget{
@@ -385,6 +462,7 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 		InjectionPointID: ip.ID,
 		URL:              info.Canonical,
 	})
+	return true
 }
 
 // enqueueJob enqueues a test job for a discovered target. Enqueue failures are

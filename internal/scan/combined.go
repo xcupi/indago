@@ -124,6 +124,13 @@ func reflectedSitesFor(findings []*domain.Finding) []reflectedSite {
 		if cand.Combined || f.InjectionPointID.Empty() {
 			continue
 		}
+		// A raw query-string blob is not a parameter. Pairing two of them is
+		// meaningless: a raw-query injection replaces the WHOLE query string,
+		// so a second "parameter" override in the same request would be
+		// silently dropped. Keep it out of the combined pass entirely.
+		if f.Location == domain.LocationRawQuery {
+			continue
+		}
 		out = append(out, reflectedSite{
 			injectionPointID: f.InjectionPointID,
 			parameterName:    d.ParameterName,

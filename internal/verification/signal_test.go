@@ -21,7 +21,7 @@ func TestMatchExecutionSignal(t *testing.T) {
 
 	t.Run("console error names the token", func(t *testing.T) {
 		sig, _, ok := matchExecutionSignal(token, nil, []string{"Uncaught ReferenceError: " + token + " is not defined"})
-		if !ok || sig != SignalConsoleError {
+		if ok || sig != SignalNone {
 			t.Fatalf("sig=%s ok=%v", sig, ok)
 		}
 	})

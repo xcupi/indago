@@ -42,6 +42,7 @@ import (
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/idor"
 	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/verification"
@@ -286,6 +287,12 @@ type CreateScanParams struct {
 	MaxPages     int
 	MaxEndpoints int
 
+	// ReconLevel selects the opt-in wordlist content/parameter discovery:
+	// "off" (default), "safe", "standard", or "aggressive". See
+	// discovery.Config.ReconLevel and docs/recon-wordlists.md. Empty means off,
+	// so existing scans and clients are unaffected.
+	ReconLevel string
+
 	// CandidateProfile ("minimal" | "standard" | "thorough"; empty = standard)
 	// and MaxCandidates (> 0 overrides the profile's per-injection-point cap)
 	// bound the candidates sent per injection point. See domain.ScanConfig.
@@ -293,12 +300,41 @@ type CreateScanParams struct {
 	MaxCandidates    int
 	// EnableEvasion — see domain.ScanConfig.EnableEvasion. Off by default.
 	EnableEvasion bool
+	// RawQueryInjection — see domain.ScanConfig.RawQueryInjection and
+	// discovery.ParseRawQueryMode. Empty / "off" (the default) adds nothing;
+	// "auto" probes GET endpoints with no named query parameters; "always"
+	// also probes endpoints that have them.
+	RawQueryInjection string
 	// ProxyPool — see domain.ScanConfig.ProxyPool. Empty (the default) means a
 	// direct connection for both raw HTTP traffic and browser verification.
 	ProxyPool []string
 	// RandomizeTLSFingerprint — see domain.ScanConfig.RandomizeTLSFingerprint.
 	// Off by default; mutually exclusive with ProxyPool (validated below).
 	RandomizeTLSFingerprint bool
+	// EnableIDOR opts into the IDOR engine's object-identifier differential —
+	// see domain.ScanConfig.EnableIDOR. Off by default; requires a real
+	// authenticated session (there is no identity to compare against without
+	// one).
+	EnableIDOR bool
+	// IDORCandidates are operator-supplied foreign object identifiers — see
+	// domain.ScanConfig.IDORCandidates. Bounded and validated at creation.
+	IDORCandidates []string
+	// EnableIDOREnumeration / IDOREnumerationNeighbours — see
+	// domain.ScanConfig.EnableIDOREnumeration. Off by default; requires the
+	// IDOR engine itself to be enabled.
+	EnableIDOREnumeration     bool
+	IDOREnumerationNeighbours int
+	// EnableRoleParam opts into the access-control engine's client-controlled
+	// flag differential (case 20). Off by default; GET only and bounded.
+	EnableRoleParam bool
+	// EnableAccessControlPages opts into the page-disclosure pass (case 19's
+	// script-disclosed path source). Off by default; bounded and GET only.
+	EnableAccessControlPages bool
+	// EnableRoleWrite opts into the access-control engine's role-field slice
+	// (case 21). Off by default; requires an authenticated session AND the
+	// server's AllowStateChanging opt-in because it writes the caller's own
+	// profile.
+	EnableRoleWrite bool
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -370,6 +406,15 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	if p.MaxEndpoints > 0 {
 		cfg.MaxEndpoints = p.MaxEndpoints
 	}
+	// Wordlist recon is opt-in per scan; an explicit but invalid level is a
+	// creation error (fail fast) rather than silently running off.
+	if p.ReconLevel != "" {
+		level, err := discovery.ParseReconLevel(p.ReconLevel)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBadConfig, err)
+		}
+		cfg.ReconLevel = string(level)
+	}
 	if err := validateCrawlExtent(cfg); err != nil {
 		return nil, err
 	}
@@ -385,6 +430,16 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 		return nil, fmt.Errorf("%w: %v", ErrBadConfig, err)
 	}
 	cfg.EnableEvasion = p.EnableEvasion
+	// Raw query-string injection is a separate, opt-in capability. Parse the
+	// explicit value (empty means off) so a typo fails at creation rather than
+	// silently enabling or disabling probes mid-scan.
+	if p.RawQueryInjection != "" {
+		mode, err := discovery.ParseRawQueryMode(p.RawQueryInjection)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBadConfig, err)
+		}
+		cfg.RawQueryInjection = string(mode)
+	}
 	cfg.ProxyPool = p.ProxyPool
 	if err := validateProxyPool(cfg.ProxyPool); err != nil {
 		return nil, err
@@ -395,14 +450,52 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 			"Go's HTTP transport performs TLS internally after any proxy tunnel, never through a "+
 			"custom TLS dialer, so the fingerprint override would silently have no effect through a proxy", ErrBadConfig)
 	}
+	// IDOR engine opt-in and its operator-supplied candidate identifiers.
+	cfg.EnableIDOR = p.EnableIDOR
+	cfg.IDORCandidates = cleanIDORCandidates(p.IDORCandidates)
+	if err := validateIDORCandidates(cfg.IDORCandidates); err != nil {
+		return nil, err
+	}
+	// Bounded enumeration is a second, explicit opt-in ON TOP of the engine;
+	// enabling it without the engine would silently do nothing, so fail closed.
+	cfg.EnableIDOREnumeration = p.EnableIDOREnumeration
+	cfg.IDOREnumerationNeighbours = p.IDOREnumerationNeighbours
+	if err := validateIDOREnumeration(cfg.EnableIDOR, cfg.EnableIDOREnumeration, cfg.IDOREnumerationNeighbours); err != nil {
+		return nil, err
+	}
+	// Access-control differentials. The flag differential is read-only; the
+	// role-field slice writes the caller's own profile and needs both the
+	// server's state-changing opt-in and a session to write from.
+	cfg.EnableRoleParam = p.EnableRoleParam
+	cfg.EnableAccessControlPages = p.EnableAccessControlPages
+	cfg.EnableRoleWrite = p.EnableRoleWrite
 
 	mode := p.AuthMode
 	if !mode.IsValid() {
 		mode = domain.AuthAnonymous
 	}
-	statePath, err := c.resolveAuth(ctx, mode, p)
+	statePath, err := c.resolveAuth(ctx, mode, p, scope)
 	if err != nil {
 		return nil, err
+	}
+	// Fail closed at creation: the IDOR engine's whole differential rests on a
+	// caller identity established from an authenticated session. An anonymous
+	// scan has none, so reject the combination instead of running a pass that
+	// can only skip.
+	if cfg.EnableIDOR && mode == domain.AuthAnonymous {
+		return nil, fmt.Errorf("%w: enable_idor requires an authenticated session (auth_mode %q has no caller identity); use -auth existing/-auth interactive/-auth mfa/-auth password", ErrBadConfig, mode)
+	}
+	// The role-field slice writes the caller's own profile and decides from
+	// that caller's privileged access. Without a session there is nobody to
+	// escalate, and without the server's state-changing opt-in the write would
+	// only ever be skipped — both are refused at creation instead.
+	if cfg.EnableRoleWrite {
+		if mode == domain.AuthAnonymous {
+			return nil, fmt.Errorf("%w: enable_role_write requires an authenticated session (auth_mode %q has no caller profile); use -auth existing/-auth interactive/-auth mfa/-auth password", ErrBadConfig, mode)
+		}
+		if !c.opts.Executor.AllowStateChanging {
+			return nil, fmt.Errorf("%w: enable_role_write requires the server's explicit -allow-state-changing opt-in; the engine writes the caller's own profile and is never enabled implicitly", ErrBadConfig)
+		}
 	}
 	stop := p.Stop
 	if !stop.Mode.IsValid() {
@@ -741,10 +834,16 @@ func (c *Controller) Shutdown() {
 // (blocking CreateScan until it finishes, times out, or the context is
 // canceled, the same contract web.LoginFunc's standalone /api/auth/login
 // endpoint already has). Returns the state path to persist on the Session.
-func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p CreateScanParams) (string, error) {
+func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p CreateScanParams, scope domain.Scope) (string, error) {
 	statePath := strings.TrimSpace(p.AuthStatePath)
 	loginURL := strings.TrimSpace(p.LoginURL)
 	successURL := strings.TrimSpace(p.SuccessURL)
+	allow := func(raw string) bool { return scope.Permits(raw).Allowed }
+	if mode == domain.AuthPassword || mode == domain.AuthInteractive || mode == domain.AuthMFA {
+		if loginURL != "" && !allow(loginURL) {
+			return "", fmt.Errorf("%w: login_url must be permitted by project scope; explicitly include authorized SSO hosts and paths in Projects → Scope", ErrOutOfScope)
+		}
+	}
 
 	switch mode {
 	case domain.AuthAnonymous:
@@ -786,7 +885,7 @@ func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p Cr
 		if err != nil {
 			return "", fmt.Errorf("%w: build session state path: %w", ErrAuth, err)
 		}
-		res, err := mgr.InteractiveLogin(ctx, browser.LoginOptions{LoginURL: loginURL, SuccessURLGlob: successURL, StorageStatePath: path})
+		res, err := mgr.InteractiveLogin(ctx, browser.LoginOptions{AllowRequest: allow, LoginURL: loginURL, SuccessURLGlob: successURL, StorageStatePath: path})
 		if err != nil {
 			return "", fmt.Errorf("%w: interactive login: %w", ErrAuth, err)
 		}
@@ -821,7 +920,8 @@ func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p Cr
 			return "", fmt.Errorf("%w: build session state path: %w", ErrAuth, err)
 		}
 		res, err := mgr.AutoLogin(ctx, browser.AutoLoginOptions{
-			LoginURL: loginURL, Username: user, Password: pass, SuccessURLGlob: successURL, StorageStatePath: path,
+			AllowRequest: allow,
+			LoginURL:     loginURL, Username: user, Password: pass, SuccessURLGlob: successURL, StorageStatePath: path,
 			UsernameSelector: p.LoginUsernameSelector, PasswordSelector: p.LoginPasswordSelector, SubmitSelector: p.LoginSubmitSelector,
 		})
 		if err != nil {
@@ -888,6 +988,66 @@ func validateProxyPool(pool []string) error {
 		default:
 			return fmt.Errorf("%w: proxy_pool entry %q has unsupported scheme %q (want http, https, socks5, or socks5h)", ErrBadConfig, p, u.Scheme)
 		}
+	}
+	return nil
+}
+
+// IDOR candidate-identifier bounds: a typo must never turn the differential
+// into an enumeration run.
+const (
+	maxIDORCandidates   = 10
+	maxIDORCandidateLen = 120
+)
+
+// cleanIDORCandidates trims, drops empties and collapses duplicates while
+// preserving the operator's order.
+func cleanIDORCandidates(in []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, raw := range in {
+		v := strings.TrimSpace(raw)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
+// validateIDORCandidates rejects an implausible identifier up front: this
+// list is the ONLY unbounded-by-derivation input to the differential, so it is
+// hard-capped and restricted to identifier-shaped values.
+func validateIDORCandidates(cands []string) error {
+	if len(cands) > maxIDORCandidates {
+		return fmt.Errorf("%w: at most %d idor_candidates are allowed, got %d", ErrBadConfig, maxIDORCandidates, len(cands))
+	}
+	for _, v := range cands {
+		if len(v) > maxIDORCandidateLen {
+			return fmt.Errorf("%w: idor_candidates entry is longer than %d characters", ErrBadConfig, maxIDORCandidateLen)
+		}
+		for _, r := range v {
+			if r < 0x20 || r == 0x7f || r == '<' || r == '>' || r == '"' || r == '\'' || r == '\\' || r == ' ' || r == '\t' {
+				return fmt.Errorf("%w: idor_candidates entry %q contains whitespace, control or markup characters", ErrBadConfig, v)
+			}
+		}
+	}
+	return nil
+}
+
+// validateIDOREnumeration rejects a configuration that cannot do what the
+// operator asked: enumeration without the engine, or N outside the engine's
+// stated range. Bounded means bounded — a typo must not become a wordlist.
+func validateIDOREnumeration(enableIDOR, enableEnum bool, neighbours int) error {
+	if enableEnum && !enableIDOR {
+		return fmt.Errorf("%w: idor_enumerate requires enable_idor", ErrBadConfig)
+	}
+	if neighbours != 0 && !enableEnum {
+		return fmt.Errorf("%w: idor_enumerate_n requires idor_enumerate", ErrBadConfig)
+	}
+	if neighbours < 0 || neighbours > idor.MaxEnumerationNeighbours {
+		return fmt.Errorf("%w: idor_enumerate_n must be between 1 and %d (0 = default %d), got %d",
+			ErrBadConfig, idor.MaxEnumerationNeighbours, idor.DefaultEnumerationNeighbours, neighbours)
 	}
 	return nil
 }
@@ -1029,7 +1189,7 @@ func (c *Controller) poolConfig(sc *domain.Scan) worker.Config {
 		ScanID: sc.ID,
 		Groups: []worker.GroupSpec{
 			{Name: GroupDiscovery, Types: []domain.JobType{domain.JobDiscovery}, Size: sc.Config.DiscoveryConcurrency},
-			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest}, Size: sc.Config.HTTPConcurrency},
+			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR, domain.JobAccessControl}, Size: sc.Config.HTTPConcurrency},
 			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify, domain.JobDOMXSS}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
 		},
 		LeaseDuration: c.opts.LeaseDuration,

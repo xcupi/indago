@@ -9,6 +9,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -24,7 +25,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/indago/indago/internal/config"
+	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/llm"
 	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/web"
 )
@@ -223,6 +227,33 @@ type stringList []string
 func (s *stringList) String() string     { return strings.Join(*s, ",") }
 func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 
+// rawQueryModeFlag accepts the optional-value form the operator types:
+//
+//	-raw-query-injection            → "auto"   (bare boolean-style flag)
+//	-raw-query-injection=auto       → "auto"
+//	-raw-query-injection=always     → "always"
+//	-raw-query-injection=off|false  → "off"
+//
+// The bare form is what flag.Value.Set receives ("true") for a flag given
+// without a value, so it maps to the conservative "auto" mode: probe only GET
+// endpoints that have no named query parameters at all.
+type rawQueryModeFlag string
+
+func (f *rawQueryModeFlag) String() string { return string(*f) }
+
+// IsBoolFlag makes the bare form (-raw-query-injection) legal without a
+// following argument; flag.Value.Set then receives "true", which maps to auto.
+func (f *rawQueryModeFlag) IsBoolFlag() bool { return true }
+
+func (f *rawQueryModeFlag) Set(v string) error {
+	mode, err := discovery.ParseRawQueryMode(v)
+	if err != nil {
+		return err
+	}
+	*f = rawQueryModeFlag(mode)
+	return nil
+}
+
 // parseInterspersed parses flags that may appear before or after positional
 // arguments (Go's flag package stops at the first positional), returning the
 // positionals.
@@ -285,6 +316,8 @@ func (c *cli) runClient(group string, args []string) error {
 		return c.auth(sub, rest)
 	case "report":
 		return c.report(sub, rest)
+	case "config":
+		return c.config(sub, rest)
 	}
 	return fmt.Errorf("unknown command group %q", group)
 }
@@ -444,6 +477,16 @@ func (c *cli) scanCreate(args []string) error {
 	candProfile := fs.String("candidate-profile", "", "XSS candidate profile: minimal | standard | thorough (default: server default)")
 	maxCand := fs.Int("max-candidates", 0, "cap on candidates tried per injection point (0 = the profile's own; hard ceiling 32)")
 	enableEvasion := fs.Bool("enable-evasion", false, "opt in to WAF/filter-bypass candidate variants (case variation, alt separators, double URL-encoding) ON TOP OF the canonical set; OFF by default — only for an authorized engagement where a bypass is itself the reportable finding (see AGENTS.md §2.3)")
+	var rawQuery rawQueryModeFlag
+	fs.Var(&rawQuery, "raw-query-injection", "opt in to testing the WHOLE query string as one injection point, for pages that echo their entire query (canonical <link href>, 404/search/error pages): bare flag = auto (only GET endpoints with no named query parameters), =always also probes endpoints that have named parameters; OFF by default, GET-only, capped at 2 shapes/endpoint and 40 probes/scan (see docs/raw-query-injection.md)")
+	enableIDOR := fs.Bool("idor", false, "opt in to the IDOR engine's object-identifier differential (GET/HEAD reads only); requires an authenticated session — OFF by default (see docs/idor.md)")
+	var idorCandidates stringList
+	fs.Var(&idorCandidates, "idor-candidates", "foreign object identifier to try for the IDOR differential, e.g. the victim username an authorized lab brief names (repeatable, max 10; never invented by Indago)")
+	enableIDOREnum := fs.Bool("idor-enumerate", false, "opt in to BOUNDED identifier enumeration for the IDOR engine: numeric neighbours (value-1, value+1, 1..N) and a fixed short-slug set (admin, test, demo, guest); requires -idor, OFF by default (see docs/idor.md)")
+	idorEnumN := fs.Int("idor-enumerate-n", 0, "N for -idor-enumerate: how many low integers 1..N to try (default 5, ceiling 10)")
+	enableRoleParam := fs.Bool("role-param", false, "opt in to the access-control engine's client-controlled flag differential (case 20): fetch a privileged endpoint with a role-shaped query parameter/cookie absent and then set to an admin-like value, and confirm ONLY when the privileged admin action surface becomes reachable; GET only, same-origin, bounded — OFF by default (see docs/access-control.md)")
+	enableACP := fs.Bool("access-control-pages", false, "opt in to the access-control engine's page-disclosure pass: re-fetch discovered pages, extract administrative path literals from their OWN inline/same-origin scripts, and probe each disclosed path anonymously (case 19's unpredictable path); never a wordlist, GET only, bounded — OFF by default")
+	enableRoleWrite := fs.Bool("role-write", false, "opt in to the access-control engine's role-field slice (case 21): send the caller's OWN profile update with a client-supplied role field and confirm ONLY when a privileged surface denied before the write is reachable after it; requires an authenticated session and the server's -allow-state-changing — OFF by default (see docs/access-control.md)")
 	var proxyPool stringList
 	fs.Var(&proxyPool, "proxy", "proxy to route this scan's traffic through — raw HTTP and browser verification alike (repeatable, round-robin; http://host:port, https://host:port, or socks5://host:port, optionally with embedded user:pass@ creds); operator-supplied infrastructure only, off by default (see AGENTS.md §2.3)")
 	randomizeTLS := fs.Bool("randomize-tls-fingerprint", false, "randomize the raw HTTP engine's TLS ClientHello (JA3) via uTLS instead of Go's own default — OFF by default (see AGENTS.md §2.3); MUTUALLY EXCLUSIVE with -proxy (Go's transport never consults a custom TLS dialer for a proxied connection); has no effect on browser verification, which already uses a real browser's own TLS stack")
@@ -451,19 +494,45 @@ func (c *cli) scanCreate(args []string) error {
 	depth := fs.Int("depth", 0, "crawl depth for a full scan (0 = server default; ignored with -quick)")
 	maxPages := fs.Int("max-pages", 0, "cap on pages fetched by the crawler (0 = server default)")
 	maxEndpoints := fs.Int("max-endpoints", 0, "cap on endpoints discovered (0 = server default)")
+	reconLevel := fs.String("recon-level", "off", "wordlist content/parameter discovery: off | safe (paths) | standard (paths+params+extensions) | aggressive (+ extended paths, directory recursion); OFF by default — see docs/recon-wordlists.md")
 	var seeds stringList
 	fs.Var(&seeds, "seed", "discovery seed URL (repeatable; default: the target base URL)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
 		"profile": *profile, "seed_urls": []string(seeds),
 		"quick_scan": *quick, "max_depth": *depth, "max_pages": *maxPages, "max_endpoints": *maxEndpoints,
 		"enable_evasion": *enableEvasion,
+		"enable_idor":    *enableIDOR,
+	}
+	if *enableRoleParam {
+		req["enable_role_param"] = true
+	}
+	if *enableACP {
+		req["enable_access_control_pages"] = true
+	}
+	if *enableRoleWrite {
+		req["enable_role_write"] = true
+	}
+	if *enableIDOREnum {
+		req["idor_enumerate"] = true
+	}
+	if *idorEnumN != 0 {
+		req["idor_enumerate_n"] = *idorEnumN
+	}
+	if len(rawQuery) > 0 && rawQuery != "off" {
+		req["raw_query_injection"] = string(rawQuery)
+	}
+	if *reconLevel != "" && !strings.EqualFold(*reconLevel, "off") {
+		req["recon_level"] = *reconLevel
+	}
+	if len(idorCandidates) > 0 {
+		req["idor_candidates"] = []string(idorCandidates)
 	}
 	if len(proxyPool) > 0 {
 		req["proxy_pool"] = []string(proxyPool)
@@ -778,19 +847,20 @@ func (c *cli) auth(sub string, args []string) error {
 
 func (c *cli) authLogin(args []string) error {
 	fs := c.newFlags("auth login")
+	project := fs.String("project", "", "project ID whose scope authorizes login and SSO traffic (required)")
 	loginURL := fs.String("login-url", "", "login page to open in a real, visible browser")
 	successURL := fs.String("success-url", "", "URL glob the browser must reach before the login counts as done (optional, but a login with none saves state IMMEDIATELY with no wait at all)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
-	if *loginURL == "" {
-		return errors.New("usage: indago auth login -login-url URL [-success-url GLOB]")
+	if strings.TrimSpace(*project) == "" || *loginURL == "" {
+		return errors.New("usage: indago auth login -project PID -login-url URL [-success-url GLOB]; explicitly include authorized SSO hosts in project scope")
 	}
 	var out struct {
 		StatePath string `json:"state_path"`
 		FinalURL  string `json:"final_url"`
 	}
-	if err := c.call("POST", "/api/auth/login", map[string]string{"login_url": *loginURL, "success_url": *successURL}, &out); err != nil {
+	if err := c.call("POST", "/api/auth/login", map[string]string{"project_id": *project, "login_url": *loginURL, "success_url": *successURL}, &out); err != nil {
 		return err
 	}
 	fmt.Fprintf(c.out, "saved session: %s\n", out.StatePath)
@@ -1242,4 +1312,128 @@ func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+// --- local configuration: LLM provider --------------------------------------
+//
+// These commands are deliberately local: they read and write the same
+// <data>/llm directory `indago serve` reads, with no HTTP client involved. That
+// keeps the API key off every socket and lets an operator configure a provider
+// before the server starts. Run them with the same -data directory as the
+// server (the default is the same "data" both use).
+//
+// The only command here that contacts a provider is `test`, and it makes ONE
+// bounded request.
+
+// llmAPIKeyEnv is the preferred way to supply the key: unlike -api-key, an
+// environment variable does not land in shell history or `ps` output.
+const llmAPIKeyEnv = "INDAGO_LLM_API_KEY"
+
+func (c *cli) config(section string, args []string) error {
+	if section != "llm" {
+		return fmt.Errorf("unknown config section %q (only \"llm\" is supported)", section)
+	}
+	if len(args) == 0 {
+		return errors.New("usage: indago config llm set|show|clear|test [flags]")
+	}
+	action, rest := args[0], args[1:]
+
+	fs := flag.NewFlagSet("config llm "+action, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dataDir := fs.String("data", config.DefaultDataDir, "data directory (the same -data `indago serve` uses)")
+
+	provider := llm.DefaultProvider
+	var model, baseURL, apiKey string
+	switch action {
+	case "set":
+		fs.StringVar(&provider, "provider", provider, "provider: deepseek|openai|custom")
+		fs.StringVar(&model, "model", "", "model name (default: the provider's default)")
+		fs.StringVar(&baseURL, "base-url", "", "override the provider's base URL")
+		fs.StringVar(&apiKey, "api-key", "", "API key (prefer $"+llmAPIKeyEnv+"; a flag is visible in shell history)")
+	case "show", "clear", "test":
+		// Only -data applies.
+	default:
+		return fmt.Errorf("unknown config llm subcommand %q (set, show, clear, test)", action)
+	}
+	pos, err := parseInterspersed(fs, rest)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 0 {
+		return fmt.Errorf("unexpected argument %q", pos[0])
+	}
+
+	store := llm.NewStore(filepath.Join(*dataDir, "llm"))
+	switch action {
+	case "set":
+		key := strings.TrimSpace(apiKey)
+		fromFlag := key != ""
+		if key == "" {
+			key = strings.TrimSpace(os.Getenv(llmAPIKeyEnv))
+		}
+		cfg, err := store.Set(llm.SetRequest{
+			Provider: provider, Model: model, BaseURL: baseURL, APIKey: key,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(c.out, "configured LLM provider %s (model %s)\n", cfg.Provider, cfg.Model)
+		fmt.Fprintf(c.out, "base URL: %s\n", cfg.BaseURL)
+		if cfg.HasKey() {
+			fmt.Fprintf(c.out, "API key:  %s (stored; only the last 4 characters are shown)\n", cfg.MaskedKey())
+		} else {
+			fmt.Fprintln(c.out, "API key:  none (allowed for a local endpoint)")
+		}
+		if fi, statErr := os.Stat(store.Path()); statErr == nil {
+			fmt.Fprintf(c.out, "config:   %s (mode %04o)\n", store.Path(), fi.Mode().Perm())
+		}
+		if fromFlag {
+			fmt.Fprintf(c.out, "note: -api-key is visible in shell history and process listings; prefer $%s\n", llmAPIKeyEnv)
+		}
+		return nil
+	case "show":
+		cfg, err := store.Load()
+		if errors.Is(err, llm.ErrNotConfigured) {
+			fmt.Fprintln(c.out, "LLM provider: not configured")
+			fmt.Fprintf(c.out, "config:       %s (absent)\n", store.Path())
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(c.out, "provider: %s\n", cfg.Provider)
+		fmt.Fprintf(c.out, "model:    %s\n", cfg.Model)
+		fmt.Fprintf(c.out, "base URL: %s\n", cfg.BaseURL)
+		if cfg.HasKey() {
+			fmt.Fprintf(c.out, "API key:  %s (set; last 4 characters only)\n", cfg.MaskedKey())
+		} else {
+			fmt.Fprintln(c.out, "API key:  none")
+		}
+		if fi, statErr := os.Stat(store.Path()); statErr == nil {
+			fmt.Fprintf(c.out, "config:   %s (mode %04o)\n", store.Path(), fi.Mode().Perm())
+		}
+		return nil
+	case "clear":
+		if err := store.Clear(); err != nil {
+			return err
+		}
+		fmt.Fprintln(c.out, "LLM provider configuration cleared (config and key file removed)")
+		return nil
+	case "test":
+		cfg, err := store.Load()
+		if errors.Is(err, llm.ErrNotConfigured) {
+			return errors.New("LLM provider is not configured; run `indago config llm set ...` first")
+		}
+		if err != nil {
+			return err
+		}
+		res := llm.NewProber(0).Test(context.Background(), cfg)
+		fmt.Fprintf(c.out, "provider: %s\nmodel:    %s\nlatency:  %d ms\n", res.Provider, res.Model, res.LatencyMS)
+		if !res.OK {
+			return fmt.Errorf("connection test failed: %s", cfg.Redact(res.Error))
+		}
+		fmt.Fprintln(c.out, "result:   OK")
+		return nil
+	}
+	return fmt.Errorf("unknown config llm subcommand %q (set, show, clear, test)", action)
 }

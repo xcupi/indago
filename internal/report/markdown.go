@@ -35,6 +35,7 @@ func (MarkdownGenerator) Generate(w io.Writer, data Data) error {
 	findings := Prioritized(data.Findings)
 	idx := EvidenceIndex(data.Evidence)
 	summary := dataSummary(data, findings)
+	coverage := coverageFor(data)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Indago Scan Report\n\n")
@@ -42,6 +43,12 @@ func (MarkdownGenerator) Generate(w io.Writer, data Data) error {
 	fmt.Fprintf(&b, "- **Generated:** %s\n", data.GeneratedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(&b, "- **Project:** %s\n", nonEmpty(data.Project.Name, string(data.Project.ID)))
 	fmt.Fprintf(&b, "- **Scan:** %s (`%s`)\n\n", nonEmpty(data.Scan.Name, string(data.Scan.ID)), data.Scan.ID)
+
+	if !coverage.Complete() {
+		writeIncompleteBanner(&b, coverage)
+	} else if coverage.NeedsCoverageNote() {
+		writeCoverageNote(&b, coverage)
+	}
 
 	if data.AISummary != "" {
 		b.WriteString("## AI-generated advisory summary (NOT verified — see Findings below for actual evidence)\n\n")
@@ -64,7 +71,15 @@ func (MarkdownGenerator) Generate(w io.Writer, data Data) error {
 	writeCountTable(&b, "By vulnerability class", summary.ByVulnClass)
 
 	if len(findings) == 0 {
-		b.WriteString("## Findings\n\n_No findings._\n")
+		b.WriteString("## Findings\n\n")
+		switch {
+		case !coverage.Complete():
+			b.WriteString("_" + incompleteEmptyText + "_\n")
+		case coverage.NeedsCoverageNote():
+			fmt.Fprintf(&b, "_No findings recorded. %s (they may have been recovered by retry) — review before treating the target as clean._\n", coverage.testCaseGapText())
+		default:
+			b.WriteString("_No findings._\n")
+		}
 	}
 	n := 0
 	for _, sec := range sectionOrder {

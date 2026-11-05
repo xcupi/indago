@@ -50,10 +50,56 @@ func TestParseDOMXSSReachabilityIgnoresMismatchedMarker(t *testing.T) {
 func TestParseDOMXSSReachabilityIgnoresUnknownSink(t *testing.T) {
 	marker := "indabc123"
 	msgs := []browser.ConsoleMessage{
-		consoleLog(domXSSConsolePrefix + `{"sink":"eval","value":"indabc123"}`),
+		consoleLog(domXSSConsolePrefix + `{"sink":"unsupported","value":"indabc123"}`),
 	}
 	if got := parseDOMXSSReachability(msgs, marker); len(got) != 0 {
-		t.Fatalf("got %v, want none (eval is out of scope for this slice)", got)
+		t.Fatalf("got %v, want none (unknown sink)", got)
+	}
+}
+
+// --- text-only (diagnostic) reports ---
+//
+// A text write can never execute. The harness reports it so a negative can say
+// where the marker actually went, but no text report may ever be mistaken for
+// sink reachability - not even a forged one that names a real HTML sink.
+
+func TestParseDOMXSSTextSinksNamesWhereTheMarkerWent(t *testing.T) {
+	marker := "indabc123"
+	msgs := []browser.ConsoleMessage{
+		consoleLog("unrelated page log"),
+		consoleLog(domXSSConsolePrefix + `{"sink":"innerText","value":"0 results for 'indabc123'","text_only":true}`),
+		consoleLog(domXSSConsolePrefix + `{"sink":"textContent","value":"indabc123","text_only":true}`),
+		consoleLog(domXSSConsolePrefix + `{"sink":"innerText","value":"again indabc123","text_only":true}`),
+	}
+	got := parseDOMXSSTextSinks(msgs, marker)
+	if len(got) != 2 || got[0] != "innerText" || got[1] != "textContent" {
+		t.Fatalf("got %v, want [innerText textContent] in first-seen order, deduplicated", got)
+	}
+}
+
+func TestParseDOMXSSTextSinksRequiresMarkerAndAllowList(t *testing.T) {
+	marker := "indabc123"
+	msgs := []browser.ConsoleMessage{
+		// no marker in the value: the diagnostic is marker-gated
+		consoleLog(domXSSConsolePrefix + `{"sink":"innerText","value":"nothing here","text_only":true}`),
+		// a page-invented sink name must never be echoed as a sink
+		consoleLog(domXSSConsolePrefix + `{"sink":"innerHTML","value":"indabc123","text_only":true}`),
+		consoleLog(domXSSConsolePrefix + `{"sink":"totally-made-up","value":"indabc123","text_only":true}`),
+	}
+	if got := parseDOMXSSTextSinks(msgs, marker); len(got) != 0 {
+		t.Fatalf("got %v, want none", got)
+	}
+}
+
+func TestParseDOMXSSReachabilityIgnoresTextOnlyReports(t *testing.T) {
+	marker := "indabc123"
+	msgs := []browser.ConsoleMessage{
+		// A text write labelled with a REAL HTML sink name: still not
+		// reachability, because text_only is authoritative.
+		consoleLog(domXSSConsolePrefix + `{"sink":"innerHTML","value":"indabc123","text_only":true}`),
+	}
+	if got := parseDOMXSSReachability(msgs, marker); len(got) != 0 {
+		t.Fatalf("a text-only report must never be reachable, got %v", got)
 	}
 }
 
@@ -188,15 +234,50 @@ func TestDomXSSQueryURLNoExistingQuery(t *testing.T) {
 	}
 }
 
-func TestDomXSSQueryURLUsesFormEncodingNotJSEncoding(t *testing.T) {
-	// Unlike the hash source (jsEncodeURIComponent), the query-string
-	// source deliberately uses Go's standard net/url form encoding —
-	// URLSearchParams decodes "+" as a space per the WHATWG spec, so a
-	// literal space in the raw query string should round-trip as "+",
-	// not "%20". See domXSSQueryURL's doc comment.
+func TestDomXSSQueryURLPercentEncodesSpacesForRawHrefReaders(t *testing.T) {
+	// A real page may read location.href with indexOf()/substring() and then
+	// decodeURIComponent(). That path does NOT decode '+' as a space, so a
+	// payload containing spaces must use %20. URLSearchParams also decodes
+	// %20 as a space, so this encoding works for both readers.
 	got := domXSSQueryURL("https://target.example/page", "q", "a b")
-	if !strings.Contains(got, "q=a+b") {
-		t.Fatalf("got %q, want a form-encoded space (a+b)", got)
+	if !strings.Contains(got, "q=a%20b") {
+		t.Fatalf("got %q, want a percent-encoded space (a%%20b)", got)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Query().Get("q") != "a b" {
+		t.Fatalf("URLSearchParams-compatible decoded value = %q, want %q", u.Query().Get("q"), "a b")
+	}
+}
+
+func TestDomXSSQueryURLLeavesReservedSlashVisibleToDecodeURI(t *testing.T) {
+	payload := "<script>indagoMarker</script>"
+	got := domXSSQueryURL("http://127.0.0.1:18080/vulnerabilities/xss_d/", "default", payload)
+	if !strings.Contains(got, "%3Cscript%3EindagoMarker%3C/script%3E") {
+		t.Fatalf("URL = %q, want encoded markup but literal slash for decodeURI", got)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Query().Get("default") != payload {
+		t.Fatalf("query value = %q, want original payload %q", u.Query().Get("default"), payload)
+	}
+}
+
+func TestDomXSSQueryURLPreservesLiteralPlusAndFragment(t *testing.T) {
+	got := domXSSQueryURL("https://target.example/page?keep=a%2Bb#frag", "q", "a+b")
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("result is not a valid URL: %v (%q)", err, got)
+	}
+	if u.Query().Get("keep") != "a+b" || u.Query().Get("q") != "a+b" {
+		t.Fatalf("literal plus values changed: query=%v", u.Query())
+	}
+	if u.Fragment != "frag" {
+		t.Fatalf("fragment = %q, want frag", u.Fragment)
 	}
 }
 
@@ -639,5 +720,19 @@ func TestQueryStringDOMXSSFindingDoesNotCollideWithReflectedXSSOnSameParameter(t
 	}
 	if !sawReflected || !sawDOMXSS {
 		t.Fatalf("expected one of each vuln class, findings=%+v", findings)
+	}
+}
+
+func TestDOMXSSFindingDedupKeySeparatesFragmentRouteSelectors(t *testing.T) {
+	ep := domain.ID("ep1")
+	a := domXSSFindingDedupKey(ep, detection.DOMSourceHash, detection.DOMSinkInnerHTML, "a")
+	b := domXSSFindingDedupKey(ep, detection.DOMSourceHash, detection.DOMSinkInnerHTML, "b")
+	whole := domXSSFindingDedupKey(ep, detection.DOMSourceHash, detection.DOMSinkInnerHTML, "")
+	if a == b || a == whole || b == whole {
+		t.Fatalf("fragment route parameters and the whole-fragment probe must not share a finding: a=%q b=%q whole=%q", a, b, whole)
+	}
+	// Sources that carry no selector keep collapsing per sink.
+	if domXSSFindingDedupKey(ep, detection.DOMSourceWindowName, detection.DOMSinkInnerHTML, "x") != domXSSFindingDedupKey(ep, detection.DOMSourceWindowName, detection.DOMSinkInnerHTML, "y") {
+		t.Fatal("selector-less sources must not fan out by parameter")
 	}
 }

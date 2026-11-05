@@ -2,7 +2,9 @@ package verification
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"mime"
 	"net"
 	"strings"
 	"time"
@@ -26,22 +28,47 @@ import (
 //   - No DOM XSS: this observes the SAME marker the candidate step already sent;
 //     it does not crawl the DOM for new sinks or client-side-only inputs.
 //   - No LLM: the verdict in decide() is a pure function of the observations.
+//
+// One bounded activation may follow navigation, and only for a candidate whose
+// declared trigger is NOT page load (see activation.go): a focus, a window
+// resize event, a click, or a SMIL begin — exactly one of them, exactly once.
+// The activation is methodology, never evidence: it only gives the page a
+// chance to dispatch the event the candidate needs, and the verdict still comes
+// solely from the unchanged marker-specific provenance signal. TriggerLoad
+// candidates are never activated, so their outcome is exactly what it was
+// before activation existed.
 
 // Report is the structured, persisted record of one browser-verification
 // attempt. The caller marshals it into TestCase.Detail, mirroring how
 // detection.ReflectionReport is persisted.
 type Report struct {
-	Engine      string              `json:"engine"` // "browser-verification"
-	Candidate   detection.Candidate `json:"candidate"`
-	FinalURL    string              `json:"final_url"`
-	Status      int                 `json:"status,omitempty"`
-	Signal      Signal              `json:"signal"`
-	SignalText  string              `json:"signal_text,omitempty"`
-	MarkerInDOM bool                `json:"marker_in_dom"`
-	DOMExcerpt  string              `json:"dom_excerpt,omitempty"`
-	NavigatedAt time.Time           `json:"navigated_at"`
-	ObservedAt  time.Time           `json:"observed_at"`
+	Provenance  browser.RuntimeObservations `json:"provenance"`
+	Engine      string                      `json:"engine"` // "browser-verification"
+	Candidate   detection.Candidate         `json:"candidate"`
+	FinalURL    string                      `json:"final_url"`
+	Status      int                         `json:"status,omitempty"`
+	Signal      Signal                      `json:"signal"`
+	SignalText  string                      `json:"signal_text,omitempty"`
+	MarkerInDOM bool                        `json:"marker_in_dom"`
+	DOMExcerpt  string                      `json:"dom_excerpt,omitempty"`
+	// Activation records the ONE activation performed for a candidate whose
+	// trigger is not page load, or why none was performed. It is omitted
+	// entirely for load-trigger candidates, keeping their report byte-identical
+	// to before activation existed.
+	Activation  *Activation `json:"activation,omitempty"`
+	NavigatedAt time.Time   `json:"navigated_at"`
+	ObservedAt  time.Time   `json:"observed_at"`
 }
+
+// DefaultActivationSettle bounds how long verification waits, AFTER a dispatched
+// activation, for the browser's own exception report to arrive. The handler
+// itself runs synchronously inside the dispatch; this window only lets the
+// asynchronous CDP event land. It is a fixed, one-shot wait — not a poll.
+const DefaultActivationSettle = 300 * time.Millisecond
+
+// maxActivationSettle is the hard ceiling on that window, so no configuration
+// can turn one activation into a long wait.
+const maxActivationSettle = 2 * time.Second
 
 // BrowserVerifierConfig tunes the verifier.
 type BrowserVerifierConfig struct {
@@ -51,11 +78,21 @@ type BrowserVerifierConfig struct {
 	// DOMExcerptWindow bounds the bytes of context captured around the marker in
 	// the DOM evidence (default 80).
 	DOMExcerptWindow int
+	// ActivationSettle is the bounded post-activation observation window
+	// (default DefaultActivationSettle, hard-capped at maxActivationSettle).
+	// Applied only when an activation was actually dispatched.
+	ActivationSettle time.Duration
 }
 
 func (c BrowserVerifierConfig) withDefaults() BrowserVerifierConfig {
 	if c.DOMExcerptWindow <= 0 {
 		c.DOMExcerptWindow = 80
+	}
+	if c.ActivationSettle <= 0 {
+		c.ActivationSettle = DefaultActivationSettle
+	}
+	if c.ActivationSettle > maxActivationSettle {
+		c.ActivationSettle = maxActivationSettle
 	}
 	return c
 }
@@ -90,7 +127,8 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 		method = "GET"
 	}
 	isFormPost := method == "POST" && in.Location == domain.LocationForm && in.FormValues != nil
-	if method != "GET" && method != "HEAD" && !isFormPost {
+	isJSONPost := method == "POST" && in.Location == domain.LocationJSON && validJSONPost(in.JSONBody, in.ContentType)
+	if method != "GET" && method != "HEAD" && !isFormPost && !isJSONPost {
 		return nil, ErrUnsupportedMethod
 	}
 	if in.URL == "" {
@@ -140,6 +178,7 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 		return nil, classifyBrowserErr(ctx, err)
 	}
 	defer page.Close()
+	provenanceErr := page.EnableRuntimeProvenance(in.Marker, "")
 
 	// Baseline the page's own observation channels BEFORE navigating, so the
 	// signal below is attributable to THIS navigation only. A page is brand new
@@ -155,6 +194,12 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	var nav *browser.NavResult
 	if isFormPost {
 		nav, err = page.NavigateForm(ctx, method, in.URL, in.FormValues, browser.NavOptions{
+			WaitUntil: browser.WaitLoad,
+			Timeout:   v.cfg.NavigationTimeout,
+			Limiter:   in.Limiter,
+		})
+	} else if isJSONPost {
+		nav, err = page.NavigateJSON(ctx, in.URL, in.JSONBody, in.ContentType, browser.NavOptions{
 			WaitUntil: browser.WaitLoad,
 			Timeout:   v.cfg.NavigationTimeout,
 			Limiter:   in.Limiter,
@@ -176,22 +221,87 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	}
 	observedAt := time.Now()
 
-	var consoleErrs []string
-	for _, cm := range sinceIndex(page.ConsoleMessages(), baseConsole) {
-		if cm.Type == "error" {
-			consoleErrs = append(consoleErrs, cm.Text)
-		}
-	}
-	pageErrs := sinceIndex(page.PageErrors(), basePageErrs)
-	dialogs := sinceIndex(page.DialogMessages(), baseDialogs)
+	consoleErrs, pageErrs, dialogs := collectPageLog(page, baseConsole, basePageErrs, baseDialogs)
 
 	token := in.Marker
-	sig, sigText, matched := matchExecutionSignal(token, pageErrs, consoleErrs)
+	provenance := page.RuntimeObservations()
+	sig, sigText, matched := MatchRuntimeExecution(token, provenance)
 	markerInDOM := containsToken(html, token)
 
-	verdict, confidence, notes := decide(matched, markerInDOM)
+	// Activation — see activation.go. Only a candidate that declares a
+	// non-load trigger, reflected the marker, and produced no load-time signal
+	// is eligible: a load-trigger candidate's behaviour never changes, and a
+	// candidate that already executed needs nothing more. ONE activation, and
+	// it is never itself execution evidence — matched stays false unless the
+	// unchanged marker-specific provenance signal fires afterwards.
+	class, classReason := ClassifyActivation(in.Candidate)
+	var act *Activation
+	evidenceHTML := html
+	if !matched && markerInDOM && class != ActivationNone {
+		act = v.activate(ctx, page, token, in.Candidate.Value, class, classReason)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if act.Status == ActivationStatusDispatched {
+			// Re-read provenance AFTER the activation and its bounded settle.
+			// matched was false immediately before the activation, so a match
+			// now can only come from an exception raised after it; the record
+			// itself still attributes that exception to the main frame's marker
+			// identifier (see MatchRuntimeExecution). The post-activation record
+			// is also what the verdict rule and the persisted evidence use, so
+			// an unattributed marker exception raised by the activation is seen.
+			provenance = page.RuntimeObservations()
+			if s, text, ok := MatchRuntimeExecution(token, provenance); ok {
+				sig, sigText, matched = s, text, true
+			}
+			// The page's own log can change DURING the activation: Chromium
+			// reports a Content-Security-Policy refusal to compile an inline
+			// event handler when the handler is first compiled, i.e. at
+			// dispatch. Re-read it so the persisted evidence and the CSP note
+			// below describe the same, post-activation state — a pre-activation
+			// snapshot can miss the one line that explains a Rejected verdict.
+			consoleErrs, pageErrs, dialogs = collectPageLog(page, baseConsole, basePageErrs, baseDialogs)
+			// Evidence DOM: the state the single activation left behind, so the
+			// recorded excerpt and the stored HTML describe the same moment.
+			if after, cerr := page.Content(ctx); cerr == nil {
+				evidenceHTML = after
+			}
+			observedAt = time.Now()
+		}
+	}
+
+	verdict, confidence, notes := DecideWithProvenance(token, matched, markerInDOM, provenance)
+	if provenanceErr != nil {
+		verdict, confidence = domain.VerdictInconclusive, domain.ConfidenceLow
+		notes = "execution provenance could not be enabled: " + provenanceErr.Error() + "; replay manually"
+	}
+	if !matched && verdict == domain.VerdictRejected && act != nil && act.Status == ActivationStatusDispatched {
+		// The page's own policy can refuse to compile the injected inline
+		// handler while the activation is dispatched exactly as intended. The
+		// verdict stays Rejected — a victim's browser would not run it either —
+		// but a bare "no signal" would send an operator looking for a broken
+		// activation. The browser's CSP report is already in the collected log;
+		// name it. Only a dispatched handler activation can be blocked this
+		// way: a load-trigger candidate, or one whose activation never ran,
+		// has no inline handler for the policy to refuse. See csp.go.
+		if line, blocked := cspInlineHandlerBlocked(append(append([]string(nil), consoleErrs...), pageErrs...)); blocked {
+			notes += "; the browser log records the page's Content-Security-Policy blocking an inline event handler (" +
+				line + "), so that handler could not run: a page policy block, not an activation failure"
+		}
+	}
+	if act != nil {
+		switch {
+		case matched && act.Status == ActivationStatusDispatched:
+			notes += " (observed after one " + string(act.Class) + " activation: " + act.Method + ")"
+		case act.Status == ActivationStatusFailed:
+			notes += "; the " + string(act.Class) + " activation could not run: " + act.Error
+		case act.Status == ActivationStatusSkipped:
+			notes += "; the " + string(act.Class) + " activation was skipped: " + act.Reason
+		}
+	}
 
 	rep := &Report{
+		Provenance:  provenance,
 		Engine:      "browser-verification",
 		Candidate:   in.Candidate,
 		FinalURL:    nav.FinalURL,
@@ -199,7 +309,8 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 		Signal:      sig,
 		SignalText:  sigText,
 		MarkerInDOM: markerInDOM,
-		DOMExcerpt:  domExcerpt(html, token, v.cfg.DOMExcerptWindow),
+		DOMExcerpt:  domExcerpt(evidenceHTML, token, v.cfg.DOMExcerptWindow),
+		Activation:  act,
 		NavigatedAt: navigatedAt,
 		ObservedAt:  observedAt,
 	}
@@ -216,10 +327,22 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 		Report:     rep,
 		Evidence: ResultEvidence{
 			Screenshot: shot,
-			DOMHTML:    html,
+			DOMHTML:    evidenceHTML,
 			BrowserLog: append(append(append([]string(nil), consoleErrs...), pageErrs...), dialogs...),
 		},
 	}, nil
+}
+
+func validJSONPost(body []byte, contentType string) bool {
+	if len(body) == 0 || len(body) > browser.MaxJSONNavigationBodyBytes || !json.Valid(body) {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || (mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json")) {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	return json.Unmarshal(body, &fields) == nil && len(fields) > 0
 }
 
 // containsToken reports whether the rendered HTML contains the marker token.
@@ -236,6 +359,20 @@ func sinceIndex[T any](all []T, baseline int) []T {
 		return nil
 	}
 	return all[baseline:]
+}
+
+// collectPageLog snapshots the page's error-shaped console messages, uncaught
+// exceptions and dialogs observed since baseline. Called right after navigation
+// and again after an activation, because some browser reports (notably a CSP
+// refusal to compile an inline event handler) only appear when the handler is
+// first dispatched.
+func collectPageLog(page *browser.Page, baseConsole, basePageErrs, baseDialogs int) (consoleErrs, pageErrs, dialogs []string) {
+	for _, cm := range sinceIndex(page.ConsoleMessages(), baseConsole) {
+		if cm.Type == "error" {
+			consoleErrs = append(consoleErrs, cm.Text)
+		}
+	}
+	return consoleErrs, sinceIndex(page.PageErrors(), basePageErrs), sinceIndex(page.DialogMessages(), baseDialogs)
 }
 
 // decide is the deterministic verdict rule — the one place a candidate is

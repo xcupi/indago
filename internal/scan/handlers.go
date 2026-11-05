@@ -8,12 +8,17 @@ import (
 	"github.com/indago/indago/internal/browser"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/idor"
 	"github.com/indago/indago/internal/ratelimit"
 	"github.com/indago/indago/internal/verification"
 	"github.com/indago/indago/internal/worker"
 )
 
-func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope, proxyPool []string, limiter *ratelimit.Limiter) map[domain.JobType]worker.Handler {
+func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope, proxyPool []string, limiter *ratelimit.Limiter, idorCandidates []string, idorEnum ...idor.EnumerationOptions) map[domain.JobType]worker.Handler {
+	var enum idor.EnumerationOptions
+	if len(idorEnum) > 0 {
+		enum = idorEnum[0]
+	}
 	h := phase0Handlers(c.log)
 	// Shared by both executors so Finding correlation (candidate-side upsert
 	// and verification-side update) is race-free across the whole scan — see
@@ -32,6 +37,18 @@ func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope, 
 	dom.limiter = limiter
 	dom.proxyPool = append([]string(nil), proxyPool...)
 	h[domain.JobDOMXSS] = dom
+	// IDOR shares findingsMu for the same reason: its correlation reads and
+	// writes the SAME Findings() rows. It is a raw-HTTP engine (GET/HEAD
+	// reads), never a browser job.
+	h[domain.JobIDOR] = newIDORExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log, findingsMu, idorCandidates, enum)
+	// Access control shares findingsMu too. hasSession decides whether the
+	// anonymous probe gets the non-admin comparison request: a scan with no
+	// saved session can still confirm anonymous access to an admin action.
+	hasSession := false
+	if se, ok := eng.(*scopedEngine); ok && se != nil && len(se.cookies) > 0 {
+		hasSession = true
+	}
+	h[domain.JobAccessControl] = newAccessControlExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log, findingsMu, hasSession)
 	return h
 }
 
@@ -71,6 +88,8 @@ func (c *Controller) verifier() verification.Verifier {
 //	JobTest      → executor: baseline/reflection/candidate execution
 //	JobVerify    → verifyExecutor: browser verification of a reflected candidate
 //	JobDOMXSS    → domXSSExecutor: DOM-XSS reachability + payload verification
+//	JobIDOR      → idorExecutor: object-identifier differential (GET/HEAD reads)
+//	JobAccessControl → accessControlExecutor: anonymous-vs-non-admin admin-path probe
 func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 	noop := func(kind domain.JobType) worker.Handler {
 		return worker.HandlerFunc(func(ctx context.Context, job *domain.TestJob) error {
@@ -79,9 +98,11 @@ func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 		})
 	}
 	return map[domain.JobType]worker.Handler{
-		domain.JobDiscovery: noop(domain.JobDiscovery),
-		domain.JobTest:      noop(domain.JobTest),
-		domain.JobVerify:    noop(domain.JobVerify),
-		domain.JobDOMXSS:    noop(domain.JobDOMXSS),
+		domain.JobDiscovery:     noop(domain.JobDiscovery),
+		domain.JobTest:          noop(domain.JobTest),
+		domain.JobVerify:        noop(domain.JobVerify),
+		domain.JobDOMXSS:        noop(domain.JobDOMXSS),
+		domain.JobIDOR:          noop(domain.JobIDOR),
+		domain.JobAccessControl: noop(domain.JobAccessControl),
 	}
 }

@@ -60,6 +60,11 @@ type Server struct {
 	// creation then skips AI-drafted summaries, never fails because of it.
 	ai ai.Gateway
 
+	// llm is the LLM provider configuration store behind /api/llm/* (see
+	// internal/llm). Nil leaves those endpoints reporting that configuration
+	// is unavailable; it never blocks the scanner.
+	llm llmStore
+
 	// apiTokenDigest is SHA-256 of the configured bearer token (see
 	// SetAPIToken). Nil means the control API is unauthenticated.
 	apiTokenDigest []byte
@@ -70,6 +75,10 @@ type Server struct {
 
 	// metrics backs GET /metrics. Methods are nil-safe, so a zero Server works.
 	metrics *httpMetrics
+
+	// caps is what this instance can do (see SetCapabilities). The zero value
+	// reports everything off, never optimistic coverage.
+	caps Capabilities
 }
 
 // LoginFunc runs an interactive browser login: it opens a visible browser at
@@ -82,8 +91,10 @@ type LoginFunc func(ctx context.Context, p LoginParams) (statePath, finalURL str
 
 // LoginParams are the inputs to an interactive login.
 type LoginParams struct {
-	LoginURL   string // page to open for the operator to log in on
-	SuccessURL string // optional glob; login is considered done when the browser reaches it
+	// AllowRequest carries the selected project scope; mandatory for browser login.
+	AllowRequest func(string) bool
+	LoginURL     string // page to open for the operator to log in on
+	SuccessURL   string // optional glob; login is considered done when the browser reaches it
 }
 
 // SetLoginFunc installs the interactive-login implementation. A nil fn (the
@@ -124,7 +135,19 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/version", s.handleVersion)
+	mux.HandleFunc("GET /api/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
+
+	// LLM provider settings (configuration only). Every route is inside /api/
+	// and therefore behind the same guard, rate limiter and bearer-token
+	// middleware as the rest of the control API. Data-modifying methods are
+	// PUT/DELETE/POST and are CSRF-guarded accordingly; GET never contacts a
+	// provider.
+	mux.HandleFunc("GET /api/llm/config", s.handleGetLLMConfig)
+	mux.HandleFunc("PUT /api/llm/config", s.handlePutLLMConfig)
+	mux.HandleFunc("DELETE /api/llm/config", s.handleDeleteLLMConfig)
+	mux.HandleFunc("POST /api/llm/test", s.handleTestLLM)
+	mux.HandleFunc("POST /api/llm/models", s.handleListLLMModels)
 
 	mux.HandleFunc("GET /api/projects", s.handleListProjects)
 	mux.HandleFunc("POST /api/projects", s.handleCreateProject)
@@ -146,6 +169,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/scans/{id}/stats", s.handleScanStats)
 	mux.HandleFunc("GET /api/scans/{id}/endpoints", s.handleListEndpoints)
 	mux.HandleFunc("GET /api/scans/{id}/status", s.handleScanStatus)
+	mux.HandleFunc("GET /api/scans/{id}/coverage", s.handleScanCoverage)
+	mux.HandleFunc("GET /api/scans/{id}/tests", s.handleListScanTests)
+	mux.HandleFunc("GET /api/scans/{id}/idor/candidates", s.handleIDORCandidates)
+	mux.HandleFunc("GET /api/scans/{id}/explorer", s.handleScanExplorer)
 	mux.HandleFunc("GET /api/scans/{id}/findings", s.handleListFindings)
 	mux.HandleFunc("GET /api/scans/{id}/findings/{fid}", s.handleGetFinding)
 	mux.HandleFunc("GET /api/scans/{id}/findings/{fid}/poc", s.handleGetFindingPoC)

@@ -1,4 +1,402 @@
-# Indago — bounded DOM-XSS HTML and string-timer sinks
+# Indago — bounded DOM-XSS HTML, string-timer, jQuery and AngularJS-expression sinks
+
+## AngularJS expression execution (`angular_expression`)
+
+The operator authorized the PortSwigger AngularJS lab class — "DOM XSS in
+AngularJS expression execution", "Reflected XSS with AngularJS sandbox escape
+without strings", "Reflected XSS with AngularJS sandbox escape and CSP". These
+are not HTML-context injections: the value is placed where AngularJS compiles a
+text-node interpolation, so `{{...}}` is evaluated as an Angular expression.
+Before this slice the engine had no sink for that, so it reported nothing on
+all three labs.
+
+`detection.DOMSinkAngularExpression` is a first-class sink
+(`DOMXSSSink = "angular_expression"`) reachable from the same seven sources as
+every other sink. The server-reflected lab class is covered through the query
+source: the engine navigates to `endpoint?param={{…}}`, the server reflects that
+value into the page, and the page's own Angular bootstrap compiles it. The
+`angular_expression` sink is additive: every pre-existing sink, shape, dedup key
+and verdict is unchanged (pinned by
+`TestDOMXSSExistingSinkPlansAreByteIdentical` and by the eight real-browser
+confirmations in `TestDOMXSSExistingSinkConfirmationsUnchanged`).
+
+### The candidate, and why it is marker-specific
+
+A bare identifier would **not** work here. Angular resolves an unknown
+identifier inside an expression to `undefined`; it does not throw a
+`ReferenceError`, so the whole Reflected-XSS `ReferenceError: MARKER is not
+defined` signal is unavailable (and a rendered `undefined` is indistinguishable
+from ordinary page text). The marker-specific signal for this sink is the
+evaluated **result appearing in a rendered text node**.
+
+`detection.DOMXSSPayloadsFor(source, DOMSinkAngularExpression, marker)` plans
+exactly one shape, `angular_interpolation`:
+
+```
+marker = "ind<16 hex chars>"   (the engine's normal marker)
+value  = {{'ind12345' + '6789abcd' + ($id ? '' : '')}}
+```
+
+1. **The candidate never contains the contiguous marker.** It is split in half
+   and the expression itself reassembles it. A page that merely echoes the
+   source — server-side, `textContent`, `innerHTML`, a log, a SQL error — keeps
+   the literal quotes and braces and therefore cannot produce the contiguous
+   marker. Observing it in rendered text is positive evidence that the
+   expression was evaluated, not a reflection match.
+2. **`($id ? '' : '')` forces runtime evaluation.** It reads Angular's
+   always-present per-scope `$id` and appends the empty string either way, so
+   the result is still exactly the marker. An expression made only of string
+   literals is compile-time constant, and Angular can fold it without its
+   dynamic evaluator — which would let a CSP that forbids eval still produce
+   the result and make the CSP outcome untestable. Referencing a scope value
+   routes the candidate through Angular's real expression compiler.
+3. **No side effect, no escape.** The expression only concatenates literals and
+   reads `$id`. There is no `alert`, cookie, network call, `constructor`
+   access, sandbox-escape gadget or `$eval` chain. Detection claims exactly
+   what it proves: the page compiled *this* expression. The labs differ only in
+   what the page permits *after* compilation, and Indago deliberately does not
+   go there.
+
+### Reachability and verification
+
+There is no DOM setter to hook: Angular writes the interpolation result through
+the text node's own value, so `innerHTML`/`document.write`/timer hooks never
+fire. The harness therefore takes a **passive text observation** at the page's
+`load` event (plus two bounded follow-ups at 0 ms and 120 ms, covering a page
+that compiles from its own load/timer handler), walking text nodes and
+excluding `script`/`style`/`noscript`/`textarea`/`title` (Angular does not
+interpolate there). Phase one reaches the sink when the canary is observed as
+rendered text; phase two confirms when the *marker* is, which only the
+evaluated candidate can produce.
+
+Because that observation is passive, `angular_expression` is a **fallback**
+sink: `domXSSPrimarySink` still prefers any sink the page's own code actively
+reached, and `jQuery.selector` keeps its existing precedence. A page that
+writes markup at its load handler therefore keeps its original sink
+attribution, and the passive report is filtered out of other sinks' "hooked
+sinks that received the payload" note. Reachability is not confirmation: the
+canary contains no interpolation, so a page that only *displays* the value is
+still just a candidate until the compiled result appears.
+
+The passive observation is gated on AngularJS actually being present in the
+document (`window.angular`, or an `ng-*` application-root attribute). Without
+that gate, every page that displays a source value as text would become an
+`angular_expression` candidate, producing a rejected finding on every reflected
+search page — a real regression, and one the engine's existing negative ("no
+implemented DOM-XSS sink reachable") already states honestly. The gate also
+means the two false-positive guards are not symmetric, deliberately:
+
+- Angular present but not bootstrapped (`ng-app` removed): the text is observed,
+  the candidate is verified, and the verdict is **Rejected** (`inert_text`).
+- Angular absent entirely: **no candidate is opened**; the page reports no
+  reachable sink. A page with no Angular and a page that merely displays a
+  value are indistinguishable from the DOM, so a "Rejected" here would require
+  treating every text-rendering page as an Angular candidate. The stronger,
+  honest claim is that no Angular sink exists there.
+
+### The parameter-NAME binding — the measured "sandbox escape without strings" shape
+
+The third lab class reads the query string differently, and that difference is
+the whole reason it does not confirm with the interpolation shape. The live
+page (AngularJS **1.4.4**, `ng-app=labApp`) emits, **for every query
+parameter**, this three-line block into an inline `<script>`:
+
+```js
+var key = '<NAME>';
+$scope.query[key] = '<VALUE>';
+$scope.value = $parse(key)($scope.query);
+```
+
+and renders `<h1 ng-controller=vulnCtrl>… {{value}}</h1>`. Two consequences,
+both measured:
+
+- The parameter **VALUE is data**. It is stored in a scope object and rendered
+  by `{{value}}`; Angular never re-compiles an interpolation's *result*, so a
+  `{{…}}` candidate in the value stays literal text. That is the honest
+  `Rejected(inert_text)` the interpolation shape reports there — and it is still
+  the right verdict for that shape.
+- The parameter **NAME is compiled**. `$parse(key)` parses the name as an
+  Angular expression and assigns its result to the scope the template renders.
+  This is why the lab's own published payload is `?search=1&<expression>=1`: the
+  expression rides as the *name* of a second parameter, and the last block wins
+  the rendered value.
+
+The page also rewrites `'` → `&apos;` and `"` → `&quot;` inside that inline
+script (the HTML parser does not decode character references in raw-text script
+content), so **no string literal survives in either quote style**, and
+AngularJS 1.4.4's expression grammar has no hex literals. A marker expression
+for this binding therefore has to be built without quotes. The planner's
+second, query-only shape, `angular_parse_expression`, is that expression:
+
+```
+marker = "inddd525eb0320dca43"
+value  = [(18).toString(36),(23).toString(36),(13).toString(36),…].join([])
+```
+
+Each marker character is the base-36 digit of its own decimal number literal
+(`(18).toString(36)` is `"i"`), and `join([])` concatenates them because an
+array coerces to `""` as the separator. It contains no quote, no hex literal, no
+global, no `constructor`/`prototype`/`__proto__` access, no `$eval` chain and no
+side effect: it does not need a sandbox escape and performs none. The sandbox is
+still active — `search.__proto__` in the same position throws `isefcld`/
+`$parse:isefcfld` — and the candidate never touches it. The contiguous marker
+never appears in the expression bytes, so a marker in rendered text can only be
+the evaluated result.
+
+Delivery is part of the shape, and it is measured rather than assumed
+(`DOMXSSShapeNeedsParameterName`):
+
+- the discovered parameter is kept, with a **fixed marker-free value** (`1`) —
+  without it the measured page does not render the vulnerable block at all, and
+  a marker-carrying anchor would be indistinguishable from a confirmed result
+  if the page ignored the name channel;
+- the expression is appended as the **last** parameter in the raw query
+  (`domXSSQueryNameURL`). The page assigns the rendered value from the last
+  block it emits; the ordinary sorted encoding would place `[` before `search`
+  and the page would render the anchor instead.
+
+The shape is planned only for the `location.search` source (no other source has
+a parameter name) and **second**, so a page whose text-node interpolation
+compiles stops at the first shape and never receives this navigation. Both
+shapes are attempts of the *same* finding (identity stays endpoint/source/sink/
+selector), so confirming the name channel never creates a second row, and the
+interpolation's `inert_text` attempt and its evidence stay recorded.
+
+Its verdict rule (`decideDOMXSSAngularParse`) has no Rejected branch: on this
+binding the candidate bytes are compiled and never rendered as text, so "the
+marker did not appear" is untested, not disproved. Compiled → **Confirmed**
+(`outcome=compiled`); an enforced eval refusal → **Inconclusive**
+(`outcome=csp_blocked`, the same token as the interpolation shape); anything
+else → **Inconclusive** with its own `outcome=parse_unobserved`.
+
+### False-positive guards (all real-browser fixtures)
+
+| fixture | outcome |
+|---|---|
+| `ng-app` page, value reflected into a text node, real AngularJS 1.2.32 | **Confirmed** — `outcome=compiled` |
+| same page with `ng-app` removed (Angular loaded, never bootstrapped) | **Rejected** — `outcome=inert_text` |
+| no Angular at all, `{{...}}` echoed as ordinary text | **no candidate** — the existing "no implemented DOM-XSS sink reachable" negative; never Confirmed |
+| template compiler whose dynamic evaluator CSP refuses | **Inconclusive** — `outcome=csp_blocked` |
+| same blocked compiler with no CSP header | **Confirmed** — proves the block is the policy, not the fixture |
+| real AngularJS under `script-src 'self' 'unsafe-inline'` | **Confirmed**, *not* `csp_blocked` |
+| measured per-parameter `$parse(name)` page, both quotes entity-encoded | **Confirmed** — `outcome=compiled`, reached by the parameter-NAME shape after the interpolation shape's honest `inert_text` |
+| same page shape, value bound as data and never re-compiled (`$parse('search')`) | **Rejected** — `inert_text`; the added name attempt stays `parse_unobserved` and never upgrades the verdict |
+| page that renders the whole decoded query string (names included) with Angular present but never `$parse`s a name | **Rejected** — showing the candidate's bytes is not compiling them; no attempt Confirms |
+
+
+The last row matters: AngularJS probes `new Function` once and, when CSP
+refuses it, switches to its own CSP-safe interpreter, so the marker is not
+blocked and must not be reported as such. A CSP header alone is never treated
+as a blocked compile.
+
+### `csp_blocked` outcome semantics
+
+The harness records `securitypolicyviolation` events (engine-attributed: same
+init script, via a nested call frame so the browser's provenance tracer keeps
+it). `domXSSEvalBlockedByCSP` accepts only an **enforced** refusal of dynamic
+evaluation (`blockedURI == "eval"`, directive `script-src`/`script-src-elem`/
+`default-src`); report-only policies and inline-script blocks do not qualify.
+`decideDOMXSSAngular` is a pure four-way rule, and every outcome carries its
+token in the finding summary and the verification attempt notes:
+
+| observation | verdict | outcome token |
+|---|---|---|
+| marker observed as rendered text | Confirmed (high) | `compiled` |
+| no result, enforced eval refusal observed | **Inconclusive** (low) | `csp_blocked` |
+| candidate present in the page, never evaluated | Rejected (high) | `inert_text` |
+| neither candidate nor result re-observed | Inconclusive (low) | `unobserved` |
+
+`csp_blocked` is deliberately not a new `domain.Verdict`: the verdict lattice is
+shared with every other engine, and the honest reading is Inconclusive — the
+sink was reachable, but the compile was refused before execution could be
+observed. It is distinct on every presentation surface through its outcome
+token, and it can never be Confirmed or silently Rejected. Ordering is
+`compiled` → `csp_blocked` → `inert_text` → `unobserved`, so a page that both
+compiled and logged an unrelated eval refusal still confirms.
+
+### Bounded coverage, stated honestly
+
+- Only the classic double-brace **text-node interpolation** is covered.
+  Attribute-expression injection (`ng-focus="…"`, `ng-click`, `ng-init`,
+  `ng-bind-html` + `$compile` chains) is a different placement and is **not**
+  covered.
+- No sandbox escape, no `constructor`/`__proto__` gadget, no `$eval`, no
+  `eval`/`Function` sink, no simulated user activation, no new source.
+- The observation window is the page's `load` plus the engine's existing
+  bounded settling window. A page that compiles only after a long async delay
+  or a user gesture is out of reach by design.
+- A page that renders the marker-carrying value inside an attribute (not a text
+  node) is out of scope for this sink; the passive walker only reads text
+  nodes.
+
+
+## Candidate shapes: the attribute-context breakout, and non-HTML endpoints
+
+Two coverage gaps found against PortSwigger labs are fixed here. Neither adds a
+source, sink, engine category or verification signal.
+
+**1. Attribute-context HTML sinks now get a breakout shape.** A page can place a
+source value *inside an already-open quoted attribute* — the lab shape is
+`document.write('<img src="/resources/images/tracker.gif?searchTerms='+query+'">')`.
+No standalone markup candidate can execute there: `<img src=x onerror=…>` simply
+becomes part of the `src` attribute's value. `detection.DOMXSSPayloadsFor` now
+returns an ordered, bounded set of shapes per reachable `(source, sink)`:
+
+| order | shape | value | when it is the one that works |
+|---|---|---|---|
+| 1 | `markup` (unchanged) | `<img src=x onerror=MARKER>`; `<script>MARKER</script>` for query-sourced `document.write`; the bare marker for timers | the value starts its own HTML markup |
+| 2 | `attr_breakout` (new) | `"><img src=y onerror=MARKER>` | the value sits inside a **double-quoted** attribute |
+
+Each shape is its own `Candidate` with its own `DedupKey`
+(`…\x00<shape>\x00<value>`), and verification gives each one its own navigation,
+in this order. Ordering matters: the query/`document.write` script body stays
+first because a page reading `decodeURI(location.href)` keeps reserved `=`/`+`
+encoded, where the breakout shape cannot work. The scan stops at the first
+**Confirmed** shape, so a target that the existing markup shape already
+confirms still makes exactly one verification navigation and one finding. A
+shape that only reflects is Rejected and the next shape is tried; all shapes at
+one site correlate into the same finding (finding identity is
+endpoint/source/sink/selector, never the value), so the extra shape can never
+produce a near-duplicate row. A reflection — or a page-authored
+`ReferenceError: MARKER is not defined` console line — still never confirms;
+confirmation remains the engine-attributed marker execution, and the
+attribute-context tests keep an escaped/safe control and a forged-console
+control Rejected.
+
+Bounded limits, stated honestly: the breakout shape closes a **double-quoted**
+attribute only (single-quoted and unquoted attributes are not covered, and a
+page that HTML-escapes `"` defeats it — both are documented gaps, not silent
+negatives). Measured against current Chromium, an inline `<svg onload=…>`
+variant does **not** fire when written/assigned this way, which is why the
+breakout shape uses an `<img onerror=…>` instead. Each reachable site can cost
+at most two verification navigations.
+
+**2. A response with no DOM is NOT APPLICABLE, not an error.** The crawler also
+registers image/asset URLs, and a non-HTML response has no document body. The
+postMessage probe used to end with `document.body.appendChild(sender)` and
+crashed (`TypeError: Cannot read properties of null (reading 'appendChild')`),
+retrying into a dead job and leaving the scan's coverage incomplete. Two
+honest gates now exist:
+
+- `domXSSExecutor.Handle` checks the endpoint's recorded `ContentType` **before**
+  any browser context, selector discovery or navigation. A non-empty non-HTML
+  media type (`image/*`, `application/json`, `application/xml`, `text/plain`,
+  `application/pdf`, …) records one **skipped** TestCase saying the source is not
+  applicable and makes no navigation. An empty/unknown content type is still
+  probed — an unrecorded type is not evidence of "no DOM here".
+- `postMessageScript` attaches its opaque-origin sender to `document.body ||
+  documentElement` (a frameset document has no body but does have a root) and
+  resolves a distinct no-root status when neither exists. That status maps to
+  `errDOMXSSSourceNotApplicable`, which both phases record as a **skipped**
+  TestCase ("not applicable … not a clean negative"). The attachment itself is
+  deliberately **not** wrapped in `try`/`catch`: a genuine evaluation failure on
+  an attachable document still surfaces as a retried error, and both properties
+  are asserted by `TestDOMBodylessDocumentIsNotApplicable`.
+
+**3. `document.write` inside a `<select>`: measured, and no shape is added.**
+The stock-checker lab shape — a page's own script reads a client-side value and
+hands it to `document.write` inside a `<select>` — was measured on a loopback
+fixture (`internal/scan/domxss_select_shape_integration_test.go`) before adding
+anything. The premise that HTML's "in select" insertion mode ignores an injected
+`<img>`, so only a `</select>`-closing shape could execute, does **not** hold for
+the Chromium the verifier actually drives (Chrome 156 here: the parser change
+that accepts arbitrary content inside `<select>` shipped with customizable
+select). Measured directly, a `document.write`'d
+`<option>x<img src=y onerror=…>` becomes a real `<img>` element inside the
+`<option>`.
+
+Consequences, verified end to end at the base commit and pinned by that test:
+
+| position | shape that confirms |
+|---|---|
+| value as the `<option>`'s text, `location.search` | the existing query/`document.write` script body (`<script>M</script>`) |
+| value as the `<option>`'s text, any other source | the existing markup shape (`<img src=x onerror=M>`) |
+| value inside an ATTRIBUTE of an element inside the `<select>` | the existing `attr_breakout` shape |
+
+So a `select_breakout` shape is deliberately **not** added: it would only cost a
+third verification navigation at every non-confirming `document.write` site and
+would never run where the earlier shapes already confirm. Each position's
+fully-escaped control stays Rejected.
+
+## jQuery sink slices: attribute write and selector call (operator-authorized)
+
+The operator explicitly asked Indago to cover the jQuery DOM-XSS lab classes, so
+this slice adds two first-class sinks. They are called `jQuery.attr` and
+`jQuery.selector` so an operator can tell them apart from the HTML sinks on
+every presentation surface. This is operator-authorized work; `AGENTS.md` §3
+still lists DOM slices beyond P2.3 as out of scope until the coordinator raises
+that wording with the operator.
+
+**Hook, not source-text search.** The harness wraps the page's own jQuery
+library when the page assigns the global (`window.jQuery = window.$ = jQuery`),
+which happens before any later page script can call it:
+
+- `jQuery.fn.init` (the function every `jQuery(...)`/`$(...)` call constructs)
+  reports `jQuery.selector` when the selector argument is a primitive string
+  containing the marker.
+- `jQuery.fn.attr` reports `jQuery.attr` only for an `href` write whose value is
+  a primitive string containing the marker, and tags the exact element(s) with
+  `data-indago-xss-target="<marker>"` so verification can click the element it
+  located instead of inventing a selector.
+
+Native code always runs first with the original receiver and every argument,
+and its result is returned identically. A page that replaces `console.log` or
+`JSON.stringify` after load cannot silence the reports (the harness captured the
+natives before page scripts). A throwing native call is not reported, exactly
+like the other sinks' primitive-string-only rule.
+
+**Reachability is still inert.** The phase-one canary is
+`indago-domxss-canary-<marker>`: no `javascript:` scheme and no markup, so a
+`jQuery.attr` write stores it as a harmless relative URL and a
+`jQuery.selector` call treats it as a selector. A page can therefore reach a
+sink without anything executing.
+
+**Verification candidates and activation.** Each sink has exactly one bounded
+shape:
+
+| sink | shape | activation before reading the signal |
+|---|---|---|
+| `jQuery.attr` | `javascript:<marker>` | one click on the harness-tagged element; the browser's own default activation of that link evaluates the marker identifier |
+| `jQuery.selector` | `<img src=x onerror=<marker>>` | only if phase one needed it: one bounded hash change, so the page's own `hashchange` handler runs with exactly this value |
+
+The hash probe is phase-one only: when the fragment carried by the navigation
+reaches no hooked sink, the hash source re-issues the same fragment as a real
+hash change (`location.hash = ''; location.hash = <value>`) and observes again;
+that is how a `hashchange`-driven page ever runs its handler. Verification
+repeats the delivery phase one needed, once, inside the existing observation
+window. A non-hashchange selector page needs no activation. Both activations
+are engine-issued DOM operations, not OS-level trusted input: the click goes
+through the element's own activation behavior (`element.click()` via the page
+evaluate escape hatch), and the hash change is a normal script URL mutation. The
+engine never navigates to the `javascript:` URL itself.
+
+**No verdict rule changed.** Confirmation is still
+`verification.MatchRuntimeExecution`/`DecideWithProvenance`: the engine-attributed
+`ReferenceError: <marker> is not defined` at the bare marker identifier in the
+main frame. In Chromium this is observed for both a clicked `javascript:`
+URL and a jQuery-created image `onerror`. A reflection (the marker in the
+`href`/DOM), a page-authored console line formatted as the same
+ReferenceError, and a safe/escaped control all stay Rejected; each real-Chromium
+case reaches the hook and finishes payload verification first. Activation is
+recorded in the verification note and in the browser-log evidence as
+`__INDAGO_DOMXSS_ACTIVATION__<kind>:applied|not-applied`.
+
+**One attribution rule.** jQuery's own HTML parsing assigns `innerHTML` inside
+the factory call, so a markup-carrying `$(...)` can report both
+`jQuery.selector` and `innerHTML`. The page-authored `jQuery.selector` call is
+the site identity; choosing `innerHTML` there would drop the activation the
+factory call needs. Every other sink keeps the original first-reachable order.
+
+Bounded limits, stated honestly: only the global jQuery function's factory
+(`fn.init`) and `fn.attr` are hooked. `jQuery.fn.prop`, `.html`, `.append`,
+direct `jQuery.find(selector)` calls, non-`href` attributes, single-quoted
+attribute writes and a jQuery loaded only through an AMD/CommonJS module with no
+global are not covered. The selector lab class is version-specific: jQuery
+1.8.3's selector parser turns `:contains(<img ...>)` into markup, while modern
+jQuery does not (the local fixture is the pinned upstream 1.8.3 in
+`internal/scan/testdata/`). The click activation is one attempt per candidate;
+if the harness found no element, execution is not attempted and the attempt is
+not reported as a clean negative.
 
 ## P2.3: primitive-string setTimeout / setInterval
 
@@ -22,8 +420,10 @@ contracts exercise both timers using comparable ordered spy/init scripts.
 
 Timer verification uses only the **bare marker JavaScript expression**, not the
 HTML image payload (which stays unchanged for HTML sinks). Confirmation still
-requires the exact marker-specific **page error**; console reports are evidence
-only, even when formatted as an exact runtime ReferenceError. Timer evidence
+requires the engine-attributed execution of the bare marker identifier in the
+main frame (see [verdict-provenance.md](verdict-provenance.md)); console reports
+and page-error text are evidence only, even when formatted as an exact runtime
+ReferenceError. Timer evidence
 retains the actual selected sink and string payload report as well as runtime,
 DOM and screenshot attribution. Canceled, CSP-blocked and delayed calls can reach
 a string sink without execution and must not confirm. Callback-only and rejected
@@ -42,6 +442,70 @@ First-reachable-sink, selector and GET/HEAD limits still apply.
 See [`p23-string-timers-validation.md`](p23-string-timers-validation.md) for actual
 TDD, native contracts, CLI/controller outcomes, evidence hashes, gates and cleanup.
 P2.2 below remains historical HTML evidence, not a timer claim.
+
+## Fragment-route parameters and script-literal query discovery (validation in progress)
+
+Hash-routed URLs such as `/#/search?q=hello` are canonicalized as the route
+endpoint `/#/search?q=` (the parameter names with blank values; the original
+values are removed) plus DOM-only `q` parameter metadata (`location.hash` source).
+Fragment parameters never create HTTP injection points. Both operator-provided
+seeds and crawler-discovered links register their fragment parameter names;
+distinct names remain distinct in endpoint identity while value permutations
+collapse. Hash-source probes preserve the route and place the canary/candidate
+in `q`; ordinary hashes with no route query continue to use whole-fragment
+probing. The selected parameter is currently tested without carrying other
+fragment-query values.
+
+The crawler also records a bounded set of literal candidates from inline scripts
+that resemble URL parameter reads (`indexOf("name=")`, `.get("name")`, or
+`getParameterByName("name")`). The `.get()` matcher is lexical: it only follows
+a variable initialized with `URLSearchParams` (or a direct `URLSearchParams(...).get`),
+but it is not a JavaScript parser. A match only proposes a discovery candidate;
+it is not evidence of URL control or XSS. This supports names such as DVWA's
+`default` that do not occur in a form or URL already. It only runs on HTML pages
+the crawler actually fetches; it cannot infer names from an unvisited page or an
+external script bundle. The matcher is literal-only, not a JS parser. Script-derived
+parameters are ordinary query injection points, still subject to browser verification.
+
+Local regressions: disabling the fragment-route placement makes the real-Chromium
+route regression produce zero findings; disabling script-literal registration
+makes the discovery regression fail to find `default`. The positive synthetic
+route test and safe `textContent` control pass. A direct authenticated DVWA scan
+records `default` as `script_literal` at all four security levels. At `low`, the
+independent oracle executes a script through `document.write` and Indago now
+confirms it. Root cause: the page embeds the query value in `<option>` markup and
+uses `decodeURI(location.href)`; the old generic image candidate depended on
+reserved `=` and `/` that stayed percent-encoded. Query-sourced `document.write`
+now uses a benign `<script>MARKER</script>` candidate, and only the selected
+query value leaves `/` literal while keeping query separators escaped. The
+medium scan remains `Inconclusive`, not a clean negative; high/impossible are
+not Confirmed.
+
+The real Juice Shop search oracle also executes, and a latest-build exact-route
+scan now confirms the DOM-XSS through the already-supported `innerHTML` sink.
+Root cause: its hash-router fetches search data after `load` and reaches the sink
+roughly 0.5–0.75 seconds later under four concurrent browser contexts. The DOM
+engine now waits up to one second after load for hash-route query pages (250 ms
+for other URL-source pages), with cancellation support. A 600 ms delayed-sink
+Chromium regression fails before that wait and passes after it; the `textContent`
+control remains unconfirmed. No new sink category was added. These fixes close
+the two measured false negatives on their exact targets, but the 29-unit
+benchmark remains a small, narrow corpus—not production-wide coverage.
+
+## Same-origin external scripts
+
+The static taint pass used to read inline `<script>` bodies only, so a sink that
+lives in `/app.js` produced `no_tainted_path` — an absence it had not
+established. The DOM pass now fetches the same-origin external scripts each
+analysed page references (through the already-loaded page, so the scan's
+session, proxy, rate limiter and scope gate apply), bounds the cost, caches by
+content hash, and feeds the bodies through the **same** taint pass. Each site
+records the script URL it came from; a script that cannot be read or parsed is
+recorded as unresolved instead of being folded into a negative. Caps: 8 files
+per page, 256 KiB per file (skip whole, never truncate), 4 MiB per scan. No
+verdict, payload, finding or dedup key changes. See
+[`dom-xss-external-scripts.md`](dom-xss-external-scripts.md) for the numbers,
+the validation record and the limits.
 
 ## P2.1: exactly two additional HTML sink methods
 
@@ -67,9 +531,10 @@ redesigned by this bounded change.
 
 The existing inert-canary → benign `<img src=x onerror=MARKER>` phases and
 strict marker-specific runtime matcher are retained. DOM confirmation requires
-the browser page-error channel; console output is stored as evidence only.
-Logging a canary/payload or even a forged `ReferenceError: MARKER is not defined`
-via `console.error` cannot confirm DOM execution.
+engine-attributed execution (the paused V8 instruction is the marker identifier
+in the main frame); console output and page-error text are stored as evidence
+only. Logging a canary/payload, `console.error`, or throwing a forged
+`ReferenceError: MARKER is not defined` cannot confirm DOM execution.
 
 **Fragment creation is not insertion.** Indago never inserts returned
 fragments. Chromium can raise an image `onerror` ReferenceError even while an
@@ -206,7 +671,7 @@ sinks added by P2.1 are described at the top of this document. See "Out of scope
 | Axis | Implemented |
 |---|---|
 | Sources | SEVEN (all client-side sources identified so far): `location.hash` (piece 1); `location.search`/`URLSearchParams`, `window.name`, `postMessage` (piece 2); `document.referrer`, `localStorage`, `sessionStorage` (piece 3 — `detection.DOMXSSSources`) |
-| Sink categories (current) | Bounded HTML injection: `Element.prototype.innerHTML` / `outerHTML`, `document.write` / `document.writeln`, `Element.prototype.insertAdjacentHTML`, `Range.prototype.createContextualFragment`; P2.3 adds only primitive-string `setTimeout` / `setInterval` (see native/timing limits above) |
+| Sink categories (current) | Bounded HTML injection: `Element.prototype.innerHTML` / `outerHTML`, `document.write` / `document.writeln`, `Element.prototype.insertAdjacentHTML`, `Range.prototype.createContextualFragment`; P2.3 adds only primitive-string `setTimeout` / `setInterval`; the operator-authorized jQuery slice adds `jQuery.attr` (an `href` write, activated by one click) and `jQuery.selector` (a factory/selector call, hash-change activated only when the page needs it) — see the jQuery section above |
 | Pairs tested per endpoint/source/selector | At most ONE — the first reachable sink (by the page's own script call order) for each query parameter or storage key; non-selector sources have one pass — see "Two-phase design" below |
 | Methods probed | GET/HEAD-navigable endpoints only — UNCHANGED from piece 1 |
 | Query source coverage | Every distinct discovered `Location=Query` parameter name, sorted lexicographically for deterministic ordering — each name gets an independent canary/payload pass and finding identity. If no query parameter was discovered, a skipped `TestCase` says the source was not tested (not a clean negative) |
@@ -504,6 +969,56 @@ TestCase saying `location.search` was **not tested** because no candidate
 parameter was available. This is not a clean negative and is not silently
 reported as safe.
 
+## Static flow diagnostic: accepted source spellings
+
+`detection.DOMXSSStaticReachability` is a pure, bounded taint pass over the
+page's inline scripts (see its doc comment). It is a **diagnostic**, never a
+verdict: it can explain why a probe reached no sink, and it distinguishes
+"the analysed scripts contain no supported tainted path" from "the analysis
+could not see far enough" (`unresolved_flow`). Only the browser's own
+marker-specific signal confirms anything.
+
+Every way a page reaches the same `Location` object for the document the scan
+navigates is accepted, for each of the three members the pass models:
+
+| member | accepted spellings | source |
+|---|---|---|
+| `location.search` | `location.`, `window.location.`, `document.location.`, `self.location.` | `DOMSourceQuery` |
+| `location.hash` | same four prefixes | `DOMSourceHash` |
+| `location.href` | same four prefixes, plus `document.URL` / `window.document.URL` | query **and** hash (a full-URL read carries both) |
+
+The aliases are spellings, not separate sources, so source isolation still
+holds: a query probe is never credited by a `location.hash` read, and a hash
+probe is never credited by a `location.search` read, whichever alias the page
+used. `top.`/`parent.` are deliberately **not** accepted — in a framed document
+they name a different window, so crediting them would over-claim.
+
+`URLSearchParams` is accepted with or without `new`, with or without wrapping
+parentheses, qualified as `window.URLSearchParams`, and when the object is
+assigned to a variable and `.get(name)` is called later. `.get()` keeps its
+literal-name requirement (a computed name is `dynamic selector`, an explicit
+unknown) and its selector match against the parameter under test. The depth
+bound is unchanged: exactly one user-defined function boundary.
+
+### The measured lab page (and what it does not prove)
+
+The exact measured page — `trackSearch(query)` writing into `document.write`,
+`var query = (new URLSearchParams(window.location.search)).get('search')`,
+`if (query) { trackSearch(query); }` — is reproduced byte-for-byte in
+`internal/detection/domxss_location_spellings_test.go`. At the base revision it
+is already `tainted_path` with the `document.write` site and `hops == 1`: the
+`window.` prefix was accepted before this slice, and the real-browser fixture
+(`domxss_lab_page_browser_test.go`) confirms the planner's `document.write`
+candidate on that page in Chromium for the bare, `window.`, `document.` and
+`self.` spellings. So a live `no implemented DOM-XSS sink reachable from
+location.search parameter "search"` result is **not** explained by this pass:
+the alias blind spot this slice fixed was `self.location.…`, and the measured
+page does not use it.
+
+Known limits of the pass (unchanged): inline `<script>` bodies only, no
+shadowing resolution (a local variable named `location`/`self` is still read as
+the global), no escaping model, branches and loop bodies evaluated once.
+
 ## Wiring into the scan (extended)
 
 - `enqueueDOMXSSProbes` now enqueues one `JobDOMXSS` per
@@ -600,8 +1115,10 @@ deliberate exclusions for future, separate pieces of work:
   `detection.DOMXSSSources`). A genuinely new source not yet identified
   would still be new work, but nothing on the current list remains.
 - **Sinks**: bounded HTML injection plus the two P2.3 primitive-string timers
-  listed above. `eval`/`Function` and `location`/`src` assignment (including
-  script-src) remain excluded.
+  and the two operator-authorized jQuery sinks described above. Every other
+  jQuery method (`prop`, `html`, `append`, direct `jQuery.find`, …), `eval`/
+  `Function` and `location`/`src` assignment (including script-src) remain
+  excluded.
   Other HTML methods are not implicitly covered. Source-specific limits and
   the first-reachable-sink bound still apply; this is not exhaustive DOM XSS.
 - **More than one reachable pair per endpoint/source/selector per probe
@@ -761,17 +1278,18 @@ a deliberate scope boundary for this first slice, not an oversight.
    evidence, never confirm without a real deterministic signal".
 3. The engine navigates AGAIN — a fresh page, same harness installed
    before navigation — to `endpointURL#<percent-encoded payload>`.
-4. Confirmation uses the **EXACT SAME deterministic signal** Reflected XSS
-   verification already uses, literally the same code:
-   `verification.MatchExecutionSignal` and `verification.Decide` (both new,
-   trivial exported wrappers around the existing, private
-   `matchExecutionSignal`/`decide` in `internal/verification`) — scanning
-   the page's own uncaught-exception (`page_error`) and console-error
-   channels for the exact marker token. `MARKER` is a bare, unquoted JS
+4. Confirmation uses the **EXACT SAME deterministic rule** Reflected XSS
+   verification uses, literally the same code:
+   `verification.MatchRuntimeExecution` and
+   `verification.DecideWithProvenance` — consulting the engine's own record of
+   the uncaught exception (paused instruction, script, frame) rather than
+   scanning page-error or console text, which a page can forge
+   ([verdict-provenance.md](verdict-provenance.md)). `MARKER` is a bare, unquoted JS
    identifier the `onerror` handler evaluates; referencing an undeclared
    identifier as code does exactly one thing in JavaScript: the engine
    throws `Uncaught ReferenceError: MARKER is not defined` the moment it
-   is evaluated. Observing this (page_error or console_error) → Confirmed.
+   is evaluated. Observing this at the marker identifier in the main frame →
+   Confirmed.
    The marker reaching the DOM but no signal → Rejected (e.g. CSP blocking
    inline event handlers, or a downstream sanitizer). Neither → Inconclusive.
 5. Verification attribution follows the same anti-false-positive

@@ -11,12 +11,22 @@ const (
 	VulnReflectedXSS VulnClass = "reflected_xss"
 	VulnStoredXSS    VulnClass = "stored_xss" // designed-for, not implemented
 	VulnDOMXSS       VulnClass = "dom_xss"    // designed-for, not implemented
+	// VulnIDOR is broken object-level authorization (family A: object
+	// identifiers selecting another principal's object). Function/role-level
+	// access control (family B) is not part of this class yet.
+	VulnIDOR VulnClass = "idor"
+	// VulnAccessControl is function-/role-level access control: a surface
+	// that applies no authorization to an already-privileged administrative
+	// function (the "unprotected admin functionality" class). It is decided
+	// from the response content an anonymous request receives, never from an
+	// LLM. See docs/access-control.md.
+	VulnAccessControl VulnClass = "access_control"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl:
 		return true
 	default:
 		return false
@@ -98,12 +108,25 @@ const (
 	LocationHeader ParamLocation = "header" // request header
 	LocationCookie ParamLocation = "cookie" // cookie value
 	LocationPath   ParamLocation = "path"   // path segment
+	// LocationFragment is a query parameter carried inside a single-page-app
+	// route fragment (e.g. "q" in "#/search?q=..."). It is never an HTTP
+	// injection point: only the DOM-XSS engine reads it.
+	LocationFragment ParamLocation = "fragment"
+	// LocationRawQuery is the WHOLE query string as one injection point — an
+	// unnamed blob such as "/?<payload>" or "/?x=<payload>", not a
+	// name=value parameter. It exists for pages that echo their entire query
+	// string (canonical <link href>, some 404/search/error pages) where a
+	// parameter-driven scan has no named parameter to focus on. It is an HTTP
+	// injection point (GET only, behind the opt-in raw-query mode) and is
+	// deliberately distinct from LocationQuery so provenance never claims a
+	// named parameter that does not exist. See docs/raw-query-injection.md.
+	LocationRawQuery ParamLocation = "raw_query"
 )
 
 // IsValid reports whether the location is a known value.
 func (l ParamLocation) IsValid() bool {
 	switch l {
-	case LocationQuery, LocationForm, LocationJSON, LocationHeader, LocationCookie, LocationPath:
+	case LocationQuery, LocationForm, LocationJSON, LocationHeader, LocationCookie, LocationPath, LocationFragment, LocationRawQuery:
 		return true
 	default:
 		return false
@@ -123,13 +146,16 @@ const (
 	SourceRobots           DiscoverySource = "robots"
 	SourceContentDiscovery DiscoverySource = "content_discovery"
 	SourceParamDiscovery   DiscoverySource = "param_discovery"
+	// SourceScriptLiteral: a parameter name a page's own inline script reads
+	// as a string literal (see discovery.ExtractScriptParamNames).
+	SourceScriptLiteral DiscoverySource = "script_literal"
 )
 
 // IsValid reports whether the source is a known value.
 func (d DiscoverySource) IsValid() bool {
 	switch d {
 	case SourceUserProvided, SourceCrawler, SourceForm, SourceBrowserNetwork,
-		SourceSitemap, SourceRobots, SourceContentDiscovery, SourceParamDiscovery:
+		SourceSitemap, SourceRobots, SourceContentDiscovery, SourceParamDiscovery, SourceScriptLiteral:
 		return true
 	default:
 		return false

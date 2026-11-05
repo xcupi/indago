@@ -34,7 +34,7 @@ func TestDOMPolicyEveryNavigationSharesScanPacing(t *testing.T) {
 	env := newScanEnv(t)
 	c := &Controller{store: env.st, opts: Options{Browser: mgr}, log: execLog()}
 	lim := ratelimit.New(1)
-	ex := c.defaultHandlers(nil, sourceSelectionScope(t, lab.URL), nil, lim)[domain.JobDOMXSS].(*domXSSExecutor)
+	ex := c.defaultHandlers(nil, sourceSelectionScope(t, lab.URL), nil, lim, nil)[domain.JobDOMXSS].(*domXSSExecutor)
 	bc, err := mgr.NewContext(context.Background(), browser.ContextOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +50,7 @@ func TestDOMPolicyEveryNavigationSharesScanPacing(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer cancel()
 			before := arrivals.Load()
-			_, _, _, _, _, err := ex.navigateSource(ctx, bc, source, ep, "key", "POLICY_MARKER", "inert")
+			_, _, err := ex.navigateSource(ctx, bc, source, ep, "key", "POLICY_MARKER", "inert")
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("navigation bypassed shared pacing: %v", err)
 			}
@@ -105,7 +105,7 @@ func TestDOMPolicyProxySessionReferrerAndScope(t *testing.T) {
 	}
 	scope := domain.Scope{IncludeHosts: []string{"dom-policy.invalid"}, IncludePathPrefixes: []string{"/allowed"}}
 	c := &Controller{store: env.st, opts: Options{Browser: mgr, Evidence: env.ev}, log: execLog()}
-	ex := c.defaultHandlers(nil, scope, []string{proxy.URL}, ratelimit.New(0))[domain.JobDOMXSS]
+	ex := c.defaultHandlers(nil, scope, []string{proxy.URL}, ratelimit.New(0), nil)[domain.JobDOMXSS]
 	ep := env.endpoint("http://dom-policy.invalid/allowed", domain.MethodGET)
 	if err := ex.Handle(context.Background(), sourceSelectionJob(t, env.scanID, ep, string(detection.DOMSourceReferrer))); err != nil {
 		t.Fatal(err)

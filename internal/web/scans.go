@@ -1,14 +1,18 @@
 package web
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/idor"
 	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/store"
 )
@@ -127,14 +131,24 @@ func (s *Server) handlePutScope(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "include_hosts must contain at least one host")
 		return
 	}
+	exclude := cleanList(req.ExcludeHosts)
+	includePaths := cleanList(req.IncludePathPrefixes)
+	excludePaths := cleanList(req.ExcludePathPrefixes)
+	// An entry that can never match is not an error at match time: it just makes
+	// the scope silently deny the host the operator meant. Reject it here, before
+	// anything is stored, so a rejected replacement leaves the old scope intact.
+	if msg := validateScopeLists(include, exclude, includePaths, excludePaths); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
 	now := time.Now()
 	existing, err := s.store.Scopes().GetByProject(r.Context(), projectID)
 	switch {
 	case err == nil:
 		existing.IncludeHosts = include
-		existing.ExcludeHosts = cleanList(req.ExcludeHosts)
-		existing.IncludePathPrefixes = cleanList(req.IncludePathPrefixes)
-		existing.ExcludePathPrefixes = cleanList(req.ExcludePathPrefixes)
+		existing.ExcludeHosts = exclude
+		existing.IncludePathPrefixes = includePaths
+		existing.ExcludePathPrefixes = excludePaths
 		existing.AllowSubdomains = req.AllowSubdomains
 		existing.UpdatedAt = now
 		if err := s.store.Scopes().Update(r.Context(), existing); err != nil {
@@ -145,9 +159,9 @@ func (s *Server) handlePutScope(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrNotFound):
 		sc := &domain.Scope{
 			ID: domain.NewID(), ProjectID: projectID,
-			IncludeHosts: include, ExcludeHosts: cleanList(req.ExcludeHosts),
-			IncludePathPrefixes: cleanList(req.IncludePathPrefixes),
-			ExcludePathPrefixes: cleanList(req.ExcludePathPrefixes),
+			IncludeHosts: include, ExcludeHosts: exclude,
+			IncludePathPrefixes: includePaths,
+			ExcludePathPrefixes: excludePaths,
 			AllowSubdomains:     req.AllowSubdomains,
 			CreatedAt:           now, UpdatedAt: now,
 		}
@@ -199,6 +213,10 @@ type createScanReq struct {
 	MaxDepth     int  `json:"max_depth"`
 	MaxPages     int  `json:"max_pages"`
 	MaxEndpoints int  `json:"max_endpoints"`
+	// ReconLevel selects opt-in wordlist content/parameter discovery:
+	// "off" (default) | "safe" | "standard" | "aggressive". See
+	// domain.ScanConfig.ReconLevel and docs/recon-wordlists.md.
+	ReconLevel string `json:"recon_level"`
 
 	// Candidate selection: "minimal" | "standard" (default) | "thorough", and an
 	// optional per-injection-point cap overriding the profile's. Validated by
@@ -211,6 +229,11 @@ type createScanReq struct {
 	// operator sets this explicitly per scan.
 	EnableEvasion bool `json:"enable_evasion"`
 
+	// RawQueryInjection opts this scan into testing the WHOLE query string as
+	// one injection point ("off" default, "auto", or "always") — see
+	// domain.ScanConfig.RawQueryInjection and docs/raw-query-injection.md.
+	RawQueryInjection string `json:"raw_query_injection"`
+
 	// ProxyPool, when non-empty, routes this scan's outbound traffic (raw HTTP
 	// and browser verification alike) through one of the listed proxies,
 	// round-robin. See domain.ScanConfig.ProxyPool. Empty (the default) means
@@ -221,6 +244,34 @@ type createScanReq struct {
 	// Off by default; the server rejects this combined with ProxyPool (see
 	// Controller.CreateScan) rather than silently no-op the override.
 	RandomizeTLSFingerprint bool `json:"randomize_tls_fingerprint"`
+
+	// EnableIDOR opts this scan into the IDOR engine's object-identifier
+	// differential (see domain.ScanConfig.EnableIDOR). Off by default; the
+	// server rejects it for an anonymous scan, which has no caller identity.
+	EnableIDOR bool `json:"enable_idor"`
+	// IDORCandidates are operator-supplied foreign object identifiers, e.g.
+	// the victim username an authorized lab brief names. Bounded/validated by
+	// the controller; explicit values always come first and are merged ahead
+	// of identifiers the engine harvests from the scan's own data. Empty means
+	// "use the harvested set" — no candidate is ever guessed.
+	IDORCandidates []string `json:"idor_candidates"`
+	// EnableIDOREnumeration opts into the IDOR engine's bounded enumeration
+	// pass (numeric neighbours + a fixed short-slug set). Requires enable_idor;
+	// off by default. IDOREnumerationNeighbours is N (0 = engine default 5,
+	// ceiling 10). See docs/idor.md.
+	EnableIDOREnumeration     bool `json:"idor_enumerate"`
+	IDOREnumerationNeighbours int  `json:"idor_enumerate_n"`
+
+	// EnableRoleParam opts into the access-control engine's client-controlled
+	// flag differential (case 20). Off by default; GET only, bounded.
+	EnableRoleParam bool `json:"enable_role_param"`
+	// EnableAccessControlPages opts into page-script path disclosure (case
+	// 19's unpredictable path). Off by default; GET only, bounded.
+	EnableAccessControlPages bool `json:"enable_access_control_pages"`
+	// EnableRoleWrite opts into the access-control engine's role-field slice
+	// (case 21). Off by default; the server rejects it for an anonymous scan
+	// or when it was not started with -allow-state-changing.
+	EnableRoleWrite bool `json:"enable_role_write"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -287,12 +338,21 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		MaxDepth:              req.MaxDepth,
 		MaxPages:              req.MaxPages,
 		MaxEndpoints:          req.MaxEndpoints,
+		ReconLevel:            req.ReconLevel,
 
-		CandidateProfile:        req.CandidateProfile,
-		MaxCandidates:           req.MaxCandidates,
-		EnableEvasion:           req.EnableEvasion,
-		ProxyPool:               cleanList(req.ProxyPool),
-		RandomizeTLSFingerprint: req.RandomizeTLSFingerprint,
+		CandidateProfile:          req.CandidateProfile,
+		MaxCandidates:             req.MaxCandidates,
+		EnableEvasion:             req.EnableEvasion,
+		RawQueryInjection:         req.RawQueryInjection,
+		ProxyPool:                 cleanList(req.ProxyPool),
+		RandomizeTLSFingerprint:   req.RandomizeTLSFingerprint,
+		EnableIDOR:                req.EnableIDOR,
+		IDORCandidates:            req.IDORCandidates,
+		EnableIDOREnumeration:     req.EnableIDOREnumeration,
+		IDOREnumerationNeighbours: req.IDOREnumerationNeighbours,
+		EnableRoleParam:           req.EnableRoleParam,
+		EnableAccessControlPages:  req.EnableAccessControlPages,
+		EnableRoleWrite:           req.EnableRoleWrite,
 	})
 	if err != nil {
 		s.writeScanError(w, err)
@@ -387,8 +447,9 @@ func (s *Server) handleReconfigureScan(w http.ResponseWriter, r *http.Request) {
 
 // loginReq is the interactive-login request.
 type loginReq struct {
-	LoginURL   string `json:"login_url"`
-	SuccessURL string `json:"success_url"`
+	ProjectID  domain.ID `json:"project_id"`
+	LoginURL   string    `json:"login_url"`
+	SuccessURL string    `json:"success_url"`
 }
 
 // handleInteractiveLogin drives a visible-browser login and returns the saved
@@ -411,7 +472,33 @@ func (s *Server) handleInteractiveLogin(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "login_url must be an absolute http(s) URL")
 		return
 	}
-	statePath, finalURL, err := s.login(r.Context(), LoginParams{LoginURL: u.String(), SuccessURL: strings.TrimSpace(req.SuccessURL)})
+	if req.ProjectID == "" {
+		writeError(w, http.StatusBadRequest, "project_id is required for login; select a project and configure Projects → Scope, including explicitly authorized SSO hosts")
+		return
+	}
+	if _, err := s.store.Projects().Get(r.Context(), req.ProjectID); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.writeInternalError(w, "login project", err)
+			return
+		}
+		writeError(w, http.StatusBadRequest, "login project not found; select an existing project")
+		return
+	}
+	scope, err := s.store.Scopes().GetByProject(r.Context(), req.ProjectID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.writeInternalError(w, "login scope", err)
+			return
+		}
+		writeError(w, http.StatusBadRequest, "login requires project scope; configure Projects → Scope, including explicitly authorized SSO hosts")
+		return
+	}
+	if !scope.Permits(u.String()).Allowed {
+		writeError(w, http.StatusBadRequest, "login_url is outside project scope; explicitly include authorized login/SSO hosts and paths in Projects → Scope")
+		return
+	}
+	allow := func(raw string) bool { return scope.Permits(raw).Allowed }
+	statePath, finalURL, err := s.login(r.Context(), LoginParams{AllowRequest: allow, LoginURL: u.String(), SuccessURL: strings.TrimSpace(req.SuccessURL)})
 	if err != nil {
 		if r.Context().Err() != nil {
 			// Operator navigated away / canceled: not a server fault.
@@ -460,6 +547,9 @@ func validateConfig(c domain.ScanConfig) string {
 	if c.RequestsPerSecond < 0 || c.RequestsPerSecond > maxRPS {
 		return "requests_per_second must be between 0 and " + strconv.Itoa(maxRPS)
 	}
+	if _, err := discovery.ParseRawQueryMode(c.RawQueryInjection); err != nil {
+		return "raw_query_injection: " + err.Error()
+	}
 	return ""
 }
 
@@ -474,10 +564,96 @@ func cleanList(in []string) []string {
 	return out
 }
 
+// validateScopeLists returns "" when every entry could match something, else a
+// message naming the first bad entry's field and how to fix it.
+func validateScopeLists(include, exclude, includePaths, excludePaths []string) string {
+	for _, f := range []struct {
+		name    string
+		entries []string
+		check   func(string) error
+	}{
+		{"include_hosts", include, domain.ValidateScopeHost},
+		{"exclude_hosts", exclude, domain.ValidateScopeHost},
+		{"include_path_prefixes", includePaths, domain.ValidateScopePathPrefix},
+		{"exclude_path_prefixes", excludePaths, domain.ValidateScopePathPrefix},
+	} {
+		for i, e := range f.entries {
+			if err := f.check(e); err != nil {
+				return fmt.Sprintf("%s[%d]: %v", f.name, i, err)
+			}
+		}
+	}
+	return ""
+}
+
 // nonNil returns an empty slice instead of nil so JSON encodes [] not null.
 func nonNil[T any](in []T) []T {
 	if in == nil {
 		return []T{}
 	}
 	return in
+}
+
+// --- IDOR harvested candidates (read-only) ---
+
+// idorCandidateDTO is one identifier the IDOR engine harvested from data the
+// scan already held. Origin is what lets a report say "tested carlos harvested
+// from /admin/users".
+type idorCandidateDTO struct {
+	Value  string      `json:"value"`
+	Shape  string      `json:"shape"`
+	Origin idor.Origin `json:"origin"`
+	Count  int         `json:"observed_count,omitempty"`
+}
+
+type idorCandidatesResp struct {
+	ScanID     domain.ID          `json:"scan_id"`
+	Candidates []idorCandidateDTO `json:"candidates"`
+	Total      int                `json:"total"`
+	Note       string             `json:"note,omitempty"`
+}
+
+// handleIDORCandidates surfaces the harvested candidate set, read-only. The
+// engine persists it on the identity-baseline TestCase; this endpoint never
+// probes anything and never triggers harvesting.
+func (s *Server) handleIDORCandidates(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(r.PathValue("id"))
+	if _, err := s.store.Scans().Get(r.Context(), id); err != nil {
+		s.writeLookupError(w, err)
+		return
+	}
+	cases, err := s.store.TestCases().ListByScan(r.Context(), id)
+	if err != nil {
+		s.writeInternalError(w, "list test cases", err)
+		return
+	}
+	resp := idorCandidatesResp{ScanID: id, Candidates: []idorCandidateDTO{}}
+	for _, tc := range cases {
+		if tc.VulnClass != domain.VulnIDOR || len(tc.Detail) == 0 {
+			continue
+		}
+		var d struct {
+			Harvest []idor.Harvest `json:"harvested_candidates"`
+			Note    string         `json:"harvest_note"`
+		}
+		if json.Unmarshal(tc.Detail, &d) != nil {
+			continue
+		}
+		if d.Note != "" && resp.Note == "" {
+			resp.Note = d.Note
+		}
+		if len(d.Harvest) > len(resp.Candidates) {
+			resp.Candidates = resp.Candidates[:0]
+			for _, h := range d.Harvest {
+				resp.Candidates = append(resp.Candidates, idorCandidateDTO{
+					Value: h.Value, Shape: string(h.Shape), Origin: h.Origin, Count: h.Count,
+				})
+			}
+		}
+	}
+	if len(resp.Candidates) == 0 && resp.Note == "" {
+		resp.Note = "the IDOR engine has not harvested any identifier for this scan"
+	}
+	resp.Total = len(resp.Candidates)
+	writeJSON(w, http.StatusOK, resp)
 }

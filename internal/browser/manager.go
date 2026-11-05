@@ -236,6 +236,15 @@ func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*
 	if err != nil {
 		return nil, err
 	}
+	if opts.ObservationWindow > 0 {
+		timer := time.NewTimer(opts.ObservationWindow)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 
 	res := &RenderResult{
 		FinalURL:       nav.FinalURL,
@@ -271,6 +280,12 @@ func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*
 // This requires a display; on a headless host it will fail to launch — that is
 // expected, as interactive login is an operator action.
 func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*LoginResult, error) {
+	if opts.AllowRequest == nil {
+		return nil, fmt.Errorf("browser: login requires a project scope gate")
+	}
+	if !opts.AllowRequest(opts.LoginURL) {
+		return nil, fmt.Errorf("browser: login URL is outside project scope; explicitly include authorized SSO hosts and paths in project scope")
+	}
 	if opts.LoginURL == "" || opts.StorageStatePath == "" {
 		return nil, fmt.Errorf("browser: interactive login requires LoginURL and StorageStatePath")
 	}
@@ -293,7 +308,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", nil, nil) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
+	ch, err := b.NewContext("", "", nil, opts.AllowRequest) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}
@@ -392,6 +407,12 @@ const autoLoginScript = `(arg) => {
 // for this one in-memory JS evaluation call; Indago never logs, persists,
 // or returns them anywhere.
 func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginResult, error) {
+	if opts.AllowRequest == nil {
+		return nil, fmt.Errorf("browser: login requires a project scope gate")
+	}
+	if !opts.AllowRequest(opts.LoginURL) {
+		return nil, fmt.Errorf("browser: login URL is outside project scope; explicitly include authorized SSO hosts and paths in project scope")
+	}
 	if opts.LoginURL == "" || opts.StorageStatePath == "" || opts.Username == "" || opts.Password == "" {
 		return nil, fmt.Errorf("browser: auto login requires LoginURL, Username, Password, and StorageStatePath")
 	}
@@ -418,7 +439,7 @@ func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginR
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", nil, nil) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
+	ch, err := b.NewContext("", "", nil, opts.AllowRequest) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}
@@ -501,7 +522,11 @@ func (c *Context) NewPage(ctx context.Context) (*Page, error) {
 	if err != nil {
 		return nil, fmt.Errorf("browser: new page: %w", err)
 	}
-	p := newPage(c, ph)
+	p, err := newPage(c, ph)
+	if err != nil {
+		_ = ph.Close()
+		return nil, fmt.Errorf("browser: observe new page: %w", err)
+	}
 
 	c.mu.Lock()
 	if c.closed {
@@ -560,22 +585,29 @@ func (c *Context) forget(p *Page) {
 // Page
 // ---------------------------------------------------------------------------
 
+const (
+	maxObservedJSONBodyBytesPerPage  = 256 << 10
+	maxObservedJSONBodyEventsPerPage = 16
+)
+
 // Page is a single page within a context. It accumulates observed console
 // messages, dialogs, and network events.
 type Page struct {
 	ctxp   *Context
 	handle pageHandle
 
-	mu       sync.Mutex
-	console  []ConsoleMessage
-	dialogs  []string
-	pageErrs []string
-	network  []NetworkEvent
-	blocked  []string
-	closed   bool
+	mu                    sync.Mutex
+	console               []ConsoleMessage
+	dialogs               []string
+	pageErrs              []string
+	network               []NetworkEvent
+	networkJSONBodyBytes  int
+	networkJSONBodyEvents int
+	blocked               []string
+	closed                bool
 }
 
-func newPage(c *Context, ph pageHandle) *Page {
+func newPage(c *Context, ph pageHandle) (*Page, error) {
 	p := &Page{ctxp: c, handle: ph}
 	ph.OnConsole(func(m ConsoleMessage) {
 		p.mu.Lock()
@@ -592,7 +624,7 @@ func newPage(c *Context, ph pageHandle) *Page {
 		p.pageErrs = append(p.pageErrs, msg)
 		p.mu.Unlock()
 	})
-	ph.OnRequest(func(ev NetworkEvent) {
+	if err := ph.OnRequest(func(ev NetworkEvent) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		// Scope the observation itself, independent of the driver: a disallowed
@@ -602,9 +634,20 @@ func newPage(c *Context, ph pageHandle) *Page {
 			p.blocked = append(p.blocked, ev.URL)
 			return
 		}
+		if len(ev.PostData) > 0 {
+			bodyBytes := len(ev.PostData)
+			if !isJSONRequestContentType(ev.ContentType) || p.networkJSONBodyEvents >= maxObservedJSONBodyEventsPerPage || p.networkJSONBodyBytes+bodyBytes > maxObservedJSONBodyBytesPerPage {
+				ev.PostData = ""
+			} else {
+				p.networkJSONBodyEvents++
+				p.networkJSONBodyBytes += bodyBytes
+			}
+		}
 		p.network = append(p.network, ev)
-	})
-	return p
+	}, c.allow); err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 // Navigate loads url with the given options.
@@ -685,6 +728,59 @@ func (p *Page) NavigateForm(ctx context.Context, method, url string, fields map[
 	return &NavResult{Status: r.status, FinalURL: r.finalURL}, nil
 }
 
+// ErrJSONPostUnsupported is returned when the driver cannot turn the initial
+// document navigation into a bounded POST/JSON request.
+var ErrJSONPostUnsupported = errors.New("browser: this driver cannot submit a JSON POST navigation")
+
+// ErrInvalidJSONPostBody is returned when a JSON navigation body is empty,
+// malformed, oversized, or paired with a non-JSON media type.
+var ErrInvalidJSONPostBody = errors.New("browser: invalid or oversized JSON POST body")
+
+type jsonPoster interface {
+	GotoJSON(url string, body []byte, contentType, waitUntil string, timeout time.Duration) (status int, finalURL string, err error)
+}
+
+// NavigateJSON replays a candidate JSON request as a real top-level POST
+// navigation. The concrete browser driver rewrites only that first, scope-gated
+// navigation request; Chromium parses the response as the document, so marker
+// execution is observed by the normal verifier. State-changing policy remains
+// the caller's responsibility.
+func (p *Page) NavigateJSON(ctx context.Context, url string, body []byte, contentType string, opts NavOptions) (*NavResult, error) {
+	if len(body) == 0 || len(body) > MaxJSONNavigationBodyBytes || !json.Valid(body) || !isJSONRequestContentType(contentType) {
+		return nil, ErrInvalidJSONPostBody
+	}
+	if p.ctxp.allow == nil {
+		return nil, errors.New("browser: JSON POST navigation requires an explicit scope gate")
+	}
+	jp, ok := p.handle.(jsonPoster)
+	if !ok {
+		return nil, ErrJSONPostUnsupported
+	}
+	if err := opts.Limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = p.ctxp.mgr.cfg.NavigationTimeout
+	}
+	wait := opts.WaitUntil
+	if wait == "" {
+		wait = WaitLoad
+	}
+	type nav struct {
+		status   int
+		finalURL string
+	}
+	r, err := callCtx(ctx, func() (nav, error) {
+		s, u, err := jp.GotoJSON(url, append([]byte(nil), body...), contentType, wait, timeout)
+		return nav{s, u}, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("browser: navigate JSON: %w", err)
+	}
+	return &NavResult{Status: r.status, FinalURL: r.finalURL}, nil
+}
+
 // AddInitScript installs script to run in this page BEFORE any of the
 // page's own scripts, on this navigation and every subsequent one this
 // Page makes (Playwright's own init-script mechanism) — MUST be called
@@ -695,6 +791,39 @@ func (p *Page) AddInitScript(ctx context.Context, script string) error {
 	return callCtxErr(ctx, func() error { return p.handle.AddInitScript(script) })
 }
 
+// keyChordPresser is implemented by drivers that can dispatch real keyboard
+// input (needed for accesskey activation: a browser access-key shortcut is a
+// browser-level default action, so a synthetic KeyboardEvent dispatched from
+// page JS has no such action). It is a separate, OPTIONAL interface rather
+// than a new pageHandle method so a test fake that only implements pageHandle
+// keeps compiling unchanged; PressKeyChord reports ErrKeyboardUnsupported when
+// the concrete driver does not implement it.
+type keyChordPresser interface {
+	PressKeyChord(chord string) error
+}
+
+// ErrKeyboardUnsupported is returned by PressKeyChord when the underlying
+// driver cannot dispatch real keyboard input (e.g. a test fake).
+var ErrKeyboardUnsupported = errors.New("browser: this driver cannot dispatch keyboard input")
+
+// PressKeyChord presses exactly ONE key chord through the browser's real input
+// path (Playwright's Keyboard.Press, which is Chromium's own
+// Input.dispatchKeyEvent pipeline — ordinary keyboard input, not a DOM event
+// constructed by page script), for example "Alt+Shift+x". Modifiers are held
+// while the key is pressed, exactly as a physical shortcut is, and released
+// afterwards. This is neutral automation like Evaluate: the caller decides
+// whether performing it is appropriate, and this package makes no verdict.
+func (p *Page) PressKeyChord(ctx context.Context, chord string) error {
+	if chord == "" {
+		return errors.New("browser: empty key chord")
+	}
+	kp, ok := p.handle.(keyChordPresser)
+	if !ok {
+		return ErrKeyboardUnsupported
+	}
+	return callCtxErr(ctx, func() error { return kp.PressKeyChord(chord) })
+}
+
 // Evaluate runs a JavaScript expression in the page and returns its result.
 // It is the general escape hatch for driving and inspecting a loaded page —
 // used by UI/integration tests to click, fill, and read DOM state against the
@@ -703,7 +832,7 @@ func (p *Page) AddInitScript(ctx context.Context, script string) error {
 // this package: it evaluates exactly what the caller passes and performs no
 // scope checks of its own.
 func (p *Page) Evaluate(ctx context.Context, script string) (any, error) {
-	return callCtx(ctx, func() (any, error) { return p.handle.Evaluate(script, nil) })
+	return callCtx(ctx, func() (any, error) { return p.handle.Evaluate(automationTag+script, nil) })
 }
 
 // Screenshot captures a PNG screenshot.
@@ -790,6 +919,30 @@ func (p *Page) PageErrors() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.pageErrs...)
+}
+
+// ErrNetworkIdleUnsupported is returned by Page.WaitNetworkIdle when the
+// concrete driver cannot observe in-flight network requests (test fakes, or a
+// driver that predates the facility). Callers fall back to their own fixed
+// bounded settle rather than treating the page as already quiet.
+var ErrNetworkIdleUnsupported = errors.New("browser: network-idle observation is not supported by this driver")
+
+// WaitNetworkIdle waits until the page has had no in-flight network request
+// for quiet, or until max elapses, whichever comes first. It reports whether
+// the quiet period was actually observed (false means the bound was reached
+// with work still in flight, which is a bounded answer, not an error). The
+// context bounds the caller's wait; the driver call keeps its own max.
+func (p *Page) WaitNetworkIdle(ctx context.Context, quiet, max time.Duration) (bool, error) {
+	w, ok := p.handle.(networkIdleWaiter)
+	if !ok {
+		return false, ErrNetworkIdleUnsupported
+	}
+	type outcome struct{ settled bool }
+	out, err := callCtx(ctx, func() (outcome, error) {
+		settled, err := w.WaitNetworkIdle(quiet, max)
+		return outcome{settled: settled}, err
+	})
+	return out.settled, err
 }
 
 // NetworkEvents returns a copy of observed network requests.

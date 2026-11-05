@@ -1,0 +1,18 @@
+# Indago file-extension probes (standard and aggressive levels).
+#
+# Provenance: hand-curated for this project — the small set of suffixes that
+# most often exposes an editor/backup/deployment artefact next to a
+# discovered file-like path (config.php~, backup.sql, app.js.bak, ...).
+# Applied only to paths the crawler already found with a file-like last
+# segment, never to every path, so the request cost stays bounded.
+#
+# One suffix per line; '#' starts a comment and blank lines are ignored.
+
+.bak
+.old
+.orig
+.zip
+.sql
+.tar.gz
+.json
+~

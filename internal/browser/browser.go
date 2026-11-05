@@ -41,6 +41,11 @@ const (
 	WaitCommit           = "commit"
 )
 
+// MaxJSONNavigationBodyBytes bounds one browser-verification POST/JSON replay.
+// It is larger than the discovery per-body cap to allow a benign candidate to
+// expand an otherwise-maximal observed body without permitting unbounded data.
+const MaxJSONNavigationBodyBytes = 128 << 10
+
 // Config tunes the browser Manager.
 type Config struct {
 	// Headless runs Chromium without a visible window (default true). Interactive
@@ -100,11 +105,15 @@ type Cookie struct {
 	HTTPOnly bool   `json:"http_only,omitempty"`
 }
 
-// NetworkEvent is an observed network request.
+// NetworkEvent is an observed browser network request. PostData is ephemeral,
+// used only to discover bounded JSON request fields; it is omitted from
+// serialization so full request bodies cannot leak through NetworkEvent JSON.
 type NetworkEvent struct {
 	URL          string    `json:"url"`
 	Method       string    `json:"method"`
 	ResourceType string    `json:"resource_type"`
+	ContentType  string    `json:"content_type,omitempty"`
+	PostData     string    `json:"-"` // ephemeral JSON request body for discovery; never serialized
 	At           time.Time `json:"at"`
 }
 
@@ -121,8 +130,15 @@ type ContextOptions struct {
 	// Disallowed requests are ABORTED before they leave the browser — no traffic
 	// reaches the host — and are recorded as blocked rather than as network
 	// observations. nil allows everything (the caller then owns scope).
-	//
-	// Limitation: WebSocket and service-worker traffic is not intercepted.
+	// Scoped contexts also block service workers and close WebSockets. Context
+	// routing rejects requests without an approved managed page (including a
+	// popup's first request with no frame yet) BEFORE network dispatch. Only
+	// Context.NewPage registers a page, after installing its redirect guard;
+	// child frames of managed pages remain supported. Popups are unsupported:
+	// even in-scope popup requests are aborted, independent of target-page JS.
+	// Frame-less worker traffic is also refused. Non-network blank targets can
+	// exist until context close; this is not an OS-wide network firewall.
+	// These restrictions intentionally change application behavior.
 	AllowRequest func(url string) bool
 	// StorageStatePath, when set, seeds the context with previously saved session
 	// material (cookies + localStorage), yielding a persistent authenticated
@@ -175,6 +191,8 @@ type ScreenshotOptions struct {
 
 // LoginOptions configure interactive login/MFA.
 type LoginOptions struct {
+	// AllowRequest is mandatory: use the project's Scope.Permits for all login traffic.
+	AllowRequest     func(string) bool
 	LoginURL         string        // page to open for the operator to log in
 	SuccessURLGlob   string        // navigation to this URL glob signals success
 	StorageStatePath string        // where to save the authenticated session
@@ -195,9 +213,11 @@ type LoginResult struct {
 // boundary, which is specifically about never faking interaction to force
 // an XSS candidate to execute (see AGENTS.md §2.2).
 type AutoLoginOptions struct {
-	LoginURL string
-	Username string
-	Password string
+	// AllowRequest is mandatory: use the project's Scope.Permits for all login traffic.
+	AllowRequest func(string) bool
+	LoginURL     string
+	Username     string
+	Password     string
 	// UsernameSelector/PasswordSelector/SubmitSelector are CSS selectors
 	// that override the built-in heuristic (see autoLoginScript) for a
 	// login form it can't guess correctly. Empty uses the heuristic.
@@ -230,6 +250,9 @@ type RenderOptions struct {
 	SessionStatePath string
 	// WaitUntil is a navigation readiness hint (one of the Wait* constants).
 	WaitUntil string
+	// ObservationWindow keeps a page alive for this bounded duration after
+	// navigation and content retrieval so asynchronous request events can settle.
+	ObservationWindow time.Duration
 	// Timeout overrides the Manager default navigation timeout.
 	Timeout time.Duration
 	// Screenshot requests a screenshot be captured.

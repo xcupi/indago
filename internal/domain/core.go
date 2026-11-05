@@ -184,6 +184,13 @@ type ScanConfig struct {
 	// MaxEndpoints caps endpoints discovered (0 = server default).
 	MaxEndpoints int `json:"max_endpoints,omitempty"`
 
+	// ReconLevel selects the opt-in wordlist content/parameter discovery:
+	// "off" (default), "safe", "standard", or "aggressive". Empty means off,
+	// which keeps every pre-existing scan byte-identical (no wordlist
+	// requests). Read when discovery starts, like the crawl controls. See
+	// discovery.Config.ReconLevel and docs/recon-wordlists.md.
+	ReconLevel string `json:"recon_level,omitempty"`
+
 	// CandidateProfile selects how many/which of the planner's candidates are
 	// sent per injection point: "minimal", "standard" (default when empty), or
 	// "thorough" (see internal/detection/profile.go). MaxCandidates, when > 0,
@@ -207,6 +214,19 @@ type ScanConfig struct {
 	// candidate SHAPES tried, not what may be targeted. See
 	// docs/reflection-candidates.md "Evasion candidates (opt-in)".
 	EnableEvasion bool `json:"enable_evasion,omitempty"`
+
+	// RawQueryInjection opts into testing the WHOLE query string as one
+	// injection point, for endpoints that echo their entire query string
+	// (a canonical <link href>, some 404/search/error pages) and therefore
+	// have no named parameter to test. "" / "off" (the default) adds nothing
+	// and keeps every existing scan byte-identical; "auto" probes only GET
+	// endpoints with no named query parameters; "always" also probes
+	// endpoints that do have them. Bounded (2 probe shapes per endpoint,
+	// 40 probes per scan) and GET-only; every request goes through the same
+	// scope-enforcing engine, limiter and session as a named parameter, and
+	// the probe flows through the same reflection → context → candidate →
+	// browser-verification pipeline. See docs/raw-query-injection.md.
+	RawQueryInjection string `json:"raw_query_injection,omitempty"`
 
 	// ProxyPool, when non-empty, routes every outbound request this scan
 	// makes — raw HTTP engine requests AND browser verification navigation
@@ -237,6 +257,65 @@ type ScanConfig struct {
 	// context has its own, genuine (unspoofed) TLS stack that this setting
 	// has no way to reach into.
 	RandomizeTLSFingerprint bool `json:"randomize_tls_fingerprint,omitempty"`
+
+	// EnableIDOR opts this scan into the IDOR engine's object-identifier
+	// differential (see internal/idor and docs/idor.md). Off by default
+	// (conservative by design): it reads objects selected by other
+	// identifiers, so an operator turns it on explicitly for an authorized
+	// access-control engagement. It requires an authenticated session — the
+	// engine establishes the caller's identity from the target itself, and
+	// without a session there is no identity to compare against.
+	EnableIDOR bool `json:"enable_idor,omitempty"`
+	// IDORCandidates are operator-supplied foreign object identifiers for
+	// EnableIDOR, e.g. the victim username a lab brief names ("carlos") or an
+	// unpredictable id. They are only ever tried as read-only GET/HEAD object
+	// lookups inside the scan's scope; the engine never invents them. Empty
+	// leaves derivation to bounded numeric neighbours of the caller's own
+	// identifier.
+	IDORCandidates []string `json:"idor_candidates,omitempty"`
+
+	// EnableIDOREnumeration opts into the bounded enumeration pass: when a
+	// parameter's observed identifier is numeric (7), try 6, 8 and 1..N; when
+	// it is a short slug, try the fixed common neighbours admin/test/demo/
+	// guest. It is a separate, explicit switch ON TOP of EnableIDOR, OFF by
+	// default, and never a wordlist (see internal/idor/enumerate.go and
+	// docs/idor.md). Requires EnableIDOR.
+	EnableIDOREnumeration bool `json:"idor_enumerate,omitempty"`
+	// IDOREnumerationNeighbours is N: how many low integers 1..N are tried for
+	// a numeric baseline. 0 means the engine default (5); the hard ceiling is
+	// internal/idor.MaxEnumerationNeighbours (10).
+	IDOREnumerationNeighbours int `json:"idor_enumerate_n,omitempty"`
+
+	// EnableRoleParam opts this scan into the access-control engine's
+	// client-controlled-flag differential (case 20): the SAME privileged
+	// endpoint is fetched with a role-shaped query parameter or cookie absent
+	// and then set to an admin-like value, and a finding is made only when the
+	// privileged admin action surface becomes reachable. GET only, same-origin,
+	// bounded, OFF by default (the engine may propose the conventional /admin
+	// path when discovery found no privileged endpoint). See
+	// docs/access-control.md.
+	EnableRoleParam bool `json:"enable_role_param,omitempty"`
+
+	// EnableAccessControlPages opts this scan into the access-control engine's
+	// page-disclosure pass (case 19's "unpredictable path" source): discovered
+	// HTML pages are re-fetched, the administrative path literals their OWN
+	// inline/same-origin scripts contain are extracted, and each disclosed
+	// path is probed anonymously for administrative actions. Off by default
+	// so a pre-existing scan sends exactly the same requests as before; the
+	// robots.txt/sitemap path pass needs no opt-in because discovery already
+	// registered those paths. Never a wordlist: only literals the target's own
+	// bytes contain. See docs/access-control.md.
+	EnableAccessControlPages bool `json:"enable_access_control_pages,omitempty"`
+
+	// EnableRoleWrite opts this scan into the access-control engine's
+	// role-field slice (case 21): the caller's OWN profile update is sent with
+	// one client-supplied role field, and a finding is made only when a
+	// privileged surface that was denied BEFORE the write is reachable AFTER
+	// it. It is state-changing, so it ALSO requires the server's explicit
+	// AllowStateChanging opt-in and an authenticated session — both are
+	// refused at scan creation, never enabled implicitly. It never targets
+	// another principal's profile.
+	EnableRoleWrite bool `json:"enable_role_write,omitempty"`
 }
 
 // StopMode controls when a scan stops relative to confirmed findings.

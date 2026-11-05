@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
@@ -156,6 +157,32 @@ func TestBuildRequest(t *testing.T) {
 			p("b", domain.LocationJSON, "2"), p("a", domain.LocationJSON, "1")}, nil)
 		if string(r.Body) != `{"a":"1","b":"2"}` || r.ContentType != "application/json" {
 			t.Fatalf("json body = %q (%s)", r.Body, r.ContentType)
+		}
+	})
+
+	t.Run("POST JSON preserves observed raw types and mutates only the focus field", func(t *testing.T) {
+		q := &domain.Parameter{ID: domain.NewID(), Name: "query", Location: domain.LocationJSON, Example: `"hello"`, Source: domain.SourceBrowserNetwork}
+		page := &domain.Parameter{ID: domain.NewID(), Name: "page", Location: domain.LocationJSON, Example: `2`, Source: domain.SourceBrowserNetwork}
+		options := &domain.Parameter{ID: domain.NewID(), Name: "options", Location: domain.LocationJSON, Example: `{"sort":"newest"}`, Source: domain.SourceBrowserNetwork}
+		req, err := buildRequest(ep("http://h/api/search", domain.MethodPOST), []*domain.Parameter{options, q, page}, &injection{param: q, value: "BENIGN_MARKER"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := `{"options":{"sort":"newest"},"page":2,"query":"BENIGN_MARKER"}`; string(req.Body) != want {
+			t.Fatalf("mutated JSON body = %s, want %s", req.Body, want)
+		}
+	})
+
+	t.Run("POST JSON preserves observed vendor media type", func(t *testing.T) {
+		query := &domain.Parameter{ID: domain.NewID(), Name: "query", Location: domain.LocationJSON, Example: `"hello"`, Source: domain.SourceBrowserNetwork}
+		endpoint := ep("http://h/api/search", domain.MethodPOST)
+		endpoint.ContentType = "application/vnd.api+json; charset=utf-8"
+		req, err := buildRequest(endpoint, []*domain.Parameter{query}, &injection{param: query, value: "BENIGN_MARKER"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if req.ContentType != endpoint.ContentType {
+			t.Fatalf("request content type = %q, want observed %q", req.ContentType, endpoint.ContentType)
 		}
 	})
 
@@ -335,6 +362,34 @@ func TestExecuteWithoutEvidenceStoreStillRecordsOutcome(t *testing.T) {
 }
 
 // --- state-changing methods ---
+
+func TestPOSTJSONCandidateSkippedWithoutStateChangingOptIn(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	env := newExecEnv(t)
+	ep := &domain.Endpoint{ID: domain.NewID(), ScanID: env.scanID, URL: srv.URL + "/api/search", Method: domain.MethodPOST, ContentType: "application/json", CreatedAt: time.Now()}
+	if err := env.st.Endpoints().Create(context.Background(), ep); err != nil {
+		t.Fatal(err)
+	}
+	focus := &domain.Parameter{ID: domain.NewID(), ScanID: env.scanID, EndpointID: ep.ID, Name: "q", Location: domain.LocationJSON, Example: `"hi"`, Source: domain.SourceBrowserNetwork, CreatedAt: time.Now()}
+	if err := env.st.Parameters().Create(context.Background(), focus); err != nil {
+		t.Fatal(err)
+	}
+	ip := env.injection(ep, focus)
+	m := marker(env.scanID, ip.ID)
+	job := env.candJob(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: "<svg onload=" + m + ">", Priority: 90, DedupKey: "post-json-opt-in"})
+	if err := env.executor(scopedClient(t, openScope()), ExecutorConfig{}).Handle(context.Background(), job); err != nil {
+		t.Fatalf("skipped POST/JSON job: %v", err)
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("sent %d state-changing request(s) without opt-in", hits.Load())
+	}
+	tc := env.only()
+	if tc.Status != domain.TestCaseSkipped || !strings.Contains(tc.Note, "AllowStateChanging") {
+		t.Fatalf("POST/JSON test case = status %s note %q, want skipped with opt-in note", tc.Status, tc.Note)
+	}
+}
 
 func TestStateChangingMethodsSkippedUnlessAllowed(t *testing.T) {
 	var hits atomic.Int64

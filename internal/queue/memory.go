@@ -157,6 +157,12 @@ func (q *Memory) Fail(_ context.Context, jobID domain.ID, cause string, retry bo
 	if !ok {
 		return ErrNotLeasable
 	}
+	// Only an ACTIVE job can fail. A late writer (an abandoned handler finally
+	// returning after the pool stopped, a reaper racing a cancel) must never
+	// turn a cancelled/completed/dead job back into runnable work.
+	if !j.State.IsActive() {
+		return ErrNotLeasable
+	}
 	now := q.now()
 	j.LastError = cause
 	j.LeaseID = ""
@@ -225,10 +231,18 @@ func (q *Memory) ReapExpired(_ context.Context, now time.Time) (int, error) {
 	defer q.mu.Unlock()
 	n := 0
 	for _, j := range q.jobs {
-		if j.State.IsActive() && j.LeasedUntil != nil && !j.LeasedUntil.After(now) {
-			q.requeue(j, now)
-			n++
+		if !j.State.IsActive() || j.LeasedUntil == nil || j.LeasedUntil.After(now) {
+			continue
 		}
+		// A lease that expires with no attempts left is terminal. Requeueing
+		// it forever is how a job that always wedges its worker kept a scan
+		// running indefinitely.
+		if j.Attempts >= j.MaxAttempts {
+			q.markDead(j, leaseExpiredCause(j.Attempts), now)
+		} else {
+			q.requeue(j, now)
+		}
+		n++
 	}
 	return n, nil
 }
@@ -239,6 +253,16 @@ func (q *Memory) requeue(j *domain.TestJob, now time.Time) {
 	j.LeaseID = ""
 	j.LeasedUntil = nil
 	j.AvailableAt = now
+	j.UpdatedAt = now
+}
+
+// markDead makes an active job terminal after its lease expired with no
+// attempts left (caller holds the lock).
+func (q *Memory) markDead(j *domain.TestJob, cause string, now time.Time) {
+	j.State = domain.JobDead
+	j.LastError = cause
+	j.LeaseID = ""
+	j.LeasedUntil = nil
 	j.UpdatedAt = now
 }
 

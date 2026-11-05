@@ -129,6 +129,103 @@ func TestCandidateTestingSucceedsWithStaleCSRFTokenViaRefresh(t *testing.T) {
 	}
 }
 
+// The endpoint URL itself may already carry a stale token (discovery found a
+// link such as /?token=old). The refreshed value must replace it: keeping the
+// URL's copy sends the stale token, the server answers "CSRF token is
+// incorrect", and the miss reads as "not reflected" without ever exercising
+// the parameter under test.
+func TestReflectionRefreshReplacesStaleTokenAlreadyInEndpointURL(t *testing.T) {
+	s := &csrfServer{}
+	srv := s.server(t)
+
+	env := newExecEnv(t)
+	ep := env.endpoint(srv.URL+"/?token=stale-token-in-url", domain.MethodGET)
+	name := env.param(ep, "name", domain.LocationQuery, "obs")
+	env.param(ep, "token", domain.LocationQuery, "stale-token-in-url")
+	ip := env.injection(ep, name)
+
+	tc, rep := reflectReport(t, env, ExecutorConfig{}, env.job(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}))
+	if tc.Outcome != domain.OutcomeSuccess {
+		t.Fatalf("outcome = %s, want success", tc.Outcome)
+	}
+	if !rep.Reflected {
+		t.Fatal("the refreshed token must replace the stale one already present in the endpoint URL")
+	}
+}
+
+func TestCandidateRefreshReplacesStaleTokenAlreadyInEndpointURL(t *testing.T) {
+	s := &csrfServer{}
+	srv := s.server(t)
+
+	env := newExecEnv(t)
+	ep := env.endpoint(srv.URL+"/?token=stale-token-in-url", domain.MethodGET)
+	name := env.param(ep, "name", domain.LocationQuery, "obs")
+	env.param(ep, "token", domain.LocationQuery, "stale-token-in-url")
+	ip := env.injection(ep, name)
+
+	m := marker(env.scanID, ip.ID)
+	cand := detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: "<svg onload=" + m + ">", Priority: 90, DedupKey: "k"}
+	job := env.candJob(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, cand)
+	if err := env.executor(scopedClient(t, openScope()), ExecutorConfig{}).Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	out := env.only()
+	rep := detailReport(t, out)
+	if !rep.Reflected || !strings.Contains(out.Note, "reflected at") {
+		t.Fatalf("expected the candidate to reflect with the refreshed token; reflected=%v note=%q", rep.Reflected, out.Note)
+	}
+}
+
+// Control: only dynamic-looking names are replaced. An ordinary query value
+// already present in the endpoint URL stays the observed one.
+func TestRefreshDoesNotOverrideOrdinaryQueryValueInEndpointURL(t *testing.T) {
+	var seen sync.Map
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen.Store("mode", r.URL.Query().Get("mode"))
+		fmt.Fprintf(w, `<form method="GET"><input name="name"><input name="mode" value="discovery-example"><input type="hidden" name="token" value="fresh"></form><p>%s</p>`, r.URL.Query().Get("name"))
+	}))
+	t.Cleanup(srv.Close)
+
+	env := newExecEnv(t)
+	ep := env.endpoint(srv.URL+"/?mode=observed-in-url", domain.MethodGET)
+	name := env.param(ep, "name", domain.LocationQuery, "obs")
+	env.param(ep, "mode", domain.LocationQuery, "discovery-example")
+	env.param(ep, "token", domain.LocationQuery, "stale")
+	ip := env.injection(ep, name)
+
+	reflectReport(t, env, ExecutorConfig{}, env.job(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}))
+	if got, _ := seen.Load("mode"); got != "observed-in-url" {
+		t.Fatalf("an ordinary value already in the URL must stay the observed one, got %v", got)
+	}
+}
+
+// A hidden token field that a script fills in later has an empty value in the
+// served HTML. The empty refreshed value must not erase a token the endpoint
+// URL already carries.
+func TestRefreshEmptyTokenDoesNotEraseTokenInEndpointURL(t *testing.T) {
+	var seen sync.Map
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Has("name") {
+			seen.Store("token", r.URL.Query().Get("token"))
+			fmt.Fprintf(w, "<p>%s</p>", r.URL.Query().Get("name"))
+			return
+		}
+		fmt.Fprint(w, `<form method="GET"><input name="name"><input type="hidden" name="token" value=""></form>`)
+	}))
+	t.Cleanup(srv.Close)
+
+	env := newExecEnv(t)
+	ep := env.endpoint(srv.URL+"/?token=url-token", domain.MethodGET)
+	name := env.param(ep, "name", domain.LocationQuery, "obs")
+	env.param(ep, "token", domain.LocationQuery, "url-token")
+	ip := env.injection(ep, name)
+
+	reflectReport(t, env, ExecutorConfig{}, env.job(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}))
+	if got, _ := seen.Load("token"); got != "url-token" {
+		t.Fatalf("an empty refreshed token erased the one in the endpoint URL, server saw %q", got)
+	}
+}
+
 // --- unit-level: isDynamicTokenName / refreshDynamicParams ---
 
 func TestIsDynamicTokenName(t *testing.T) {

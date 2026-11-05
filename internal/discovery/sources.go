@@ -1,14 +1,15 @@
 package discovery
 
 import (
-	"bufio"
 	"context"
 	"encoding/xml"
 	"errors"
-	"os"
+	"mime"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/indago/indago/internal/browser"
 	"github.com/indago/indago/internal/domain"
@@ -195,6 +196,10 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 		return nil, nil // only parse HTML
 	}
 	body := string(resp.Body)
+	for _, name := range ExtractScriptParamNames(body) {
+		_ = sink.AddParameter(ctx, ParamCandidate{EndpointURL: pageURL, EndpointMethod: domain.MethodGET,
+			Name: name, Location: domain.LocationQuery, Source: domain.SourceScriptLiteral})
+	}
 
 	// Forms.
 	for _, f := range ExtractForms(body) {
@@ -230,8 +235,18 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 		if err != nil || !in.Scope.Permits(info.Canonical).Allowed {
 			continue
 		}
-		if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: info.Canonical, Method: domain.MethodGET, Source: domain.SourceCrawler}); err != nil {
+		// Ask before queueing: a link queued for the next level is requested
+		// by fetchPage before the sink ever sees it, so a registration refusal
+		// alone would still send the request.
+		if !allowFetch(sink, info.Canonical, domain.SourceCrawler) {
+			continue
+		}
+		id, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: info.Canonical, Method: domain.MethodGET, Source: domain.SourceCrawler})
+		if err != nil {
 			return nil, err
+		}
+		if id == "" {
+			continue // refused by the sink (out of scope, malformed): never follow it
 		}
 		nextLinks = append(nextLinks, info.Canonical)
 	}
@@ -239,6 +254,14 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 }
 
 func (c *crawlSource) applyParamWordlist(ctx context.Context, sink Sink, endpointURL string) {
+	// Legacy path only: an operator-supplied ParamWordlist is registered on
+	// pages the crawler already fetched, with no extra requests. At standard
+	// and above, parameter mining (recon.go) replaces this with a real
+	// differential, so blindly registering the same names here would only add
+	// injection points nothing established as live.
+	if c.cfg.ReconLevel.UsesParams() {
+		return
+	}
 	for _, name := range c.cfg.ParamWordlist {
 		_ = sink.AddParameter(ctx, ParamCandidate{
 			EndpointURL:    endpointURL,
@@ -290,6 +313,17 @@ func (s *sitemapSource) Run(ctx context.Context, in Input, sink Sink) error {
 func (s *sitemapSource) process(ctx context.Context, in Input, sink Sink, sitemapURL string, depth int) error {
 	if depth > 3 { // bound sitemap-index recursion
 		return nil
+	}
+	if depth > 0 {
+		// A nested sitemap URL comes from document content, so it is untrusted:
+		// it must be in scope and must not be a session-terminating endpoint
+		// before it is requested. The top-level /sitemap.xml is built from the
+		// operator's seed origin.
+		info, err := Normalize(sitemapURL)
+		if err != nil || !in.Scope.Permits(info.Canonical).Allowed || !allowFetch(sink, info.Canonical, domain.SourceSitemap) {
+			return nil
+		}
+		sitemapURL = info.Canonical
 	}
 	if err := in.wait(ctx); err != nil {
 		return err
@@ -413,97 +447,6 @@ func cleanRobotsPath(p string) string {
 }
 
 // ---------------------------------------------------------------------------
-// content discovery (wordlist)
-// ---------------------------------------------------------------------------
-
-type contentSource struct {
-	engine httpengine.Engine
-	cfg    Config
-}
-
-// NewContentSource probes paths from a wordlist under each seed origin.
-func NewContentSource(engine httpengine.Engine, cfg Config) Source {
-	return &contentSource{engine: engine, cfg: cfg.withDefaults()}
-}
-
-func (c *contentSource) Name() domain.DiscoverySource { return domain.SourceContentDiscovery }
-
-func (c *contentSource) Run(ctx context.Context, in Input, sink Sink) error {
-	words := c.cfg.Wordlist
-	if len(words) == 0 && in.Wordlist != "" {
-		loaded, err := loadWordlist(in.Wordlist)
-		if err != nil {
-			return nil // missing wordlist is not fatal
-		}
-		words = loaded
-	}
-	if len(words) == 0 {
-		return nil
-	}
-
-	for _, origin := range uniqueOrigins(in.SeedURLs) {
-		for _, w := range words {
-			if err := in.wait(ctx); err != nil {
-				return err
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			candidate := origin + "/" + strings.TrimPrefix(strings.TrimSpace(w), "/")
-			info, err := Normalize(candidate)
-			if err != nil || !in.Scope.Permits(info.Canonical).Allowed {
-				continue
-			}
-			resp, err := c.engine.Do(ctx, &httpengine.Request{Method: "GET", URL: info.Canonical})
-			if err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				continue
-			}
-			if !contentExists(resp.Status) {
-				continue
-			}
-			if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: info.Canonical, Method: domain.MethodGET, Source: domain.SourceContentDiscovery}); err != nil {
-				if errors.Is(err, ErrLimitReached) {
-					return nil
-				}
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func contentExists(status int) bool {
-	switch {
-	case status >= 200 && status < 400:
-		return true
-	case status == 401 || status == 403:
-		return true
-	default:
-		return false
-	}
-}
-
-func loadWordlist(path string) ([]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	var out []string
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line != "" && !strings.HasPrefix(line, "#") {
-			out = append(out, line)
-		}
-	}
-	return out, sc.Err()
-}
-
-// ---------------------------------------------------------------------------
 // browser network observation (XHR/fetch)
 // ---------------------------------------------------------------------------
 
@@ -536,10 +479,11 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 		// (so no third-party traffic is generated), and every observation is
 		// re-checked below before it reaches the sink.
 		res, err := n.browser.Render(ctx, info.Canonical, browser.RenderOptions{
-			Limiter:          n.cfg.Limiter,
-			WaitUntil:        browser.WaitLoad,
-			AllowRequest:     func(u string) bool { return in.Scope.Permits(u).Allowed },
-			SessionStatePath: in.SessionStatePath,
+			Limiter:           n.cfg.Limiter,
+			WaitUntil:         browser.WaitLoad,
+			ObservationWindow: 250 * time.Millisecond,
+			AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
+			SessionStatePath:  in.SessionStatePath,
 		})
 		if err != nil {
 			if errors.Is(err, browser.ErrNotImplemented) {
@@ -554,19 +498,54 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			if !in.Scope.Permits(ev.URL).Allowed {
 				continue // never persist or enqueue an out-of-scope observation
 			}
+			if isAutomaticFaviconRequest(ev.URL) {
+				continue // browsers request favicon.ico automatically; it is not a useful XSS input surface
+			}
 			method := domain.HTTPMethod(strings.ToUpper(ev.Method))
 			if !method.IsValid() {
 				method = domain.MethodGET
 			}
-			if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: ev.URL, Method: method, Source: domain.SourceBrowserNetwork}); err != nil {
+			if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: ev.URL, Method: method, Source: domain.SourceBrowserNetwork, ContentType: ev.ContentType}); err != nil {
 				if errors.Is(err, ErrLimitReached) {
 					return nil
 				}
 				return err
 			}
+			if ev.PostData == "" || !isJSONContentType(ev.ContentType) {
+				continue
+			}
+			for _, field := range ExtractJSONBodyParams(ev.PostData) {
+				if err := in.wait(ctx); err != nil {
+					return err
+				}
+				if err := sink.AddParameter(ctx, ParamCandidate{
+					EndpointURL: ev.URL, EndpointMethod: method,
+					Name: field.Name, Location: domain.LocationJSON,
+					Example: field.RawValue, Source: domain.SourceBrowserNetwork,
+				}); err != nil {
+					if errors.Is(err, ErrLimitReached) {
+						return nil
+					}
+					return err
+				}
+			}
 		}
 	}
 	return nil
+}
+
+func isAutomaticFaviconRequest(raw string) bool {
+	info, err := Normalize(raw)
+	return err == nil && strings.EqualFold(path.Base(info.Path), "favicon.ico")
+}
+
+func isJSONContentType(raw string) bool {
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return false
+	}
+	mediaType = strings.ToLower(mediaType)
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
 }
 
 // ---------------------------------------------------------------------------

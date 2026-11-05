@@ -36,12 +36,23 @@ import (
 // finding (raw evidence of what was actually tried, preserved even when
 // merged), and the TestCase IDs that back it end to end.
 type findingDetail struct {
-	Method        domain.HTTPMethod     `json:"method,omitempty"`
-	ParameterName string                `json:"parameter_name,omitempty"`
-	DedupKey      string                `json:"dedup_key"`
-	Occurrences   int                   `json:"occurrences"`
-	TestCaseIDs   []domain.ID           `json:"test_case_ids,omitempty"`
-	Candidates    []detection.Candidate `json:"candidates,omitempty"`
+	Method        domain.HTTPMethod `json:"method,omitempty"`
+	ParameterName string            `json:"parameter_name,omitempty"`
+	// ParameterSource records where a DOM-XSS selector's NAME came from when
+	// that is not ordinary URL/form discovery: "page_script" means the page's
+	// own JavaScript reads the literal query name (see
+	// docs/dom-xss.md "Names the page reads"). Empty everywhere else, so no
+	// existing detail blob changes meaning.
+	ParameterSource string `json:"parameter_source,omitempty"`
+	// Location mirrors Finding.Location into the engine detail. For a raw
+	// query-string injection point it is domain.LocationRawQuery and
+	// ParameterName is the reserved shape name ("(raw query)" /
+	// "x=(raw query)"), so no surface can read it as a real named parameter.
+	Location    domain.ParamLocation  `json:"location,omitempty"`
+	DedupKey    string                `json:"dedup_key"`
+	Occurrences int                   `json:"occurrences"`
+	TestCaseIDs []domain.ID           `json:"test_case_ids,omitempty"`
+	Candidates  []detection.Candidate `json:"candidates,omitempty"`
 	// Attempts records every browser-verification attempt correlated into this
 	// finding with its OWN verdict and evidence. The Finding's Verdict is the
 	// ratcheted maximum across attempts (see verdictRank); this keeps the
@@ -89,8 +100,9 @@ type verificationAttempt struct {
 	// candidate the passive verifier can never confirm itself (an
 	// interaction-only trigger: onmouseover, javascript: href, …) — see
 	// ReviewInteractionOnly in internal/report/view.go. Empty for a
-	// non-GET-navigable attempt (POST+JSON, state-changing without the
-	// operator's AllowStateChanging opt-in) that never actually navigated.
+	// non-GET-navigable attempt (unsupported body representation, invalid or
+	// oversized POST/JSON, or state-changing without the operator's
+	// AllowStateChanging opt-in) that never actually navigated.
 	URL         string            `json:"url,omitempty"`
 	Verdict     domain.Verdict    `json:"verdict"`
 	Confidence  domain.Confidence `json:"confidence,omitempty"`
@@ -162,6 +174,12 @@ func severityFor(cand detection.Candidate) domain.Severity {
 func findingTitle(cand detection.Candidate, focus *domain.Parameter, ep *domain.Endpoint) string {
 	if cand.Combined && cand.ParameterB != "" {
 		return fmt.Sprintf("Reflected XSS candidate in parameters %q + %q (combined, %s) at %s %s", focus.Name, cand.ParameterB, cand.Context, ep.Method, endpointLabel(ep.URL))
+	}
+	if focus != nil && focus.Location == domain.LocationRawQuery {
+		// Never render a raw query blob as a named parameter: the injection
+		// point is the whole query string, and the reserved pseudo-name only
+		// identifies the probe SHAPE. See docs/raw-query-injection.md.
+		return fmt.Sprintf("Reflected XSS candidate in the raw query string (%s) at %s %s", cand.Context, ep.Method, endpointLabel(ep.URL))
 	}
 	return fmt.Sprintf("Reflected XSS candidate in parameter %q (%s) at %s %s", focus.Name, cand.Context, ep.Method, endpointLabel(ep.URL))
 }
@@ -256,7 +274,7 @@ func upsertPendingFinding(ctx context.Context, st store.Store, scanID domain.ID,
 	}
 	now := time.Now()
 	d := findingDetail{
-		Method: ep.Method, ParameterName: focus.Name, DedupKey: key, Occurrences: 1,
+		Method: ep.Method, ParameterName: focus.Name, Location: focus.Location, DedupKey: key, Occurrences: 1,
 		TestCaseIDs: []domain.ID{candTestCaseID}, Candidates: []detection.Candidate{cand},
 	}
 	if cand.Combined {

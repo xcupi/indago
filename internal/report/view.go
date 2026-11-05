@@ -132,8 +132,9 @@ type AttemptView struct {
 	// manual proof-of-concept, most useful for an interaction-only
 	// candidate (onmouseover, javascript: href, …) the passive verifier can
 	// reflect-but-never-confirm itself; see ReviewInteractionOnly below.
-	// Empty when the attempt never actually navigated (POST+JSON, or a
-	// state-changing request without AllowStateChanging).
+	// Empty when the attempt never actually navigated (unsupported body
+	// representation, invalid/oversized JSON, or a state-changing request
+	// without AllowStateChanging).
 	URL              string            `json:"url,omitempty"`
 	Verdict          domain.Verdict    `json:"verdict"`
 	Confidence       domain.Confidence `json:"confidence,omitempty"`

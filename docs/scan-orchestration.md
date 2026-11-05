@@ -45,7 +45,8 @@ per scan:
   stored on every endpoint/parameter and surfaced in status.
 - **Session-terminating links are skipped on authenticated scans.** When the
   scan carries a session (`RunParams.SessionStatePath` non-empty), the
-  Collector refuses to register a crawler-style-discovered (not
+  Collector (`AllowFetch`) refuses to register **or request** — the crawler and
+  content discovery ask before sending — a crawler-style-discovered (not
   `user_provided`) endpoint whose path looks like a logout/sign-out
   endpoint (`internal/discovery/safety.go`: `looksSessionTerminating`,
   matched word-bounded against `logout`/`log-off`/`sign-out` and
@@ -111,15 +112,16 @@ baseline:
   evidence, but **does not re-plan** (no recursion). The state-changing opt-in is
   re-checked, so a breakout never reaches a state-changing endpoint unless the
   operator allowed it.
-- A candidate that **reflects via GET/HEAD** is **correlated into a `Finding`**
+- A candidate that reflects is **correlated into a `Finding`**
   (`internal/scan/finding.go`'s `upsertPendingFinding` — see
   [`finding-correlation.md`](finding-correlation.md)): the same injection point
   producing the same candidate category+context absorbs into one existing
   `Finding` rather than minting a near-duplicate, with every distinct
   candidate's TestCase ID preserved as raw evidence regardless. A genuinely
-  new site creates one at `VerdictPending`. Either way, a **browser-verify
-  job** (section 1c) is then enqueued. A POST/body-carrying reflection has no
-  browser-navigable form in this phase and stays `pending`.
+  new site creates one at `VerdictPending`. A **browser-verify job** (section
+  1c) is then enqueued for GET/HEAD, POST/form, and bounded POST/JSON candidates;
+  other body-carrying methods remain unsupported and their findings stay
+  `Pending`.
 - The `detection.ReflectionReport` (reflection + context + plan; for a candidate
   job, reflection + context + the executed `candidate`) is stored in `TestCase.Detail`; evidence
   references the shared baseline (request+response) and the mutated
@@ -139,10 +141,10 @@ concurrency, `BrowserConcurrency`), via `verifyExecutor`
 signal and the confirmed/rejected/inconclusive decision rule in full.
 
 In orchestration terms: it resolves the job's target exactly like a test job,
-re-applies the state-changing safeguard, and — only for a GET/HEAD candidate —
-calls the Verifier with the scan's scope (for the browser's `AllowRequest`
-gate) and the scan's saved session (`domain.Session.StatePath`, for an
-authenticated context). On success it persists the verification report into
+re-applies the state-changing safeguard, and — only for a supported method/body
+combination (GET/HEAD, POST/form, or bounded POST/JSON) — calls the Verifier
+with the scan's scope (for the browser's `AllowRequest` gate) and the scan's
+saved session (`domain.Session.StatePath`, for an authenticated context). On success it persists the verification report into
 `TestCase.Detail`, stores the screenshot/rendered-DOM/browser-log as evidence,
 and **correlates** the result into the Finding (`finding.go`'s
 `correlateVerification` — see [`finding-correlation.md`](finding-correlation.md)):
@@ -204,11 +206,14 @@ Consequence: the rate counts requests, not jobs. A test job that sends several
 requests (baseline, reflection, candidate) now consumes several permits; before
 this, the rate applied per job and could be exceeded by that factor.
 
-Not paced (documented exceptions): subresources, XHR/fetch and WebSocket traffic
-that a loaded page issues on its own (one permit covers the navigation, not each
-subresource — the browser's own request interception would have to block on the
-limiter); and interactive/auto login, which runs when a session is established,
-before any scan execution exists, so no scan limiter applies to it.
+Not paced (documented exceptions): subresources, XHR/fetch traffic that a loaded
+page issues on its own (one permit covers the navigation, not each subresource —
+the browser's own request interception would have to block on the limiter); and
+interactive/auto login, which runs when a session is established, before any scan
+execution exists, so no scan limiter applies to it. WebSocket traffic is closed
+in scope-gated browser contexts rather than paced; service workers are blocked,
+and all requests from unmanaged popup targets are aborted at the context's
+pre-network route boundary, not by target-page event suppression.
 
 ## 2. Scope is enforced at five points (fail closed)
 
@@ -229,13 +234,20 @@ check 5). `cmd/indago` does this.
 The **executor** and discovery share one scope-enforcing engine per scan.
 
 **Browser-network discovery** (`Options.Browser`, `indago serve -browser`) is
-scope-gated in two layers: the browser **aborts every out-of-scope request before
-it is sent** (page loads, subresources, XHR/fetch, redirect hops — so no
-third-party traffic is generated), and the discovery source re-checks each
-observation before it reaches the collector, so nothing out of scope is persisted
-or enqueued. Aborted requests are reported as `Blocked`, never as observations.
-Limitation: WebSocket and service-worker traffic is not intercepted. It is off by
-default (it needs Chromium).
+scope-gated in two layers: the browser **aborts every out-of-scope HTTP(S)
+request before it is sent** (page loads, subresources, XHR/fetch and redirect
+hops), and the discovery source re-checks each observation before it reaches the
+collector, so nothing out of scope is persisted or enqueued. Aborted requests are
+reported as `Blocked`, never as observations.
+
+Scoped browser contexts also close every WebSocket, block service-worker
+execution before its script is fetched, and abort requests from every unmanaged
+target at context routing, including first popup requests with no frame yet.
+Only explicitly created managed pages are approved after installing their
+redirect guard; page events never authorize popups. Child frames remain
+supported. These deliberate restrictions impair popup-dependent apps, even if
+all popup URLs are in scope. See [browser-scope-boundary.md](browser-scope-boundary.md)
+for the early-frame race patch, positive controls, and limits.
 
 ## 3. Pause, resume, cancel
 
@@ -357,7 +369,7 @@ so all three always agree:
 | start / pause / resume / cancel | `POST /api/scans/{id}/{action}` | `indago scan start\|pause\|resume\|cancel ID` |
 | runtime concurrency / rate (`requests_per_second` paces all target-facing traffic of the scan) | `POST /api/scans/{id}/config` (the four runtime fields; crawl extent preserved) | `indago scan config ID [-discovery N] [-http N] [-browser N] [-rate N]` |
 | status (state, discovery, jobs, findings, request rate, live workers, 429/5xx, redacted session) | `GET /api/scans/{id}/status` | `indago scan status ID [-json]` |
-| interactive login (capture a session file for `existing` mode; needs `-browser`) | `POST /api/auth/login` | (dashboard only) |
+| interactive login (capture a session file for `existing` mode; needs `-browser` and explicit project scope) | `POST /api/auth/login` (`project_id`, `login_url`, optional `success_url`) | `auth login -project PID -login-url URL [-success-url GLOB]` |
 
 The CLI is a thin client over the running server's API (so only the server opens
 the SQLite file); scan IDs may be given as a unique prefix. The bundled web
@@ -416,10 +428,10 @@ already fixed in code and have been removed: live discovery concurrency
   interrupted N times and then failing transiently can go `dead` sooner than
   one that was never interrupted. Its TestCases record the interruptions
   (`cancelled`, "interrupted by restart").
-- **WebSocket and service-worker traffic is not intercepted** by browser
-  discovery's scope gate (§2). This is deferred, and not a production blocker:
-  `-browser` is opt-in, and every observation is still re-checked against scope
-  before anything is persisted.
+- **Restricted browser flows:** service workers and all WebSockets are blocked.
+  Unmanaged popup targets cannot send HTTP(S) requests, even in scope; missing
+  early request frames fail closed. Blank targets can still exist until context
+  close. See [browser-scope-boundary.md](browser-scope-boundary.md).
 
 ## Authenticated raw-HTTP cookie scope
 
