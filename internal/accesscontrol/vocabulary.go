@@ -40,17 +40,30 @@ var roleNames = map[string]bool{
 	"admin": true, "isadmin": true, "adminflag": true, "adminmode": true,
 	"administrator": true, "isadministrator": true,
 	"superuser": true, "issuperuser": true, "root": true, "isroot": true,
-	"privileged": true, "isprivileged": true,
+	"privileged": true, "isprivileged": true, "elevated": true, "iselevated": true,
 	"staff": true, "isstaff": true,
 	"role": true, "roles": true, "userrole": true, "accountrole": true,
 	"usertype": true, "accounttype": true,
 	"accesslevel": true, "authlevel": true, "access": true,
 	"privilege": true, "privileges": true, "permission": true, "permissions": true,
+	// Names real applications (and bounty programs) actually expose. All are
+	// authorization decisions; none are billing-only (plan, tier, price) or
+	// generic identifiers, which would spend probes without plausibly granting
+	// a role.
+	"moderator": true, "ismoderator": true, "mod": true, "ismod": true,
+	"manager": true, "ismanager": true, "owner": true, "isowner": true,
+	"support": true, "issupport": true, "agent": true, "isagent": true,
+	"editor": true, "iseditor": true, "operator": true, "isoperator": true,
+	"supervisor": true, "issupervisor": true, "approver": true, "isapprover": true,
+	"reviewer": true, "isreviewer": true, "developer": true, "isdeveloper": true,
+	"internal": true, "isinternal": true, "godmode": true, "impersonate": true,
 }
 
 // roleSuffixes catch the common qualified spellings (user_role, memberRole,
-// account_role_id, …) without opening the vocabulary to arbitrary names.
-var roleSuffixes = []string{"role", "roleid"}
+// account_role_id, access_flag, staff_level, …) without opening the vocabulary
+// to arbitrary names. The 28-character bound in RoleName keeps a long ordinary
+// parameter that merely ends with one of these from matching.
+var roleSuffixes = []string{"role", "roleid", "flag", "mode", "level"}
 
 // RoleName reports whether a parameter, cookie or field name plausibly carries
 // a client-controlled authorization decision.
