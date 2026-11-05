@@ -255,7 +255,7 @@ func TestE2E_FullPipelineAgainstCorpus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	done := waitStatus(t, ctrl, sc.ID, 90*time.Second, isCompleted)
+	done := waitCompletedWhileProgressing(t, func() (*scan.Status, error) { return ctrl.Status(ctx, sc.ID) }, corpusScanMaxDuration, corpusScanStallWindow)
 
 	// --- scope enforcement: the out-of-scope resource was never requested ---
 	if c.hitCount("/outside/secret") != 0 {
@@ -409,7 +409,7 @@ func TestE2E_StateChangingAllowedSendsPostCandidates(t *testing.T) {
 	if err := ctrl.Start(ctx, sc.ID); err != nil {
 		t.Fatal(err)
 	}
-	done := waitStatus(t, ctrl, sc.ID, 60*time.Second, isCompleted)
+	done := waitCompletedWhileProgressing(t, func() (*scan.Status, error) { return ctrl.Status(ctx, sc.ID) }, corpusScanMaxDuration, corpusScanStallWindow)
 	t.Logf("findings: breakdown=%+v", done.Findings)
 
 	findings, err := st.Findings().ListByScan(ctx, sc.ID)
@@ -457,8 +457,12 @@ func TestE2E_StateChangingAllowedSendsPostCandidates(t *testing.T) {
 	}
 }
 
-// The authenticated flow's wait policy (authedScanMaxDuration /
-// authedScanStallWindow, waitCompletedWhileProgressing) lives in e2e_wait_test.go.
+// Every corpus-wide flow (full pipeline, state-changing, authenticated) scans
+// the same finite ~230-job workload, so all of them share one wait policy:
+// corpusScanMaxDuration / corpusScanStallWindow, implemented by
+// waitCompletedWhileProgressing in e2e_wait_test.go. A bare wall-clock deadline
+// measured the runner, not the product: the same scan finishes in ~20s locally
+// and took just over 60s on the hosted runner with the queue empty.
 
 // --- authenticated scan flow (separate: needs its own session + a running scan) ---
 
@@ -504,7 +508,7 @@ func TestE2E_AuthenticatedScanFlow(t *testing.T) {
 	if err := ctrl.Start(ctx, sc.ID); err != nil {
 		t.Fatal(err)
 	}
-	done := waitCompletedWhileProgressing(t, func() (*scan.Status, error) { return ctrl.Status(ctx, sc.ID) }, authedScanMaxDuration, authedScanStallWindow)
+	done := waitCompletedWhileProgressing(t, func() (*scan.Status, error) { return ctrl.Status(ctx, sc.ID) }, corpusScanMaxDuration, corpusScanStallWindow)
 
 	if c.authedHits.Load() == 0 {
 		t.Fatal("the HTTP-level executor never presented the session cookie to /auth")

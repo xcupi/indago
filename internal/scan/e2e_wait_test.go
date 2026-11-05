@@ -11,18 +11,19 @@ import (
 	"github.com/indago/indago/internal/scan"
 )
 
-// The authenticated flow scans the whole corpus: a finite workload of ~230 jobs
+// Every corpus-wide flow (full pipeline, state-changing, authenticated) scans the
+// SAME finite workload of ~230 jobs
 // (about 110 HTTP tests, 40 verifications and 85 DOM-XSS probes), the last of
 // which are real browser navigations serialized through one browser pool. It
 // takes ~21-25s locally under -race and was measured finishing within a few
 // jobs of 60s on the ~3x slower hosted runner (queue empty, nothing dead), so a
 // bare 60s wall-clock deadline measured the runner, not the product. A stuck
 // scan is still caught: waitCompletedWhileProgressing fails immediately on any
-// dead or failed job and after authedScanStallWindow with no job finishing; the
+// dead or failed job and after corpusScanStallWindow with no job finishing; the
 // overall cap only bounds a scan that keeps finishing jobs slowly.
 const (
-	authedScanMaxDuration = 180 * time.Second
-	authedScanStallWindow = 30 * time.Second
+	corpusScanMaxDuration = 180 * time.Second
+	corpusScanStallWindow = 30 * time.Second
 )
 
 // waitCompletedWhileProgressing waits for the scan to complete, failing fast on
