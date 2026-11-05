@@ -832,7 +832,7 @@ func (p *Page) PressKeyChord(ctx context.Context, chord string) error {
 // this package: it evaluates exactly what the caller passes and performs no
 // scope checks of its own.
 func (p *Page) Evaluate(ctx context.Context, script string) (any, error) {
-	return callCtx(ctx, func() (any, error) { return p.handle.Evaluate(script, nil) })
+	return callCtx(ctx, func() (any, error) { return p.handle.Evaluate(automationTag+script, nil) })
 }
 
 // Screenshot captures a PNG screenshot.

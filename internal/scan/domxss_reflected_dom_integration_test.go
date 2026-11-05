@@ -253,6 +253,12 @@ type reflectedLab struct {
 	sink   string // reflectedDOMScriptInnerText or ...InnerHTML
 	decode bool   // page percent-decodes the echoed term before writing it
 	inline bool   // serve the script inline instead of as a file
+	// noEval parses the XHR echo with JSON.parse instead of the measured
+	// page's eval. eval is itself an implemented reachability sink and the
+	// engine tests the FIRST reachable sink, so a page that also evals the
+	// echo is judged through eval; the text-sink and markup-gating controls
+	// below isolate the HTML/text sink semantics by not involving eval.
+	noEval bool
 }
 
 func newReflectedLab(t *testing.T, cfg reflectedLab) *httptest.Server {
@@ -263,6 +269,9 @@ func newReflectedLab(t *testing.T, cfg reflectedLab) *httptest.Server {
 		decodeExpr = "decodeURIComponent(searchResultsObj.searchTerm)"
 	}
 	script = strings.ReplaceAll(script, "DECODE(searchResultsObj.searchTerm)", decodeExpr)
+	if cfg.noEval {
+		script = strings.ReplaceAll(script, "eval('var searchResultsObj = ' + this.responseText);", "var searchResultsObj = JSON.parse(this.responseText);")
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -317,6 +326,14 @@ func reflectedHTMLEscape(s string) string {
 // returns the findings recorded for that endpoint plus every TestCase.
 func runReflectedDOMJob(t *testing.T, mgr *browser.Manager, labURL string) ([]*domain.Finding, []*domain.TestCase) {
 	t.Helper()
+	findings, cases, _ := runReflectedDOMJobEnv(t, mgr, labURL)
+	return findings, cases
+}
+
+// runReflectedDOMJobEnv is runReflectedDOMJob that also returns the scan
+// environment, for tests that read stored evidence.
+func runReflectedDOMJobEnv(t *testing.T, mgr *browser.Manager, labURL string) ([]*domain.Finding, []*domain.TestCase, *scanEnv) {
+	t.Helper()
 	env := newScanEnv(t)
 	ep := env.endpoint(labURL+"/", domain.MethodGET)
 	env.param(ep, "search", domain.LocationQuery, "x")
@@ -328,7 +345,7 @@ func runReflectedDOMJob(t *testing.T, mgr *browser.Manager, labURL string) ([]*d
 	if err != nil {
 		t.Fatal(err)
 	}
-	return sourceSelectionFindings(t, env.st, env.scanID, ep.ID), cases
+	return sourceSelectionFindings(t, env.st, env.scanID, ep.ID), cases, env
 }
 
 // reflectedDOMReachabilityNote returns the reachability note recorded for the
@@ -367,7 +384,7 @@ func TestDOMXSSReflectedDOMPageShape(t *testing.T) {
 	defer mgr.Close()
 
 	t.Run("measured page writes the marker with innerText and stays negative", func(t *testing.T) {
-		lab := newReflectedLab(t, reflectedLab{sink: reflectedDOMScriptInnerText})
+		lab := newReflectedLab(t, reflectedLab{sink: reflectedDOMScriptInnerText, noEval: true})
 		findings, cases := runReflectedDOMJob(t, mgr, lab.URL)
 		note := reflectedDOMReachabilityNote(t, cases)
 		if len(findings) != 0 {
@@ -416,7 +433,7 @@ func TestDOMXSSReflectedDOMPageShape(t *testing.T) {
 	})
 
 	t.Run("text canary reaching a text sink does not clear an innerHTML sink: markup payload confirms", func(t *testing.T) {
-		lab := newReflectedLab(t, reflectedLab{sink: reflectedDOMScriptMarkupGated})
+		lab := newReflectedLab(t, reflectedLab{sink: reflectedDOMScriptMarkupGated, noEval: true})
 		findings, cases := runReflectedDOMJob(t, mgr, lab.URL)
 		if !reflectedDOMConfirmed(findings) {
 			t.Fatalf("innerHTML sink reached only by a markup payload must confirm, findings=%s notes=%d", reflectedDOMVerdicts(findings), len(cases))
@@ -424,7 +441,7 @@ func TestDOMXSSReflectedDOMPageShape(t *testing.T) {
 	})
 
 	t.Run("textContent sink stays negative even with a markup payload", func(t *testing.T) {
-		lab := newReflectedLab(t, reflectedLab{sink: reflectedDOMScriptTextContent})
+		lab := newReflectedLab(t, reflectedLab{sink: reflectedDOMScriptTextContent, noEval: true})
 		findings, cases := runReflectedDOMJob(t, mgr, lab.URL)
 		note := reflectedDOMReachabilityNote(t, cases)
 		if len(findings) != 0 {
@@ -455,7 +472,7 @@ func TestDOMXSSReflectedDOMPageShape(t *testing.T) {
 	})
 
 	t.Run("an inline copy of the script behaves the same", func(t *testing.T) {
-		inline := newReflectedLab(t, reflectedLab{sink: reflectedDOMScriptInnerText, inline: true})
+		inline := newReflectedLab(t, reflectedLab{sink: reflectedDOMScriptInnerText, inline: true, noEval: true})
 		findings, cases := runReflectedDOMJob(t, mgr, inline.URL)
 		note := reflectedDOMReachabilityNote(t, cases)
 		if len(findings) != 0 || !strings.Contains(note, "text-only sink (innerText)") {

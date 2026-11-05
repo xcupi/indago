@@ -437,6 +437,9 @@ func TestDOMXSSHarnessMarkerSnippetBounded(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// The automation's own evaluation carries the marker; tagging it keeps
+			// the eval hook from reporting it, so the only report is the
+			// innerHTML write under test.
 			if _, err := page.Evaluate(ctx, "document.body.innerHTML = "+string(literal)+";"); err != nil {
 				t.Fatal(err)
 			}

@@ -126,13 +126,50 @@ func TestDOMStringTimerSourceMatrix(t *testing.T) {
 			if parameter == "" {
 				parameter = sc.source
 			}
-			if len(d.Candidates) != 1 || d.Candidates[0].Context != detection.Context(sc.sink) || d.Candidates[0].ContextSub != sc.source || d.Candidates[0].Parameter != selector || d.ParameterName != parameter || d.Candidates[0].Value != marker {
+			// Native timers evaluate JavaScript: the bare marker expression is the
+			// only shape tried, except for a query-sourced timer, which also
+			// plans the bounded execution breakouts (detection.DOMXSSPayloadsFor).
+			// Those run only after the bare marker did not confirm, so a
+			// positive stops at one candidate; a safe/forged control exhausts
+			// all five and must still be Rejected.
+			wantShapes := []string{"timer_expression"}
+			if sc.source == "location.search" {
+				wantShapes = []string{"execution_expression", "execution_double_string", "execution_single_string", "execution_json_string", "execution_json_backslash"}
+			}
+			wantCandidates := len(wantShapes)
+			if sc.control == "positive" && sc.source == "location.search" {
+				wantCandidates = 1
+			}
+			if len(d.Candidates) != wantCandidates || d.ParameterName != parameter {
 				t.Fatalf("source/sink/selector/bare payload mismatch: %+v", d)
 			}
-			if len(d.Attempts) != 2 || d.Attempts[1].Verdict == domain.VerdictPending || len(d.TestCaseIDs) != 2 || d.Attempts[1].VerifyTestCaseID.Empty() {
+			for i, cand := range d.Candidates {
+				if cand.Context != detection.Context(sc.sink) || cand.ContextSub != sc.source || cand.Parameter != selector || cand.Shape != wantShapes[i] || !strings.Contains(cand.Value, marker) {
+					t.Fatalf("source/sink/selector/bare payload mismatch: %+v", d)
+				}
+			}
+			if d.Candidates[0].Value != marker {
+				t.Fatalf("the first candidate must be the bare marker expression: %+v", d)
+			}
+			last := d.Attempts[len(d.Attempts)-1]
+			if len(d.Attempts) != 1+wantCandidates || last.Verdict == domain.VerdictPending || len(d.TestCaseIDs) != len(d.Attempts) || last.VerifyTestCaseID.Empty() {
 				t.Fatalf("payload verification not finished: %+v", d)
 			}
-			wantCases := 2
+			wantCases := 1 + wantCandidates
+			if sc.source == "location.search" {
+				// An observation-only case names the query parameter the page's
+				// own scripts read; it precedes the sink probes.
+				wantCases++
+				discovery := 0
+				for _, tc := range cases {
+					if strings.HasPrefix(tc.Note, "page-script query-name discovery:") && strings.Contains(tc.Note, selector) {
+						discovery++
+					}
+				}
+				if discovery != 1 {
+					t.Fatalf("want exactly one query-name discovery case naming %q, got %d", selector, discovery)
+				}
+			}
 			if strings.HasSuffix(sc.source, "Storage") {
 				wantCases++
 				if !strings.Contains(f.Summary, "attacker-relevant ability to write or poison") || !strings.Contains(d.Candidates[0].Rationale, "manual exploitability review") {
@@ -149,7 +186,14 @@ func TestDOMStringTimerSourceMatrix(t *testing.T) {
 			if f.Verdict != want {
 				t.Fatalf("expected %s, actual %s: %+v", want, f.Verdict, d)
 			}
-			bodies := htmlSourceMatrixEvidence(t, env, f, d.Attempts[1].VerifyTestCaseID)
+			var attemptIDs []domain.ID
+			for _, a := range d.Attempts {
+				attemptIDs = append(attemptIDs, a.VerifyTestCaseID)
+			}
+			// Assertions about the delivered bare marker (and the forged console
+			// text built from it) are made on the bare-marker attempt; the
+			// breakout attempts' evidence is still validated for attribution.
+			bodies := htmlSourceMatrixEvidenceFor(t, env, f, d.Attempts[1].VerifyTestCaseID, attemptIDs...)
 			log := bodies[domain.EvidenceBrowserLog]
 			html := bodies[domain.EvidenceDOM]
 			if !strings.Contains(html, marker) {

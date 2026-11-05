@@ -7,12 +7,13 @@ package scan_test
 // → real HTTP → real-browser verification → finding.
 //
 // Measured outcome, pinned here: the attribute-only vector IS planned and sent,
-// so a reflecting canonical link now produces a finding (before this slice the
-// URL-query context planned nothing and the position was silently unreported),
-// but the lab's accesskey/onclick vector executes only after an operator
-// keypress. The passive verifier never simulates activation, so the verdict
-// stays Rejected — the honest result, and the reason this stays an interaction
-// candidate rather than a Confirmed one.
+// so a reflecting canonical link produces a finding. Its accesskey/onclick
+// vector executes only after a keypress, which the verifier now performs the way
+// a victim would (docs/browser-verification.md, "keyboard" activation: one
+// bounded keyboard.press('Alt+Shift+x')). The verdict is Confirmed only on the
+// browser's own marker-specific execution signal observed AFTER that single
+// activation; the escaped control, where no element declares the accesskey, can
+// never activate and must not confirm.
 //
 // Registered as a required root in scripts/ci-browser-check.py.
 
@@ -68,13 +69,11 @@ func TestReflectedCanonicalLinkVectorIsPlannedButNeedsActivation(t *testing.T) {
 		}
 	}
 
-	// The canonical-link position must now be REPORTED: a reflecting
-	// attribute-only candidate produces a finding instead of nothing at all.
+	// The canonical-link position is reported, and decided by the verifier: the
+	// accesskey/onclick vector is Confirmed only through the one supported
+	// keyboard activation, and the verdict says so.
 	var planned *domain.Finding
 	for _, f := range byPath["/canonical"] {
-		if f.Verdict == domain.VerdictConfirmed {
-			t.Fatalf("the accesskey/onclick vector needs an activation keypress the passive verifier never performs; got Confirmed: %+v", f.Summary)
-		}
 		for _, a := range jsStringAttempts(f) {
 			if a.CandidateValue != "" {
 				planned = f
@@ -84,20 +83,20 @@ func TestReflectedCanonicalLinkVectorIsPlannedButNeedsActivation(t *testing.T) {
 	if planned == nil {
 		t.Fatalf("/canonical: no finding carried an executed candidate; findings=%d", len(byPath["/canonical"]))
 	}
-	hasVector := false
+	hasVector, activated := false, false
 	for _, a := range jsStringAttempts(planned) {
 		if strings.Contains(a.CandidateValue, "accesskey=x onclick=") {
 			hasVector = true
-		}
-		if a.Verdict == domain.VerdictConfirmed {
-			t.Fatalf("interaction-only canonical vector must never confirm: %+v", a)
+			if a.Verdict == domain.VerdictConfirmed && strings.Contains(a.Notes, "keyboard.press('Alt+Shift+x')") && strings.Contains(a.Notes, "unresolved JavaScript identifier") {
+				activated = true
+			}
 		}
 	}
 	if !hasVector {
 		t.Fatalf("/canonical finding must record the attribute-only accesskey/onclick attempt, got %+v", jsStringAttempts(planned))
 	}
-	if planned.Verdict == domain.VerdictPending {
-		t.Fatalf("/canonical finding must be decided by the verifier, not left Pending: %+v", planned.Verdict)
+	if !activated || planned.Verdict != domain.VerdictConfirmed {
+		t.Fatalf("/canonical accesskey vector must be Confirmed by the marker-specific signal after the one supported keyboard activation; finding=%s attempts=%+v", planned.Verdict, jsStringAttempts(planned))
 	}
 
 	// The escaped control encodes < > " ' &, so nothing can leave the href
@@ -105,6 +104,11 @@ func TestReflectedCanonicalLinkVectorIsPlannedButNeedsActivation(t *testing.T) {
 	for _, f := range byPath["/safe-canonical"] {
 		if f.Verdict == domain.VerdictConfirmed {
 			t.Fatalf("escaped canonical control must never confirm: %+v", f.Summary)
+		}
+		for _, a := range jsStringAttempts(f) {
+			if strings.Contains(a.Notes, "keyboard.press") && a.Verdict == domain.VerdictConfirmed {
+				t.Fatalf("escaped canonical control must never confirm via activation: %+v", a)
+			}
 		}
 	}
 }

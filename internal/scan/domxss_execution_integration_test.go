@@ -95,10 +95,16 @@ func TestDOMXSSExecutionXHR(t *testing.T) {
 					}
 					foundProof := false
 					for _, a := range d.Attempts {
-						if a.VerifyTestCaseID == "" {
+						if a.VerifyTestCaseID == "" || a.Verdict != domain.VerdictConfirmed {
 							continue
 						}
-						bodies := htmlSourceMatrixEvidence(t, env, f, a.VerifyTestCaseID)
+						// The finding unions the evidence of every attempt: each row
+						// must belong to one of them, the proof is read from this one.
+						var attemptIDs []domain.ID
+						for _, other := range d.Attempts {
+							attemptIDs = append(attemptIDs, other.VerifyTestCaseID)
+						}
+						bodies := htmlSourceMatrixEvidenceFor(t, env, f, a.VerifyTestCaseID, attemptIDs...)
 						if strings.Contains(bodies[domain.EvidenceBrowserLog], "is not defined") && strings.Contains(bodies[domain.EvidenceBrowserLog], `"marker_identifier":true`) {
 							foundProof = true
 						}

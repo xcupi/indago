@@ -1,6 +1,8 @@
 package browser
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -55,6 +57,222 @@ type cdpScript struct {
 }
 
 var compilationCallee = regexp.MustCompile(`\b(eval|Function)\s*\(\s*$`)
+
+// automationTag marks a script evaluated by Page.Evaluate. Playwright runs that
+// expression through the page's own eval, so without a marker the engine would
+// attribute the scanner's automation (a window.name setter, a postMessage
+// sender, an activation script - all of which carry the candidate value) to the
+// target as an eval sink. Runtime provenance ignores a compilation whose code
+// starts with it. The tag is random per process; a page that learned it could
+// only hide its own eval use from the reachability report.
+var automationTag = func() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("browser: no entropy for the automation tag: " + err.Error())
+	}
+	return "/*indago-automation-" + hex.EncodeToString(b[:]) + "*/"
+}()
+
+// compilationCalleeScanLimit bounds how much source enclosingCompilationCallee
+// lexes (the caller script up to V8's reported position).
+const compilationCalleeScanLimit = 1 << 20
+
+// enclosingCompilationCallee returns "eval" or "Function" when offset lies
+// directly inside the argument list of such a call, "" otherwise. V8 reports
+// the creation position of an eval'd script at the argument expression's own
+// operator for a computed argument (`eval('var o = ' + body)` points at the
+// `+`), so the callee is recovered by lexing the caller script FORWARD from its
+// start to offset and reading the innermost open bracket. Forward lexing is
+// what makes it syntax-aware: comments, string, template (including ${...}
+// nesting) and regular-expression literals are skipped, so text such as
+// `/* eval( */` or "eval(" in a string can never be mistaken for a call.
+// It declines (returns "") whenever it cannot be sure: offset inside a
+// comment/string/template/regex, an unterminated literal, an unbalanced
+// bracket, or a script larger than compilationCalleeScanLimit. A decline only
+// means no reachability report, never a fabricated one.
+func enclosingCompilationCallee(code string, offset int) string {
+	if offset < 0 || offset > len(code) || offset > compilationCalleeScanLimit {
+		return ""
+	}
+	type frame struct {
+		open   byte // '(' '[' '{' or '$' for a template ${ expression
+		callee string
+	}
+	var stack []frame
+	prev := byte('p') // previous significant token: 'i' identifier, 'n' operand-ending, 'p' punctuation/keyword
+	lastIdent := ""
+	isIdentStart := func(c byte) bool {
+		return c == '_' || c == '$' || c >= 0x80 || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	}
+	isIdentPart := func(c byte) bool { return isIdentStart(c) || (c >= '0' && c <= '9') }
+	// quoted skips a '...' or "..." literal starting at i, returning the index
+	// just past it, or -1 if it is unterminated before offset.
+	quoted := func(i int) int {
+		q := code[i]
+		for j := i + 1; j < offset; j++ {
+			switch code[j] {
+			case '\\':
+				j++
+			case '\n':
+				return -1
+			case q:
+				return j + 1
+			}
+		}
+		return -1
+	}
+	// templateText skips template text starting at i (just after the opening
+	// backtick or the closing brace of a ${ expression). It returns the index
+	// after the closing backtick, or after "${" with true when an expression
+	// opens, or -1 if offset falls inside the text.
+	templateText := func(i int) (int, bool) {
+		for j := i; j < offset; j++ {
+			switch code[j] {
+			case '\\':
+				j++
+			case '`':
+				return j + 1, false
+			case '$':
+				if j+1 < offset && code[j+1] == '{' {
+					return j + 2, true
+				}
+			}
+		}
+		return -1, false
+	}
+	keywords := map[string]bool{"return": true, "typeof": true, "case": true, "in": true, "of": true, "delete": true,
+		"void": true, "throw": true, "new": true, "else": true, "do": true, "instanceof": true, "yield": true, "await": true}
+	for i := 0; i < offset; {
+		c := code[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v':
+			i++
+		case c == '/' && i+1 < len(code) && code[i+1] == '/':
+			nl := strings.IndexByte(code[i:offset], '\n')
+			if nl < 0 {
+				return ""
+			}
+			i += nl
+		case c == '/' && i+1 < len(code) && code[i+1] == '*':
+			end := strings.Index(code[i+2:], "*/")
+			if end < 0 || i+2+end+2 > offset {
+				return ""
+			}
+			i += 2 + end + 2
+		case c == '\'' || c == '"':
+			if i = quoted(i); i < 0 {
+				return ""
+			}
+			prev = 'n'
+		case c == '`':
+			j, expr := templateText(i + 1)
+			if j < 0 {
+				return ""
+			}
+			i = j
+			if expr {
+				stack = append(stack, frame{open: '$'})
+				prev = 'p'
+			} else {
+				prev = 'n'
+			}
+		case c == '/':
+			if prev != 'p' {
+				i++ // division
+				prev = 'p'
+				break
+			}
+			// A regular-expression literal: skip to its closing slash,
+			// honouring escapes and character classes.
+			j, inClass := i+1, false
+			for ; j < offset; j++ {
+				if code[j] == '\\' {
+					j++
+					continue
+				}
+				if code[j] == '\n' {
+					return ""
+				}
+				if code[j] == '[' {
+					inClass = true
+				} else if code[j] == ']' {
+					inClass = false
+				} else if code[j] == '/' && !inClass {
+					break
+				}
+			}
+			if j >= offset {
+				return ""
+			}
+			i = j + 1
+			for i < offset && isIdentPart(code[i]) {
+				i++ // flags
+			}
+			prev = 'n'
+		case isIdentStart(c):
+			j := i
+			for j < len(code) && isIdentPart(code[j]) {
+				j++
+			}
+			if j > offset {
+				return "" // offset inside an identifier: not a position we understand
+			}
+			lastIdent = code[i:j]
+			if keywords[lastIdent] {
+				prev = 'p'
+			} else {
+				prev = 'i'
+			}
+			i = j
+		case c >= '0' && c <= '9':
+			for i < offset && (isIdentPart(code[i]) || code[i] == '.') {
+				i++
+			}
+			prev = 'n'
+		case c == '(':
+			f := frame{open: '('}
+			if prev == 'i' && (lastIdent == "eval" || lastIdent == "Function") {
+				f.callee = lastIdent
+			}
+			stack = append(stack, f)
+			prev = 'p'
+			i++
+		case c == '[' || c == '{':
+			stack = append(stack, frame{open: c})
+			prev = 'p'
+			i++
+		case c == ')' || c == ']' || c == '}':
+			if len(stack) == 0 {
+				return ""
+			}
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			i++
+			if c == '}' && top.open == '$' {
+				j, expr := templateText(i)
+				if j < 0 {
+					return ""
+				}
+				i = j
+				if expr {
+					stack = append(stack, frame{open: '$'})
+					prev = 'p'
+				} else {
+					prev = 'n'
+				}
+				break
+			}
+			prev = 'n'
+		default:
+			prev = 'p'
+			i++
+		}
+	}
+	if len(stack) == 0 || stack[len(stack)-1].open != '(' {
+		return ""
+	}
+	return stack[len(stack)-1].callee
+}
 
 func decodeCDP(v any, out any) { b, _ := json.Marshal(v); _ = json.Unmarshal(b, out) }
 
@@ -218,9 +436,16 @@ func (p *pwPage) EnableRuntimeProvenance(marker, initScript string) error {
 			}
 		}
 		if kind == "" {
+			// ... or at the operator of a computed argument.
+			kind = enclosingCompilationCallee(callerCode, offset)
+		}
+		if kind == "" {
 			return
 		}
 		code, ok := source(s.ID)
+		if ok && strings.HasPrefix(code, automationTag) {
+			return
+		}
 		at := strings.Index(code, marker)
 		if !ok || marker == "" || at < 0 {
 			return

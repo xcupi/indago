@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
 )
 
@@ -55,8 +56,26 @@ func attributionScript(assign string) string {
 // attributionStaticScript is the same external-file shape, but with the flow
 // visible to the STATIC pass as well (no XHR indirection): the assignment is
 // still inside a function defined in the external script, so a site here can
-// only come from analysing that file.
+// only come from analysing that file. The script loads before the
+// .blog-header element exists, so showResults() re-runs itself at
+// DOMContentLoaded; search() exists only because the shared page calls it.
 const attributionStaticScript = `function showResults() {
+    var term = new URLSearchParams(location.search).get('search')
+    var header = document.getElementsByClassName("blog-header")[0]
+    if (!header) {
+        window.addEventListener('DOMContentLoaded', showResults)
+        return
+    }
+    header.innerHTML = term
+}
+function search(path) {}
+showResults()
+`
+
+// attributionNeverRunsScript is the previous (broken) shape of the fixture, kept
+// as an honest negative: the script runs BEFORE the .blog-header element
+// exists, so the sink statement throws and never executes in the browser.
+const attributionNeverRunsScript = `function showResults() {
     var term = new URLSearchParams(location.search).get('search')
     var header = document.getElementsByClassName("blog-header")[0]
     header.innerHTML = term
@@ -79,7 +98,7 @@ func TestDOMXSSSinkAttributionVariants(t *testing.T) {
 	}{
 		{
 			name:    "innerText+innerHTML",
-			assign:  `        h1.innerText = "0 results for '" + searchTerm + "'"` + "\n" + attributionHTMLAssign,
+			assign:  `        blogHeader.innerText = "0 results for '" + searchTerm + "'"` + "\n" + attributionHTMLAssign,
 			confirm: true,
 		},
 		{
@@ -115,10 +134,19 @@ func TestDOMXSSSinkAttributionVariants(t *testing.T) {
 			}
 			note := reflectedDOMReachabilityNote(t, cases)
 			if !tc.confirm {
-				if !strings.Contains(note, "no implemented DOM-XSS sink reachable") ||
-					!strings.Contains(note, "text-only sink ("+tc.textSink+")") ||
-					strings.Contains(note, "reachable sink:") {
-					t.Fatalf("text-only negative wording changed: %q", note)
+				// The measured page also eval()s the XHR echo, and eval is an
+				// implemented reachability sink, so the note names eval - and ONLY
+				// eval: the text sink that fired must never be reported as a
+				// reachable HTML sink, and nothing may confirm (asserted above).
+				if !strings.HasPrefix(note, "reachable sink: eval from location.search") ||
+					strings.Contains(note, "reachable sink: innerHTML") ||
+					strings.Contains(note, "reachable sink: outerHTML") {
+					t.Fatalf("text-only negative must name only the eval sink, note=%q", note)
+				}
+				for _, f := range findings {
+					if f.Verdict != domain.VerdictRejected {
+						t.Fatalf("a text-only sink must end Rejected, got %s", reflectedDOMVerdicts(findings))
+					}
 				}
 				return
 			}
@@ -167,7 +195,7 @@ func TestDOMXSSExternalScriptES5StaticAnalysis(t *testing.T) {
 
 	t.Run("statically visible sink in the external file is reported", func(t *testing.T) {
 		lab := newReflectedLab(t, reflectedLab{sink: attributionStaticScript})
-		findings, cases := runReflectedDOMJob(t, mgr, lab.URL)
+		findings, cases, env := runReflectedDOMJobEnv(t, mgr, lab.URL)
 		note := reflectedDOMReachabilityNote(t, cases)
 		if !strings.Contains(note, "static pass (advisory, no verdict): innerHTML reachable at ") {
 			t.Fatalf("the static pass must analyse the external body and name its sink, note=%q", note)
@@ -175,8 +203,54 @@ func TestDOMXSSExternalScriptES5StaticAnalysis(t *testing.T) {
 		if !strings.Contains(note, "/resources/js/searchResults.js") {
 			t.Fatalf("the static site must carry the external script URL, note=%q", note)
 		}
-		if !reflectedDOMConfirmed(findings) {
-			t.Fatalf("line-break-terminated ES5 with an external innerHTML sink must confirm: %s", reflectedDOMVerdicts(findings))
+		if !strings.Contains(note, "reachable sink: innerHTML from location.search") {
+			t.Fatalf("the sink must be reachable in the real browser, not only statically: %q", note)
+		}
+		if len(findings) != 1 || findings[0].Verdict != domain.VerdictConfirmed {
+			t.Fatalf("line-break-terminated ES5 with an external innerHTML sink must Confirm: %s", reflectedDOMVerdicts(findings))
+		}
+		d := decodeFindingDetail(findings[0].Detail)
+		var confirmed *domain.Finding
+		var proof domain.ID
+		for _, a := range d.Attempts {
+			if a.Verdict == domain.VerdictConfirmed && !a.VerifyTestCaseID.Empty() {
+				confirmed, proof = findings[0], a.VerifyTestCaseID
+			}
+		}
+		if confirmed == nil {
+			t.Fatalf("no Confirmed verification attempt with a test case: %+v", d.Attempts)
+		}
+		var attemptIDs []domain.ID
+		for _, a := range d.Attempts {
+			attemptIDs = append(attemptIDs, a.VerifyTestCaseID)
+		}
+		bodies := htmlSourceMatrixEvidenceFor(t, env, confirmed, proof, attemptIDs...)
+		log := bodies[domain.EvidenceBrowserLog]
+		marker := detection.NewProbe(env.scanID, confirmed.EndpointID).Token
+		if !strings.Contains(log, "playwright: "+marker+" is not defined") {
+			t.Fatalf("Confirmed needs the marker-specific browser page error: %s", log)
+		}
+		// The page must run cleanly apart from that signal: no fixture error
+		// (undefined function, missing element) may stand in for the proof.
+		for _, bad := range []string{"search is not defined", "showResults is not defined", "Cannot set properties of undefined", "Cannot read properties of undefined"} {
+			if strings.Contains(log, bad) {
+				t.Fatalf("unexpected fixture error %q in the verification log: %s", bad, log)
+			}
+		}
+		if !strings.Contains(bodies[domain.EvidenceDOM], `onerror="`+marker+`"`) {
+			t.Fatalf("the injected marker handler must be in the rendered DOM: %s", bodies[domain.EvidenceDOM])
+		}
+	})
+
+	t.Run("a static sink the browser never runs is an advisory-only negative", func(t *testing.T) {
+		lab := newReflectedLab(t, reflectedLab{sink: attributionNeverRunsScript})
+		findings, cases := runReflectedDOMJob(t, mgr, lab.URL)
+		note := reflectedDOMReachabilityNote(t, cases)
+		if !strings.Contains(note, "static pass (advisory, no verdict): innerHTML reachable at ") || !strings.Contains(note, "no implemented DOM-XSS sink reachable") {
+			t.Fatalf("a sink that never runs must be a runtime negative that still names the static site, note=%q", note)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("static analysis alone must not create or confirm a finding: %s", reflectedDOMVerdicts(findings))
 		}
 	})
 }
@@ -193,8 +267,19 @@ func TestDOMXSSEncodedEchoStaysNegativeEverywhere(t *testing.T) {
 	if reflectedDOMConfirmed(findings) {
 		t.Fatalf("an HTML-encoded echo is text, not markup: %s", reflectedDOMVerdicts(findings))
 	}
+	// The canary is plain alphanumerics, so it genuinely reaches innerHTML even
+	// when the echo is HTML-escaped: reachability is reported. The escaped
+	// markup payload then does not execute, so every attempt must end Rejected.
 	note := reflectedDOMReachabilityNote(t, cases)
-	if !strings.Contains(note, "no implemented DOM-XSS sink reachable") {
-		t.Fatalf("expected the honest negative, got %q", note)
+	if !strings.HasPrefix(note, "reachable sink: innerHTML from location.search") {
+		t.Fatalf("expected the canary to reach innerHTML, got %q", note)
+	}
+	if len(findings) == 0 {
+		t.Fatal("a reachable sink with an escaped payload must record a Rejected finding, not nothing")
+	}
+	for _, f := range findings {
+		if f.Verdict != domain.VerdictRejected {
+			t.Fatalf("an HTML-encoded echo must end Rejected: %s", reflectedDOMVerdicts(findings))
+		}
 	}
 }

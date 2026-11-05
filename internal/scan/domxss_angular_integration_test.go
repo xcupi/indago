@@ -100,7 +100,7 @@ func angularLab(t *testing.T) *httptest.Server {
 				// a rendered body text node. The ng-bind echo is DATA (never
 				// template source) and is only the reachability signal.
 				value := html.EscapeString(r.URL.Query().Get("q"))
-				fmt.Fprintf(w, `<!doctype html><html><body ng-app ng-controller="C"><div id="echo" ng-bind="echo"></div>
+				fmt.Fprintf(w, `<!doctype html><html><body ng-app="lab" ng-controller="C"><div id="echo" ng-bind="echo"></div>
 <textarea id="out">%s</textarea><script src="/angular.js"></script>
 <script>angular.module('lab', []).controller('C', function($scope) {
   $scope.echo = new URLSearchParams(location.search).get('q') || '';
@@ -130,8 +130,10 @@ func angularLab(t *testing.T) *httptest.Server {
 				// never be re-compiled by the observation.
 				fmt.Fprint(w, `<!doctype html><html><body ng-app="lab" ng-controller="C"><div id="out" ng-bind="value"></div>
 <script src="/angular.js"></script>
-<script>angular.module('lab', []).controller('C', function($scope, $location) {
-  $scope.value = $location.search().q || '';
+<script>angular.module('lab', []).controller('C', function($scope) {
+  // Not $location.search(): without html5Mode AngularJS reads the HASH, so
+  // the query string would never reach the binding.
+  $scope.value = new URLSearchParams(location.search).get('q') || '';
 });</script></body></html>`)
 				return
 			}

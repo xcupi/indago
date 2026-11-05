@@ -42,11 +42,11 @@ const (
 	RawQueryAlways RawQueryMode = "always" // every GET endpoint, in addition to its named parameters
 )
 
-// ParseRawQueryMode parses the scan option. Empty means off (backwards
+// ParseRawQueryMode parses the scan option. "false" is the boolean-flag spelling of off. Empty means off (backwards
 // compatibility for rows created before the field existed).
 func ParseRawQueryMode(s string) (RawQueryMode, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "", string(RawQueryOff):
+	case "", string(RawQueryOff), "false":
 		return RawQueryOff, nil
 	case string(RawQueryAuto), "true", "on":
 		return RawQueryAuto, nil

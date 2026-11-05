@@ -85,6 +85,11 @@ required = {
     # planned and sent, with the passive verifier honestly rejecting it.
     "TestDOMDocumentWriteInsideSelectIsAlreadyConfirmed",
     "TestReflectedCanonicalLinkVectorIsPlannedButNeedsActivation",
+    # Eval attribution: scanner automation is never a target eval sink, target
+    # eval (incl. a computed argument) is reachable, and direct eval keeps its
+    # lexical scope. The external-script ES5 positive must really Confirm.
+    "TestDOMXSSHarnessEvalAttribution",
+    "TestDOMXSSExternalScriptES5StaticAnalysis",
 }
 if not shutil.which("node"):
     raise SystemExit("required Node.js unavailable")

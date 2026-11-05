@@ -134,8 +134,11 @@ func urlAttrPlanFor(t *testing.T, srv *httptest.Server) *detection.CandidatePlan
 }
 
 // TestURLHrefBreakoutConfirmsAfterOneClick is the positive fixture: the planned
-// shape closes the href attribute value and installs the click-class handler, so
-// the verifier's single activation reaches the marker as code.
+// shape closes the href attribute value and installs an accesskey/onclick pair,
+// so the verifier's single activation reaches the marker as code. A candidate
+// that declares an accesskey is activated the way a victim would (one real
+// Alt+Shift+x keypress, see docs/browser-verification.md "keyboard"), and the
+// browser itself then dispatches the one click on the link.
 func TestURLHrefBreakoutConfirmsAfterOneClick(t *testing.T) {
 	srv := urlAttrServer(t, false)
 	plan := urlAttrPlanFor(t, srv)
@@ -177,11 +180,11 @@ func TestURLHrefBreakoutConfirmsAfterOneClick(t *testing.T) {
 		t.Fatalf("signal = %s, want page_error", res.Report.Signal)
 	}
 	act := res.Report.Activation
-	if act == nil || act.Class != verification.ActivationClick || act.Status != verification.ActivationStatusDispatched {
-		t.Fatalf("activation = %+v, want one dispatched click", act)
+	if act == nil || act.Class != verification.ActivationKeyboard || act.Status != verification.ActivationStatusDispatched {
+		t.Fatalf("activation = %+v, want one dispatched keyboard activation", act)
 	}
-	if act.Attempts != 1 || act.Method != "element.click()" {
-		t.Fatalf("activation attempts/method = %d/%q, want 1/element.click()", act.Attempts, act.Method)
+	if act.Attempts != 1 || act.Method != "keyboard.press('Alt+Shift+x')" {
+		t.Fatalf("activation attempts/method = %d/%q, want 1/keyboard.press('Alt+Shift+x')", act.Attempts, act.Method)
 	}
 	// The activation itself ran exactly once (the fixture's own counter), and
 	// the injected attributes are really on the element.
