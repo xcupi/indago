@@ -457,6 +457,9 @@ func TestE2E_StateChangingAllowedSendsPostCandidates(t *testing.T) {
 	}
 }
 
+// The authenticated flow's wait policy (authedScanMaxDuration /
+// authedScanStallWindow, waitCompletedWhileProgressing) lives in e2e_wait_test.go.
+
 // --- authenticated scan flow (separate: needs its own session + a running scan) ---
 
 func TestE2E_AuthenticatedScanFlow(t *testing.T) {
@@ -501,7 +504,7 @@ func TestE2E_AuthenticatedScanFlow(t *testing.T) {
 	if err := ctrl.Start(ctx, sc.ID); err != nil {
 		t.Fatal(err)
 	}
-	done := waitStatus(t, ctrl, sc.ID, 60*time.Second, isCompleted)
+	done := waitCompletedWhileProgressing(t, func() (*scan.Status, error) { return ctrl.Status(ctx, sc.ID) }, authedScanMaxDuration, authedScanStallWindow)
 
 	if c.authedHits.Load() == 0 {
 		t.Fatal("the HTTP-level executor never presented the session cookie to /auth")
