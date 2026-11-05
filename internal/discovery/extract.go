@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"strings"
+	"unicode"
 
 	"golang.org/x/net/html"
 
@@ -17,9 +18,10 @@ type FormField struct {
 
 // Form is a discovered HTML form.
 type Form struct {
-	Action string // raw action attribute ("" means the current page URL)
-	Method domain.HTTPMethod
-	Inputs []FormField
+	Action            string // raw action or handler target ("" means the current page URL)
+	ActionFromHandler bool   // target derived from an inline submit handler
+	Method            domain.HTTPMethod
+	Inputs            []FormField
 }
 
 // URL-bearing attributes by element, used for link extraction.
@@ -105,10 +107,24 @@ func parseForm(form *html.Node) Form {
 			f.Method = domain.MethodPOST
 		}
 	}
+	handler, hasSubmitHandler := attrValue(form, "onsubmit")
+	if f.Action == "" && hasSubmitHandler {
+		f.Action = handlerSubmitPath(handler)
+		f.ActionFromHandler = f.Action != ""
+	}
 	seen := make(map[string]struct{})
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
+			if f.Action == "" && !hasSubmitHandler {
+				typ, _ := attrValue(n, "type")
+				typ = strings.ToLower(strings.TrimSpace(typ))
+				if (n.Data == "button" && (typ == "" || typ == "submit")) || (n.Data == "input" && (typ == "submit" || typ == "image")) {
+					onclick, _ := attrValue(n, "onclick")
+					f.Action = handlerSubmitPath(onclick)
+					f.ActionFromHandler = f.Action != ""
+				}
+			}
 			switch n.Data {
 			case "input", "textarea", "select", "button":
 				name, _ := attrValue(n, "name")
@@ -130,6 +146,9 @@ func parseForm(form *html.Node) Form {
 	for c := form.FirstChild; c != nil; c = c.NextSibling {
 		walk(c)
 	}
+	if f.ActionFromHandler {
+		f.Method = domain.MethodPOST
+	}
 	return f
 }
 
@@ -140,4 +159,40 @@ func attrValue(n *html.Node, key string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// handlerSubmitPath reads literal paths only; it never executes JavaScript or
+// decodes escapes. The last qualifying quoted literal is the submit target.
+func handlerSubmitPath(handler string) string {
+	var target string
+	for i := 0; i < len(handler); i++ {
+		quote := handler[i]
+		if quote != '\'' && quote != '"' {
+			continue
+		}
+		start := i + 1
+		escaped := false
+		for i++; i < len(handler); i++ {
+			if handler[i] == '\\' {
+				escaped = true
+				i++
+				continue
+			}
+			if handler[i] == quote {
+				break
+			}
+		}
+		if i >= len(handler) {
+			break
+		}
+		literal := handler[start:i]
+		if escaped || len(literal) > 512 || !strings.HasPrefix(literal, "/") || strings.HasPrefix(literal, "//") {
+			continue
+		}
+		if strings.ContainsRune(literal, '\\') || strings.ContainsFunc(literal, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+			continue
+		}
+		target = literal
+	}
+	return target
 }

@@ -42,7 +42,7 @@ var roleNames = map[string]bool{
 	"superuser": true, "issuperuser": true, "root": true, "isroot": true,
 	"privileged": true, "isprivileged": true, "elevated": true, "iselevated": true,
 	"staff": true, "isstaff": true,
-	"role": true, "roles": true, "userrole": true, "accountrole": true,
+	"role": true, "roleid": true, "roles": true, "userrole": true, "accountrole": true,
 	"usertype": true, "accounttype": true,
 	"accesslevel": true, "authlevel": true, "access": true,
 	"privilege": true, "privileges": true, "permission": true, "permissions": true,

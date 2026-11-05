@@ -662,8 +662,8 @@ func (e *accessControlExecutor) runRoleField(ctx context.Context, job *domain.Te
 	return d, domain.OutcomeSuccess, nil, false, false
 }
 
-// roleFieldAttempt sends ONE profile update carrying the candidate role field,
-// then re-reads the caller's profile and re-probes the same privileged surface.
+// roleFieldAttempt tries the observed encoding, then at most one JSON fallback
+// for a form-discovered endpoint. Every write uses the scan-wide budget.
 func (e *accessControlExecutor) roleFieldAttempt(ctx context.Context, tc *domain.TestCase, ep *domain.Endpoint,
 	params []*domain.Parameter, profile *callerProfile, before *accessSurface, f accesscontrol.Field) accessControlAttempt {
 
@@ -680,6 +680,47 @@ func (e *accessControlExecutor) roleFieldAttempt(ctx context.Context, tc *domain
 		a.Outcome, a.Reason = string(accesscontrol.OutcomeInconclusive), "encode "+f.Name+" into the profile update: "+truncate(err.Error(), 200)
 		return a
 	}
+
+	a = e.roleFieldWrite(ctx, tc, req, profile, before, f)
+	if ep.Source != domain.SourceForm || !strings.Contains(strings.ToLower(req.ContentType), "application/x-www-form-urlencoded") || a.Outcome == string(accesscontrol.OutcomeConfirmed) || a.Status == 0 || ctx.Err() != nil {
+		return a
+	}
+	vals, err := url.ParseQuery(string(req.Body))
+	if err != nil {
+		a.Reason += "; JSON fallback could not encode the observed form body"
+		return a
+	}
+	body := make(map[string]json.RawMessage, len(vals))
+	for name, values := range vals {
+		raw, _ := json.Marshal(values[0])
+		body[name] = raw
+	}
+	raw, err := f.RawValue()
+	if err != nil {
+		a.Reason += "; JSON fallback could not encode the role value"
+		return a
+	}
+	body[f.Name] = raw
+	req.Body, err = json.Marshal(body)
+	if err != nil {
+		a.Reason += "; JSON fallback could not encode the role value"
+		return a
+	}
+	if !e.budget.takeWrite() {
+		a.Reason += "; JSON fallback skipped: the scan-wide profile-update write budget was exhausted"
+		return a
+	}
+	req.ContentType = "application/json"
+	retry := e.roleFieldWrite(ctx, tc, req, profile, before, f)
+	retry.EvidenceIDs = appendUniqueIDs(a.EvidenceIDs, retry.EvidenceIDs)
+	retry.Reason = a.Reason + "; JSON fallback: " + retry.Reason
+	return retry
+}
+
+// roleFieldWrite records one write and applies the shared elevation rule.
+func (e *accessControlExecutor) roleFieldWrite(ctx context.Context, tc *domain.TestCase, req *httpengine.Request,
+	profile *callerProfile, before *accessSurface, f accesscontrol.Field) accessControlAttempt {
+	a := accessControlAttempt{Kind: accessModeRoleField, URL: req.URL, Field: f.Name, FieldValue: f.Value, FieldKind: string(f.Kind), BeforeReach: before.reach, BaselineStatus: before.status}
 
 	resp, outcome, reqErr := e.do(ctx, req)
 	a.Status = statusOf(resp)
