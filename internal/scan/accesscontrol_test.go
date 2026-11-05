@@ -92,9 +92,13 @@ func TestAccessControlConfirmsAnonymousAdminPanel(t *testing.T) {
 	env := newScanEnv(t)
 	var mu sync.Mutex
 	var requests []string
+	var adminCookies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		if r.URL.Path == "/admin" {
+			adminCookies = append(adminCookies, r.Header.Get("Cookie"))
+		}
 		mu.Unlock()
 
 		switch r.URL.Path {
@@ -181,8 +185,13 @@ func TestAccessControlConfirmsAnonymousAdminPanel(t *testing.T) {
 		if row.Kind != domain.EvidenceRequest {
 			continue
 		}
-		if strings.Contains(body, "Cookie:") && strings.Contains(body, "sid=nonadmin") {
+		// The evidence must prove the cookie was sent without persisting the
+		// credential itself: the NAME stays, the value is redacted.
+		if strings.Contains(body, "Cookie:") && strings.Contains(body, "sid=<redacted>") {
 			sawAuthenticated = true
+		}
+		if strings.Contains(body, "sid=nonadmin") {
+			t.Fatalf("raw session cookie value persisted in access-control evidence:\n%s", body)
 		}
 	}
 	if !sawAnonymous {
@@ -190,6 +199,21 @@ func TestAccessControlConfirmsAnonymousAdminPanel(t *testing.T) {
 	}
 	if !sawAuthenticated {
 		t.Fatal("authenticated non-admin request evidence not found")
+	}
+
+	// Redaction happens on the persisted copy only: the target itself must
+	// still have received the session on the comparison request.
+	mu.Lock()
+	seenCookies := append([]string(nil), adminCookies...)
+	mu.Unlock()
+	sawSessionOnWire := false
+	for _, raw := range seenCookies {
+		if strings.Contains(raw, "sid=nonadmin") {
+			sawSessionOnWire = true
+		}
+	}
+	if !sawSessionOnWire {
+		t.Fatalf("the non-admin comparison lost the session cookie; target saw %v", seenCookies)
 	}
 
 	// Read-only by construction.

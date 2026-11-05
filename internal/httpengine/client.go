@@ -292,14 +292,28 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 	// Per-call redirect capture keeps the Client concurrency-safe.
 	var chain []string
 	jar := c.jar
-	if req.NoCookies {
-		jar = nil // genuinely anonymous: nothing from a previous response
+	isolated := req.NoCookies || req.Jarless || req.NoJar
+	if isolated {
+		// Nothing from a previous response is attached, and this response's
+		// Set-Cookie is not stored: the request (NoCookies) or its explicit
+		// Cookies (Jarless/NoJar) is the only cookie state that reaches it.
+		jar = nil
 	}
 	client := &http.Client{
 		Transport: c.transport,
 		Jar:       jar,
 		CheckRedirect: func(r *http.Request, via []*http.Request) error {
 			chain = append(chain, r.URL.String())
+			if isolated {
+				// Fail closed. Go's client copies an explicit Cookie header to
+				// any same-host redirect, which includes a changed port and an
+				// HTTPS->HTTP downgrade: exactly the hops an isolation mode did
+				// not authorise. The mode's cookies were declared for THIS
+				// request; the next hop gets none of them. (The scope-enforcing
+				// engine follows redirects itself and re-derives the cookies it
+				// sends per hop, so this only affects direct Client use.)
+				r.Header.Del("Cookie")
+			}
 			if !c.followRedirects {
 				return http.ErrUseLastResponse
 			}
@@ -380,6 +394,15 @@ func (c *Client) buildRequest(ctx context.Context, req *Request) (*http.Request,
 	}
 	if hr.Header.Get("Content-Type") == "" && req.ContentType != "" {
 		hr.Header.Set("Content-Type", req.ContentType)
+	}
+	// An isolation mode owns the request's ENTIRE cookie state. A raw "Cookie"
+	// header — from Config.DefaultHeaders or Request.Headers — is cookie state
+	// like any other, so it must not survive; otherwise the mode would only be
+	// half isolated (and the raw value would reach the wire unredacted by
+	// whatever the mode's explicit list says). The caller's Request.Cookies are
+	// then the only cookies left, and NoCookies suppresses even those.
+	if req.NoCookies || req.Jarless || req.NoJar {
+		hr.Header.Del("Cookie")
 	}
 	if !req.NoCookies {
 		for _, ck := range req.Cookies {

@@ -37,10 +37,37 @@ type Request struct {
 	Cookies []*http.Cookie    // request-scoped cookies (in addition to any jar)
 	// NoCookies makes this request genuinely anonymous: the configured cookie
 	// jar is bypassed AND Cookies is ignored, so nothing a previous response
-	// stored can authenticate it. Used by differential probes that must
-	// compare an anonymous request with an authenticated one.
+	// stored can authenticate it. A raw "Cookie" header — from the client's
+	// DefaultHeaders or this request's Headers — is dropped as well: cookie
+	// state the caller did not declare through Cookies must not reach the wire
+	// under an isolation mode. Used by differential probes that must compare an
+	// anonymous request with an authenticated one.
 	NoCookies bool
-	Body      []byte // raw request body
+	// Jarless hides the configured cookie jar from this request in BOTH
+	// directions: no cookie stored by an earlier response is attached, and this
+	// response's Set-Cookie is not stored. Unlike NoCookies, Cookies IS still
+	// sent — the caller is supplying the only cookie state that may reach the
+	// request. A raw "Cookie" header (DefaultHeaders or Headers) is dropped, so
+	// the explicit Cookies really are the request's whole cookie state. Used to
+	// replay a cookie one response just issued, without inheriting any ambient
+	// (possibly another scan's) session state.
+	Jarless bool
+	// NoJar hides the configured cookie jar from this request in BOTH
+	// directions — nothing a previous response stored is attached and this
+	// response's Set-Cookie is not stored — while still sending Cookies. The
+	// difference from Jarless is made by the scope-enforcing engine: a NoJar
+	// request still receives the scan's EXPLICIT saved session cookies, because
+	// those are deliberate request state rather than ambient jar content. Used
+	// by a fetch whose Set-Cookie must stay job-local (it is handed to one
+	// follow-up probe as a value) and must never enter a jar that other scans
+	// share.
+	//
+	// All three isolation modes are fail-closed on redirects the Client follows
+	// itself: the mode's cookies are declared for THIS request, so the next hop
+	// (which may be a different port or an HTTPS->HTTP downgrade) carries none
+	// of them.
+	NoJar bool
+	Body  []byte // raw request body
 	// ContentType, when set and no explicit Content-Type header is present, is
 	// used as the request's Content-Type. The POSTForm/POSTJSON constructors set
 	// it for you.

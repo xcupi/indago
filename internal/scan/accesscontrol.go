@@ -45,6 +45,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -375,6 +376,11 @@ var _ worker.Handler = (*accessControlExecutor)(nil)
 // transport errors → retryable; permanent resolution errors → ErrPermanent.
 func (e *accessControlExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	started := time.Now()
+	// Cookie values are credentials. One job-local redactor collects the
+	// values this job's own requests/responses carry, so every piece of
+	// evidence and detail it persists can be sanitised without inventing a
+	// secret. It lives only inside this call.
+	ctx, _ = withCookieRedaction(ctx)
 	tc := &domain.TestCase{
 		ID: domain.NewID(), ScanID: job.ScanID, JobID: job.ID, Attempt: job.Attempts,
 		VulnClass: domain.VulnAccessControl, Status: domain.TestCaseRunning, URL: job.Target.URL,
@@ -451,7 +457,7 @@ func (e *accessControlExecutor) runPanel(ctx context.Context, job *domain.TestJo
 		return skip("the scan-wide anonymous-probe budget was exhausted")
 	}
 
-	p, outcome, reqErr := e.probePanel(ctx, tc, ep.URL)
+	p, outcome, reqErr := e.probePanel(ctx, tc, ep.URL, nil)
 	if outcome != domain.OutcomeSuccess {
 		return d, outcome, reqErr, false, false
 	}
@@ -508,7 +514,18 @@ func (e *accessControlExecutor) runPageDisclosure(ctx context.Context, job *doma
 		return skip("not an HTML page whose scripts could disclose a path")
 	}
 
-	resp, outcome, reqErr := e.do(ctx, httpengine.GET(pageURL))
+	// The page response is where the anonymous session cookie and the path it
+	// unlocks are disclosed together, so its Set-Cookie is job-local state:
+	// it is handed to the immediately related panel probe as a value
+	// (continuityCookies) and nowhere else. The fetch therefore must not read
+	// or write the HTTP client's jar — that jar is shared by every scoped
+	// engine in the process, so a stored cookie here would be visible to
+	// unrelated requests and to other scans. NoJar hides the jar in both
+	// directions while still attaching the scan's explicit saved session
+	// cookies, so an authenticated page stays fetchable.
+	pageReq := httpengine.GET(pageURL)
+	pageReq.NoJar = true
+	resp, outcome, reqErr := e.do(ctx, pageReq)
 	if outcome != domain.OutcomeSuccess {
 		return d, outcome, reqErr, false, false
 	}
@@ -547,7 +564,8 @@ func (e *accessControlExecutor) runPageDisclosure(ctx context.Context, job *doma
 		// literal the finding's provenance names.
 		if e.evidence != nil {
 			if _, evErr := putEvidenceBlob(ctx, e.store, e.evidence, tc.ScanID, domain.EvidenceOther,
-				".js", "text/javascript", body, "access-control disclosing script "+scriptURL); evErr != nil {
+				".js", "text/javascript", cookieRedactorFrom(ctx).redactBytes(body),
+				cookieRedactorFrom(ctx).redact("access-control disclosing script "+scriptURL)); evErr != nil {
 				tc.Note = strings.TrimSpace(tc.Note + " | script evidence incomplete: " + truncate(evErr.Error(), 200))
 			}
 		}
@@ -579,7 +597,13 @@ func (e *accessControlExecutor) runPageDisclosure(ctx context.Context, job *doma
 			break
 		}
 
-		p, outcome, reqErr := e.probePanel(ctx, tc, probeURL)
+		// The disclosed path may only be reachable with the anonymous cookie
+		// THIS page response minted (an "unpredictable" path bound to the
+		// session that disclosed it). Carry exactly that cookie set — nothing
+		// ambient — into the probe; it is derived per probe URL, so a path that
+		// resolves off this origin can never receive it.
+		carry := continuityCookies(resp.FinalURL, resp.Headers, probeURL)
+		p, outcome, reqErr := e.probePanel(ctx, tc, probeURL, carry)
 		if outcome != domain.OutcomeSuccess {
 			if outcome == domain.OutcomeCancelled && ctx.Err() != nil {
 				return d, outcome, reqErr, false, false
@@ -665,12 +689,24 @@ type panelProbe struct {
 // applies the pure decision. A Confirmed decision whose evidence could not be
 // stored is downgraded: never ship a finding that is not reproducible from the
 // bytes the scan kept.
-func (e *accessControlExecutor) probePanel(ctx context.Context, tc *domain.TestCase, rawURL string) (*panelProbe, domain.TestOutcome, error) {
+//
+// carry, when non-empty, is the ephemeral cookie set an immediately preceding
+// disclosure response issued for this exact origin and path (see
+// continuityCookies). It makes the anonymous request "jarless": the browser's
+// own behaviour after receiving that response, with no stored jar, no other
+// scan's state and — critically — no part of the scan's authenticated session.
+func (e *accessControlExecutor) probePanel(ctx context.Context, tc *domain.TestCase, rawURL string, carry []*http.Cookie) (*panelProbe, domain.TestOutcome, error) {
 	// Request 1: genuinely anonymous. NoCookies suppresses both the scan's
 	// saved session cookies and the HTTP client's jar, which may hold cookies
-	// set by an earlier response.
+	// set by an earlier response. When carry is set, the ONLY cookie state the
+	// request may see is the one the disclosure response just issued.
 	anonReq := httpengine.GET(rawURL)
-	anonReq.NoCookies = true
+	if len(carry) > 0 {
+		anonReq.Jarless = true
+		anonReq.Cookies = carry
+	} else {
+		anonReq.NoCookies = true
+	}
 	anonResp, outcome, reqErr := e.do(ctx, anonReq)
 	if outcome != domain.OutcomeSuccess {
 		return nil, outcome, reqErr
@@ -690,9 +726,17 @@ func (e *accessControlExecutor) probePanel(ctx context.Context, tc *domain.TestC
 	// Request 2: the same path as the scan's authenticated (non-admin)
 	// session. It is only useful when the anonymous response itself could be
 	// a finding; a rejected anonymous response needs no comparison.
+	//
+	// The comparison carries the scan's EXPLICIT saved session (scopedEngine
+	// attaches it) and nothing else: NoJar hides the process-wide jar in both
+	// directions, so an ambient cookie some earlier request or other scan
+	// stored can neither authenticate this comparison nor let the comparison's
+	// own Set-Cookie escape into that jar.
 	var nonAdmin *accesscontrol.Snapshot
 	if e.hasSession && anonResp.Status >= 200 && anonResp.Status < 300 && len(anonObs.Actions) > 0 {
-		authResp, authOutcome, _, _ := e.send(ctx, httpengine.GET(rawURL))
+		compareReq := httpengine.GET(rawURL)
+		compareReq.NoJar = true
+		authResp, authOutcome, _, _ := e.send(ctx, compareReq)
 		if authOutcome == domain.OutcomeSuccess && authResp != nil {
 			p.compared, p.nonAdminStatus = true, authResp.Status
 			if ids, evErr := e.persistPair(ctx, tc, authResp, "access control non-admin session"); evErr != nil {
@@ -725,7 +769,12 @@ func (e *accessControlExecutor) probePanel(ctx context.Context, tc *domain.TestC
 // fetchDisclosingScript reads one same-origin external script. Every refusal is
 // recorded in the detail: "not read" is never reported as "contains no path".
 func (e *accessControlExecutor) fetchDisclosingScript(ctx context.Context, tc *domain.TestCase, scriptURL string, d *accessControlDetail) ([]byte, bool) {
-	resp, outcome, err, _ := e.send(ctx, httpengine.GET(scriptURL))
+	// Same isolation as the disclosure page fetch: a script response's
+	// Set-Cookie is not continuity evidence and has no reason to enter the
+	// shared jar, where unrelated requests (and other scans) would see it.
+	scriptReq := httpengine.GET(scriptURL)
+	scriptReq.NoJar = true
+	resp, outcome, err, _ := e.send(ctx, scriptReq)
 	if outcome != domain.OutcomeSuccess {
 		d.SkippedScripts = append(d.SkippedScripts, accesscontrol.Skip{URL: scriptURL, Reason: "fetch failed: " + truncate(errText(err), 120)})
 		return nil, false
@@ -734,6 +783,10 @@ func (e *accessControlExecutor) fetchDisclosingScript(ctx context.Context, tc *d
 		d.SkippedScripts = append(d.SkippedScripts, accesscontrol.Skip{URL: scriptURL, Reason: fmt.Sprintf("fetch returned HTTP %d", resp.Status)})
 		return nil, false
 	}
+	// The script response is not persisted as a request/response pair, but its
+	// own Set-Cookie values are still credentials: record them so the body blob
+	// below is sanitised if the script echoes them.
+	cookieRedactorFrom(ctx).observe(resp)
 	if resp.Truncated || len(resp.Body) > maxAccessControlScriptBytes {
 		d.SkippedScripts = append(d.SkippedScripts, accesscontrol.Skip{URL: scriptURL, Reason: "exceeds the per-file size cap"})
 		return nil, false
@@ -779,20 +832,27 @@ func (e *accessControlExecutor) finish(ctx context.Context, tc *domain.TestCase,
 	if d.Engine == "" {
 		d.Engine = accessControlEngine
 	}
-	tc.Detail = encodeAccessControlDetail(d)
+	// The detail is derived from response bytes (an action's target, a
+	// disclosed path), so a target that echoes a cookie value into its HTML can
+	// push that value here. Detail is persisted through this one function;
+	// rewriting the serialised record keeps every derived field covered without
+	// touching the decision that produced it.
+	red := cookieRedactorFrom(ctx)
+	tc.Detail = red.redactJSON(encodeAccessControlDetail(d))
 	switch {
 	case skipped:
 		tc.Status = domain.TestCaseSkipped
-		tc.Note = "access control skipped: " + d.SkipReason
+		tc.Note = red.redact("access control skipped: " + d.SkipReason)
 	case outcome == domain.OutcomeSuccess:
 		tc.Status = domain.TestCaseCompleted
 		tc.Outcome = outcome
 		if d.Verdict == "" {
 			d.Verdict = domain.VerdictInconclusive
 			d.Reason = "no access-control decision was produced"
-			tc.Detail = encodeAccessControlDetail(d)
+			tc.Detail = red.redactJSON(encodeAccessControlDetail(d))
 		}
 		tc.Note = fmt.Sprintf("access control: %s (%s)", d.Verdict, truncate(d.Reason, 300))
+		tc.Note = red.redact(tc.Note)
 	default:
 		tc.Outcome = outcome
 		tc.Status = domain.TestCaseFailed
@@ -800,7 +860,7 @@ func (e *accessControlExecutor) finish(ctx context.Context, tc *domain.TestCase,
 			tc.Status = domain.TestCaseCancelled
 		}
 		if runErr != nil {
-			tc.Error = truncate(runErr.Error(), 1024)
+			tc.Error = red.redact(truncate(runErr.Error(), 1024))
 		}
 	}
 	if err := e.store.TestCases().Update(ctx, tc); err != nil {
@@ -849,13 +909,34 @@ func (e *accessControlExecutor) do(ctx context.Context, req *httpengine.Request)
 }
 
 // persistPair stores the request and response of one probe as evidence.
+//
+// Cookie values are credentials and are ALWAYS redacted here, on both sides:
+// every Set-Cookie value, and the value of every cookie in the request's
+// replayed Cookie header. The access-control decision never depends on the
+// value (a fresh disclosure re-issues its own), so storing it would add
+// nothing but a leaked credential to the evidence store, reports or exported
+// detail. Cookie NAMES, paths, domains, flags and expiry are kept, so the pair
+// still documents exactly what was sent and what scope the response set.
 func (e *accessControlExecutor) persistPair(ctx context.Context, tc *domain.TestCase, resp *httpengine.Response, role string) ([]domain.ID, error) {
 	var ids []domain.ID
 	if e.evidence == nil || resp == nil || resp.Request == nil {
 		return ids, nil
 	}
+
+	// The pair's own cookie values are what this job has just seen; recording
+	// them lets every blob this job stores — this one included — rewrite the
+	// same values if a target reflects them into a body.
+	red := cookieRedactorFrom(ctx)
+	red.observe(resp)
+
+	captured := *resp.Request
+	captured.Headers = resp.Request.Headers.Clone()
+	reqNote := "test_case=" + string(tc.ID) + " " + role + " request"
+	if redactRequestCookieValues(captured.Headers) {
+		reqNote += " (cookie values redacted)"
+	}
 	id, err := putEvidenceBlob(ctx, e.store, e.evidence, tc.ScanID, domain.EvidenceRequest, ".http", "message/http",
-		dumpRequest(resp.Request), "test_case="+string(tc.ID)+" "+role+" request")
+		red.redactBytes(dumpRequest(&captured)), reqNote)
 	if err != nil {
 		return ids, err
 	}
@@ -864,13 +945,68 @@ func (e *accessControlExecutor) persistPair(ctx context.Context, tc *domain.Test
 	if resp.Truncated {
 		note += " (body truncated at the engine's size cap)"
 	}
+	recorded := *resp
+	recorded.Headers = resp.Headers.Clone()
+	if redactSetCookieValues(recorded.Headers) {
+		note += " (Set-Cookie values redacted)"
+	}
 	id, err = putEvidenceBlob(ctx, e.store, e.evidence, tc.ScanID, domain.EvidenceResponse, ".http", "message/http",
-		dumpResponse(resp), note)
+		red.redactBytes(dumpResponse(&recorded)), note)
 	if err != nil {
 		return ids, err
 	}
 	ids = append(ids, id)
 	return ids, nil
+}
+
+// redactRequestCookieValues blanks the value of every cookie in each Cookie
+// header line, keeping the names: the pair still shows that (and which) cookies
+// were sent, without persisting the credential itself. Reports true when at
+// least one cookie value was rewritten.
+func redactRequestCookieValues(h http.Header) bool {
+	lines := h.Values("Cookie")
+	if len(lines) == 0 {
+		return false
+	}
+	h.Del("Cookie")
+	redacted := false
+	for _, line := range lines {
+		parts := strings.Split(line, ";")
+		for i, part := range parts {
+			name, _, ok := strings.Cut(strings.TrimSpace(part), "=")
+			if !ok || name == "" {
+				continue
+			}
+			parts[i] = " " + name + "=<redacted>"
+			redacted = true
+		}
+		h.Add("Cookie", strings.TrimSpace(strings.Join(parts, ";")))
+	}
+	return redacted
+}
+
+// redactSetCookieValues blanks every Set-Cookie value in place, keeping the
+// cookie name and its attributes (Domain, Path, Secure, HttpOnly, SameSite,
+// expiry). Reports true when at least one header was rewritten.
+func redactSetCookieValues(h http.Header) bool {
+	lines := h.Values("Set-Cookie")
+	if len(lines) == 0 {
+		return false
+	}
+	h.Del("Set-Cookie")
+	for _, line := range lines {
+		name, rest, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(name) == "" {
+			h.Add("Set-Cookie", "<redacted>")
+			continue
+		}
+		attrs := ""
+		if i := strings.IndexByte(rest, ';'); i >= 0 {
+			attrs = rest[i:]
+		}
+		h.Add("Set-Cookie", strings.TrimSpace(name)+"=<redacted>"+attrs)
+	}
+	return true
 }
 
 // accessControlFinding is one confirmed result handed to correlation.
@@ -893,6 +1029,14 @@ type accessControlFinding struct {
 func (e *accessControlExecutor) correlate(ctx context.Context, scanID domain.ID, draft accessControlFinding, tcID domain.ID) {
 	e.findingsMu.Lock()
 	defer e.findingsMu.Unlock()
+
+	// The finding copies fields that were derived from response bytes (an
+	// action target, a reason quoted from the decision). Redact the persisted
+	// copy with the same job-local redactor the evidence used, so the finding
+	// never becomes a second place a reflected cookie value survives.
+	red := cookieRedactorFrom(ctx)
+	draft.Title = red.redact(draft.Title)
+	draft.Summary = red.redact(draft.Summary)
 
 	draft.Detail.DedupKey = draft.Key
 	draft.Detail.Engine = accessControlEngine
@@ -944,7 +1088,7 @@ func (e *accessControlExecutor) correlate(ctx context.Context, scanID domain.ID,
 		if draft.Detail.BeforeReach != "" {
 			prev.BeforeReach, prev.AfterReach = draft.Detail.BeforeReach, draft.Detail.AfterReach
 		}
-		f.Detail = encodeAccessControlFindingDetail(prev)
+		f.Detail = red.redactJSON(encodeAccessControlFindingDetail(prev))
 		f.Verdict = domain.VerdictConfirmed
 		f.Summary = draft.Summary
 		f.EvidenceIDs = appendUniqueIDs(f.EvidenceIDs, draft.Evidence)
@@ -969,7 +1113,7 @@ func (e *accessControlExecutor) correlate(ctx context.Context, scanID domain.ID,
 		EndpointID:  draft.EndpointID,
 		EvidenceIDs: appendUniqueIDs(nil, draft.Evidence),
 		Provenance:  domain.Provenance{Engine: accessControlEngine, DiscoverySource: draft.DiscoverySource, DetectedAt: now, AIAssisted: false},
-		Detail:      encodeAccessControlFindingDetail(draft.Detail),
+		Detail:      red.redactJSON(encodeAccessControlFindingDetail(draft.Detail)),
 		CreatedAt:   now, UpdatedAt: now,
 	}
 	if err := e.store.Findings().Create(ctx, f); err != nil {
