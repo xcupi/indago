@@ -87,10 +87,61 @@ func vocabularyFlags() []Flag {
 	}
 }
 
+// counterpartValues returns the bounded admin-like counterparts of a value the
+// target itself already used. This is what makes the differential portable to
+// real applications: instead of assuming how an application spells its
+// negative (false? 0? no? off? guest? disabled?), the engine flips the literal
+// it actually observed. At most two values are returned — the flipped literal
+// and, when the observed literal is capitalized, its capitalized form first,
+// because case-sensitive comparisons are common.
+//
+// A literal that is already admin-like, or is not a recognised negative,
+// yields nothing: an unknown value must never turn into a guess.
+func counterpartValues(observed string) []string {
+	raw := strings.TrimSpace(observed)
+	if raw == "" {
+		return nil
+	}
+	low := strings.ToLower(raw)
+	var flipped string
+	switch low {
+	case "false":
+		flipped = "true"
+	case "0":
+		flipped = "1"
+	case "no":
+		flipped = "yes"
+	case "off":
+		flipped = "on"
+	case "disabled", "inactive":
+		flipped = "enabled"
+	case "unverified":
+		flipped = "verified"
+	case "guest", "user", "member", "basic", "standard", "customer", "free",
+		"trial", "none", "anonymous", "public":
+		flipped = "admin"
+	default:
+		return nil
+	}
+	if AdminLikeValue(flipped) && AdminLikeValue(low) {
+		return nil
+	}
+	out := make([]string, 0, 2)
+	if first := raw[0]; first >= 'A' && first <= 'Z' {
+		out = append(out, strings.ToUpper(flipped[:1])+flipped[1:])
+	}
+	out = append(out, flipped)
+	return out
+}
+
 // DeriveFlags merges the flags the scan actually observed with the bounded
 // vocabulary fallback. Discovered flags come first (they are grounded in a
 // request the target itself accepted), duplicates are dropped
 // case-insensitively, and the result is capped at MaxFlags.
+//
+// For an observed flag the probe value follows the observed literal first
+// (false->true, 0->1, guest->admin, …) and only then the name-based guess, so a
+// target whose negative spelling is unusual is still covered.
 func DeriveFlags(observed []Observed) []Flag {
 	out := make([]Flag, 0, MaxFlags)
 	seen := map[string]bool{}
@@ -109,6 +160,9 @@ func DeriveFlags(observed []Observed) []Flag {
 	for _, o := range observed {
 		if !RoleName(o.Name) {
 			continue
+		}
+		for _, v := range counterpartValues(o.Value) {
+			add(Flag{Name: o.Name, Location: o.Location, Value: v, Source: "discovered"})
 		}
 		for _, v := range RoleValues(o.Name) {
 			add(Flag{Name: o.Name, Location: o.Location, Value: v, Source: "discovered"})

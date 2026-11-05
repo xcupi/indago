@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -140,7 +141,9 @@ func (e *accessControlExecutor) runRoleFlag(ctx context.Context, job *domain.Tes
 	}
 
 	targets := accessControlPrivilegedTargets(origin, endpoints, []string{"/admin"})
-	flags := accesscontrol.DeriveFlags(observedAccessFlags(origin, targets, endpoints, params))
+	observed := observedAccessFlags(origin, targets, endpoints, params)
+	observed = append(observed, e.observedOriginCookieFlags(ctx, origin, endpoints)...)
+	flags := accesscontrol.DeriveFlags(observed)
 	if len(flags) == 0 {
 		return skip("no client-controlled authorization flag could be derived for this origin")
 	}
@@ -307,7 +310,15 @@ func buildAccessFlagRequest(privilegedURL string, f accesscontrol.Flag) (*httpen
 		// Appended as an override only: scopedEngine keeps every other session
 		// cookie and lets this one win over a same-named stored cookie for THIS
 		// origin. It is not carried to a different origin on a redirect.
+		//
+		// NoJar removes the ambient jar from this probe in both directions. A
+		// target that already handed the scan its negative value (is_staff=no)
+		// would otherwise have that value stored in the jar and re-sent
+		// alongside the override; servers disagree on which duplicate wins, so
+		// the differential must send the flag exactly once. The scan's explicit
+		// saved session cookies still go — they are deliberate request state.
 		req.Cookies = []*http.Cookie{{Name: f.Name, Value: f.Value}}
+		req.NoJar = true
 	default:
 		return nil, fmt.Errorf("unsupported flag location %q", f.Location)
 	}
@@ -315,6 +326,120 @@ func buildAccessFlagRequest(privilegedURL string, f accesscontrol.Flag) (*httpen
 		return nil, fmt.Errorf("refusing to set %s on a different origin (%s)", f.Describe(), req.URL)
 	}
 	return req, nil
+}
+
+// maxLearnedOriginCookies bounds how many target-issued cookies one origin may
+// contribute to the flag differential.
+const maxLearnedOriginCookies = 8
+
+// sessionCookieName mirrors discovery's session-cookie heuristic: a name that
+// looks like the scan's own authentication or CSRF cookie is never treated as a
+// client-controlled authorization flag, because flipping it would break the
+// session instead of testing an authorization decision.
+var sessionCookieName = regexp.MustCompile(`(?i)sess|sid|auth|token|jwt|csrf|xsrf`)
+
+// learnableFlagCookie reports whether a target-issued cookie may be used as an
+// authorization-flag candidate. An explicit authorization NAME wins over the
+// session heuristic: `auth_level` matches the "auth" pattern but is exactly the
+// kind of flag this engine exists to flip, while a real session cookie
+// (`session`, PHPSESSID, connect.sid, csrf_token, jwt) is never a role name.
+func learnableFlagCookie(name string) bool {
+	n := strings.TrimSpace(name)
+	if n == "" {
+		return false
+	}
+	if accesscontrol.RoleName(n) {
+		return true
+	}
+	return !sessionCookieName.MatchString(n)
+}
+
+// learningRequest builds the cookie-learning GET. NoJar keeps the request
+// job-local: the scan's explicit saved session cookies are still sent (an
+// application may only issue its flag once authenticated), but nothing the
+// response sets is stored in the ambient jar — otherwise the very flag we are
+// about to flip would be pinned in the jar at its negative value and the
+// override probe would keep sending "no".
+func learningRequest(rawURL string) *httpengine.Request {
+	req := httpengine.GET(rawURL)
+	req.NoJar = true
+	return req
+}
+
+// observedOriginCookieFlags asks the target itself which client-controlled
+// cookies it issues. Discovery only registers the OPERATOR's session cookies,
+// so an application that hands out its own authorization flag in a Set-Cookie
+// (the common real-world shape: Admin=false, is_staff=no, access=basic) would
+// otherwise never be flipped — the engine would fall back to guessing names.
+//
+// It asks the pages discovery already knows first (bounded to two non-privileged
+// navigable endpoints, because that is where an application normally issues its
+// flag), then the origin root. Every request goes through the same
+// scope-enforcing, paced engine as everything else and is counted against the
+// same flag budget. Nothing is persisted as evidence here: the value only
+// becomes evidence if a later probe actually escalates, and that probe stores
+// its own redacted request/response pair.
+func (e *accessControlExecutor) observedOriginCookieFlags(ctx context.Context, origin string, endpoints []*domain.Endpoint) []accesscontrol.Observed {
+	if origin == "" {
+		return nil
+	}
+	var candidates []string
+	seenURL := map[string]bool{}
+	for _, ep := range endpoints {
+		if ep == nil || !sameOriginURL(origin, ep.URL) || !isNavigationMethod(ep.Method) {
+			continue
+		}
+		u, err := url.Parse(ep.URL)
+		if err != nil || accesscontrol.PrivilegedPath(u.Path) {
+			// The privileged surface itself is probed by the differential; its
+			// 401 is not where an application volunteers its own flag.
+			continue
+		}
+		if seenURL[ep.URL] {
+			continue
+		}
+		seenURL[ep.URL] = true
+		candidates = append(candidates, ep.URL)
+		if len(candidates) >= 2 {
+			break
+		}
+	}
+	if !seenURL[origin+"/"] {
+		candidates = append(candidates, origin+"/")
+	}
+
+	var out []accesscontrol.Observed
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		if ctx.Err() != nil || !e.budget.takeFlag() {
+			break
+		}
+		resp, outcome, _ := e.do(ctx, learningRequest(candidate))
+		if outcome != domain.OutcomeSuccess || resp == nil {
+			continue
+		}
+		for _, ck := range (&http.Response{Header: resp.Headers}).Cookies() {
+			name := strings.TrimSpace(ck.Name)
+			if !learnableFlagCookie(name) {
+				continue
+			}
+			key := strings.ToLower(name)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, accesscontrol.Observed{Name: name, Location: accesscontrol.LocationCookie, Value: ck.Value})
+			if len(out) >= maxLearnedOriginCookies {
+				return out
+			}
+		}
+		if len(out) > 0 {
+			// The application already told us the flags it owns; further page
+			// fetches would only spend budget.
+			break
+		}
+	}
+	return out
 }
 
 // observedAccessFlags collects the client-controlled authorization flags the
