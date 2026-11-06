@@ -65,12 +65,17 @@ func (m RawQueryMode) Enabled() bool { return m == RawQueryAuto || m == RawQuery
 const (
 	// MaxRawQueryShapesPerEndpoint is the fixed number of probe shapes sent at
 	// one endpoint — one reflection request per shape, never more:
-	//   bare:  /?<payload>
-	//   named: /?x=<payload>
-	// The shapes are deliberately the two smallest forms that cover both
-	// "no parameter syntax at all" and "one parameter whose value is unserialized
-	// blob" echo styles.
-	MaxRawQueryShapesPerEndpoint = 2
+	//   bare:   /?<payload>
+	//   named:  /?x=<payload>
+	//   append: /?<existing query>&<payload>
+	// The first two cover "no parameter syntax at all" and "one
+	// parameter-looking name whose value is an unserialized blob". The third
+	// exists because many endpoints REQUIRE one of their own parameters before
+	// they reflect anything (measured: a post page 400s without postId), and
+	// replacing the whole query — what bare and named do — can never reach
+	// those. It is only sent when the endpoint actually has query parameters,
+	// so it never duplicates the bare shape.
+	MaxRawQueryShapesPerEndpoint = 3
 
 	// MaxRawQueryProbesPerScan caps how many raw-query injection points one
 	// scan may register. At 2 shapes per endpoint this covers at most 20
@@ -87,20 +92,26 @@ const (
 // parentheses names the request SHAPE, which is what distinguishes the two
 // injection points of one endpoint.
 const (
-	RawQueryBareName  = "(raw query)"
-	RawQueryNamedName = "x=(raw query)"
+	RawQueryBareName   = "(raw query)"
+	RawQueryNamedName  = "x=(raw query)"
+	RawQueryAppendName = "existing&(raw query)"
 )
 
 // rawQueryShape is one fixed probe shape.
 type rawQueryShape struct {
 	name   string
 	prefix string // literal query prefix before the encoded payload
-	why    string
+	// afterExisting appends the payload to the endpoint's own query string
+	// instead of replacing it, and is only registered when that query is
+	// non-empty (otherwise it would be the bare shape again).
+	afterExisting bool
+	why           string
 }
 
 var rawQueryShapes = []rawQueryShape{
 	{name: RawQueryBareName, prefix: "", why: "/?<payload>: the payload replaces the whole query string"},
 	{name: RawQueryNamedName, prefix: "x=", why: "/?x=<payload>: one parameter-looking name whose value is the payload"},
+	{name: RawQueryAppendName, afterExisting: true, why: "/?<existing>&<payload>: the payload is appended to the endpoint's own query, which is required when the page needs one of its parameters before it reflects anything"},
 }
 
 // RawQueryShapeNames returns the reserved pseudo-parameter names, in the fixed
@@ -125,6 +136,18 @@ func RawQueryPrefix(name string) (prefix string, ok bool) {
 	return "", false
 }
 
+// RawQueryAppendsToExisting reports whether name is the append shape, i.e. the
+// payload must be appended to the endpoint's own query string rather than
+// replacing it.
+func RawQueryAppendsToExisting(name string) bool {
+	for _, s := range rawQueryShapes {
+		if s.name == name {
+			return s.afterExisting
+		}
+	}
+	return false
+}
+
 // RawQueryQueryString builds the request query string for one raw-query
 // injection: the shape's literal prefix followed by the URL-encoded payload.
 // Encoding is exactly what a named parameter value gets (url.QueryEscape), so
@@ -132,10 +155,18 @@ func RawQueryPrefix(name string) (prefix string, ok bool) {
 // query string sees the same bytes it would see for "?name=<payload>".
 //
 // A name that is not reserved is reported as not a raw-query parameter.
-func RawQueryQueryString(name, payload string) (string, bool) {
+func RawQueryQueryString(name, payload, existingQuery string) (string, bool) {
 	prefix, ok := RawQueryPrefix(name)
 	if !ok {
 		return "", false
+	}
+	if RawQueryAppendsToExisting(name) {
+		if existingQuery == "" {
+			// Without an existing query this shape is the bare one; sending it
+			// twice would be a duplicate request.
+			return "", false
+		}
+		return existingQuery + "&" + url.QueryEscape(payload), true
 	}
 	return prefix + url.QueryEscape(payload), true
 }
@@ -170,6 +201,9 @@ func (c *Collector) registerRawQueryInjectionPoints(ctx context.Context, endpoin
 		return
 	}
 	for _, shape := range rawQueryShapes {
+		if shape.afterExisting && len(info.ParamNames) == 0 {
+			continue
+		}
 		c.mu.Lock()
 		if c.rawQueryProbes >= MaxRawQueryProbesPerScan {
 			c.mu.Unlock()

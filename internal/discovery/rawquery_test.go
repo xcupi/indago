@@ -60,7 +60,7 @@ func TestParseRawQueryMode(t *testing.T) {
 }
 
 func TestRawQueryShapeQueryString(t *testing.T) {
-	bare, ok := discovery.RawQueryQueryString(discovery.RawQueryBareName, `"><svg onload=M>`)
+	bare, ok := discovery.RawQueryQueryString(discovery.RawQueryBareName, `"><svg onload=M>`, "")
 	if !ok {
 		t.Fatal("bare shape not recognised")
 	}
@@ -68,12 +68,23 @@ func TestRawQueryShapeQueryString(t *testing.T) {
 	if bare != wantBare {
 		t.Fatalf("bare query = %q, want %q", bare, wantBare)
 	}
-	named, ok := discovery.RawQueryQueryString(discovery.RawQueryNamedName, `"><svg onload=M>`)
+	named, ok := discovery.RawQueryQueryString(discovery.RawQueryNamedName, `"><svg onload=M>`, "")
 	if !ok || named != "x="+wantBare {
 		t.Fatalf("named query = %q (ok=%v), want %q", named, ok, "x="+wantBare)
 	}
-	if _, ok := discovery.RawQueryQueryString("q", "v"); ok {
+	if _, ok := discovery.RawQueryQueryString("q", "v", ""); ok {
 		t.Fatal("an ordinary parameter name must not be treated as a raw-query shape")
+	}
+	// Append shape: the payload follows the endpoint's own query, which is what
+	// an endpoint that requires one of its parameters needs (measured on lab 12:
+	// "/?<payload>" and "/?x=<payload>" are both 400, "/?postId=1&<payload>"
+	// reflects).
+	appended, ok := discovery.RawQueryQueryString(discovery.RawQueryAppendName, `<payload>`, "postId=1")
+	if !ok || appended != "postId=1&"+url.QueryEscape(`<payload>`) {
+		t.Fatalf("append query = %q (ok=%v), want %q", appended, ok, "postId=1&"+url.QueryEscape(`<payload>`))
+	}
+	if _, ok := discovery.RawQueryQueryString(discovery.RawQueryAppendName, `<payload>`, ""); ok {
+		t.Fatal("the append shape must not be sent when the endpoint has no query of its own")
 	}
 }
 
@@ -154,8 +165,10 @@ func TestRawQueryInjectionModes(t *testing.T) {
 			t.Fatalf("AddEndpoint: id=%q err=%v", id, err)
 		}
 		got := rawParams(t, st, ctx, id)
-		if len(got) != discovery.MaxRawQueryShapesPerEndpoint {
-			t.Fatalf("auto registered %d raw-query parameter(s); want %d", len(got), discovery.MaxRawQueryShapesPerEndpoint)
+		// An endpoint with no query of its own gets bare + named: the append
+		// shape would be byte-identical to bare there.
+		if len(got) != 2 {
+			t.Fatalf("auto registered %d raw-query parameter(s); want 2", len(got))
 		}
 		for _, p := range got {
 			if p.Location != domain.LocationRawQuery {

@@ -596,7 +596,9 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 			// raw-query parameter is a no-op, which keeps every baseline and
 			// every named-parameter request byte-identical.
 			if injected {
-				if rs, ok := discovery.RawQueryQueryString(p.Name, val); ok {
+				// The endpoint's own query string is the base for the append
+				// shape; captured here, before any override replaces it.
+				if rs, ok := discovery.RawQueryQueryString(p.Name, val, u.RawQuery); ok {
 					rawQuery, hasRawQuery = rs, true
 				}
 			}
