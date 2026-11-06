@@ -110,6 +110,12 @@ type Activation struct {
 // the operator-readable reason. It is pure and deterministic.
 func ClassifyActivation(c detection.Candidate) (ActivationClass, string) {
 	switch c.Trigger {
+	case detection.TriggerJSURL:
+		// The javascript: URL lives in the page's own markup and executes when
+		// the element carrying it is clicked. The click class already prefers
+		// exactly such an element (href starting with javascript: and carrying
+		// the marker), so no handler in the value is needed.
+		return ActivationClick, "the sink is a javascript: URL in the page's own markup: it executes when the element carrying it is clicked, and the browser percent-decodes the URL before evaluating it"
 	case detection.TriggerInteraction:
 		return classifyInteractionValue(c.Value)
 	case detection.TriggerNone:

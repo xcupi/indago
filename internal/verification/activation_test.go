@@ -20,6 +20,12 @@ func TestClassifyActivation(t *testing.T) {
 		reason string // substring the reason must contain
 	}{
 		{
+			name:   "javascript: URL in the page markup is clicked",
+			cand:   detection.Candidate{Trigger: detection.TriggerJSURL, Value: `'},x=x=>{throw/**/onerror=alert,` + m + `},toString=x,window+'',{x:'`},
+			want:   verification.ActivationClick,
+			reason: "javascript: URL",
+		},
+		{
 			name: "load trigger is never activated",
 			cand: detection.Candidate{Trigger: detection.TriggerLoad, Value: "<svg onload=" + m + ">"},
 			want: verification.ActivationNone,
