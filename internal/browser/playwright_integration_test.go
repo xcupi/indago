@@ -429,7 +429,8 @@ func TestIntegrationScopeGateBlocksWebSocketTraffic(t *testing.T) {
 	defer inside.Close()
 	m := newManagerOrSkip(t, browser.DefaultConfig())
 	defer m.Close()
-	if _, err := m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{WaitUntil: browser.WaitLoad}); err != nil {
+	control, err := m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{WaitUntil: browser.WaitLoad})
+	if err != nil {
 		t.Fatalf("render unscoped WebSocket control: %v", err)
 	}
 	// The handshake is asynchronous: it starts after the load event and can
@@ -442,10 +443,16 @@ func TestIntegrationScopeGateBlocksWebSocketTraffic(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	if websocketHits.Load() == 0 {
-		t.Fatal("WebSocket fixture did not reach its loopback server in the unscoped control")
+		// The control has no AllowRequest, so nothing should have been
+		// aborted by the scope gate. When it still never connects, the
+		// render observations are the only way to tell "the browser refused
+		// the handshake" from "something in our own path blocked it", so
+		// report them instead of a bare timeout.
+		t.Fatalf("WebSocket fixture did not reach its loopback server in the unscoped control (blocked=%v console_errors=%v page_errors=%v)",
+			control.Blocked, control.ConsoleErrors, control.PageErrors)
 	}
 	websocketHits.Store(0)
-	_, err := m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{
+	_, err = m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{
 		WaitUntil:    browser.WaitLoad,
 		AllowRequest: func(raw string) bool { return strings.HasPrefix(raw, inside.URL+"/api/") },
 	})
