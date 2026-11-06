@@ -106,6 +106,23 @@ func (r parameterRepo) ListByEndpoint(_ context.Context, eid domain.ID) ([]*doma
 func (r parameterRepo) ListByScan(_ context.Context, sid domain.ID) ([]*domain.Parameter, error) {
 	return r.t.list(func(p *domain.Parameter) bool { return p.ScanID == sid }), nil
 }
+func (r parameterRepo) AppendExamples(_ context.Context, id domain.ID, values []string, max int) error {
+	if len(values) == 0 {
+		return nil
+	}
+	cur, err := r.t.get(id)
+	if err != nil {
+		return err
+	}
+	merged := store.AppendDistinctExamples(cur.Examples, values, max)
+	if len(merged) == len(cur.Examples) {
+		return nil
+	}
+	next := *cur
+	next.Examples = merged
+	return r.t.update(&next)
+}
+
 func (r parameterRepo) Delete(_ context.Context, id domain.ID) error { return r.t.remove(id) }
 
 // --- InjectionPoint ---

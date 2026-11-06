@@ -251,6 +251,27 @@ func testDiscoveryChain(t *testing.T, f Factory) {
 	if len(eps) != 1 || len(pmsByEp) != 1 || len(ips) != 1 {
 		t.Fatalf("discovery chain counts: ep=%d param=%d ip=%d", len(eps), len(pmsByEp), len(ips))
 	}
+
+	// AppendExamples keeps DISTINCT observed values in order and honours the
+	// cap; a duplicate value is a no-op write, not an error.
+	must(t, s.Parameters().AppendExamples(ctx, pm.ID, []string{"a", "b", "a", " "}, 3))
+	got, err := s.Parameters().Get(ctx, pm.ID)
+	must(t, err)
+	if len(got.Examples) != 2 || got.Examples[0] != "a" || got.Examples[1] != "b" {
+		t.Fatalf("examples after first append = %v, want [a b]", got.Examples)
+	}
+	must(t, s.Parameters().AppendExamples(ctx, pm.ID, []string{"c", "d"}, 3))
+	got, err = s.Parameters().Get(ctx, pm.ID)
+	must(t, err)
+	if len(got.Examples) != 3 || got.Examples[2] != "c" {
+		t.Fatalf("examples are capped at 3: %v", got.Examples)
+	}
+	must(t, s.Parameters().AppendExamples(ctx, pm.ID, []string{"a"}, 3))
+	got, err = s.Parameters().Get(ctx, pm.ID)
+	must(t, err)
+	if len(got.Examples) != 3 {
+		t.Fatalf("a duplicate must not grow the list: %v", got.Examples)
+	}
 }
 
 func testJobStates(t *testing.T, f Factory) {

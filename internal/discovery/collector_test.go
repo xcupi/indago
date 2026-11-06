@@ -663,3 +663,66 @@ func TestCollectorHydrateCreatesMissingInjectionPoint(t *testing.T) {
 		}
 	}
 }
+
+// An endpoint that has already been seen still carries NEW parameter values.
+// The endpoint collapses by path + parameter names, so without keeping those
+// values a crawl of /blogs?userId=A, /blogs?userId=B, /blogs?userId=C leaves
+// only one id on record — and an object-identifier differential (IDOR) then has
+// no foreign identifier to propose, even though the crawl saw them.
+func TestCollectorKeepsEveryObservedParameterValue(t *testing.T) {
+	c, st, _, _ := newCollector(t, discovery.DefaultConfig())
+	ctx := context.Background()
+
+	first, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{
+		URL:    "http://example.com/blogs?userId=11111111-1111-1111-1111-111111111111",
+		Method: domain.MethodGET, Source: domain.SourceCrawler,
+	})
+	if err != nil || first == "" {
+		t.Fatalf("first endpoint: id=%q err=%v", first, err)
+	}
+	for _, v := range []string{
+		"22222222-2222-2222-2222-222222222222",
+		"33333333-3333-3333-3333-333333333333",
+		"11111111-1111-1111-1111-111111111111", // duplicate: must not grow
+	} {
+		again, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{
+			URL: "http://example.com/blogs?userId=" + v, Method: domain.MethodGET, Source: domain.SourceCrawler,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if again != first {
+			t.Fatalf("deduplicated endpoint id = %q, want %q", again, first)
+		}
+	}
+
+	params, err := st.Parameters().ListByEndpoint(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Header injection points are registered too; the query parameter is the
+	// one under test here.
+	var query *domain.Parameter
+	for _, p := range params {
+		if p.Location == domain.LocationQuery && p.Name == "userId" {
+			query = p
+		}
+	}
+	if query == nil {
+		t.Fatalf("no userId query parameter among %d parameters", len(params))
+	}
+	got := query.Examples
+	want := []string{
+		"11111111-1111-1111-1111-111111111111",
+		"22222222-2222-2222-2222-222222222222",
+		"33333333-3333-3333-3333-333333333333",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("examples = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("examples = %v, want %v", got, want)
+		}
+	}
+}

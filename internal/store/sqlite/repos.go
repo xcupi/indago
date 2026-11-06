@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"slices"
 
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/store"
@@ -394,21 +395,22 @@ func (r *endpointRepo) Delete(ctx context.Context, id domain.ID) error {
 
 type parameterRepo struct{ db *sql.DB }
 
-const parameterCols = `id, scan_id, endpoint_id, name, location, example, source, created_at`
+const parameterCols = `id, scan_id, endpoint_id, name, location, example, examples, source, created_at`
 
 func (r *parameterRepo) Create(ctx context.Context, p *domain.Parameter) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO parameters (`+parameterCols+`) VALUES (?,?,?,?,?,?,?,?)`,
-		p.ID, p.ScanID, p.EndpointID, p.Name, p.Location, p.Example, p.Source, ts(p.CreatedAt))
+		`INSERT INTO parameters (`+parameterCols+`) VALUES (?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.ScanID, p.EndpointID, p.Name, p.Location, p.Example, encodeStrings(p.Examples), p.Source, ts(p.CreatedAt))
 	return err
 }
 
 func scanParameter(sc scanner) (*domain.Parameter, error) {
 	var p domain.Parameter
-	var created string
-	if err := sc.Scan(&p.ID, &p.ScanID, &p.EndpointID, &p.Name, &p.Location, &p.Example, &p.Source, &created); err != nil {
+	var created, examples string
+	if err := sc.Scan(&p.ID, &p.ScanID, &p.EndpointID, &p.Name, &p.Location, &p.Example, &examples, &p.Source, &created); err != nil {
 		return nil, err
 	}
+	p.Examples = decodeStrings(examples)
 	p.CreatedAt, _ = parseTS(created)
 	return &p, nil
 }
@@ -442,6 +444,23 @@ func (r *parameterRepo) ListByEndpoint(ctx context.Context, endpointID domain.ID
 
 func (r *parameterRepo) ListByScan(ctx context.Context, scanID domain.ID) ([]*domain.Parameter, error) {
 	return r.queryList(ctx, `scan_id=?`, scanID)
+}
+
+// AppendExamples merges observed values into the parameter's capped list.
+func (r *parameterRepo) AppendExamples(ctx context.Context, id domain.ID, values []string, max int) error {
+	if len(values) == 0 {
+		return nil
+	}
+	cur, err := r.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	merged := store.AppendDistinctExamples(cur.Examples, values, max)
+	if slices.Equal(merged, cur.Examples) {
+		return nil
+	}
+	_, err = r.db.ExecContext(ctx, `UPDATE parameters SET examples=? WHERE id=?`, encodeStrings(merged), id)
+	return err
 }
 
 func (r *parameterRepo) Delete(ctx context.Context, id domain.ID) error {

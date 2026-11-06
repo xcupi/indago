@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,12 @@ import (
 // URL, enforces scope (fail closed), deduplicates, persists the survivor, and
 // enqueues a test job — so testing can begin immediately. It is safe for
 // concurrent use by many sources.
+// MaxObservedExamples caps how many distinct values the crawl keeps per
+// parameter. An object-identifier differential only needs a handful of foreign
+// ids, and the cap bounds both the row size and the memory of a crawl that sees
+// a listing page with hundreds of links.
+const MaxObservedExamples = 20
+
 type Collector struct {
 	store         store.Store
 	queue         queue.Queue
@@ -27,7 +34,7 @@ type Collector struct {
 
 	mu            sync.Mutex
 	seenEndpoints map[string]domain.ID // endpoint key → canonical ID
-	seenParams    map[string]struct{}  // param key
+	seenParams    map[string]domain.ID // param key → parameter ID
 	endpointCount int
 	paramCount    int
 	jobCount      int
@@ -56,7 +63,7 @@ func NewCollector(st store.Store, q queue.Queue, scanID domain.ID, scope domain.
 		authenticated: authenticated,
 		cfg:           cfg.withDefaults(),
 		seenEndpoints: make(map[string]domain.ID),
-		seenParams:    make(map[string]struct{}),
+		seenParams:    make(map[string]domain.ID),
 		reconCounts:   make(map[string]int),
 	}
 }
@@ -152,7 +159,7 @@ func (c *Collector) Hydrate(ctx context.Context) error {
 		}
 		key := fp + "#" + string(p.Location) + ":" + p.Name
 		if _, dup := c.seenParams[key]; !dup {
-			c.seenParams[key] = struct{}{}
+			c.seenParams[key] = p.ID
 			c.paramCount++
 		}
 	}
@@ -301,7 +308,13 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 	c.mu.Lock()
 	if id, ok := c.seenEndpoints[key]; ok {
 		c.mu.Unlock()
-		return id, nil // duplicate
+		// Duplicate endpoint: the URL collapses into the first one, but its
+		// parameter VALUES are still new information. Keep them — an
+		// object-identifier differential (IDOR) can only propose a foreign id
+		// it has seen, and other users' ids arrive exactly this way (measured:
+		// /blogs?userId=<other user> on an already-seen path).
+		c.recordObservedValues(ctx, id, method, info)
+		return id, nil
 	}
 	if c.endpointCount >= c.cfg.MaxEndpoints {
 		c.mu.Unlock()
@@ -362,6 +375,43 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 	return id, nil
 }
 
+func firstExample(v string) []string {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	return []string{v}
+}
+
+// recordObservedValues stores the query values a duplicate URL carried, so the
+// crawl keeps every distinct identifier it saw for an already-known endpoint.
+func (c *Collector) recordObservedValues(ctx context.Context, endpointID domain.ID, method domain.HTTPMethod, info URLInfo) {
+	for _, name := range info.ParamNames {
+		v := info.Query.Get(name)
+		if v == "" {
+			continue
+		}
+		pkey := ParamKey(method, info, name, domain.LocationQuery)
+		c.mu.Lock()
+		paramID, ok := c.seenParams[pkey]
+		c.mu.Unlock()
+		if !ok {
+			continue
+		}
+		c.appendParamExample(ctx, paramID, v)
+	}
+}
+
+// appendParamExample records one observed value for a parameter. Failures are
+// logged, never fatal: losing an example costs a candidate, not the scan.
+func (c *Collector) appendParamExample(ctx context.Context, paramID domain.ID, value string) {
+	if paramID.Empty() || value == "" {
+		return
+	}
+	if err := c.store.Parameters().AppendExamples(ctx, paramID, []string{value}, MaxObservedExamples); err != nil {
+		c.log.Debug("discovery: append parameter example", "param", paramID, "err", err)
+	}
+}
+
 // AddParameter implements Sink.
 func (c *Collector) AddParameter(ctx context.Context, p ParamCandidate) error {
 	info, err := Normalize(p.EndpointURL)
@@ -412,11 +462,11 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 	pkey := ParamKey(method, info, name, loc)
 
 	c.mu.Lock()
-	if _, ok := c.seenParams[pkey]; ok {
+	if existing, ok := c.seenParams[pkey]; ok {
 		c.mu.Unlock()
+		c.appendParamExample(ctx, existing, example)
 		return false
 	}
-	c.seenParams[pkey] = struct{}{}
 	c.paramCount++
 	c.mu.Unlock()
 
@@ -428,8 +478,11 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 		Name:       name,
 		Location:   loc,
 		Example:    example,
-		Source:     source,
-		CreatedAt:  now,
+		// Seed the observed-value list with the first value so a later
+		// duplicate is recognised and the list is the complete record.
+		Examples:  firstExample(example),
+		Source:    source,
+		CreatedAt: now,
 	}
 	if err := c.store.Parameters().Create(ctx, param); err != nil {
 		c.mu.Lock()
@@ -439,6 +492,9 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 		c.log.Warn("discovery: persist parameter", "err", err)
 		return false
 	}
+	c.mu.Lock()
+	c.seenParams[pkey] = param.ID
+	c.mu.Unlock()
 
 	if loc == domain.LocationFragment {
 		// DOM-only: no HTTP injection point, so no HTTP engine ever sends it.
