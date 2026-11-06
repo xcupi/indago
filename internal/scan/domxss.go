@@ -2060,7 +2060,10 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	// site correlate into the SAME finding (finding identity is
 	// endpoint/source/sink/selector, never the payload value), so trying an
 	// extra shape never creates a near-duplicate row.
-	for _, shape := range detection.DOMXSSPayloadsFor(source, sink, marker) {
+	shapes := detection.DOMXSSPayloadsFor(source, sink, marker)
+	e.log.Debug("dom-xss: shape plan", "scan", job.ScanID, "source", source, "sink", sink, "selector", selector, "shapes", len(shapes))
+	for _, shape := range shapes {
+		e.log.Debug("dom-xss: trying shape", "scan", job.ScanID, "shape", shape.Shape)
 		cand := domXSSCandidateForSelector(shape, source, selector, paramSource)
 
 		e.findingsMu.Lock()
@@ -2175,6 +2178,11 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 	var verdict domain.Verdict
 	var confidence domain.Confidence
 	var notes string
+	// dialogConfirmed records that the verdict rests on EXECUTION (a dialog
+	// carrying the marker), so the compilation-only caveat below must not be
+	// appended: it would claim "no alert was executed" directly after the
+	// evidence that one was.
+	dialogConfirmed := false
 	if sink == detection.DOMSinkAngularExpression {
 		// The ReferenceError channel cannot decide this sink: Angular resolves
 		// an unknown identifier to undefined, so the marker-specific signal is
@@ -2182,18 +2190,28 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 		// detection.domXSSAngularInterpolation for why that cannot be a
 		// reflection match). A document that refused dynamic evaluation gets
 		// its own outcome instead of being read as a negative.
-		cspViolations := parseDOMXSSCSPViolations(harness2)
-		cspBlocked, violation := domXSSEvalBlockedByCSP(cspViolations)
-		compiled, viaBinding := domXSSAngularResult(harness2, marker)
-		if detection.DOMXSSShapeNeedsParameterName(cand.Shape) {
-			// The parameter-NAME binding never puts the candidate's bytes in a
-			// text node (they sit in the page's own inline script), so the
-			// interpolation shape's "inert text" test would be measuring the
-			// wrong place. Its absence of a result is therefore untested, not
-			// a rejection — see decideDOMXSSAngularParse.
-			verdict, confidence, notes = decideDOMXSSAngularParse(compiled, cspBlocked, violation)
+		// Execution first: a dialog carrying the marker means the candidate's
+		// code RAN, which is strictly stronger than "the expression compiled".
+		// The sandbox-escape shape is built for this, and the marker is random
+		// per scan, so the page cannot fabricate one by echoing text.
+		if msg, ok := verification.MarkerDialog(marker, obs2.Dialogs); ok {
+			dialogConfirmed = true
+			verdict, confidence = domain.VerdictConfirmed, domain.ConfidenceHigh
+			notes = "outcome=sandbox_escape_executed: the candidate's code EXECUTED in the browser — a JavaScript dialog carried this scan's marker, which only running code can produce; evidence: " + msg
 		} else {
-			verdict, confidence, notes = decideDOMXSSAngular(compiled, viaBinding, domXSSAngularInertText(obs2.HTML, cand.Value), cspBlocked, violation)
+			cspViolations := parseDOMXSSCSPViolations(harness2)
+			cspBlocked, violation := domXSSEvalBlockedByCSP(cspViolations)
+			compiled, viaBinding := domXSSAngularResult(harness2, marker)
+			if detection.DOMXSSShapeNeedsParameterName(cand.Shape) {
+				// The parameter-NAME binding never puts the candidate's bytes in a
+				// text node (they sit in the page's own inline script), so the
+				// interpolation shape's "inert text" test would be measuring the
+				// wrong place. Its absence of a result is therefore untested, not
+				// a rejection — see decideDOMXSSAngularParse.
+				verdict, confidence, notes = decideDOMXSSAngularParse(compiled, cspBlocked, violation)
+			} else {
+				verdict, confidence, notes = decideDOMXSSAngular(compiled, viaBinding, domXSSAngularInertText(obs2.HTML, cand.Value), cspBlocked, violation)
+			}
 		}
 	} else {
 		verdict, confidence, notes = verification.DecideWithProvenance(marker, matched, markerInDOM, obs2.Runtime)
@@ -2211,7 +2229,7 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 		}
 		notes += domXSSAttributionNotes(source, sink, observed)
 	}
-	if sink == detection.DOMSinkAngularExpression && verdict == domain.VerdictConfirmed {
+	if sink == detection.DOMSinkAngularExpression && verdict == domain.VerdictConfirmed && !dialogConfirmed {
 		if detection.DOMXSSShapeNeedsParameterName(cand.Shape) {
 			notes += "; confirmation is the $parse evaluation RESULT of the parameter-name expression, not a sandbox escape: no alert, cookie, network request or escape gadget was executed"
 		} else {
@@ -2438,6 +2456,12 @@ type domXSSObservation struct {
 	HTML       string
 	Screenshot []byte
 	Runtime    browser.RuntimeObservations
+	// Dialogs are the page's own alert/confirm/prompt messages. A dialog that
+	// carries the scan marker is the one observation that proves CANDIDATE CODE
+	// RAN: a page cannot raise one by echoing text, and the marker is random per
+	// scan. It is how the AngularJS sandbox-escape shape is confirmed — that
+	// shape exists to EXECUTE code rather than merely compile an expression.
+	Dialogs []string
 	// SettleBusy records that the network-quiet settle hit its hard bound with
 	// requests still in flight. The observation is still taken (bounded, never
 	// unbounded), but a negative must say so: async-driven sinks may simply not
@@ -2474,7 +2498,7 @@ func observePage(ctx context.Context, page *browser.Page, quiet time.Duration) (
 	}
 	html, _ := page.Content(ctx)
 	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
-	return domXSSObservation{Console: page.ConsoleMessages(), PageErrors: page.PageErrors(), HTML: html, Screenshot: shot, Runtime: page.RuntimeObservations(), SettleBusy: !settled}, nil
+	return domXSSObservation{Console: page.ConsoleMessages(), PageErrors: page.PageErrors(), Dialogs: page.DialogMessages(), HTML: html, Screenshot: shot, Runtime: page.RuntimeObservations(), SettleBusy: !settled}, nil
 }
 
 // navigateSource performs ONE phase's navigation for source, injecting

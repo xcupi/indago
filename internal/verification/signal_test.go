@@ -1,6 +1,9 @@
 package verification
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestMatchExecutionSignal(t *testing.T) {
 	const token = "indb2c4d8e6a1f2a3b4"
@@ -122,4 +125,33 @@ func contains(s, sub string) bool {
 		}
 	}
 	return len(sub) == 0
+}
+
+// A dialog carrying the scan marker is the one signal that proves the
+// candidate's code RAN (the AngularJS sandbox-escape shape depends on it): the
+// page cannot raise a dialog by echoing text, and the marker is random per scan.
+func TestMarkerDialog(t *testing.T) {
+	const marker = "inddd525eb0320dca43"
+	cases := []struct {
+		name    string
+		dialogs []string
+		want    bool
+	}{
+		{"empty", nil, false},
+		{"unrelated dialog", []string{"Hello"}, false},
+		{"marker present", []string{"Hello", "alert " + marker}, true},
+		{"marker split across dialogs", []string{"inddd5", "25eb0320dca43"}, false},
+	}
+	for _, c := range cases {
+		msg, ok := MarkerDialog(marker, c.dialogs)
+		if ok != c.want {
+			t.Fatalf("%s: matched=%v, want %v (msg %q)", c.name, ok, c.want, msg)
+		}
+		if ok && !strings.Contains(msg, marker) {
+			t.Fatalf("%s: matched message %q must contain the marker", c.name, msg)
+		}
+	}
+	if _, ok := MarkerDialog("", []string{"anything"}); ok {
+		t.Fatal("an empty marker must never match a dialog")
+	}
 }

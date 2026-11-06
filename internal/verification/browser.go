@@ -270,6 +270,17 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 		}
 	}
 
+	// A dialog raised by the candidate's own code is execution evidence: the
+	// page cannot produce one by echoing text, and the marker makes it
+	// attributable. This is what confirms the AngularJS sandbox-escape shape,
+	// whose whole point is that the expression RUNS rather than merely
+	// compiling.
+	if !matched {
+		if msg, ok := MarkerDialog(token, dialogs); ok {
+			sig, sigText, matched = SignalDialog, msg, true
+		}
+	}
+
 	verdict, confidence, notes := DecideWithProvenance(token, matched, markerInDOM, provenance)
 	if provenanceErr != nil {
 		verdict, confidence = domain.VerdictInconclusive, domain.ConfidenceLow

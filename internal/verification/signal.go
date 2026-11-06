@@ -29,6 +29,14 @@ const (
 	SignalNone         Signal = "none"          // no channel reported the marker as an unresolved identifier
 	SignalPageError    Signal = "page_error"    // an uncaught ReferenceError named the marker as undefined
 	SignalConsoleError Signal = "console_error" // a runtime-shaped console error named the marker as undefined
+	// SignalDialog: the page presented a JavaScript dialog (alert/confirm/
+	// prompt) whose message contains the scan's marker. A dialog exists only if
+	// candidate JavaScript RAN — a page that merely echoes text cannot raise
+	// one — and the marker makes it attributable to this scan's candidate. It is
+	// the only signal that proves execution rather than compilation on a page
+	// whose AngularJS sandbox otherwise swallows expressions (see the
+	// angular_sandbox_escape shape).
+	SignalDialog Signal = "dialog"
 )
 
 // matchExecutionSignal scans pageErrors then consoleErrors (in that priority:
@@ -106,4 +114,19 @@ func domExcerpt(html, token string, window int) string {
 		end = len(html)
 	}
 	return html[start:end]
+}
+
+// MarkerDialog reports the first dialog message that carries the scan marker.
+// The marker is random per scan and never appears in the page's own markup, so a
+// dialog naming it can only come from the candidate's own code running.
+func MarkerDialog(token string, dialogs []string) (string, bool) {
+	if token == "" {
+		return "", false
+	}
+	for _, d := range dialogs {
+		if strings.Contains(d, token) {
+			return d, true
+		}
+	}
+	return "", false
 }

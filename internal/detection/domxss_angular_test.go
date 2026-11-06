@@ -20,21 +20,36 @@ import (
 	"github.com/indago/indago/internal/detection"
 )
 
+// angularShape returns the candidate with the given shape, or fails.
+func angularShape(t *testing.T, cands []detection.Candidate, shape string) detection.Candidate {
+	t.Helper()
+	for _, c := range cands {
+		if c.Shape == shape {
+			return c
+		}
+	}
+	t.Fatalf("no %s candidate among %d: %+v", shape, len(cands), cands)
+	return detection.Candidate{}
+}
+
 func TestDOMXSSAngularInterpolationCandidate(t *testing.T) {
 	const marker = "angularmarker42"
 	for _, source := range detection.DOMXSSSources {
 		shapes := detection.DOMXSSPayloadsFor(source, detection.DOMSinkAngularExpression, marker)
-		// The query source also plans the parameter-NAME shape (below); every
-		// other source has no parameter name to deliver, so it plans exactly
-		// the interpolation.
+		// The query source also plans the two parameter-NAME shapes (below);
+		// every other source has no parameter name to deliver, so it plans
+		// exactly the interpolation.
 		wantShapes := 1
 		if source == detection.DOMSourceQuery {
-			wantShapes = 2
+			wantShapes = 3
 		}
 		if len(shapes) != wantShapes {
 			t.Fatalf("%s: angular_expression must plan %d shape(s), got %d: %+v", source, wantShapes, len(shapes), shapes)
 		}
-		cand := shapes[0]
+		if source == detection.DOMSourceQuery && shapes[0].Shape != "angular_sandbox_escape" {
+			t.Fatalf("%s: the execution shape must be tried before the compilation shapes, got %q first", source, shapes[0].Shape)
+		}
+		cand := angularShape(t, shapes, "angular_interpolation")
 		wantValue := "{{'" + marker[:len(marker)/2] + "' + '" + marker[len(marker)/2:] + "' + ($id ? '' : '')}}"
 		if cand.Value != wantValue {
 			t.Fatalf("%s: want %q, got %q", source, wantValue, cand.Value)
@@ -61,8 +76,14 @@ func TestDOMXSSAngularInterpolationCandidate(t *testing.T) {
 		if !strings.Contains(cand.Rationale, "csp_blocked") {
 			t.Fatalf("%s: rationale must name the distinct CSP outcome, got %q", source, cand.Rationale)
 		}
-		if again := detection.DOMXSSPayloadsFor(source, detection.DOMSinkAngularExpression, marker); len(again) != wantShapes || again[0] != cand {
-			t.Fatalf("%s: planner is not deterministic", source)
+		again := detection.DOMXSSPayloadsFor(source, detection.DOMSinkAngularExpression, marker)
+		if len(again) != wantShapes {
+			t.Fatalf("%s: planner is not deterministic (len %d vs %d)", source, len(again), wantShapes)
+		}
+		for i := range again {
+			if again[i] != shapes[i] {
+				t.Fatalf("%s: planner is not deterministic at %d: %q vs %q", source, i, again[i].Shape, shapes[i].Shape)
+			}
 		}
 	}
 }
@@ -75,13 +96,10 @@ func TestDOMXSSAngularInterpolationCandidate(t *testing.T) {
 func TestDOMXSSAngularParseExpressionShape(t *testing.T) {
 	const marker = "inddd525eb0320dca43"
 	got := detection.DOMXSSPayloadsFor(detection.DOMSourceQuery, detection.DOMSinkAngularExpression, marker)
-	if len(got) != 2 {
-		t.Fatalf("query source must plan the interpolation and the parameter-name shape, got %d: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("query source must plan the interpolation, the parameter-name and the sandbox-escape shapes, got %d: %+v", len(got), got)
 	}
-	cand := got[1]
-	if cand.Shape != "angular_parse_expression" {
-		t.Fatalf("second shape must be the parameter-name expression, got %q", cand.Shape)
-	}
+	cand := angularShape(t, got, "angular_parse_expression")
 	if !detection.DOMXSSShapeNeedsParameterName(cand.Shape) {
 		t.Fatal("the executor must be told this shape needs parameter-name delivery")
 	}
@@ -128,13 +146,15 @@ func TestDOMXSSAngularParseExpressionShape(t *testing.T) {
 		t.Fatal("the two shapes must not share a dedup key")
 	}
 	// A marker the base-36 construction cannot represent must not produce a
-	// dead candidate: the interpolation shape is still planned, alone. (A
-	// marker that is not a valid DOM-XSS marker at all plans nothing, which
-	// the existing rejects-unusable-markers test already pins.)
+	// dead candidate: the interpolation shape is still planned, and so is the
+	// sandbox escape (it carries the marker as character codes, so it is
+	// representable for ANY marker). The parameter-name expression is the one
+	// shape that is dropped. (A marker that is not a valid DOM-XSS marker at all
+	// plans nothing, which the existing rejects-unusable-markers test pins.)
 	for _, m := range []string{"UPPERmarker42", "mark_er42"} {
 		shapes := detection.DOMXSSPayloadsFor(detection.DOMSourceQuery, detection.DOMSinkAngularExpression, m)
-		if len(shapes) != 1 || shapes[0].Shape != "angular_interpolation" {
-			t.Fatalf("marker %q is not representable and must plan only the interpolation, got %+v", m, shapes)
+		if len(shapes) != 2 || shapes[0].Shape != "angular_sandbox_escape" || shapes[1].Shape != "angular_interpolation" {
+			t.Fatalf("marker %q must plan sandbox escape + interpolation only, got %+v", m, shapes)
 		}
 	}
 }
@@ -212,5 +232,49 @@ func TestDOMXSSExistingSinkPlansAreByteIdentical(t *testing.T) {
 				t.Fatalf("%s/%s: existing sink lost its plan", source, sink)
 			}
 		}
+	}
+}
+
+// TestDOMXSSAngularSandboxEscapeShape covers the third, query-only shape: the
+// same parameter-NAME binding, but an expression that ESCAPES the AngularJS
+// sandbox and evaluates code, so execution (not just compilation) can be
+// observed. It must follow the published technique — overwhelm charAt through
+// the String prototype, then build x=alert('<marker>') from character codes —
+// carry the marker only inside those codes, and be delivered as a param NAME.
+func TestDOMXSSAngularSandboxEscapeShape(t *testing.T) {
+	const marker = "inddd525eb0320dca43"
+	got := detection.DOMXSSPayloadsFor(detection.DOMSourceQuery, detection.DOMSinkAngularExpression, marker)
+	cand := angularShape(t, got, "angular_sandbox_escape")
+	if !detection.DOMXSSShapeNeedsParameterName(cand.Shape) {
+		t.Fatal("the executor must be told this shape needs parameter-name delivery")
+	}
+	for _, want := range []string{"constructor.prototype.charAt", "[].join", "|orderBy:", "fromCharCode("} {
+		if !strings.Contains(cand.Value, want) {
+			t.Fatalf("escape shape must contain %q: %q", want, cand.Value)
+		}
+	}
+	// The marker must travel ONLY as character codes: the contiguous marker in
+	// the candidate bytes would let a page that merely echoes the parameter name
+	// fake the dialog check.
+	if strings.Contains(cand.Value, marker) {
+		t.Fatalf("candidate must never contain the contiguous marker: %q", cand.Value)
+	}
+	// Decode the fromCharCode argument list the way JavaScript does and require
+	// the exact alert statement it is supposed to build.
+	body := cand.Value[strings.Index(cand.Value, "fromCharCode(")+len("fromCharCode("):]
+	body = strings.TrimSuffix(body, ")")
+	var built strings.Builder
+	for _, part := range strings.Split(body, ",") {
+		var code int
+		if _, err := fmt.Sscanf(part, "%d", &code); err != nil || code < 32 || code > 126 {
+			t.Fatalf("fromCharCode argument %q is not a printable ASCII code: %v", part, err)
+		}
+		built.WriteByte(byte(code))
+	}
+	if want := "x=alert('" + marker + "')"; built.String() != want {
+		t.Fatalf("escape builds %q, want %q", built.String(), want)
+	}
+	if !strings.Contains(cand.Rationale, "DIALOG") {
+		t.Fatalf("rationale must say the confirmation is a dialog, got %q", cand.Rationale)
 	}
 }
