@@ -201,7 +201,8 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 			Name: name, Location: domain.LocationQuery, Source: domain.SourceScriptLiteral})
 	}
 
-	// Forms.
+	// Forms. ExtractForms promotes handler-derived submit targets to POST,
+	// so their inputs follow the same body-parameter path as declared POST forms.
 	for _, f := range ExtractForms(body) {
 		actionInfo, err := NormalizeRef(pageURL, f.Action)
 		if err != nil || !in.Scope.Permits(actionInfo.Canonical).Allowed {
