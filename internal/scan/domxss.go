@@ -2178,6 +2178,11 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 	var verdict domain.Verdict
 	var confidence domain.Confidence
 	var notes string
+	// dialogConfirmed records that the verdict rests on EXECUTION (a dialog
+	// carrying the marker), so the compilation-only caveat below must not be
+	// appended: it would claim "no alert was executed" directly after the
+	// evidence that one was.
+	dialogConfirmed := false
 	if sink == detection.DOMSinkAngularExpression {
 		// The ReferenceError channel cannot decide this sink: Angular resolves
 		// an unknown identifier to undefined, so the marker-specific signal is
@@ -2190,6 +2195,7 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 		// The sandbox-escape shape is built for this, and the marker is random
 		// per scan, so the page cannot fabricate one by echoing text.
 		if msg, ok := verification.MarkerDialog(marker, obs2.Dialogs); ok {
+			dialogConfirmed = true
 			verdict, confidence = domain.VerdictConfirmed, domain.ConfidenceHigh
 			notes = "outcome=sandbox_escape_executed: the candidate's code EXECUTED in the browser — a JavaScript dialog carried this scan's marker, which only running code can produce; evidence: " + msg
 		} else {
@@ -2223,7 +2229,7 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 		}
 		notes += domXSSAttributionNotes(source, sink, observed)
 	}
-	if sink == detection.DOMSinkAngularExpression && verdict == domain.VerdictConfirmed {
+	if sink == detection.DOMSinkAngularExpression && verdict == domain.VerdictConfirmed && !dialogConfirmed {
 		if detection.DOMXSSShapeNeedsParameterName(cand.Shape) {
 			notes += "; confirmation is the $parse evaluation RESULT of the parameter-name expression, not a sandbox escape: no alert, cookie, network request or escape gadget was executed"
 		} else {
