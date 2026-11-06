@@ -349,9 +349,25 @@ func activationScript(marker string, class ActivationClass, key string) (string,
       out.detail = "the element is not natively focusable, so exactly one synthetic FocusEvent was dispatched on it";
     }
   } else if (target.kind === "click") {
-    el.click();
-    out.method = "element.click()";
-    out.detail = "the marker-carrying element was clicked exactly once through the DOM's own click() activation, which runs its click handler or javascript: URL";
+    // A click on an SVG element has to go through the anchor that owns the
+    // link: SVG elements (animate, text, …) do not implement HTMLElement's
+    // click(), so calling it there throws "el.click is not a function" and the
+    // activation never happens. Measured on lab 11: the marker-carrying
+    // element the resolver picks is the <animate> inside <a>.
+    let clickable = el;
+    if (typeof clickable.click !== "function") {
+      const anchor = el.closest ? el.closest("a") : null;
+      if (anchor) clickable = anchor;
+    }
+    if (typeof clickable.click === "function") {
+      clickable.click();
+      out.method = "element.click()";
+      out.detail = "the marker-carrying element was clicked exactly once through the DOM's own click() activation, which runs its click handler or javascript: URL";
+    } else {
+      clickable.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true, view: window}));
+      out.method = "element.dispatchEvent(new MouseEvent('click'))";
+      out.detail = "the element does not implement click() (SVG), so exactly one bubbling MouseEvent('click') was dispatched on the link that owns it, which runs the anchor's activation behaviour";
+    }
   } else if (target.kind === "animation") {
     el.beginElement();
     out.method = "element.beginElement()";

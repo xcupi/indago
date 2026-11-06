@@ -424,7 +424,15 @@ func TestIntegrationScopeGateBlocksWebSocketTraffic(t *testing.T) {
 
 	inside := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		_, _ = fmt.Fprintf(w, `<!doctype html><script>new WebSocket(%q)</script>`, wsURL)
+		// The console lines are the only way to tell, remotely, whether the
+		// inline script ran at all and what the constructor did. Without them a
+		// hosted-runner failure reads as "no connection" with no evidence
+		// (blocked/console_errors/page_errors all empty).
+		_, _ = fmt.Fprintf(w, `<!doctype html><script>
+console.log("ws-control: script ran");
+try { new WebSocket(%q); console.log("ws-control: constructed"); }
+catch (e) { console.log("ws-control: threw " + e); }
+</script>`, wsURL)
 	}))
 	defer inside.Close()
 	m := newManagerOrSkip(t, browser.DefaultConfig())
@@ -448,8 +456,8 @@ func TestIntegrationScopeGateBlocksWebSocketTraffic(t *testing.T) {
 		// render observations are the only way to tell "the browser refused
 		// the handshake" from "something in our own path blocked it", so
 		// report them instead of a bare timeout.
-		t.Fatalf("WebSocket fixture did not reach its loopback server in the unscoped control (blocked=%v console_errors=%v page_errors=%v)",
-			control.Blocked, control.ConsoleErrors, control.PageErrors)
+		t.Fatalf("WebSocket fixture did not reach its loopback server in the unscoped control (blocked=%v console_errors=%v page_errors=%v console_logs=%v)",
+			control.Blocked, control.ConsoleErrors, control.PageErrors, control.ConsoleLogs)
 	}
 	websocketHits.Store(0)
 	_, err = m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{
