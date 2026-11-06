@@ -100,31 +100,51 @@ func TestPlanJSStringEscapeBreakingShapesAreSingleQuotedOnly(t *testing.T) {
 	}
 }
 
-// The `minimal` profile's skip_neutralized filter cannot see that the backslash
-// break is exactly the shape an HTML-encoded-angles reader needs: the probe
-// canary has no backslash, so the quote reads as merely escaped. This locks the
-// documented consequence (docs/reflection-candidates.md) so an improvement to
-// that heuristic is a deliberate change, not an accident.
-func TestPlanMinimalProfileLimitForBackslashReader(t *testing.T) {
+// The `minimal` profile keeps one candidate per context. For a reader that
+// escapes the quote but leaves backslash alone, the only route that works is
+// the backslash break, so that is the one the single js_string slot must hold —
+// even though the probe cannot prove the backslash arrives raw (the canary has
+// none). It ranks above provably-neutralized shapes and below proven-raw ones,
+// so a reader that also escapes backslash still prefers its raw route.
+func TestPlanMinimalProfileKeepsTheOnlyWorkableRouteForTheReader(t *testing.T) {
 	m := tok()
 	angleQuotes := func(v string) string {
 		v = strings.NewReplacer("<", "&lt;", ">", "&gt;", `"`, "&quot;").Replace(v)
 		return strings.ReplaceAll(v, `'`, `\'`)
 	}
-	rep := planDoc(t, `<script>var searchTerms = '{{M}}';</script>`, candHTML, angleQuotes)
+	quoteAndBackslash := func(v string) string {
+		v = strings.ReplaceAll(v, `\`, `\\`)
+		return strings.ReplaceAll(v, `'`, `\'`)
+	}
 	spec, err := detection.ResolveProfile("minimal", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	selected, dropped := spec.Select(rep.Plan.Candidates)
-	if len(selected) != 1 || selected[0].Value != "';"+m+"//" {
-		var got []string
-		for _, c := range selected {
-			got = append(got, c.Value)
+
+	t.Run("quote-escaping reader keeps the backslash break", func(t *testing.T) {
+		rep := planDoc(t, `<script>var searchTerms = '{{M}}';</script>`, candHTML, angleQuotes)
+		selected, dropped := spec.Select(rep.Plan.Candidates)
+		if len(selected) != 1 || selected[0].Value != `\';`+m+`//` {
+			var got []string
+			for _, c := range selected {
+				got = append(got, c.Value)
+			}
+			t.Fatalf("minimal selection = %v, want only the backslash break", got)
 		}
-		t.Fatalf("minimal selection = %v, want only the canonical quote escape", got)
-	}
-	if dropped == 0 {
-		t.Fatal("expected the escape-breakers to be reported as dropped, not silently missing")
-	}
+		if dropped == 0 {
+			t.Fatal("expected the other shapes to be reported as dropped, not silently missing")
+		}
+	})
+
+	t.Run("quote-and-backslash reader keeps the raw script close", func(t *testing.T) {
+		rep := planDoc(t, `<script>var searchTerms = '{{M}}';</script>`, candHTML, quoteAndBackslash)
+		selected, _ := spec.Select(rep.Plan.Candidates)
+		if len(selected) == 0 || selected[0].Value != "</script><script>"+m+"</script>" {
+			var got []string
+			for _, c := range selected {
+				got = append(got, c.Value)
+			}
+			t.Fatalf("minimal selection = %v, want the raw script close", got)
+		}
+	})
 }

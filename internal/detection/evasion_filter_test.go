@@ -101,7 +101,6 @@ func TestEvasionDefaultCandidateSetUnchanged(t *testing.T) {
 		`html_text|<img src=x onerror=` + m + `>|88|load`,
 		`javascript|</script><script>` + m + `</script>|88|load`,
 		`html_attribute|" autofocus onfocus=` + m + ` x="|87|load`,
-		`javascript|\';` + m + `//|86|load`,
 		`html_attribute|" onmouseover=` + m + ` x="|85|interaction`,
 		`css|</style><svg onload=` + m + `>|80|load`,
 		`html_text|</title><details open ontoggle=` + m + `>|80|load`,
@@ -112,6 +111,14 @@ func TestEvasionDefaultCandidateSetUnchanged(t *testing.T) {
 		`html_text|<svg><animate onbegin=` + m + `>|72|load`,
 		`html_text|</title><` + m + `x>|60|none`,
 		`html_text|<` + m + `x>|60|none`,
+		// The backslash break declares a backslash dependency, not a quote
+		// one: the quote being escaped is the situation it exists for. The
+		// canary carries no backslash, so on a target that already encoded
+		// something that character reads as unobserved — planned above
+		// provably-neutralized shapes, below proven-raw ones. On this all-raw
+		// document nothing is neutralized, so it sorts to the fallback band
+		// rather than beside the canonical quote escape.
+		`javascript|\';` + m + `//|8|load`,
 	}
 	got := make([]string, 0, len(rep.Plan.Candidates))
 	for _, c := range rep.Plan.Candidates {

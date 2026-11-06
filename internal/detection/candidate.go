@@ -728,11 +728,15 @@ func jsTemplates(a ContextAnalysis, m string) []candTemplate {
 			// When < and > are HTML-encoded, the remaining route is the escape
 			// rule itself: a leading backslash consumes the backslash the reader
 			// inserts before the escaped quote, leaving that quote raw and
-			// closing the string. The probe canary has no backslash, so the
-			// planner cannot tell whether the reader escapes backslash too —
-			// this shape is planned anyway (never dropped) and simply fails
-			// against a reader that does.
-			onLoad(`\';`+m+"//", "'", 86,
+			// closing the string. Its dependency is the BACKSLASH, not the
+			// quote — the quote being escaped is what this shape is FOR, so
+			// declaring the quote here would have the transformation analysis
+			// deprioritize it for the very property that makes it work (measured
+			// on lab 5: it was dropped by the per-point cap and never sent). The
+			// probe canary has no backslash, so the planner cannot tell whether
+			// the reader escapes backslash too; the shape is planned anyway and
+			// simply fails against a reader that does.
+			onLoad(`\';`+m+"//", `\`, 86,
 				"lead with a backslash so the reader's own quote escaping consumes it (\\' becomes \\\\'), leaving the closing quote raw; works when the reader escapes the quote but not the backslash"),
 		}
 	case a.Context == CtxJSString && a.Sub == "double_quoted":
@@ -1135,8 +1139,19 @@ func charForm(loc ReflectionLocation, ch string) string {
 	if f, ok := loc.PerChar[ch]; ok {
 		return f
 	}
+	// A character the probe never carried cannot have been observed, so the
+	// site-wide Encoding verdict does not describe it. Inheriting it made the
+	// backslash break (whose only dependency is a backslash) look neutralized
+	// on a reader that escapes quotes and angle brackets but leaves backslash
+	// alone — measured on lab 5, where that shape was then dropped by the
+	// per-point cap before it was ever sent. Unobserved is reported as unknown:
+	// planned above provably-neutralized shapes, below proven-raw ones, and the
+	// attempt decides.
 	if loc.Encoding != "" {
-		return loc.Encoding
+		if strings.ContainsRune(canaryChars, []rune(ch)[0]) {
+			return loc.Encoding
+		}
+		return EncUnknown
 	}
 	return EncNone
 }
