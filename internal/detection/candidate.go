@@ -326,9 +326,54 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 	if opts.Profile != (ProfileSpec{}) {
 		plan.Candidates, plan.Dropped = opts.Profile.Select(plan.Candidates)
 		plan.Profile, plan.Limit = opts.Profile.Name, opts.Profile.MaxPerInjectionPoint
+		if opts.EnableEvasion {
+			plan.Candidates, plan.Dropped = keepEvasionBeyondCap(plan.Candidates, best, plan.Dropped)
+		}
 	}
 	rep.Plan = plan
 	return plan
+}
+
+// MaxEvasionCandidatesPerInjectionPoint bounds how many OPT-IN bypass shapes
+// may be planned per injection point on top of the profile's canonical
+// selection. The profile cap is sized for the canonical set; without this
+// separate allowance the cap decides that the bypass pack never runs at all,
+// which is the opposite of what the operator asked for with -enable-evasion.
+const MaxEvasionCandidatesPerInjectionPoint = 8
+
+// keepEvasionBeyondCap returns the profile's selection plus the best evasion
+// candidates the cap pushed out, up to MaxEvasionCandidatesPerInjectionPoint.
+// Evasion candidates are the ones carrying a Technique tag. They are appended
+// in plan order (highest priority first) and deduplicated against what the
+// profile already kept, so a shape the profile liked is never sent twice.
+func keepEvasionBeyondCap(selected []Candidate, all map[string]Candidate, dropped int) ([]Candidate, int) {
+	if MaxEvasionCandidatesPerInjectionPoint <= 0 {
+		return selected, dropped
+	}
+	have := make(map[string]bool, len(selected))
+	for _, c := range selected {
+		have[c.DedupKey] = true
+	}
+	evasion := make([]Candidate, 0, len(all))
+	for key, c := range all {
+		if c.Technique == "" || have[key] {
+			continue
+		}
+		evasion = append(evasion, c)
+	}
+	sort.Slice(evasion, func(i, j int) bool { return lessCandidate(evasion[i], evasion[j]) })
+	for i, c := range evasion {
+		if i >= MaxEvasionCandidatesPerInjectionPoint {
+			break
+		}
+		selected = append(selected, c)
+		dropped--
+	}
+	sort.Slice(selected, func(i, j int) bool { return lessCandidate(selected[i], selected[j]) })
+	if dropped < 0 {
+		dropped = 0
+	}
+	return selected, dropped
 }
 
 // better reports whether candidate a should win a dedup tie over b: higher
