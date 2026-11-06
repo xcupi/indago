@@ -942,11 +942,21 @@ func (e *idorExecutor) harvestObservations(ctx context.Context, scanID domain.ID
 			return params[i].Name < params[j].Name
 		})
 		for _, p := range params {
-			v := strings.TrimSpace(p.Example)
-			if v == "" {
+			// Every DISTINCT value the crawl observed for this parameter, not
+			// just the first. Endpoint dedup keeps one URL per path, so a
+			// parameter's later values are the only record of the other users'
+			// identifiers the crawl actually saw (measured: a lab whose other
+			// users' GUIDs appear only as /blogs?userId=<uuid> link values).
+			values := append([]string(nil), p.Examples...)
+			if len(values) == 0 {
+				if v := strings.TrimSpace(p.Example); v != "" {
+					values = append(values, v)
+				}
+			}
+			if len(values) == 0 {
 				continue
 			}
-			obs = append(obs, idor.Observation{Endpoint: urlByEndpoint[p.EndpointID], Field: p.Name, Via: idor.ViaParameter, Values: []string{v}})
+			obs = append(obs, idor.Observation{Endpoint: urlByEndpoint[p.EndpointID], Field: p.Name, Via: idor.ViaParameter, Values: values})
 		}
 	}
 

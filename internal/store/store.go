@@ -101,6 +101,10 @@ type ParameterRepo interface {
 	Get(ctx context.Context, id domain.ID) (*domain.Parameter, error)
 	ListByEndpoint(ctx context.Context, endpointID domain.ID) ([]*domain.Parameter, error)
 	ListByScan(ctx context.Context, scanID domain.ID) ([]*domain.Parameter, error)
+	// AppendExamples records observed values for a parameter, keeping the
+	// first `max` DISTINCT values in observation order. It is idempotent for a
+	// value that is already recorded, and never fails a scan for a duplicate.
+	AppendExamples(ctx context.Context, id domain.ID, values []string, max int) error
 	Delete(ctx context.Context, id domain.ID) error
 }
 

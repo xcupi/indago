@@ -22,14 +22,21 @@ type Endpoint struct {
 // (query/form/json/…). Parameters are the raw material from which injection
 // points are derived.
 type Parameter struct {
-	ID         ID              `json:"id"`
-	ScanID     ID              `json:"scan_id"`
-	EndpointID ID              `json:"endpoint_id"`
-	Name       string          `json:"name"`
-	Location   ParamLocation   `json:"location"`
-	Example    string          `json:"example,omitempty"` // sample/observed value; browser-network JSON examples store a serialized JSON literal
-	Source     DiscoverySource `json:"source"`
-	CreatedAt  time.Time       `json:"created_at"`
+	ID         ID            `json:"id"`
+	ScanID     ID            `json:"scan_id"`
+	EndpointID ID            `json:"endpoint_id"`
+	Name       string        `json:"name"`
+	Location   ParamLocation `json:"location"`
+	Example    string        `json:"example,omitempty"` // sample/observed value; browser-network JSON examples store a serialized JSON literal
+	// Examples holds every DISTINCT value the crawl observed for this
+	// parameter, capped (see discovery.MaxObservedExamples). Endpoint dedup
+	// collapses /blogs?userId=A and /blogs?userId=B into ONE endpoint, so
+	// Example alone keeps only the first value — and an object-identifier
+	// differential then has no foreign identifier to try, even though the
+	// other users' ids were on the pages the crawl already fetched.
+	Examples  []string        `json:"examples,omitempty"`
+	Source    DiscoverySource `json:"source"`
+	CreatedAt time.Time       `json:"created_at"`
 }
 
 // InjectionPoint is the unit of testing: a specific (endpoint, parameter)
