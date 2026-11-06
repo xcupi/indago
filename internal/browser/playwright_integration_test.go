@@ -429,15 +429,30 @@ func TestIntegrationScopeGateBlocksWebSocketTraffic(t *testing.T) {
 	defer inside.Close()
 	m := newManagerOrSkip(t, browser.DefaultConfig())
 	defer m.Close()
-	if _, err := m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{WaitUntil: browser.WaitLoad}); err != nil {
+	control, err := m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{WaitUntil: browser.WaitLoad})
+	if err != nil {
 		t.Fatalf("render unscoped WebSocket control: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// The handshake is asynchronous: it starts after the load event and can
+	// take well over 100ms on a loaded CI runner (measured: two consecutive
+	// hosted runs failed here while the same commit passes locally in 1.4s).
+	// Wait for the control to be observed rather than sampling once — the
+	// assertion is unchanged, only the patience it gets.
+	deadline := time.Now().Add(10 * time.Second)
+	for websocketHits.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
 	if websocketHits.Load() == 0 {
-		t.Fatal("WebSocket fixture did not reach its loopback server in the unscoped control")
+		// The control has no AllowRequest, so nothing should have been
+		// aborted by the scope gate. When it still never connects, the
+		// render observations are the only way to tell "the browser refused
+		// the handshake" from "something in our own path blocked it", so
+		// report them instead of a bare timeout.
+		t.Fatalf("WebSocket fixture did not reach its loopback server in the unscoped control (blocked=%v console_errors=%v page_errors=%v)",
+			control.Blocked, control.ConsoleErrors, control.PageErrors)
 	}
 	websocketHits.Store(0)
-	_, err := m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{
+	_, err = m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{
 		WaitUntil:    browser.WaitLoad,
 		AllowRequest: func(raw string) bool { return strings.HasPrefix(raw, inside.URL+"/api/") },
 	})
