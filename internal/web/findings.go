@@ -154,6 +154,14 @@ type findingDetail struct {
 	TestCaseIDs   []domain.ID        `json:"test_case_ids,omitempty"`
 	Candidates    []findingCandidate `json:"candidates,omitempty"`
 	Attempts      []findingAttempt   `json:"attempts,omitempty"`
+	// BlockSuspected/BlockDetail/Throttled mirror scan.findingDetail: the
+	// diagnostic row upsertBlockFinding writes when a request came back with a
+	// suspicious status change. Throttled is sticky per point, so BlockDetail
+	// may show a later 403 while the point stays ineligible for the bounded
+	// pass.
+	BlockSuspected bool   `json:"block_suspected,omitempty"`
+	BlockDetail    string `json:"block_detail,omitempty"`
+	Throttled      bool   `json:"throttled,omitempty"`
 	// Combined/ParameterBName: see scan.findingDetail.
 	Combined       bool   `json:"combined,omitempty"`
 	ParameterBName string `json:"parameter_b_name,omitempty"`
