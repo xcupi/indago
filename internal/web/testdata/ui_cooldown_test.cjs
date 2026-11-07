@@ -84,9 +84,15 @@ test('navigation during JSON body read discards the old data',async()=>{
 });
 
 test('project refresh failure keeps the selected project',async()=>{
- const h=harness([response(500)]);
+ // loadProjects retries a transient read (three attempts); the assertion is
+ // about what a PERSISTENT failure leaves behind, so every attempt fails here.
+ const h=harness([response(500),response(500),response(500)]);
  h.run(`ctx.projects=[{id:'kept',name:'Kept'}];ctx.projectId='kept';`);
- await h.run(`loadProjects()`);
+ const pending=h.run(`loadProjects()`);
+ await h.flush();
+ await h.tick(150);await h.tick(300);
+ await pending;
+ assert.equal(h.calls.length,3,'a failed read is retried, bounded to three attempts');
  assert.equal(h.run('ctx.projectId'),'kept');
  assert.equal(h.run('ctx.projects.length'),1);
 });

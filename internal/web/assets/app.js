@@ -486,17 +486,28 @@ const ctx = { projects: [], projectId: prefs.get("project", ""), caps: null };
 // warning entirely, which is exactly the state this UI exists to prevent. Three
 // attempts with a short backoff cover a blip; a real outage still ends as null
 // and the UI says so instead of guessing.
-async function loadCapabilities() {
-  for (let attempt = 0; attempt < 3; attempt++) {
+// getJSONRetry reads one bootstrap endpoint with a small, bounded retry. The
+// dashboard's first reads decide whether the whole session can be trusted: a
+// single transient failure used to leave the capability card saying "unknown",
+// or the project list empty, until the operator reloaded the page. A real
+// outage still surfaces after the last attempt, so nothing is hidden.
+async function getJSONRetry(url, attempts = 3) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     try {
-      ctx.caps = await getJSON(api.capabilities);
-      return ctx.caps;
+      return await getJSON(url);
     } catch (e) {
-      if (attempt === 2) break;
+      if (attempt === attempts - 1) throw e;
       await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
     }
   }
-  ctx.caps = null;
+}
+
+async function loadCapabilities() {
+  try {
+    ctx.caps = await getJSONRetry(api.capabilities);
+  } catch (e) {
+    ctx.caps = null;
+  }
   return ctx.caps;
 }
 
@@ -504,7 +515,9 @@ function currentProject() { return ctx.projects.find((p) => p.id === ctx.project
 
 async function loadProjects() {
   try {
-    ctx.projects = (await getJSON("/api/projects")) || [];
+    // Same bounded retry as the capability read: one blip must not leave the
+    // selector empty for the rest of the session.
+    ctx.projects = (await getJSONRetry("/api/projects")) || [];
   } catch (e) {
     return ctx.projects; // a failed/throttled load is not an empty project list
   }
