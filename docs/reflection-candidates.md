@@ -617,6 +617,16 @@ All three embed only the benign marker; nothing runs until the browser
 dispatches the named event, and the handler body is the bare marker
 (a `ReferenceError`, never `alert`/cookie/exfiltration).
 
+These shapes — and the SMIL-written `href` shape measured on the
+event-handler-blocked lab — are not exclusive to an explicit `-enable-evasion`
+scan. After a point's canonical plan completes without confirmation, the
+automatic, evidence-gated fallback plans the same bounded Technique set and the
+verifier activates the matching class: one `resize` Event, `autofocus`/focus,
+SMIL `begin`, or the single declared click. The four allow-list labs
+(PortSwigger 8-11) are covered end to end by
+`TestAutomaticEvasionConfirmsFilterAllowListLabs`, which scans fixtures whose
+filters admit exactly one of those shapes each with `EnableEvasion` false.
+
 **Why `allowlisted_tag_event` is tagged `interaction`.** `onresize` is a
 genuine event, not a user gesture, but a page load does not resize the viewport:
 the lab's published exploit delivers the payload inside an iframe and changes
