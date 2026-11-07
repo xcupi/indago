@@ -261,6 +261,12 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 	var pos []string
 	for {
 		if err := fs.Parse(args); err != nil {
+			// -h/--help is a request, not a failure. The FlagSet's output is
+			// discarded so a parse error cannot dump usage, so the request is
+			// carried back to the caller with the FlagSet it applies to.
+			if errors.Is(err, flag.ErrHelp) {
+				return nil, &flagHelp{fs: fs}
+			}
 			return nil, err
 		}
 		args = fs.Args()
@@ -271,6 +277,14 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 		args = args[1:]
 	}
 }
+
+// flagHelp is a -h/--help request from a subcommand's FlagSet. flag.Parse
+// returns flag.ErrHelp once it has written usage to its (discarded) output, so
+// the caller needs the FlagSet itself to show the operator the flags instead of
+// failing with "flag: help requested".
+type flagHelp struct{ fs *flag.FlagSet }
+
+func (e *flagHelp) Error() string { return "help requested for " + e.fs.Name() }
 
 // newFlags builds a FlagSet whose errors are returned (not os.Exit) and which
 // shares the -server flag.
@@ -293,8 +307,23 @@ func splitCSV(s string) []string {
 
 // --- dispatch ---
 
-// runClient dispatches `project|target|scope|scan <sub> ...`.
+// runClient dispatches `project|target|scope|scan <sub> ...` and turns a
+// subcommand's -h/--help request into printed usage plus success: asking for
+// help must never be reported as a failed command.
 func (c *cli) runClient(group string, args []string) error {
+	err := c.dispatch(group, args)
+	var help *flagHelp
+	if errors.As(err, &help) {
+		fmt.Fprintf(c.out, "Usage of %s:\n", help.fs.Name())
+		help.fs.SetOutput(c.out)
+		help.fs.PrintDefaults()
+		return nil
+	}
+	return err
+}
+
+// dispatch routes a client command group to its subcommand implementation.
+func (c *cli) dispatch(group string, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: indago %s <subcommand> (see `indago help`)", group)
 	}
