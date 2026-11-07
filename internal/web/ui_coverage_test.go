@@ -9,6 +9,7 @@ package web_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,6 +124,86 @@ func TestUINewScanFormIsShortAndShowsReadinessBeforeStart(t *testing.T) {
 	u := newUIHarness(t)
 	scanID := uiFindingsScan(t, u)
 	_ = scanID
+	u.selectFirstProject()
+	u.eval(`openNewScanModal(); true`)
+	u.waitUI("modal open", `document.getElementById('f_advanced')`)
+
+	if !u.evalBool(`/Browser engine is OFF/.test(document.getElementById('readinessBanner').textContent)`) {
+		t.Fatal("the modal must warn, before Start, that the browser engine is off")
+	}
+	if u.evalBool(`document.getElementById('f_advanced').open`) {
+		t.Fatal("advanced options (proxy, TLS, performance, stop policy) must start collapsed")
+	}
+	// Create scan is reachable without scrolling the page and the box stays short.
+	if !u.evalBool(`(function(){ var b = Array.from(document.querySelectorAll('#modal button')).find(x => x.textContent==='Create scan'); var r = b.getBoundingClientRect(); return r.bottom <= window.innerHeight; })()`) {
+		t.Fatalf("Create scan is below the fold: %v", u.eval(`document.querySelector('#modal .modal-box').getBoundingClientRect().height + ' / ' + window.innerHeight`))
+	}
+	// Folding must not remove the options: they stay in the DOM, ready to open.
+	if !u.evalBool(`document.getElementById('f_cfgD') && document.getElementById('f_proxypool')`) {
+		t.Fatal("collapsed options must remain in the form")
+	}
+}
+
+func TestUIFindingToggleIsKeyboardOperable(t *testing.T) {
+	u := newUIHarness(t)
+	scanID := uiFindingsScan(t, u)
+	f := uiFinding(t, u, scanID, domain.VerdictConfirmed, uiFindingOpts{path: "/kb"}, time.Now())
+	u.openScanTab(scanID, "findings")
+	u.waitUI("row rendered", `document.querySelector('#findingsBody tr[data-finding-id="`+string(f.ID)+`"] button.row-toggle')`)
+	sel := `#findingsBody tr[data-finding-id="` + string(f.ID) + `"] button.row-toggle`
+	if !u.evalBool(`(function(){ var b = document.querySelector('` + sel + `'); b.focus(); return document.activeElement === b && b.tabIndex >= 0 && b.getAttribute('aria-expanded')==='false'; })()`) {
+		t.Fatal("the finding title must be a focusable button that starts collapsed")
+	}
+	u.eval(`document.querySelector('` + sel + `').click(); true`)
+	u.waitUI("expanded", `document.querySelector('`+sel+`').getAttribute('aria-expanded')==='true' && document.querySelector('#findingsBody tr.detail-row')`)
+	u.eval(`document.querySelector('` + sel + `').click(); true`)
+	u.waitUI("collapsed again", `document.querySelector('`+sel+`').getAttribute('aria-expanded')==='false' && !document.querySelector('#findingsBody tr.detail-row')`)
+}
+
+func TestUIEmptyReportPreviewNeverPrintsUndefined(t *testing.T) {
+	u := newUIHarness(t)
+	scanID := uiFindingsScan(t, u)
+	u.openScanTab(scanID, "reports")
+	u.waitUI("preview text", `/Will include/.test(document.getElementById('reportPreview').textContent)`)
+	txt := u.evalStr(`document.getElementById('reportPreview').textContent`)
+	if strings.Contains(txt, "undefined") || !strings.Contains(txt, "Will include 0 of 0") {
+		t.Fatalf("empty preview = %q", txt)
+	}
+}
+
+// Phone width: the project-level findings table and the new tests table must
+// stack instead of overflowing, and nothing may scroll the page sideways.
+func TestUIPhoneWidthTablesStackWithoutOverflow(t *testing.T) {
+	u := newUIHarness(t)
+	u.eval(layoutJS)
+	scanID := uiFindingsScan(t, u)
+	for i := 0; i < 3; i++ {
+		uiFinding(t, u, scanID, domain.VerdictConfirmed, uiFindingOpts{path: fmt.Sprintf("/p%d", i)}, time.Now())
+		seedUITest(t, u, scanID, domain.VulnDOMXSS, domain.TestCaseSkipped, "", "http://127.0.0.1:9/some/long/path/that/keeps/going?q="+strings.Repeat("a", 90), "dom-xss probe skipped: no browser configured for this scan")
+	}
+	// The project-level views need a selected project (kept in localStorage, shared with the iframe).
+	u.selectFirstProject()
+	for _, route := range []string{"#/scans/" + string(scanID) + "/coverage", "#/findings"} {
+		u.eval(`(function(){ var o = document.getElementById('narrow'); if (o) o.remove(); var f = document.createElement('iframe'); f.id = 'narrow';
+		  f.style.cssText = 'position:fixed;left:0;top:0;width:390px;height:800px;border:0;z-index:99999;background:#000';
+		  f.src = location.pathname + '` + route + `'; document.body.appendChild(f); return true; })()`)
+		u.waitUI("narrow frame rendered "+route, `document.getElementById('narrow').contentDocument.querySelector('#view table tbody tr')`)
+		time.Sleep(600 * time.Millisecond)
+		u.eval(layoutJS)
+		if v := u.violations("narrow"); len(v) > 0 {
+			t.Fatalf("%s at phone width:\n  %s", route, strings.Join(v, "\n  "))
+		}
+		if !u.evalBool(`getComputedStyle(document.getElementById('narrow').contentDocument.querySelector('#view table thead')).display === 'none'`) {
+			t.Fatalf("%s: the table must be stacked (header row hidden) at phone width", route)
+		}
+	}
+}
+
+// A short viewport (small laptop, landscape phone) must still reach Create scan
+// without scrolling the whole form first.
+func TestUINewScanActionsStayReachableOnShortViewport(t *testing.T) {
+	u := newUIHarness(t)
+	_ = uiFindingsScan(t, u)
 	u.selectFirstProject()
 	u.eval(`(function(){ var f = document.createElement('iframe'); f.id = 'short';
 	  f.style.cssText = 'position:fixed;left:0;top:0;width:900px;height:480px;border:0;z-index:99999;background:#000';
