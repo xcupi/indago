@@ -195,17 +195,27 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 		ContentType: resp.Headers.Get("Content-Type"),
 	})
 
+	note2, suspected := possibleBlockNote(bl.status, resp.Status)
+	// A 429/503 status change is backpressure even when the body still reflects
+	// (a throttle page can echo the request). Record it so the escalation gate
+	// skips this point; reflection decides the CANDIDATE verdict, not whether
+	// the target asked for less traffic.
+	if report.Reflected && throttleSignal(bl.status, resp.Status) {
+		suspected = true
+	}
 	r.outcome = domain.OutcomeSuccess
 	if report.Reflected {
 		r.note = fmt.Sprintf("%s: reflected at %d location(s); %s", note, report.Count, contextSummary(&report))
-	} else {
-		note2, suspected := possibleBlockNote(bl.status, resp.Status)
-		r.note = note + ": not reflected" + note2
 		if suspected {
-			r.blockSuspected = true
-			r.blockBaselineStatus = bl.status
-			r.blockMutatedStatus = resp.Status
+			r.note += note2
 		}
+	} else {
+		r.note = note + ": not reflected" + note2
+	}
+	if suspected {
+		r.blockSuspected = true
+		r.blockBaselineStatus = bl.status
+		r.blockMutatedStatus = resp.Status
 	}
 	r.reflection = &report
 	r.baselineReq, r.baselineResp = bl.reqEvidence, bl.respEvidence

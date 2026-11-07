@@ -232,7 +232,10 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		// Pending — see docs/scan-orchestration.md).
 		if res.reflection != nil && res.reflection.Reflected {
 			e.enqueueVerification(ctx, job, ep, cand, focus, tc.ID)
-		} else if res.blockSuspected {
+		}
+		// Independent of reflection: a throttle/maintenance page can echo the
+		// marker, and the escalation gate still needs the recorded signal.
+		if res.blockSuspected {
 			e.recordBlockFinding(ctx, job, ep, focus, res.blockBaselineStatus, res.blockMutatedStatus, tc.ID)
 		}
 		if res.captchaSuspected {
@@ -686,11 +689,30 @@ func possibleBlockNote(baselineStatus, mutatedStatus int) (string, bool) {
 	baselineOK := baselineStatus >= 200 && baselineStatus < 400
 	suspicious := mutatedStatus == 403 || mutatedStatus == 429 || mutatedStatus == 503
 	if baselineOK && suspicious && mutatedStatus != baselineStatus {
+		if throttleSignal(baselineStatus, mutatedStatus) {
+			return fmt.Sprintf(" (possible throttle/unavailability: status changed %d -> %d from baseline; "+
+				"this is backpressure on the probe rather than a filter decision, so the bounded bypass fallback is not escalated at this point and no CAPTCHA is ever bypassed — see AGENTS.md §2.2)",
+				baselineStatus, mutatedStatus), true
+		}
 		return fmt.Sprintf(" (possible block/filter: status changed %d -> %d from baseline; "+
 			"this may not be a clean negative; the response itself is recorded once as a diagnostic, while any later bounded fallback is separately gated — see AGENTS.md §2.2)",
 			baselineStatus, mutatedStatus), true
 	}
 	return "", false
+}
+
+// throttleSignal reports a 429 (rate limit) or 503 (unavailable/maintenance)
+// status change from a healthy baseline. That is backpressure or downtime, not
+// a verdict on the payload, so the automatic evasion fallback must skip the
+// point (see findingDetail.Throttled).
+//
+// It is deliberately independent of reflection: a throttle/maintenance page can
+// echo the request (an error page showing the URL), and a reflected marker must
+// not hide the fact that the target asked for less traffic.
+func throttleSignal(baselineStatus, mutatedStatus int) bool {
+	baselineOK := baselineStatus >= 200 && baselineStatus < 400
+	throttled := mutatedStatus == 429 || mutatedStatus == 503
+	return baselineOK && throttled && mutatedStatus != baselineStatus
 }
 
 // ---------------------------------------------------------------------------

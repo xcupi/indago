@@ -1373,7 +1373,7 @@ function overviewPanel(st, scanId) {
       "WAF/filter-bypass variants are queued immediately on top of canonical candidates — look for a \"bypass: …\" tag on a candidate."));
   } else {
     m.appendChild(metric("Evasion fallback", "AUTO AFTER CANONICAL MISS", undefined,
-      "A bounded Technique-only fallback can run only after every canonical candidate at one in-scope point completed without confirmation; it is skipped for CAPTCHA, incomplete evidence, no replayable verifier, or an already-recorded bypass attempt."));
+      "A bounded Technique-only fallback can run only after every canonical candidate at one in-scope point completed without confirmation; it is skipped for CAPTCHA, a 429/503 backpressure signal (rate-limit or maintenance, not a filter decision), incomplete evidence, no replayable verifier, or an already-recorded bypass attempt."));
   }
   if (st.session) {
     const sess = st.session;
