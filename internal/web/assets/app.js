@@ -481,8 +481,22 @@ async function refreshNow() {
 // says so instead of assuming coverage it cannot vouch for.
 const ctx = { projects: [], projectId: prefs.get("project", ""), caps: null };
 
+// A single transient failure must not leave the dashboard saying "capabilities
+// unknown" for the rest of the session: readiness would then lose the OFF
+// warning entirely, which is exactly the state this UI exists to prevent. Three
+// attempts with a short backoff cover a blip; a real outage still ends as null
+// and the UI says so instead of guessing.
 async function loadCapabilities() {
-  try { ctx.caps = await getJSON(api.capabilities); } catch (e) { ctx.caps = null; }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      ctx.caps = await getJSON(api.capabilities);
+      return ctx.caps;
+    } catch (e) {
+      if (attempt === 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+    }
+  }
+  ctx.caps = null;
   return ctx.caps;
 }
 

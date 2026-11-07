@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -93,6 +94,13 @@ func newUIHarnessWithToken(t *testing.T, token string) *uiHarness {
 // newUIHarnessWith is newUIHarnessWithToken for a server that advertises caps.
 // The default (zero) caps are a server started without the browser engine.
 func newUIHarnessWith(t *testing.T, token string, caps web.Capabilities) *uiHarness {
+	return newUIHarnessWithHandler(t, token, caps, nil)
+}
+
+// newUIHarnessWithHandler wraps the dashboard's HTTP handler, so a test can make
+// one endpoint fail the way a transient network error would. wrap runs for every
+// request the page makes, including the capabilities read at startup.
+func newUIHarnessWithHandler(t *testing.T, token string, caps web.Capabilities, wrap func(http.Handler) http.Handler) *uiHarness {
 	if testing.Short() {
 		t.Skip("real-browser UI test skipped in -short mode")
 	}
@@ -145,7 +153,11 @@ func newUIHarnessWith(t *testing.T, token string, caps web.Capabilities) *uiHarn
 			t.Fatal(err)
 		}
 	}
-	srv := httptest.NewServer(h.Handler())
+	var handler http.Handler = h.Handler()
+	if wrap != nil {
+		handler = wrap(handler)
+	}
+	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
