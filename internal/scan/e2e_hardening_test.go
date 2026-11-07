@@ -51,12 +51,14 @@ func TestE2E_ConcurrentScansShareBrowserPoolSafely(t *testing.T) {
 	}
 	// The original 60s bound predates the seven-source DOM pass. Both full
 	// corpora now also open a browser context for every navigable endpoint /
-	// source pair. On a two-CPU race runner the old bound expired with only
-	// two jobs still running, not a deadlock. Keep the full workload and all
-	// isolation/leak assertions, but bound BOTH scans by one 2-minute deadline;
-	// this is a lifecycle correctness test, not a throughput SLA.
+	// source pair. Keep the full workload and all isolation/leak assertions, but
+	// bound BOTH scans generously: this is a lifecycle correctness test, not a
+	// throughput SLA. Measured on a hosted runner: at the old 2-minute bound the
+	// scans were still progressing (252 jobs succeeded, 1 running, 0 failed) and
+	// the same commit passed on main minutes later — the deadline, not the code,
+	// was the failure. Five minutes still fails a real hang.
 	started := time.Now()
-	deadline := started.Add(2 * time.Minute)
+	deadline := started.Add(5 * time.Minute)
 	doneA := waitStatus(t, ctrl, scA.ID, time.Until(deadline), isCompleted)
 	doneB := waitStatus(t, ctrl, scB.ID, time.Until(deadline), isCompleted)
 	for _, done := range []*scan.Status{doneA, doneB} {
@@ -126,7 +128,11 @@ func TestE2E_NoGoroutineLeakAcrossScanLifecycle(t *testing.T) {
 	if err := ctrl.Start(ctx, sc.ID); err != nil {
 		t.Fatal(err)
 	}
-	waitStatus(t, ctrl, sc.ID, 60*time.Second, isCompleted)
+	// Same reasoning as the concurrent-pool test above: the assertion is that
+	// the lifecycle finishes at all (and leaks nothing), not that it finishes in
+	// a minute on a loaded shared runner. That bound expired mid-scan on a
+	// hosted run with 244 jobs succeeded and 0 failed.
+	waitStatus(t, ctrl, sc.ID, 5*time.Minute, isCompleted)
 
 	ctrl.Shutdown()
 	if err := mgr.Close(); err != nil {
