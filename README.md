@@ -11,8 +11,9 @@ and conservative, operator-controlled behavior.
 > explicit written permission to test. Indago enforces explicit target scope
 > before any testing. After canonical reflected-XSS candidates at one in-scope
 > point complete without confirmation, it may run one bounded benign-marker
-> filter-bypass fallback; it never solves/bypasses CAPTCHA, rotates identity, or
-> sends weaponized payloads.
+> filter-bypass fallback (skipped where the target answered 429/503: that is
+> backpressure, not a filter decision); it never solves/bypasses CAPTCHA,
+> rotates identity, or sends weaponized payloads.
 
 ---
 

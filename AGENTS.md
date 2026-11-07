@@ -152,6 +152,15 @@ right now** and must remain stubs/interfaces (job handlers are no-ops):
   adds arbitrary obfuscation, CAPTCHA handling, cookie access, network
   exfiltration, or a weaponized payload. State-changing methods still require
   the explicit opt-in, for both candidate execution and verification.
+  The fallback targets a **filter** decision, so it is suppressed for any point
+  where the target answered 429 (rate limit) or 503 (unavailable/maintenance):
+  that is backpressure or downtime, not a judgement on the payload, and adding
+  bypass requests there would ignore the target's own request to slow down and
+  record meaningless "rejected" attempts. A 403 remains eligible — a filter
+  rejecting the payload is exactly the case this fallback exists for. The signal
+  is recorded per injection point (`findingDetail.Throttled`) and is sticky for
+  that point, so one throttled response disqualifies it rather than being
+  averaged away by other statuses.
 - ⚠️ POST/JSON candidates may be browser-verified only with the explicit
   state-changing opt-in, through a bounded top-level document replay. Other
   body-carrying methods remain unsupported and their findings stay Pending.

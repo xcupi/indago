@@ -49,4 +49,11 @@ func TestPossibleBlockLabelDescribesSeparatelyGatedFallback(t *testing.T) {
 	if strings.Contains(label, "never retries or evades") {
 		t.Fatalf("possible-block label contradicts automatic fallback policy: %q", label)
 	}
+	// A rate-limit/maintenance answer is not a filter decision, so the label
+	// has to say the bounded bypass pass does NOT run there — while a 403
+	// filter rejection still can. Matching only the "403/429/503" example
+	// list would pass without saying anything about the rule.
+	if !strings.Contains(label, "backpressure") || !strings.Contains(label, "403") {
+		t.Fatalf("possible-block label must state that backpressure is not escalated but a 403 filter rejection can be: %q", label)
+	}
 }

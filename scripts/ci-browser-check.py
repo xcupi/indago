@@ -85,6 +85,11 @@ required = {
     # planned and sent, with the passive verifier honestly rejecting it.
     "TestDOMDocumentWriteInsideSelectIsAlreadyConfirmed",
     "TestReflectedCanonicalLinkVectorIsPlannedButNeedsActivation",
+    # Variation packs across six reflection contexts: a filtered route must still
+    # confirm with the surviving later variant, and the url route confirms ONLY
+    # through the one bounded click for an interaction-shaped javascript: URL.
+    # Required because its url assertion went stale unnoticed while unlisted.
+    "TestReflectedVariationPacksConfirmAfterFirstVariantIsBlocked",
     # Eval attribution: scanner automation is never a target eval sink, target
     # eval (incl. a computed argument) is reachable, and direct eval keeps its
     # lexical scope. The external-script ES5 positive must really Confirm.
