@@ -16,23 +16,29 @@ import (
 )
 
 // A raw-query APPEND probe costs one request per endpoint. In AUTO mode it is
-// registered on endpoints that already have query parameters, so the probe only
-// earns its request when the canonical parameter probe did not reflect: once a
-// named parameter reflects, the blob shape cannot add a finding.
+// registered on endpoints that already have query parameters, and the gate is
+// about the OUTCOME: the probe is skipped only when the endpoint already has a
+// CONFIRMED reflected-XSS finding.
 //
-// The mode gate matters as much as the skip: an explicit -raw-query=always scan
-// must keep sending it, because the operator asked for the blob probe.
+// Reflection alone must NOT skip it. A canonical probe that reflected can still
+// end Rejected (the browser sees no execution signal), and the append shape
+// reaches a different sink — the canonical-link/404 class this shape exists for
+// is exactly one where the search term reflects while the raw query is what
+// lands in the href. The "confirmed" cases below pin that distinction, and the
+// mode case pins that an explicit -raw-query=always scan keeps sending it.
 func TestRawQueryAppendProbeGate(t *testing.T) {
 	cases := []struct {
 		name           string
 		mode           string
-		canonical      bool // did the canonical parameter reflect?
+		confirmed      bool // a Confirmed reflected-XSS finding already exists here
+		reflected      bool // the canonical parameter reflected (no confirmation)
 		wantSkipped    bool
 		wantAtLeastOne bool
 	}{
-		{"auto, canonical already reflected", "auto", true, true, false},
-		{"auto, canonical did not reflect", "auto", false, false, true},
-		{"always, canonical already reflected", "always", true, false, true},
+		{"auto, endpoint already confirmed", "auto", true, true, true, false},
+		{"auto, canonical reflected but not confirmed", "auto", false, true, false, true},
+		{"auto, canonical did not reflect", "auto", false, false, false, true},
+		{"always, endpoint already confirmed", "always", true, true, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -54,10 +60,9 @@ func TestRawQueryAppendProbeGate(t *testing.T) {
 			ep := env.endpoint(srv.URL+"/search?q=hi", domain.MethodGET)
 			q := env.param(ep, "q", domain.LocationQuery, "hi")
 			qIP := env.injection(ep, q)
-			if tc.canonical {
-				seedReflectionCase(t, env, qIP, "q", true)
-			} else {
-				seedReflectionCase(t, env, qIP, "q", false)
+			seedReflectionCase(t, env, qIP, "q", tc.reflected)
+			if tc.confirmed {
+				seedConfirmedFinding(t, env, ep)
 			}
 
 			raw := rawQueryParamFor(t, ep, discovery.RawQueryAppendName)
@@ -73,11 +78,11 @@ func TestRawQueryAppendProbeGate(t *testing.T) {
 
 			out := testCaseForJob(t, env, job.ID)
 			if tc.wantSkipped {
-				if out.Status != domain.TestCaseSkipped || !strings.Contains(out.Note, "already reflected") {
-					t.Fatalf("status=%s note=%q, want an explicit skip naming the reflected parameter", out.Status, out.Note)
+				if out.Status != domain.TestCaseSkipped || !strings.Contains(out.Note, "confirmed") {
+					t.Fatalf("status=%s note=%q, want an explicit skip naming the confirmed finding", out.Status, out.Note)
 				}
 				if hits.Load() != 0 {
-					t.Fatalf("the append probe sent %d request(s) although a canonical parameter already reflected", hits.Load())
+					t.Fatalf("the append probe sent %d request(s) although the endpoint is already confirmed", hits.Load())
 				}
 				return
 			}
@@ -109,6 +114,21 @@ func seedReflectionCase(t *testing.T, env *scanEnv, ip *domain.InjectionPoint, p
 	}
 }
 
+// seedConfirmedFinding records a Confirmed reflected-XSS finding at the endpoint
+// — the only state that makes the append probe redundant.
+func seedConfirmedFinding(t *testing.T, env *scanEnv, ep *domain.Endpoint) {
+	t.Helper()
+	now := time.Now()
+	if err := env.st.Findings().Create(context.Background(), &domain.Finding{
+		ID: domain.NewID(), ScanID: env.scanID, ProjectID: env.sc.ProjectID,
+		VulnClass: domain.VulnReflectedXSS, Verdict: domain.VerdictConfirmed,
+		Severity: domain.SeverityHigh, Confidence: domain.ConfidenceHigh,
+		EndpointID: ep.ID, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func testCaseForJob(t *testing.T, env *scanEnv, jobID domain.ID) *domain.TestCase {
 	t.Helper()
 	cases, err := env.st.TestCases().ListByScan(context.Background(), env.scanID)
@@ -120,6 +140,6 @@ func testCaseForJob(t *testing.T, env *scanEnv, jobID domain.ID) *domain.TestCas
 			return c
 		}
 	}
-	t.Fatalf("no test case recorded for job %s", jobID)
+	t.Fatalf("no test case record for job %s", jobID)
 	return nil
 }

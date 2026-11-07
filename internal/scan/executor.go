@@ -270,18 +270,26 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 }
 
 // rawQueryAppendCovered reports whether this job is the AUTO-mode raw-query
-// APPEND probe and a canonical parameter at the same endpoint has already
-// reflected. In that case the probe is skipped before any request is built: the
-// endpoint already reflects input, so the blob probe cannot add a finding.
+// APPEND probe and the endpoint already has a CONFIRMED reflected-XSS finding.
+// In that case the probe is skipped before any request is built: the endpoint is
+// already solved, so another blob probe cannot add a finding.
 //
-// Scope: only the append shape, only in AUTO mode. An explicit -raw-query=always
-// scan keeps sending it (the operator asked for the blob probe), and the
-// no-query shapes (bare/named) are the only injection point a parameter-less
-// endpoint has — skipping them would leave nothing tested.
+// The gate is deliberately about the OUTCOME, not about reflection. A canonical
+// probe that merely reflected proves nothing: it can still end Rejected when the
+// browser sees no execution signal, and the append shape reaches a different
+// sink (a canonical link href, a 404/error page echoing the whole query) with
+// different characters. Skipping on "a parameter reflected" would throw away
+// exactly the case this shape exists for — measured on the canonical-link lab,
+// where the search term does reflect while the raw-query shape is what lands in
+// the href. In bug-bounty terms the trade is clear: one extra GET per endpoint
+// is noise next to the 8-16 candidate requests one injection point already
+// costs, while a lost finding is the whole point of the scan.
 //
-// Ordering: this is a best-effort saving. The canonical job and this one are
-// separate jobs, so the probe is still sent when the canonical jobs have not
-// finished yet; the cost stays bounded at one request per endpoint either way.
+// Scope: only the append shape, only in AUTO mode. An explicit
+// -raw-query=always scan keeps sending it (the operator asked for the blob
+// probe), and the no-query shapes (bare/named) are the only injection point a
+// parameter-less endpoint has.
+//
 // The gate fails open (sends) on any store error, which is the safe direction
 // for coverage.
 func (e *executor) rawQueryAppendCovered(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, focus *domain.Parameter) (string, bool) {
@@ -296,40 +304,18 @@ func (e *executor) rawQueryAppendCovered(ctx context.Context, job *domain.TestJo
 	if err != nil || mode != discovery.RawQueryAuto {
 		return "", false
 	}
-	ips, err := e.store.InjectionPoints().ListByScan(ctx, job.ScanID)
+	findings, err := e.store.Findings().ListByScan(ctx, job.ScanID)
 	if err != nil {
 		return "", false
 	}
-	canonical := map[domain.ID]bool{}
-	for _, ip := range ips {
-		if ip == nil || ip.EndpointID != ep.ID || ip.ID == job.Target.InjectionPointID {
+	for _, f := range findings {
+		if f == nil || f.EndpointID != ep.ID || f.VulnClass != domain.VulnReflectedXSS {
 			continue
 		}
-		if ip.Location == domain.LocationRawQuery {
+		if f.Verdict != domain.VerdictConfirmed {
 			continue
 		}
-		canonical[ip.ID] = true
-	}
-	if len(canonical) == 0 {
-		return "", false // nothing canonical to have covered it
-	}
-	cases, err := e.store.TestCases().ListByScan(ctx, job.ScanID)
-	if err != nil {
-		return "", false
-	}
-	for _, tc := range cases {
-		if tc == nil || !canonical[tc.InjectionPointID] {
-			continue
-		}
-		rep, err := detection.ParseReflection(tc.Detail)
-		if err != nil || rep == nil || !rep.Reflected {
-			continue
-		}
-		name := rep.Parameter
-		if name == "" {
-			name = "a canonical parameter"
-		}
-		return fmt.Sprintf("parameter %s already reflected at this endpoint, so the raw-query append probe would add a request without adding a finding", name), true
+		return "this endpoint already has a confirmed reflected-XSS finding, so the append probe cannot add one", true
 	}
 	return "", false
 }

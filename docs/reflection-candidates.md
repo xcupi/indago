@@ -360,12 +360,15 @@ endpoint class: an endpoint with no query of its own gets bare + named, while an
 endpoint that already has query parameters gets the **append** shape only
 (`?<existing>&<payload>`) — bare/named would replace the query the page needs
 before it reflects anything, and its named parameters already have the canonical
-pipeline. The append probe is one extra request per endpoint, and the executor
-skips it when a canonical parameter at the same endpoint has already reflected:
-the blob shape cannot add a finding there. The skip is best-effort by
-construction (canonical and append are separate jobs), so the cost stays bounded
-at one request per endpoint either way; `-raw-query-injection=always` keeps
-sending it, because that is an explicit request for the blob probe. `TestURLAttributeBreakoutDefaultCandidateSetUnchanged`
+pipeline. The append probe is one extra request per endpoint, and the executor skips it
+only when that endpoint already has a **confirmed** finding: at that point the
+blob shape cannot add one. Reflection alone does NOT skip it — a canonical probe
+that reflected can still end Rejected (no execution signal), and the append shape
+reaches a different sink (the canonical link href, a 404/error page echoing the
+whole query) with different characters, which is the class this shape exists for.
+The cost stays bounded at one request per endpoint; `-raw-query-injection=always`
+keeps sending it unconditionally, because that is an explicit request for the blob
+probe. `TestURLAttributeBreakoutDefaultCandidateSetUnchanged`
 freezes both sides: the named-parameter plan is exactly what it was, and the
 raw-query plan is that same frozen set plus these shapes only. Real-browser
 proof: `TestURLHrefScriptBreakoutConfirmsWithoutActivation` (a page reflecting
