@@ -40,7 +40,11 @@ func TestUICoverageBrowserlessScanIsNotShownAsClean(t *testing.T) {
 	seedUITest(t, u, scanID, domain.VulnReflectedXSS, domain.TestCaseCompleted, domain.OutcomeSuccess, "http://127.0.0.1:9/safe?q=a", "not reflected")
 
 	u.openScanTab(scanID, "overview")
-	u.waitUI("overview rendered", `document.getElementById('readiness')`)
+	// Wait for the CONDITION, not the element: #readiness exists as soon as the
+	// view renders and can still hold the "Server capabilities unknown"
+	// placeholder while the capability read is in flight (or being retried).
+	u.waitUI("readiness states the browser engine is OFF",
+		`/Browser engine/.test(document.getElementById('readiness').textContent) && /OFF/.test(document.getElementById('readiness').textContent)`)
 	if !u.evalBool(`/Browser engine/.test(document.getElementById('readiness').textContent) && /OFF/.test(document.getElementById('readiness').textContent)`) {
 		t.Fatalf("the overview must state the browser engine is OFF: %q", u.evalStr(`document.getElementById('readiness').textContent`))
 	}

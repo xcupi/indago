@@ -437,34 +437,42 @@ catch (e) { console.log("ws-control: threw " + e); }
 	defer inside.Close()
 	m := newManagerOrSkip(t, browser.DefaultConfig())
 	defer m.Close()
-	control, err := m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{WaitUntil: browser.WaitLoad})
-	if err != nil {
-		t.Fatalf("render unscoped WebSocket control: %v", err)
-	}
-	// The handshake is asynchronous: it starts after the load event and can
-	// take well over 100ms on a loaded CI runner (measured: two consecutive
-	// hosted runs failed here while the same commit passes locally in 1.4s).
-	// Wait for the control to be observed rather than sampling once — the
-	// assertion is unchanged, only the patience it gets.
-	deadline := time.Now().Add(10 * time.Second)
-	for websocketHits.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(25 * time.Millisecond)
+	// The handshake is asynchronous: it starts after the load event and can take
+	// well over 100ms on a loaded hosted runner. Two hosted runs still failed
+	// here with a 10s wait, with the constructor logged and no console error —
+	// an environmental miss, not a scope-gate decision. Retry the CONTROL
+	// fixture only (never the scoped assertion): the WebSocket must work in this
+	// environment, so a real block still fails every attempt, while one miss no
+	// longer fails the suite.
+	var attempts []string
+	for attempt := 1; attempt <= 3 && websocketHits.Load() == 0; attempt++ {
+		control, err := m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{WaitUntil: browser.WaitLoad})
+		if err != nil {
+			attempts = append(attempts, fmt.Sprintf("attempt %d: render: %v", attempt, err))
+			continue
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for websocketHits.Load() == 0 && time.Now().Before(deadline) {
+			time.Sleep(25 * time.Millisecond)
+		}
+		if websocketHits.Load() == 0 {
+			// The control has no AllowRequest, so nothing should have been
+			// aborted by the scope gate. The render observations are the only
+			// way to tell "the browser refused the handshake" from "something
+			// in our own path blocked it", so keep them per attempt.
+			attempts = append(attempts, fmt.Sprintf("attempt %d: blocked=%v console_errors=%v page_errors=%v console_logs=%v",
+				attempt, control.Blocked, control.ConsoleErrors, control.PageErrors, control.ConsoleLogs))
+		}
 	}
 	if websocketHits.Load() == 0 {
-		// The control has no AllowRequest, so nothing should have been
-		// aborted by the scope gate. When it still never connects, the
-		// render observations are the only way to tell "the browser refused
-		// the handshake" from "something in our own path blocked it", so
-		// report them instead of a bare timeout.
-		t.Fatalf("WebSocket fixture did not reach its loopback server in the unscoped control (blocked=%v console_errors=%v page_errors=%v console_logs=%v)",
-			control.Blocked, control.ConsoleErrors, control.PageErrors, control.ConsoleLogs)
+		t.Fatalf("WebSocket fixture never reached its loopback server in the unscoped control after %d attempt(s): %s",
+			len(attempts), strings.Join(attempts, "; "))
 	}
 	websocketHits.Store(0)
-	_, err = m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{
+	if _, err := m.Render(context.Background(), inside.URL+"/api/page", browser.RenderOptions{
 		WaitUntil:    browser.WaitLoad,
 		AllowRequest: func(raw string) bool { return strings.HasPrefix(raw, inside.URL+"/api/") },
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("render scoped websocket fixture: %v", err)
 	}
 	time.Sleep(150 * time.Millisecond)
