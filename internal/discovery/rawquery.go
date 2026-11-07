@@ -108,11 +108,13 @@ type rawQueryShape struct {
 	why           string
 }
 
-var rawQueryShapes = []rawQueryShape{
-	{name: RawQueryBareName, prefix: "", why: "/?<payload>: the payload replaces the whole query string"},
-	{name: RawQueryNamedName, prefix: "x=", why: "/?x=<payload>: one parameter-looking name whose value is the payload"},
-	{name: RawQueryAppendName, afterExisting: true, why: "/?<existing>&<payload>: the payload is appended to the endpoint's own query, which is required when the page needs one of its parameters before it reflects anything"},
-}
+var (
+	rawQueryBareShape   = rawQueryShape{name: RawQueryBareName, prefix: "", why: "/?<payload>: the payload replaces the whole query string"}
+	rawQueryNamedShape  = rawQueryShape{name: RawQueryNamedName, prefix: "x=", why: "/?x=<payload>: one parameter-looking name whose value is the payload"}
+	rawQueryAppendShape = rawQueryShape{name: RawQueryAppendName, afterExisting: true, why: "/?<existing>&<payload>: the payload is appended to the endpoint's own query, which is required when the page needs one of its parameters before it reflects anything"}
+)
+
+var rawQueryShapes = []rawQueryShape{rawQueryBareShape, rawQueryNamedShape, rawQueryAppendShape}
 
 // RawQueryShapeNames returns the reserved pseudo-parameter names, in the fixed
 // order the shapes are registered. Callers must not mutate the result.
@@ -181,13 +183,18 @@ func isRawQueryLocation(loc domain.ParamLocation) bool { return loc == domain.Lo
 //
 // Mode:
 //   - off:    nothing (the default; no request, no persisted row).
-//   - auto:   only when the endpoint has NO named query parameters — the
-//     canonical-link/404/error-page class, where the parameter-driven
-//     pipeline otherwise has nothing at all to focus on.
+//   - auto:   an endpoint with NO named query parameters gets bare + named (the
+//     canonical-link/404/error-page class, where the parameter-driven pipeline
+//     otherwise has nothing to focus on). An endpoint WITH named query
+//     parameters gets the APPEND shape only: its own query is what makes it
+//     reflect at all, bare/named would replace that query, and the named
+//     parameters themselves are already covered canonically. The append probe
+//     is one extra request, and the executor skips it when a canonical
+//     parameter at the same endpoint already reflected.
 //   - always: in addition to any named parameters (their pipeline is untouched;
 //     the raw-query injection point is separate).
 //
-// Bounds: exactly MaxRawQueryShapesPerEndpoint (2) shapes per endpoint and at
+// Bounds: at most MaxRawQueryShapesPerEndpoint (3) shapes per endpoint and at
 // most MaxRawQueryProbesPerScan (40) per scan, enforced here. The slot is
 // reserved under the mutex BEFORE registerParam so concurrent endpoints can
 // never overshoot the scan cap, and released again when the registration turned
@@ -197,10 +204,19 @@ func (c *Collector) registerRawQueryInjectionPoints(ctx context.Context, endpoin
 	if !c.cfg.RawQueryInjection.Enabled() || method != domain.MethodGET {
 		return
 	}
-	if c.cfg.RawQueryInjection == RawQueryAuto && len(info.ParamNames) > 0 {
-		return
+	shapes := rawQueryShapes
+	if c.cfg.RawQueryInjection == RawQueryAuto {
+		if len(info.ParamNames) > 0 {
+			// The endpoint's own query is what makes it reflect; the append
+			// shape keeps it and adds the probe. Bare/named would REPLACE it,
+			// and the named parameters already have their canonical pipeline.
+			shapes = []rawQueryShape{rawQueryAppendShape}
+		} else {
+			// No query of its own: append would be byte-identical to bare.
+			shapes = []rawQueryShape{rawQueryBareShape, rawQueryNamedShape}
+		}
 	}
-	for _, shape := range rawQueryShapes {
+	for _, shape := range shapes {
 		if shape.afterExisting && len(info.ParamNames) == 0 {
 			continue
 		}

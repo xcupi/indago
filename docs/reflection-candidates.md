@@ -355,7 +355,17 @@ the accesskey sibling.
 
 Gating and default behaviour: both shapes are added only for `LocationRawQuery`,
 which is itself opt-in and off by default (`-raw-query-injection`), so a default
-named-parameter plan is byte-identical. `TestURLAttributeBreakoutDefaultCandidateSetUnchanged`
+named-parameter plan is byte-identical. Auto mode now registers **one** shape per
+endpoint class: an endpoint with no query of its own gets bare + named, while an
+endpoint that already has query parameters gets the **append** shape only
+(`?<existing>&<payload>`) — bare/named would replace the query the page needs
+before it reflects anything, and its named parameters already have the canonical
+pipeline. The append probe is one extra request per endpoint, and the executor
+skips it when a canonical parameter at the same endpoint has already reflected:
+the blob shape cannot add a finding there. The skip is best-effort by
+construction (canonical and append are separate jobs), so the cost stays bounded
+at one request per endpoint either way; `-raw-query-injection=always` keeps
+sending it, because that is an explicit request for the blob probe. `TestURLAttributeBreakoutDefaultCandidateSetUnchanged`
 freezes both sides: the named-parameter plan is exactly what it was, and the
 raw-query plan is that same frozen set plus these shapes only. Real-browser
 proof: `TestURLHrefScriptBreakoutConfirmsWithoutActivation` (a page reflecting

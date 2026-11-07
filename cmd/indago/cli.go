@@ -230,6 +230,10 @@ func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 // rawQueryModeFlag accepts the optional-value form the operator types:
 //
 //	-raw-query-injection            → "auto"   (bare boolean-style flag)
+//	                                           (auto: no-query endpoints get bare+named;
+//	                                            an endpoint with query parameters gets the
+//	                                            append shape only, and its probe is skipped
+//	                                            when a canonical parameter already reflected)
 //	-raw-query-injection=auto       → "auto"
 //	-raw-query-injection=always     → "always"
 //	-raw-query-injection=off|false  → "off"
@@ -514,7 +518,7 @@ func (c *cli) scanCreate(args []string) error {
 	maxCand := registerMaxCandidates(fs)
 	enableEvasion := fs.Bool("enable-evasion", false, "eagerly try WAF/filter-bypass candidate variants (case variation, alt separators, double URL-encoding) ON TOP OF the canonical set; without this flag, Indago may run the same bounded Technique-only fallback only after canonical candidates at one in-scope point complete without confirmation (see AGENTS.md §2.2)")
 	var rawQuery rawQueryModeFlag
-	fs.Var(&rawQuery, "raw-query-injection", "opt in to testing the WHOLE query string as one injection point, for pages that echo their entire query (canonical <link href>, 404/search/error pages): bare flag = auto (only GET endpoints with no named query parameters), =always also probes endpoints that have named parameters; OFF by default, GET-only, capped at 2 shapes/endpoint and 40 probes/scan (see docs/raw-query-injection.md)")
+	fs.Var(&rawQuery, "raw-query-injection", "opt in to testing the WHOLE query string as one injection point, for pages that echo their entire query (canonical <link href>, 404/search/error pages): bare flag = auto (a GET endpoint with NO query parameters gets the bare+named probes; one that already has query parameters gets ONE append probe, ?<existing>&<payload>, skipped when a canonical parameter at that endpoint already reflected), =always also probes endpoints that have named parameters; OFF by default, GET-only, capped at 3 shapes/endpoint and 40 probes/scan (see docs/reflection-candidates.md)")
 	enableIDOR := fs.Bool("idor", false, "opt in to the IDOR engine's object-identifier differential (GET/HEAD reads only); requires an authenticated session — OFF by default (see docs/idor.md)")
 	var idorCandidates stringList
 	fs.Var(&idorCandidates, "idor-candidates", "foreign object identifier to try for the IDOR differential, e.g. the victim username an authorized lab brief names (repeatable, max 10; never invented by Indago)")

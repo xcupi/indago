@@ -216,6 +216,13 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 	if !e.cfg.AllowStateChanging && !isSafeMethod(ep.Method) {
 		return result{skipped: true, note: fmt.Sprintf("%s skipped: %s is state-changing and AllowStateChanging is off", kind, ep.Method)}
 	}
+	// The raw-query append probe is ONE extra request per endpoint, and in AUTO
+	// mode it exists only for pages that need their own query before they
+	// reflect anything. Once a canonical parameter at this endpoint has
+	// reflected, the probe has nothing left to find, so do not spend it.
+	if note, covered := e.rawQueryAppendCovered(ctx, job, ep, focus); covered {
+		return result{skipped: true, note: kind + " skipped: " + note}
+	}
 
 	switch {
 	case hasCand:
@@ -260,6 +267,71 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 	default:
 		return e.runBaselineOnly(ctx, tc, ep, params)
 	}
+}
+
+// rawQueryAppendCovered reports whether this job is the AUTO-mode raw-query
+// APPEND probe and a canonical parameter at the same endpoint has already
+// reflected. In that case the probe is skipped before any request is built: the
+// endpoint already reflects input, so the blob probe cannot add a finding.
+//
+// Scope: only the append shape, only in AUTO mode. An explicit -raw-query=always
+// scan keeps sending it (the operator asked for the blob probe), and the
+// no-query shapes (bare/named) are the only injection point a parameter-less
+// endpoint has — skipping them would leave nothing tested.
+//
+// Ordering: this is a best-effort saving. The canonical job and this one are
+// separate jobs, so the probe is still sent when the canonical jobs have not
+// finished yet; the cost stays bounded at one request per endpoint either way.
+// The gate fails open (sends) on any store error, which is the safe direction
+// for coverage.
+func (e *executor) rawQueryAppendCovered(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, focus *domain.Parameter) (string, bool) {
+	if focus == nil || focus.Location != domain.LocationRawQuery || !discovery.RawQueryAppendsToExisting(focus.Name) {
+		return "", false
+	}
+	sc, err := e.store.Scans().Get(ctx, job.ScanID)
+	if err != nil {
+		return "", false
+	}
+	mode, err := discovery.ParseRawQueryMode(sc.Config.RawQueryInjection)
+	if err != nil || mode != discovery.RawQueryAuto {
+		return "", false
+	}
+	ips, err := e.store.InjectionPoints().ListByScan(ctx, job.ScanID)
+	if err != nil {
+		return "", false
+	}
+	canonical := map[domain.ID]bool{}
+	for _, ip := range ips {
+		if ip == nil || ip.EndpointID != ep.ID || ip.ID == job.Target.InjectionPointID {
+			continue
+		}
+		if ip.Location == domain.LocationRawQuery {
+			continue
+		}
+		canonical[ip.ID] = true
+	}
+	if len(canonical) == 0 {
+		return "", false // nothing canonical to have covered it
+	}
+	cases, err := e.store.TestCases().ListByScan(ctx, job.ScanID)
+	if err != nil {
+		return "", false
+	}
+	for _, tc := range cases {
+		if tc == nil || !canonical[tc.InjectionPointID] {
+			continue
+		}
+		rep, err := detection.ParseReflection(tc.Detail)
+		if err != nil || rep == nil || !rep.Reflected {
+			continue
+		}
+		name := rep.Parameter
+		if name == "" {
+			name = "a canonical parameter"
+		}
+		return fmt.Sprintf("parameter %s already reflected at this endpoint, so the raw-query append probe would add a request without adding a finding", name), true
+	}
+	return "", false
 }
 
 // runBaselineOnly executes an endpoint-level job: a single baseline request with
