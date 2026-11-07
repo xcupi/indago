@@ -94,6 +94,9 @@ required = {
     # AUTOMATIC escalation with EnableEvasion false: canonical shapes are all
     # rejected, so this is the guarantee that the fallback reaches them.
     "TestAutomaticEvasionConfirmsFilterAllowListLabs",
+    # Lab 23 "Reflected DOM XSS": the value round-trips through the server
+    # (query -> fetch JSON -> innerHTML), so the initial HTML reflects nothing.
+    "TestDOMXSSReflectedJSONPipelineConfirms",
     # Eval attribution: scanner automation is never a target eval sink, target
     # eval (incl. a computed argument) is reachable, and direct eval keeps its
     # lexical scope. The external-script ES5 positive must really Confirm.
