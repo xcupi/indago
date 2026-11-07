@@ -14,8 +14,7 @@ import (
 func TestUIScopeFormRefusesEntriesThatCanNeverMatch(t *testing.T) {
 	u := newUIHarnessWith(t, "", web.Capabilities{})
 	uiFindingsScan(t, u) // seeds a project with scope 127.0.0.1
-	u.eval(`(async () => { await loadProjects(); setProject(ctx.projects[0].id); })(); true`)
-	u.waitUI("project selected", `currentProject()`)
+	u.selectFirstProject()
 	u.eval(`navigate('#/scope'); true`)
 	u.waitUI("scope form", `document.getElementById('s_inchosts')`)
 

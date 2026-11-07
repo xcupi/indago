@@ -234,6 +234,32 @@ func (u *uiHarness) mustClickText(sel, text string) {
 // waitUI polls a boolean condition. A condition that throws (e.g. a selector
 // that is still null mid-render) counts as "not yet true", not a fatal error,
 // so conditions can be written without defensive null checks.
+// selectFirstProject refreshes the project list and selects its first entry,
+// retrying the read briefly and failing with what the page actually saw.
+//
+// Every UI test depends on this bootstrap, and a single failed read used to
+// surface as an unrelated "project selected" timeout in whichever test ran
+// next. The retry belongs here, not in each test: this is setup, not the
+// behaviour any of them assert.
+func (u *uiHarness) selectFirstProject() {
+	u.t.Helper()
+	u.eval(`(async () => { window.__projectLoadError = "";
+	  for (let i = 0; i < 5; i++) {
+	    try { await loadProjects(); } catch (e) { window.__projectLoadError = String(e); }
+	    if (ctx.projects.length) { setProject(ctx.projects[0].id); return; }
+	    await new Promise((r) => setTimeout(r, 200));
+	  } })(); true`)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) && !u.evalBool(`currentProject()`) {
+		time.Sleep(150 * time.Millisecond)
+	}
+	if !u.evalBool(`currentProject()`) {
+		u.t.Fatalf("no project could be selected: load error=%q, projects=%s",
+			u.evalStr(`String(window.__projectLoadError || "")`),
+			u.evalStr(`JSON.stringify(ctx.projects)`))
+	}
+}
+
 func (u *uiHarness) waitUI(desc, cond string) {
 	u.t.Helper()
 	ctx, cancel := context.WithTimeout(u.ctx, 10*time.Second)

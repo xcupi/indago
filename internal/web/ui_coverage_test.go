@@ -124,8 +124,7 @@ func TestUINewScanFormIsShortAndShowsReadinessBeforeStart(t *testing.T) {
 	u := newUIHarness(t)
 	scanID := uiFindingsScan(t, u)
 	_ = scanID
-	u.eval(`(async () => { await loadProjects(); setProject(ctx.projects[0].id); })(); true`)
-	u.waitUI("project selected", `currentProject()`)
+	u.selectFirstProject()
 	u.eval(`openNewScanModal(); true`)
 	u.waitUI("modal open", `document.getElementById('f_advanced')`)
 
@@ -183,8 +182,7 @@ func TestUIPhoneWidthTablesStackWithoutOverflow(t *testing.T) {
 		seedUITest(t, u, scanID, domain.VulnDOMXSS, domain.TestCaseSkipped, "", "http://127.0.0.1:9/some/long/path/that/keeps/going?q="+strings.Repeat("a", 90), "dom-xss probe skipped: no browser configured for this scan")
 	}
 	// The project-level views need a selected project (kept in localStorage, shared with the iframe).
-	u.eval(`(async () => { await loadProjects(); setProject(ctx.projects[0].id); })(); true`)
-	u.waitUI("project selected", `currentProject()`)
+	u.selectFirstProject()
 	for _, route := range []string{"#/scans/" + string(scanID) + "/coverage", "#/findings"} {
 		u.eval(`(function(){ var o = document.getElementById('narrow'); if (o) o.remove(); var f = document.createElement('iframe'); f.id = 'narrow';
 		  f.style.cssText = 'position:fixed;left:0;top:0;width:390px;height:800px;border:0;z-index:99999;background:#000';
@@ -206,8 +204,7 @@ func TestUIPhoneWidthTablesStackWithoutOverflow(t *testing.T) {
 func TestUINewScanActionsStayReachableOnShortViewport(t *testing.T) {
 	u := newUIHarness(t)
 	_ = uiFindingsScan(t, u)
-	u.eval(`(async () => { await loadProjects(); setProject(ctx.projects[0].id); })(); true`)
-	u.waitUI("project selected", `currentProject()`)
+	u.selectFirstProject()
 	u.eval(`(function(){ var f = document.createElement('iframe'); f.id = 'short';
 	  f.style.cssText = 'position:fixed;left:0;top:0;width:900px;height:480px;border:0;z-index:99999;background:#000';
 	  f.src = location.pathname + '#/scans'; document.body.appendChild(f); return true; })()`)
