@@ -124,8 +124,27 @@ func TestUINewScanFormIsShortAndShowsReadinessBeforeStart(t *testing.T) {
 	u := newUIHarness(t)
 	scanID := uiFindingsScan(t, u)
 	_ = scanID
-	u.eval(`(async () => { await loadProjects(); setProject(ctx.projects[0].id); })(); true`)
-	u.waitUI("project selected", `currentProject()`)
+	// Bootstrap is retried in-page here on purpose: this test is about the
+	// short-viewport layout, not about bootstrap reliability (that has its own
+	// coverage in TestUIProjectListRecoversFromOneFailedRead). A transient read
+	// used to surface as "project selected" never holding, with nothing to
+	// explain it — so retry briefly and, if it still fails, report what the page
+	// actually saw instead of a downstream condition.
+	u.eval(`(async () => { window.__projectLoadError = "";
+	  for (let i = 0; i < 5; i++) {
+	    try { await loadProjects(); } catch (e) { window.__projectLoadError = String(e); }
+	    if (ctx.projects.length) { setProject(ctx.projects[0].id); return; }
+	    await new Promise((r) => setTimeout(r, 200));
+	  } })(); true`)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) && !u.evalBool(`currentProject()`) {
+		time.Sleep(150 * time.Millisecond)
+	}
+	if !u.evalBool(`currentProject()`) {
+		t.Fatalf("no project was selected within 15s: load error=%q, projects=%s",
+			u.evalStr(`String(window.__projectLoadError || "")`),
+			u.evalStr(`JSON.stringify(ctx.projects)`))
+	}
 	u.eval(`openNewScanModal(); true`)
 	u.waitUI("modal open", `document.getElementById('f_advanced')`)
 
