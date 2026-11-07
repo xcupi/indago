@@ -81,6 +81,42 @@ func TestClassifyActivation(t *testing.T) {
 			cand: detection.Candidate{Trigger: detection.TriggerInteraction, Value: "JaVaScRiPt:" + m},
 			want: verification.ActivationClick,
 		},
+		// The parser decodes character references in an attribute value BEFORE
+		// URL parsing, so an entity-encoded colon is a live javascript: URL in
+		// the DOM even though the raw candidate bytes never contain the literal.
+		// This is the shape a filter matching "javascript:" is bypassed by, so
+		// refusing to activate it would leave exactly the surviving bypass
+		// unconfirmable.
+		{
+			name: "entity-encoded colon is a javascript url",
+			cand: detection.Candidate{Trigger: detection.TriggerInteraction, Value: "javascript&colon;" + m},
+			want: verification.ActivationClick,
+		},
+		{
+			name: "decimal character reference for the colon is a javascript url",
+			cand: detection.Candidate{Trigger: detection.TriggerInteraction, Value: "javascript&#58;" + m},
+			want: verification.ActivationClick,
+		},
+		{
+			name: "hex character reference for the colon is a javascript url",
+			cand: detection.Candidate{Trigger: detection.TriggerInteraction, Value: "javascript&#x3a;" + m},
+			want: verification.ActivationClick,
+		},
+		// An out-of-range numeric reference decodes to U+FFFD in Chromium, not
+		// to the rune its value happens to wrap to, so this is NOT a live
+		// javascript: URL and must not be activated as one.
+		{
+			name:   "out-of-range numeric reference is not a javascript url",
+			cand:   detection.Candidate{Trigger: detection.TriggerInteraction, Value: "javascript&#4294967354;" + m},
+			want:   verification.ActivationUnsupported,
+			reason: "no recognisable event handler",
+		},
+		{
+			name:   "surrogate numeric reference is not a javascript url",
+			cand:   detection.Candidate{Trigger: detection.TriggerInteraction, Value: "javascript&#55357;" + m},
+			want:   verification.ActivationUnsupported,
+			reason: "no recognisable event handler",
+		},
 		{
 			name:   "onmouseover is not activatable by this verifier",
 			cand:   detection.Candidate{Trigger: detection.TriggerInteraction, Value: `" onmouseover=` + m},
