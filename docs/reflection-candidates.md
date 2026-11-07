@@ -501,10 +501,11 @@ not a filter decision on the payload; a 403 stays eligible), a
 stub/non-replayable verifier, incomplete jobs, and a malformed ledger. On
 restart it preserves every already-recorded technique
 DedupKey and enqueues only a missing tail. An explicit `EnableEvasion` scan
-remains eager. The throttle signal is recorded even when the response body still
-reflects the probe (a rate-limit or maintenance page can echo the request),
-because reflection decides the candidate verdict, not whether the target asked
-for less traffic.
+remains eager. The throttle signal is recorded whatever the body did — a
+rate-limit or maintenance page can echo the request, and a throttled baseline
+hides whatever the mutation would have shown. Reflection only records what the
+body contained; it makes no verdict, and it does not decide whether the target
+asked for less traffic.
 See `AGENTS.md` §2–§3.
 
 ## Header/Cookie/Path injection points

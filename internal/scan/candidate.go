@@ -195,14 +195,11 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 		ContentType: resp.Headers.Get("Content-Type"),
 	})
 
+	// possibleBlockNote is status-only and runs whatever the body did: a
+	// throttle page can echo the probe, and reflection only records what the
+	// body contained (it makes no verdict), so the escalation gate must see a
+	// 429/503 even on a reflected candidate.
 	note2, suspected := possibleBlockNote(bl.status, resp.Status)
-	// A 429/503 status change is backpressure even when the body still reflects
-	// (a throttle page can echo the request). Record it so the escalation gate
-	// skips this point; reflection decides the CANDIDATE verdict, not whether
-	// the target asked for less traffic.
-	if report.Reflected && throttleSignal(bl.status, resp.Status) {
-		suspected = true
-	}
 	r.outcome = domain.OutcomeSuccess
 	if report.Reflected {
 		r.note = fmt.Sprintf("%s: reflected at %d location(s); %s", note, report.Count, contextSummary(&report))
