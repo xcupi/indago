@@ -216,6 +216,13 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 	if !e.cfg.AllowStateChanging && !isSafeMethod(ep.Method) {
 		return result{skipped: true, note: fmt.Sprintf("%s skipped: %s is state-changing and AllowStateChanging is off", kind, ep.Method)}
 	}
+	// The raw-query append probe is ONE extra request per endpoint, and in AUTO
+	// mode it exists only for pages that need their own query before they
+	// reflect anything. Once a canonical parameter at this endpoint has
+	// reflected, the probe has nothing left to find, so do not spend it.
+	if note, covered := e.rawQueryAppendCovered(ctx, job, ep, focus); covered {
+		return result{skipped: true, note: kind + " skipped: " + note}
+	}
 
 	switch {
 	case hasCand:
@@ -260,6 +267,57 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 	default:
 		return e.runBaselineOnly(ctx, tc, ep, params)
 	}
+}
+
+// rawQueryAppendCovered reports whether this job is the AUTO-mode raw-query
+// APPEND probe and the endpoint already has a CONFIRMED reflected-XSS finding.
+// In that case the probe is skipped before any request is built: the endpoint is
+// already solved, so another blob probe cannot add a finding.
+//
+// The gate is deliberately about the OUTCOME, not about reflection. A canonical
+// probe that merely reflected proves nothing: it can still end Rejected when the
+// browser sees no execution signal, and the append shape reaches a different
+// sink (a canonical link href, a 404/error page echoing the whole query) with
+// different characters. Skipping on "a parameter reflected" would throw away
+// exactly the case this shape exists for — measured on the canonical-link lab,
+// where the search term does reflect while the raw-query shape is what lands in
+// the href. In bug-bounty terms the trade is clear: one extra GET per endpoint
+// is noise next to the 8-16 candidate requests one injection point already
+// costs, while a lost finding is the whole point of the scan.
+//
+// Scope: only the append shape, only in AUTO mode. An explicit
+// -raw-query=always scan keeps sending it (the operator asked for the blob
+// probe), and the no-query shapes (bare/named) are the only injection point a
+// parameter-less endpoint has.
+//
+// The gate fails open (sends) on any store error, which is the safe direction
+// for coverage.
+func (e *executor) rawQueryAppendCovered(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, focus *domain.Parameter) (string, bool) {
+	if focus == nil || focus.Location != domain.LocationRawQuery || !discovery.RawQueryAppendsToExisting(focus.Name) {
+		return "", false
+	}
+	sc, err := e.store.Scans().Get(ctx, job.ScanID)
+	if err != nil {
+		return "", false
+	}
+	mode, err := discovery.ParseRawQueryMode(sc.Config.RawQueryInjection)
+	if err != nil || mode != discovery.RawQueryAuto {
+		return "", false
+	}
+	findings, err := e.store.Findings().ListByScan(ctx, job.ScanID)
+	if err != nil {
+		return "", false
+	}
+	for _, f := range findings {
+		if f == nil || f.EndpointID != ep.ID || f.VulnClass != domain.VulnReflectedXSS {
+			continue
+		}
+		if f.Verdict != domain.VerdictConfirmed {
+			continue
+		}
+		return "this endpoint already has a confirmed reflected-XSS finding, so the append probe cannot add one", true
+	}
+	return "", false
 }
 
 // runBaselineOnly executes an endpoint-level job: a single baseline request with

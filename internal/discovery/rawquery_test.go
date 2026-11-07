@@ -143,7 +143,7 @@ func countRawQueryJobs(t *testing.T, q *queue.Memory, scanID domain.ID, ips []*d
 func TestRawQueryInjectionModes(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("auto skips a named-parameter endpoint", func(t *testing.T) {
+	t.Run("auto registers only the append shape on a named-parameter endpoint", func(t *testing.T) {
 		c, st, _, _ := newCollector(t, rawQueryConfig(discovery.RawQueryAuto))
 		id, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{
 			URL: "http://example.com/search?q=hi", Method: domain.MethodGET, Source: domain.SourceCrawler,
@@ -151,8 +151,12 @@ func TestRawQueryInjectionModes(t *testing.T) {
 		if err != nil || id == "" {
 			t.Fatalf("AddEndpoint: id=%q err=%v", id, err)
 		}
-		if got := rawParams(t, st, ctx, id); len(got) != 0 {
-			t.Fatalf("auto registered raw-query parameters on an endpoint that already has one: %v", names(got))
+		got := rawParams(t, st, ctx, id)
+		// The endpoint's own query is what makes it reflect; bare/named would
+		// replace it, so only the append shape is registered here. The executor
+		// still skips its probe when a canonical parameter already reflected.
+		if len(got) != 1 || got[0].Name != discovery.RawQueryAppendName {
+			t.Fatalf("auto registered %v; want only the append shape %q", names(got), discovery.RawQueryAppendName)
 		}
 	})
 
