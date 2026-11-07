@@ -84,8 +84,7 @@ func TestUIOverviewLinksUntestedParametersToTheExplorer(t *testing.T) {
 func TestUIEndpointsTabStacksAtPhoneWidthWithoutOverflow(t *testing.T) {
 	u, w := explorerUIWorld(t, web.Capabilities{})
 	u.eval(layoutJS)
-	u.eval(`(async () => { await loadProjects(); setProject(ctx.projects[0].id); })(); true`)
-	u.waitUI("project selected", `currentProject()`)
+	u.selectFirstProject()
 	u.eval(`(function(){ var f = document.createElement('iframe'); f.id = 'narrow';
 	  f.style.cssText = 'position:fixed;left:0;top:0;width:390px;height:800px;border:0;z-index:99999;background:#000';
 	  f.src = location.pathname + '#/scans/` + string(w.scan) + `/endpoints'; document.body.appendChild(f); return true; })()`)
