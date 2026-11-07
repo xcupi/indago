@@ -20,13 +20,16 @@ package detection
 // cookie/exfiltration construct is ever generated here either).
 //
 // Gating: PlanCandidates only calls evasionTemplatesFor when the caller sets
-// PlanOptions.EnableEvasion — itself only ever true when the OPERATOR set
-// domain.ScanConfig.EnableEvasion for that scan (off by default). This is a
-// deliberate per-engagement opt-in (AGENTS.md §2.3: "aggressive behavior is
-// opt-in and operator-configured"), not default behavior — bypass testing is
-// appropriate for an authorized engagement where a WAF/filter bypass is
-// itself the reportable finding (e.g. many bug bounty programs), and
-// inappropriate as something Indago does silently by default.
+// PlanOptions.EnableEvasion, which happens in exactly two places: an explicit
+// domain.ScanConfig.EnableEvasion scan (operator opt-in, planned eagerly at
+// reflection time), and the one-time automatic escalation in
+// internal/scan/evasion_escalation.go, which runs only after every canonical
+// candidate at a reflected-XSS injection point completed without a confirmed
+// execution signal (AGENTS.md §2.2). Neither path enables it by default, and
+// the automatic one is bounded to MaxEvasionCandidatesPerInjectionPoint, so
+// bypass testing stays appropriate for an authorized engagement where a
+// WAF/filter bypass is itself the reportable finding (e.g. many bug bounty
+// programs) without becoming blind default behavior.
 //
 // Boundary that does NOT move: every evasion candidate is still sent through
 // the exact same scope-enforcing engine as every other request (internal/
@@ -195,15 +198,15 @@ func urlEvasionTemplates(a ContextAnalysis, m string) []candTemplate {
 		return nil
 	}
 	return []candTemplate{
-		evasionTpl("java\tscript:"+m, "", 40,
+		evasionTplTrigger("java	script:"+m, "", 40,
 			"a tab inside the scheme name — the URL parser strips ASCII tab/newline from the whole URL before parsing it, so this parses identically to a plain javascript: URI, bypassing a filter doing a literal substring match on \"javascript:\"",
-			"alt_separator"),
-		evasionTpl("java\nscript:"+m, "", 38,
+			"alt_separator", TriggerInteraction),
+		evasionTplTrigger("java\nscript:"+m, "", 38,
 			"a newline inside the scheme name — stripped by the URL parser the same way a tab is; bypasses the same literal-substring filters",
-			"alt_separator"),
-		evasionTpl("JaVaScRiPt:"+m, "", 36,
+			"alt_separator", TriggerInteraction),
+		evasionTplTrigger("JaVaScRiPt:"+m, "", 36,
 			"mixed-case scheme name — URL schemes are case-insensitive to the browser, but bypasses a filter that only matches the lowercase literal \"javascript:\"",
-			"case_variation"),
+			"case_variation", TriggerInteraction),
 	}
 }
 

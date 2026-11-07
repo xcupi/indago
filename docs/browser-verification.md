@@ -200,6 +200,9 @@ Finding stays `pending`.
 ## Boundaries
 
 No LLM verdict, no DOM XSS (the same marker/candidate is replayed, never a new
-one chosen from the live DOM), no simulated activation (a `javascript:` URL is
-never clicked for it), no anti-bot/WAF evasion, no exploit payloads — see
-`AGENTS.md` §2–§3.
+one chosen from the live DOM), no exploit payloads. Browser verification itself
+does not generate anti-bot/WAF bypasses: it replays the already-planned candidate.
+A candidate with a recognized declared interaction trigger may receive exactly one
+bounded matching activation after the in-scope navigation; that activation is
+not evidence and confirmation still requires the marker-specific signal. There
+is no arbitrary click/hover/action search — see `AGENTS.md` §2–§3.

@@ -55,23 +55,30 @@ Every built-in candidate carries a `Trigger`:
 
 - `load` — the marker is a bare JS expression that runs when the page loads
   (`<svg onload=M>`, `";M//`, `${M}`, direct code `M`, `</style><svg onload=M>`).
-  Only these can be **confirmed** by passive browser verification.
-- `interaction` — needs a user action the verifier deliberately never
-  simulates (`onmouseover=M`, `javascript:M`, `data:text/html,…`).
+  These can be **confirmed** without any post-navigation activation.
+- `interaction` — needs an action after navigation (`onmouseover=M`,
+  `javascript:M`, `data:text/html,…`). For a closed, recognized set of declared
+  mechanisms, the verifier dispatches exactly **one** matching bounded activation
+  (for example click, resize, focus, access-key press or SMIL begin); unsupported
+  interaction shapes remain manual-review-only.
 - `none` — markup probes (`<Mx>`) that show markup is injectable but carry no
   executable reference.
 
-So **Rejected means "no passive execution signal was observed for this
-candidate", not "the parameter is not vulnerable"**: an interaction-only
-candidate can reflect unescaped yet always ends rejected. This is a deliberate
-limit (AGENTS.md §3: no simulated activation) — these findings now surface a
+So **Rejected means "no execution signal was observed for this candidate", not
+"the parameter is not vulnerable"**: an interaction-only candidate can reflect
+unescaped yet still end rejected when its declared mechanism is unsupported or
+the one bounded activation produces no marker signal. This is a deliberate limit
+(AGENTS.md §3: no arbitrary activation/fuzzing) — these findings surface a
 `ReviewReason`/`ReviewReasonLabel` ("needs manual review") instead of reading
 as a clean negative; see `report.FindingSection`/`findingReviewReason`.
 The coverage gaps it leaves — event handlers that need interaction, DOM-only
 sinks, stored sinks — stay out of scope. A filter that only a differently-shaped
-breakout would pass is now addressed too, but only as an explicit operator
-opt-in (see "Evasion candidates (opt-in)" below), never by default.
-Rejected/inconclusive attempts stay stored as diagnostics on the finding.
+breakout would pass is covered by one evidence-gated fallback: after every
+canonical candidate at the same reflected-XSS injection point completed without
+confirmation, Indago may enqueue one bounded set of documented bypass
+techniques. The initial/default candidate plan remains canonical-only; an
+explicit `EnableEvasion` scan still asks for the bypass set eagerly. Rejected/
+inconclusive attempts stay stored as diagnostics on the finding.
 
 ## Candidate profiles
 
@@ -481,11 +488,19 @@ verification. See [`scan-orchestration.md`](scan-orchestration.md).
 
 No verdict, no exploit generation, no LLM. Candidate values embed a benign
 marker and are sent only to in-scope targets; state-changing methods require
-the operator opt-in. Browser verification only observes the same navigation a
+the operator opt-in. Browser verification replays the same navigation a
 candidate step already made (GET, or POST+form — see `scan-orchestration.md`
-and `AGENTS.md` §3); it never simulates clicks/hovers. Obfuscation/evasion
-variants exist only behind the explicit `EnableEvasion` opt-in described
-above — never in the default candidate set. See `AGENTS.md` §2–§3.
+and `AGENTS.md` §3), then may dispatch at most one activation only when the
+candidate declares a recognized interaction mechanism; it never performs an
+open-ended click/hover/action search. The default plan contains no evasion
+entries. The scan controller can add a one-time, bounded
+Technique-only fallback only after the durable canonical jobs at that exact
+reflected-XSS injection point completed without a confirmation; it skips
+CAPTCHA diagnostics, a stub/non-replayable verifier, incomplete jobs, and a
+malformed ledger. On restart it preserves every already-recorded technique
+DedupKey and enqueues only a missing tail. An explicit `EnableEvasion` scan
+remains eager.
+See `AGENTS.md` §2–§3.
 
 ## Header/Cookie/Path injection points
 
@@ -521,11 +536,20 @@ PoC generation (reusing this same location data) is implemented too — see
 "Standalone PoC generation" below.
 
 `internal/detection/evasion.go` is a second, separate template generator,
-called by the planner ONLY when `PlanOptions.EnableEvasion` is true — itself
-only ever set when the operator turns on `ScanConfig.EnableEvasion` (CLI
-`scan create -enable-evasion`; API `enable_evasion`) for that scan. Default:
-off, and the canonical set (above) is completely unaffected either way — these
-candidates are planned *in addition to*, never instead of, the canonical ones.
+called when `PlanOptions.EnableEvasion` is true. That happens either eagerly
+when the operator selects `ScanConfig.EnableEvasion` (CLI
+`scan create -enable-evasion`; API `enable_evasion`), or once through the
+scan controller's evidence-gated fallback. The latter is deliberately stricter:
+it starts only after a persisted, reflected canonical plan at one injection
+point has every canonical child job completed successfully, no confirmed
+Reflected-XSS finding, no CAPTCHA diagnostic, and a real replayable verifier;
+it keeps only `Candidate.Technique` entries, honors the profile filters, caps
+the result at `MaxEvasionCandidatesPerInjectionPoint` (8), and uses the queue
+as a durable per-DedupKey ledger to fill only a restart-interrupted tail.
+
+The initial canonical plan remains byte-identical and contains no evasion
+entries. These candidates are planned *in addition to*, never instead of, the
+canonical ones; explicit `EnableEvasion` remains the way to send them eagerly.
 
 Rationale: a WAF/filter bypass is itself a valid, often-rewarded bug bounty
 finding. Indago's canonical candidates intentionally try only the literal,
@@ -535,16 +559,17 @@ else changes (same scope enforcement, same rate/concurrency limits, same
 benign-marker-only rule, same lack of exploit generation).
 
 Current techniques (`Candidate.Technique`, same `candTemplate`/`Candidate`
-shape as the canonical set). They are load-triggered except where stated — an
-evasion variant of an interaction-only shape would be just as unconfirmable as
-the canonical one already is:
+shape as the canonical set). They are load-triggered except where stated; a
+declared interaction technique may receive one bounded activation only when the
+verifier recognizes its mechanism, and confirmation still requires the
+marker-specific signal:
 
 | Technique | Idea | Reliability |
 |-----------|------|--------------|
 | `case_variation` | `<SvG OnLoad=M>` — mixed-case tag/attribute name | bypasses a case-sensitive literal-string filter |
 | `alt_separator` | `<svg/onload=M>` / a tab instead of a space before the attribute | valid HTML5 (the tokenizer treats `/` and tab as attribute-boundary whitespace here); bypasses a filter expecting a literal space |
 | `double_url_encoding` | the breakout pre-encoded (`%3Csvg...%3E`), which the transport encodes again on the wire | opportunistic only — works solely against a target that decodes twice (e.g. a WAF that decodes once to inspect, then an app that decodes once more); a single-decode target will reflect the literal percent-string, which is the correct, honest outcome, not a false negative |
-| `allowlisted_tag_event` | `<body onresize=M>` — the exact tag+event pair a body/onresize allow-list admits | a real bypass of that filter class, but the resize event is never produced by a passive page load. Tagged `interaction`: the verifier records the candidate as **Rejected** (never Confirmed by accident) and the finding is flagged for manual review. The lab's own exploit supplies the resize from an attacker-controlled iframe, which a candidate value cannot carry; the local fixture proves the handler throws the marker `ReferenceError` the moment a genuine viewport resize happens |
+| `allowlisted_tag_event` | `<body onresize=M>` — the exact tag+event pair a body/onresize allow-list admits | a real bypass of that filter class, but resize is not produced by passive page load. Tagged `interaction`: the verifier dispatches one declared resize Event after navigation, and only the resulting marker-specific signal can confirm it. The lab's own exploit supplies resize from an attacker-controlled iframe; the local fixture proves the handler throws the marker `ReferenceError` on a genuine viewport resize |
 | `custom_element_focus` | `<x-M autofocus tabindex=1 onfocus=M></x-M>` — a custom element (the only tag class an "all standard tags blocked" filter admits) plus a focus trigger | fires on load: `tabindex` makes the custom element focusable, `autofocus` focuses it during parsing, and `onfocus` evaluates the bare marker. If the page already has an earlier `autofocus` element, that one consumes the trigger; the lab's `#x`-fragment delivery is a human-payload alternative a reflected candidate value cannot express |
 | `svg_smil_begin` | `<svg><animatetransform onbegin=M attributeName=transform></svg>` — an SVG SMIL element whose `begin` event fires when the animation starts | fires on load (SMIL's default `begin="0s"`); covers an allow-list that admits `animatetransform` while blocking both `<svg onload>` and `<animate>` |
 
@@ -576,7 +601,7 @@ context only, priorities 44/42/40, never a generated payload library):
 
 | Allow-list (documented lab) | Surviving construct | Trigger |
 |---|---|---|
-| most tags/attributes blocked; `body` + `onresize` survive | `<body onresize=M>` | resize event — **not** supplied by a passive load; stays Rejected and flagged for manual review |
+| most tags/attributes blocked; `body` + `onresize` survive | `<body onresize=M>` | declared resize interaction — the verifier dispatches one resize Event after navigation; confirmation still requires the marker-specific signal |
 | all standard tags blocked except custom/unknown ones | `<x-M autofocus tabindex=1 onfocus=M></x-M>` | `autofocus` + `tabindex` focus the custom element on load → `onfocus` |
 | most tags blocked; some SVG markup (`animatetransform`) survives | `<svg><animatetransform onbegin=M attributeName=transform></svg>` | SMIL `begin` fires when the animation starts (default `0s`) |
 
@@ -585,29 +610,27 @@ dispatches the named event, and the handler body is the bare marker
 (a `ReferenceError`, never `alert`/cookie/exfiltration).
 
 **Why `allowlisted_tag_event` is tagged `interaction`.** `onresize` is a
-genuine event, not a user gesture, but a page load does not resize the
-viewport: the lab's published exploit delivers the payload inside an iframe
-and changes *that iframe's* width. Indago's verifier navigates once and
-deliberately never synthesizes a resize or any other activation, so it records
-this candidate **Rejected** ("no passive execution signal") and the finding
-carries the manual-review reason — the bypass is real and worth reporting, but
-a human must supply the trigger. Labelling it `load` would be false and would
-let the `minimal` profile send it as confirm-capable. A local fixture proves
-the handler is real: with a genuine viewport resize (`Page.SetViewportSize`,
-not a synthetic event) the page throws
+genuine event, not a user gesture, but a page load does not resize the viewport:
+the lab's published exploit delivers the payload inside an iframe and changes
+*that iframe's* width. Indago's verifier therefore records this as an explicit
+resize-class interaction and, after navigation, dispatches exactly one `resize`
+Event on `window`. The event is only a bounded opportunity for the page's own
+handler to run; the verdict still requires the marker-specific browser signal.
+Labelling it `load` would be false and would let the `minimal` profile send it
+as confirm-capable. A local fixture proves the handler is real: with a genuine
+viewport resize (`Page.SetViewportSize`, not a synthetic event) the page throws
 `Uncaught ReferenceError: <marker> is not defined`; without the resize it
 throws nothing.
 
-**Profiles.** These are planned *in addition to* the six canonical HTML-text
-candidates, the nine pre-existing evasion shapes, and the two variation-pack
-values that are not already canonical — 17 candidates for an HTML-text site
-with the opt-in on (see "Variation packs (opt-in)" below; the same operator flag
-gates both). The default `standard` profile caps at 8 per injection point and
-canonical candidates sort first, so it sends the six canonical shapes plus the
-two variation-pack values and none of the evasion shapes. For a filter-allow-list
-engagement use `-candidate-profile thorough` (cap 16) or `-max-candidates`,
-exactly as for the existing evasion set — this slice does not change profile
-semantics.
+**Profiles.** Explicit `EnableEvasion` retains its established eager behavior:
+it plans the evasion shapes plus variation packs on top of the canonical set.
+The automatic fallback is narrower: it is Technique-only (never variation-pack
+values), happens only after the canonical pass drained without confirmation,
+and reapplies the selected profile's `LoadTriggerOnly` and `SkipNeutralized`
+filters before the independent 8-candidate cap. Thus a `minimal` scan does not
+silently regain interaction-only or known-neutralized bypass shapes; `standard`
+retains the documented allow-list techniques for labs 8–11. The fallback does
+not change canonical profile selection or initial-plan semantics.
 
 **Fixture proof (`internal/detection/evasion_filter_test.go`).** Each lab is
 reproduced as an allow-list over tag names and `on*` attributes, driven through
@@ -633,10 +656,10 @@ the 403 body never echoes the value). Real binary, real Chromium, one scan
 
 | Seed | Filter admits | Verified outcome |
 |---|---|---|
-| `/lab1` | `body` + `onresize` only | the body/onresize candidate reflects and is **Rejected** (needs the external resize); no canonical shape reflects |
+| `/lab1` | `body` + `onresize` only | historical pre-activation run: body/onresize reflected and was **Rejected** (no resize dispatch). The current verifier now dispatches one declared resize; fresh live revalidation is required before claiming a current result |
 | `/lab2` | custom tags + `onfocus` | only `<x-… autofocus tabindex=1 onfocus=…>` is **Confirmed** (marker-specific `ReferenceError`) |
 | `/lab3` | `svg` + `animatetransform`, `onbegin` only | only `<svg><animatetransform onbegin=…>` is **Confirmed**; `<svg onload>` and `<svg><animate onbegin>` are refused with 403 and produce no finding |
-| `/open` | no filter (control) | canonical `<svg onload>` and the rest are **Confirmed**, including the new custom/SVG shapes; `<body onresize>` still Rejected (no resize) |
+| `/open` | no filter (control) | canonical `<svg onload>` and the rest are **Confirmed**, including the new custom/SVG shapes; historical pre-activation result for `<body onresize>` was Rejected (no resize dispatch), so current activation behavior needs rerun evidence |
 
 The three 403-refusals surface as the engine's existing "possible block/filter"
 diagnostic (inconclusive, informational), never as an XSS verdict — the filter
@@ -729,10 +752,10 @@ marker, so execution raises `ReferenceError: <marker> is not defined`. No
 (`TestVariationCandidatesAreBenignMarkers`).
 
 **Interaction-only variants.** The four `url` shapes need the link to be
-activated, which the passive verifier deliberately never simulates
-(AGENTS.md §3), so they are tagged `interaction` — the same trigger class the
-evasion allow-list work introduced. They stay **Rejected** and the finding
-carries the manual-review reason. Every other pack leads with `load` variants.
+activated, so they are tagged `interaction` — the same trigger class the
+allow-list work uses. A closed, recognized subset may receive exactly one
+matching activation; unsupported URL forms remain rejected and carry the
+manual-review reason. Every other pack leads with `load` variants.
 
 **`needs` handling.** A variation whose required canary characters the site
 provably neutralizes is **not planned at all** (the packs are opt-in extra
@@ -783,10 +806,12 @@ Real-Chromium half (`internal/scan/payload_variation_integration_test.go`, build
 tag `browser_integration`): one loopback lab serves a raw and a filtered route
 per context; one scan with the evasion opt-in (which also enables the packs)
 must produce a **Confirmed** finding at every filtered route, with the
-confirmed candidate equal to the surviving later variant. The URL route is the
-honest exception: the entity-encoded colon reflects (the filter is bypassed) but
-a `javascript:` URL needs activation, so the verdict is Rejected and the finding
-is flagged for manual review — never Confirmed by a passive load.
+confirmed candidate equal to the surviving later variant. The URL route was the
+historical pre-activation exception: the entity-encoded colon reflected (the
+filter was bypassed) but the verifier did not activate the URL, so the verdict
+was Rejected. Recognized interaction candidates now receive one bounded
+activation; fresh URL-route validation is required before claiming a current
+confirmation result.
 
 Measured outcomes are recorded in the run handoff
 (`ps-payload-variation/HANDOFF.md`); this section describes the contract the
@@ -801,8 +826,9 @@ rejected or stripped. On the raw html/attribute/js_string/script_block routes
 the variation shapes confirmed alongside the canonical ones. Two honest
 exceptions: the canonical `${M}` stays **Inconclusive** (the documented
 template-literal provenance limit) and the pack's `</script><svg onload=M>` is
-what turns that site into a **Confirmed** finding; and the `url` route stays
-**Rejected** because none of its variants can fire without activation.
+what turns that site into a **Confirmed** finding. The recorded URL result was
+**Rejected** before bounded activation existed; current interaction behavior
+requires fresh live evidence.
 
 ## Combined (multi-parameter) candidates
 

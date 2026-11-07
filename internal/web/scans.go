@@ -224,9 +224,9 @@ type createScanReq struct {
 	CandidateProfile string `json:"candidate_profile"`
 	MaxCandidates    int    `json:"max_candidates"`
 
-	// EnableEvasion opts this scan into WAF/filter-bypass candidate variants
-	// (see domain.ScanConfig.EnableEvasion). Off by default — an authorized
-	// operator sets this explicitly per scan.
+	// EnableEvasion asks for eager WAF/filter-bypass candidate variants. Without
+	// it, the scan controller may still run the separately bounded automatic
+	// fallback after canonical misses; see domain.ScanConfig.EnableEvasion.
 	EnableEvasion bool `json:"enable_evasion"`
 
 	// RawQueryInjection opts this scan into testing the WHOLE query string as

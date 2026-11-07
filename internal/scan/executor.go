@@ -672,11 +672,12 @@ func hasBody(m domain.HTTPMethod) bool {
 // baseline (unmodified) request and a mutated/candidate request that did NOT
 // reflect: if the baseline succeeded (2xx/3xx) but the mutated request came
 // back 403/429/503 — common WAF/rate-limit/maintenance signals — "not
-// reflected" could mean "blocked", not "safe". This is detection only, never
-// evasion (AGENTS.md §2.2: no anti-bot/WAF bypass of any kind is added here;
-// the exact same request is still sent, once): it exists so an operator does
-// not mistake a blocked probe for a clean negative. Returns "" when nothing
-// looks anomalous.
+// reflected" could mean "blocked", not "safe". This signal itself is
+// diagnostic only: it sends no retry and never attempts to solve/bypass a
+// CAPTCHA. A later controller-level fallback is separately eligibility-gated
+// (canonical completion, real verifier, no CAPTCHA) and may use only the
+// bounded benign-marker techniques authorized by AGENTS.md §2.2. Returns ""
+// when nothing looks anomalous.
 // The bool return additionally tells the caller whether to record a
 // diagnostic Finding for this (see result.blockSuspected / upsertBlockFinding
 // in finding.go) — before that was wired, this signal only ever reached a raw
@@ -686,7 +687,7 @@ func possibleBlockNote(baselineStatus, mutatedStatus int) (string, bool) {
 	suspicious := mutatedStatus == 403 || mutatedStatus == 429 || mutatedStatus == 503
 	if baselineOK && suspicious && mutatedStatus != baselineStatus {
 		return fmt.Sprintf(" (possible block/filter: status changed %d -> %d from baseline; "+
-			"this may not be a clean negative — Indago does not retry or evade, see AGENTS.md §2.2)",
+			"this may not be a clean negative; the response itself is recorded once as a diagnostic, while any later bounded fallback is separately gated — see AGENTS.md §2.2)",
 			baselineStatus, mutatedStatus), true
 	}
 	return "", false

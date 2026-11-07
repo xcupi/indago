@@ -22,9 +22,10 @@ package detection
 //     candidate: no alert(), cookie access, network call, or DOM exfiltration.
 //     The handler body / script body is the bare marker, so an executing
 //     variant raises a marker-named ReferenceError, never a weaponized payload.
-//   - HONEST ABOUT TRIGGERS. A variant that needs a user action the passive
-//     verifier never synthesizes declares TriggerInteraction (the same class
-//     the evasion families use); everything that can fire during load declares
+//   - HONEST ABOUT TRIGGERS. A variant that needs an action after navigation
+//     declares TriggerInteraction (the same class the evasion families use);
+//     the verifier may dispatch one bounded activation only for a recognized
+//     declared mechanism. Everything that can fire during load declares
 //     TriggerLoad and sorts first.
 //   - NEEDS-AWARE. A variant whose required canary characters the site
 //     provably neutralizes is not planned at all: the point of a pack is a
@@ -263,14 +264,14 @@ func scriptBlockVariationTemplates(m string) []candTemplate {
 }
 
 // urlAttributeVariationTemplates covers href/src/action at a scheme position.
-// Every shape here needs the link to be activated, which the passive verifier
-// deliberately never simulates, so all four are TriggerInteraction: they
-// document and prove the surviving URL, and stay Rejected by design. The
-// mechanisms are distinct: plain scheme, an HTML entity for ':' (decoded by
-// the browser BEFORE URL parsing, so a filter matching the literal
-// "javascript:" misses it), leading C0 whitespace (stripped by the URL parser
-// before the scheme, defeating a start-anchored filter), and a data: URI whose
-// document carries the marker (a different navigation target entirely).
+// Every shape here needs the link to be activated, so all four declare
+// TriggerInteraction. The verifier may dispatch one bounded click only for a
+// recognized declared mechanism; unsupported forms remain rejected and surface
+// manual-review evidence. The mechanisms are distinct: plain scheme, an HTML
+// entity for ':' (decoded by the browser BEFORE URL parsing, so a filter matching
+// the literal "javascript:" misses it), leading C0 whitespace (stripped by the
+// URL parser before the scheme, defeating a start-anchored filter), and a data:
+// URI whose document carries the marker (a different navigation target entirely).
 func urlAttributeVariationTemplates(m string) []candTemplate {
 	return []candTemplate{
 		variationTpl("javascript:"+m, "", 90,

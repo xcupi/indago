@@ -123,12 +123,12 @@ type Candidate struct {
 	// Delimiter does for quote styles.
 	Separator string `json:"separator,omitempty"`
 	// Trigger is how this breakout could ever produce an execution signal:
-	// TriggerLoad fires on page load (what the passive browser verifier can
-	// observe), TriggerInteraction needs a user action (hover, click,
-	// navigation) the verifier deliberately never simulates, and TriggerNone is
-	// a markup-injection probe that carries no executable reference at all.
-	// Only TriggerLoad candidates can ever be Confirmed by verification; the
-	// others document reflection behaviour and end Rejected/unconfirmed.
+	// TriggerLoad fires on page load (no activation needed); TriggerInteraction
+	// needs an action after navigation, for which the verifier may dispatch one
+	// bounded declared activation only when it recognizes the mechanism; and
+	// TriggerNone is a markup-injection probe that carries no executable
+	// reference. A confirmation always requires the marker-specific browser
+	// signal, never the activation itself.
 	Trigger string `json:"trigger,omitempty"`
 	// Technique names the WAF/filter-bypass shape this candidate uses (e.g.
 	// "case_variation", "alt_separator", "double_url_encoding"), empty for
@@ -197,8 +197,10 @@ type PlanOptions struct {
 	Profile ProfileSpec
 	// EnableEvasion additionally plans WAF/filter-bypass variants (see
 	// evasion.go) for the contexts that have them, ON TOP OF the canonical
-	// candidates — it never replaces or hides them. Defaults to false
-	// (conservative by design, AGENTS.md §2.3): an operator opts in per scan.
+	// candidates — it never replaces or hides them. Defaults to false. An
+	// operator opts in per scan (AGENTS.md §2.2), and the scan layer also sets
+	// it internally for its one-time automatic escalation, only after the
+	// canonical candidates at a reflected-XSS point are complete.
 	EnableEvasion bool
 	// EnableVariationPacks additionally plans mechanism-distinct variation
 	// packs (see variation.go) per reflection context, ON TOP OF the canonical
@@ -341,11 +343,14 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 	return plan
 }
 
-// MaxEvasionCandidatesPerInjectionPoint bounds how many OPT-IN bypass shapes
-// may be planned per injection point on top of the profile's canonical
-// selection. The profile cap is sized for the canonical set; without this
-// separate allowance the cap decides that the bypass pack never runs at all,
-// which is the opposite of what the operator asked for with -enable-evasion.
+// MaxEvasionCandidatesPerInjectionPoint bounds how many bypass shapes may be
+// planned per injection point on top of the profile's canonical selection. It
+// bounds both the operator's explicit EnableEvasion plan and the scan layer's
+// one-time automatic escalation, so neither can widen the request set without
+// bound. The profile cap is sized for the canonical set; without this
+// separate allowance the cap would decide that the bypass pack never runs at
+// all, which is the opposite of what the operator asked for with
+// -enable-evasion.
 const MaxEvasionCandidatesPerInjectionPoint = 8
 
 // keepEvasionBeyondCap returns the profile's selection plus the best evasion
@@ -851,7 +856,8 @@ func jsTemplates(a ContextAnalysis, m string) []candTemplate {
 func urlTemplates(a ContextAnalysis, m string) []candTemplate {
 	switch a.Sub {
 	case "start", "relative_first_segment":
-		// Runs only when the link is activated; the verifier never clicks.
+		// Runs when the link is activated. It declares TriggerInteraction so
+		// the verifier may dispatch its one bounded recognized click.
 		return []candTemplate{onInteraction("javascript:"+m, "", 90,
 			"inject a javascript: scheme so the marker runs when the link is activated/navigated")}
 	case "data_uri":
@@ -876,10 +882,10 @@ func urlTemplates(a ContextAnalysis, m string) []candTemplate {
 // The value is still inside an HTML attribute, though, so the closing quote
 // alone ends it and an attribute-only injection IS plannable: a new attribute
 // pair on the link element itself. That is the reported canonical-link vector
-// (accesskey plus onclick). It only runs after an operator keypress that the
-// passive verifier never simulates, so it is an interaction candidate: it
-// documents the position — and, because it reflects, still produces a finding —
-// but it can never be Confirmed by the verifier.
+// (accesskey plus onclick). It declares an interaction; the verifier may send
+// one bounded access-key activation when it can locate the injected element, and
+// confirmation still requires the marker-specific signal. An unsupported or
+// absent element stays rejected but is still reported for manual review.
 func linkAttributeTemplates(a ContextAnalysis, m string) []candTemplate {
 	if tpl, ok := linkAccesskeyShape(a, m, sepSpace); ok {
 		return []candTemplate{tpl}
@@ -917,7 +923,7 @@ func linkAccesskeyShape(a ContextAnalysis, m string, sep separator) (candTemplat
 		// injection position at all.
 		return candTemplate{}, false
 	}
-	why := "close the link's href attribute and add an accesskey/onclick pair on the link element itself (the canonical-link vector); it needs only the quote, so encoding < and > does not stop it, but it executes only after an activation keypress that the passive verifier never simulates, so it documents the position and is never Confirmed"
+	why := "close the link's href attribute and add an accesskey/onclick pair on the link element itself (the canonical-link vector); it needs only the quote, so encoding < and > does not stop it, and it declares a bounded access-key activation whose confirmation still requires the marker-specific browser signal"
 	value := q + string(sep) + "accesskey=x" + string(sep) + "onclick=" + m + string(sep) + "y=" + q
 	if sep == sepTab {
 		why = separatorNote(why)

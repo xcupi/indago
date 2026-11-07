@@ -109,8 +109,8 @@ async function openNewScanModal() {
   const candFs = el("fieldset");
   candFs.append(legend("XSS candidates"), rowOf(field("Candidate profile", candProfile), field("Max candidates per injection point", maxCand)),
     el("div", "Selects among the built-in benign-marker candidates by the site's execution context and encoding. Never changes how a finding is confirmed (always a browser-observed execution signal).", "hint"),
-    labelInline(enableEvasion, "Also try WAF/filter-bypass variants (case variation, alternate separators, double URL-encoding)"),
-    el("div", "Off by default. Adds these ON TOP OF the candidates above for an authorized engagement where a bypass is itself the reportable finding — still benign-marker-only and scope-enforced the same as every other request. See AGENTS.md §2 and docs/reflection-candidates.md.", "hint"));
+    labelInline(enableEvasion, "Eagerly try WAF/filter-bypass variants (case variation, alternate separators, double URL-encoding)"),
+    el("div", "Without this flag, Indago may run the bounded Technique-only fallback only after canonical candidates at the same in-scope point completed without confirmation. Eager mode sends the variants immediately; both paths remain benign-marker-only and scope-enforced. See AGENTS.md §2 and docs/reflection-candidates.md.", "hint"));
 
   const proxyPool = textarea("f_proxypool", 2, "one proxy per line, e.g. http://host:port or socks5://user:pass@host:port — empty = direct connection");
   const randomizeTLS = el("input"); randomizeTLS.type = "checkbox"; randomizeTLS.id = "f_randomize_tls";
@@ -491,8 +491,10 @@ function sectionNote(f) {
       let note = f.review_reason_label || (f.verdict === "inconclusive"
         ? "Not yet a confirmed vulnerability: the marker could not be re-observed during browser verification."
         : "Not yet a confirmed vulnerability: awaiting browser verification (or it cannot be verified, e.g. a POST/body-carrying request).");
-      if (f.review_reason === "interaction_only") {
-        note += " Open the tested URL in the attempts list below yourself and perform the action (hover/click/navigate) — Indago never simulates user interaction (AGENTS.md §3).";
+      // report.ReviewReason values are the wire contract; interaction_required
+      // is the one whose guidance differs from the label alone.
+      if (f.review_reason === "interaction_required") {
+        note += " For a recognized declared mechanism Indago already dispatched one bounded activation and saw no marker signal. Open the tested URL only to exercise a page-specific or unsupported action manually.";
       }
       return note;
     }
@@ -507,7 +509,7 @@ function findingDetailEl(f, scanId) {
   const cands = pd.candidates || [];
   // candidateByValue finds the PLANNED candidate matching a verification
   // attempt's value, so a confirmed/attempted candidate can show its
-  // Technique (set only when the scan opted into evasion candidates) even
+  // Technique (set by eager evasion OR the bounded automatic fallback) even
   // though AttemptView itself doesn't carry one.
   const candidateByValue = (value) => cands.find((c) => c.value === value);
   const techniqueNote = (c) => c && c.technique
@@ -1367,8 +1369,11 @@ function overviewPanel(st, scanId) {
       st.findings.pending + " pending · " + st.findings.inconclusive + " inconclusive · " + st.findings.rejected + " rejected"),
   );
   if (cfg.enable_evasion) {
-    m.appendChild(metric("Evasion candidates", "ON", undefined,
-      "Also tried WAF/filter-bypass variants (case variation, alt separators, double URL-encoding) on top of the canonical candidates — look for a \"bypass: …\" tag on a candidate."));
+    m.appendChild(metric("Evasion candidates", "EAGER ON", undefined,
+      "WAF/filter-bypass variants are queued immediately on top of canonical candidates — look for a \"bypass: …\" tag on a candidate."));
+  } else {
+    m.appendChild(metric("Evasion fallback", "AUTO AFTER CANONICAL MISS", undefined,
+      "A bounded Technique-only fallback can run only after every canonical candidate at one in-scope point completed without confirmation; it is skipped for CAPTCHA, incomplete evidence, no replayable verifier, or an already-recorded bypass attempt."));
   }
   if (st.session) {
     const sess = st.session;
