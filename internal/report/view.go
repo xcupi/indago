@@ -178,8 +178,12 @@ type detailShape struct {
 	// BlockSuspected/BlockDetail mirror scan.findingDetail's fields of the
 	// same name — see upsertBlockFinding. Set only on a diagnostic Finding
 	// for a possible WAF/rate-limit/maintenance block seen during testing.
-	BlockSuspected   bool   `json:"block_suspected,omitempty"`
-	BlockDetail      string `json:"block_detail,omitempty"`
+	BlockSuspected bool   `json:"block_suspected,omitempty"`
+	BlockDetail    string `json:"block_detail,omitempty"`
+	// Throttled is the sticky per-point backpressure flag: once this point
+	// answered 429/503, BlockDetail may later show a 403 (it tracks the latest
+	// status change) while the point stays ineligible for the bounded pass.
+	Throttled        bool   `json:"throttled,omitempty"`
 	CaptchaSuspected bool   `json:"captcha_suspected,omitempty"`
 	CaptchaLabel     string `json:"captcha_label,omitempty"`
 	// Combined/ParameterBName mirror scan.findingDetail's fields of the
@@ -254,6 +258,11 @@ const (
 	// §2.2), set on its own dedicated diagnostic Finding the same way
 	// ReviewPossibleBlock is.
 	ReviewCaptchaDetected ReviewReason = "captcha_detected"
+	// ReviewThrottledPoint: the same diagnostic row, but this point answered
+	// 429/503 at some time during testing (sticky). It stays a block
+	// diagnostic, yet the bounded fallback is NOT escalated here, so it must
+	// not borrow the 403 wording that promises the pass.
+	ReviewThrottledPoint ReviewReason = "throttled_point"
 )
 
 // Label is the human-readable explanation of a ReviewReason.
@@ -265,6 +274,8 @@ func (r ReviewReason) Label() string {
 		return "every candidate recorded at this site was encoded or stripped by the target; bounded alternate technique shapes may also have been tried (and are listed above when present), but a differently-shaped payload outside the recorded attempts remains untested, not ruled out"
 	case ReviewPossibleBlock:
 		return "a request during testing came back with a suspicious status-code change from the baseline (e.g. 403/429/503) — this may be a WAF/filter, rate-limit or maintenance block, not a clean negative; the diagnostic itself does not retry, any bounded fallback is separately gated by evidence and never bypasses a CAPTCHA, and a 429/503 point is NOT escalated at all because that is backpressure rather than a filter decision on the payload (a 403 filter rejection can still get the bounded pass; see AGENTS.md §2.2)"
+	case ReviewThrottledPoint:
+		return "this point answered 429 (rate limit) or 503 (unavailable/maintenance) at some time during testing — that is backpressure or downtime, not a filter decision on the payload, so the bounded bypass fallback is NOT escalated here and no CAPTCHA is ever bypassed (see AGENTS.md §2.2). The status change shown is the LATEST one recorded; an earlier 429/503 keeps the point ineligible even when the latest answer was a 403."
 	case ReviewCaptchaDetected:
 		return "a response during testing matched a known CAPTCHA/bot-challenge pattern (reCAPTCHA/hCaptcha/Cloudflare challenge) that was not present in the baseline response — Indago only detects this, it never attempts to solve or bypass a CAPTCHA (see AGENTS.md §2.2)"
 	default:
@@ -282,6 +293,13 @@ func (r ReviewReason) Label() string {
 // evidence of filtering, so this never fires on data that simply didn't say.
 func findingReviewReason(verdict domain.Verdict, d detailShape) (ReviewReason, bool) {
 	if d.BlockSuspected {
+		// The label follows the STICKY flag, not the latest status in
+		// BlockDetail: a 403 that arrives after a 429 is still a throttled
+		// point, and telling the operator it can get the bounded pass would
+		// be wrong.
+		if d.Throttled {
+			return ReviewThrottledPoint, true
+		}
 		return ReviewPossibleBlock, true
 	}
 	if d.CaptchaSuspected {
