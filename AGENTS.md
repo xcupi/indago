@@ -41,17 +41,25 @@ and must be preserved by every change:
 1. **Explicit scope is mandatory.** Nothing is ever tested until an operator has
    defined and the system has validated a `Scope`. Scope enforcement lives in
    the domain/scan layers and must fail closed.
-2. **WAF/anti-bot evasion is opt-in, scope-gated, and narrowly bounded.**
-   By default Indago sends only its canonical, non-obfuscated candidates (no
-   evasion), through Indago's real network identity: no proxy, no TLS
-   fingerprint spoofing. An operator may explicitly opt into each of the
-   following, independently, per scan — never as a default:
-   - `ScanConfig.EnableEvasion` (CLI `-enable-evasion`): ALSO try a small
-     set of documented payload-shape bypasses (case variation, alternate
-     HTML separators, double URL-encoding — see
-     `internal/detection/evasion.go` and `docs/reflection-candidates.md`
-     "Evasion candidates (opt-in)") for an engagement where a bypass is
-     itself the reportable finding (e.g. a bug bounty program).
+2. **WAF/anti-bot evasion is scope-gated and narrowly bounded.**
+   Indago first sends only its canonical, non-obfuscated candidates through its
+   real network identity: no proxy and no TLS-fingerprint spoofing. If every
+   canonical candidate for one reflected-XSS injection point completes without
+   a confirmed browser-execution signal, Indago may run exactly ONE bounded,
+   deterministic payload-shape escalation for that same in-scope point. The
+   escalation is limited to the documented benign-marker alternatives in
+   `internal/detection/evasion.go`; it never retries a point indefinitely and
+   it never runs after a canonical confirmation. This policy is deliberate:
+   the fallback is selected from evidence already gathered for the point, not
+   applied blindly to every target or every request.
+
+   An operator may still explicitly opt into each of the following,
+   independently, per scan:
+   - `ScanConfig.EnableEvasion` (CLI `-enable-evasion`): try that same small
+     documented payload-shape set immediately, in addition to canonical
+     candidates, rather than waiting for the bounded automatic escalation.
+     This is appropriate when the bypass itself is the reportable finding
+     (e.g. a bug bounty program).
    - `ScanConfig.ProxyPool` (CLI `-proxy`, repeatable): route outbound
      traffic — raw HTTP requests AND browser verification alike — through
      operator-supplied proxy infrastructure, round-robin. Indago never
@@ -128,9 +136,21 @@ right now** and must remain stubs/interfaces (job handlers are no-ops):
   limitations.
 - ❌ Automated exploitation / weaponized payloads. Candidate execution AND
   verification only ever send the small, canonical, benign-marker breakouts the
-  planner chose — no payload obfuscation, no evasion variants, no exploit
-  payload libraries, no simulated user activation (e.g. clicking a
-  `javascript:` link) to force execution. State-changing methods still require
+  planner chose — no exploit payload libraries. A candidate that explicitly
+  declares `TriggerInteraction` may receive **one bounded activation** matching
+  that declared mechanism (one click, resize, focus, access-key press, or SMIL
+  begin) after its in-scope browser navigation; the activation is methodology,
+  never evidence, and confirmation still requires the unchanged marker-specific
+  browser signal. This existing bounded activation rule applies equally to the
+  automatic fallback authorized in §2.2 and is never an arbitrary click/hover
+  fuzzer.
+
+  The sole non-canonical exception is the **bounded automatic filter-bypass
+  fallback** authorized in §2.2: it reuses only the documented benign-marker
+  `internal/detection/evasion.go` techniques after the canonical plan completed
+  without confirmation, at the same in-scope injection point, once. It never
+  adds arbitrary obfuscation, CAPTCHA handling, cookie access, network
+  exfiltration, or a weaponized payload. State-changing methods still require
   the explicit opt-in, for both candidate execution and verification.
 - ⚠️ POST/JSON candidates may be browser-verified only with the explicit
   state-changing opt-in, through a bounded top-level document replay. Other

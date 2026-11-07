@@ -9,7 +9,10 @@ and conservative, operator-controlled behavior.
 
 > ⚠️ **Authorized use only.** Only run Indago against systems you own or have
 > explicit written permission to test. Indago enforces explicit target scope
-> before any testing and does **not** implement anti-bot/WAF evasion.
+> before any testing. After canonical reflected-XSS candidates at one in-scope
+> point complete without confirmation, it may run one bounded benign-marker
+> filter-bypass fallback; it never solves/bypasses CAPTCHA, rotates identity, or
+> sends weaponized payloads.
 
 ---
 

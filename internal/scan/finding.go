@@ -365,7 +365,7 @@ func upsertBlockFinding(ctx context.Context, st store.Store, scanID domain.ID, e
 		ID: domain.NewID(), ScanID: scanID, ProjectID: sc.ProjectID, VulnClass: domain.VulnReflectedXSS,
 		Verdict: domain.VerdictInconclusive, Severity: domain.SeverityInfo, Confidence: domain.ConfidenceMedium,
 		Title:            fmt.Sprintf("Possible block/filter while testing parameter %q (%s) at %s %s", focus.Name, focus.Location, ep.Method, endpointLabel(ep.URL)),
-		Summary:          detail + " — this may not be a clean negative; Indago does not retry or evade (AGENTS.md §2.2)",
+		Summary:          detail + " — this may not be a clean negative; the diagnostic itself does not retry, while any later bounded fallback is separately evidence-gated and never bypasses a CAPTCHA (AGENTS.md §2.2)",
 		EndpointID:       ep.ID,
 		InjectionPointID: injectionPointID,
 		ParameterID:      focus.ID,

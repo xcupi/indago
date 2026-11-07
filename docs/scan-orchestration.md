@@ -272,10 +272,19 @@ A monitor evaluates each running scan every `PollInterval`:
    `pause_and_ask`) is applied to the confirmed-finding count. `pause_and_ask`
    re-asks only when the count *increases*, so resuming does not immediately
    re-pause. Stopping early cancels the scan's remaining jobs.
-3. **Complete** when discovery has finished **and** no job is queued, leased, or
-   running (`Pending() == 0`). Handlers must enqueue any child jobs *before* the
-   parent job completes — that is what makes `Pending() == 0` a reliable
-   quiescence test.
+3. **Quiet-queue fallbacks, then complete.** When discovery has finished and no
+   job is queued, leased, or running (`Pending() == 0`), the monitor first runs
+   its bounded one-time passes instead of completing: automatic reflected-XSS
+   evasion escalation (only for an already-reflected injection point whose
+   canonical child jobs completed successfully, no CAPTCHA/confirmation exists,
+   and browser replay is available), then the combined multi-parameter fallback,
+   then the independent DOM-XSS/IDOR/access-control passes. Any newly enqueued
+   work drains before the next quiet tick. The evasion queue ledger is durable:
+   after a restart it fills only missing technique DedupKeys rather than replaying
+   an already-enqueued bypass shape. Once every applicable pass has run and the
+   queue is again quiet, the scan completes. Handlers must enqueue any child jobs
+   *before* the parent job completes — that is what makes `Pending() == 0` a
+   reliable quiescence test.
 
 A paused or awaiting-auth scan never completes. `COMPLETED` is recorded only
 *after* the workers and discovery have fully stopped and (for an early stop) the

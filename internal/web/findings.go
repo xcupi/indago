@@ -53,7 +53,8 @@ func (s *Server) handleListFindings(w http.ResponseWriter, r *http.Request) {
 		v := lookup.view(f)
 		item := findingListItem{
 			Finding: f, Section: v.Section, ParameterName: v.ParamName,
-			Verified: v.Verified, AttemptCount: len(v.Attempts), ReviewReasonLabel: v.ReviewReasonLabel,
+			Verified: v.Verified, AttemptCount: len(v.Attempts),
+			ReviewReason: v.ReviewReason, ReviewReasonLabel: v.ReviewReasonLabel,
 			Combined: v.Combined, ParameterBName: v.ParamNameB,
 		}
 		if len(v.Candidates) > 0 {
@@ -99,13 +100,17 @@ func parseVerdictFilter(raw string) (map[domain.Verdict]bool, string) {
 // CLI) is unaffected.
 type findingListItem struct {
 	*domain.Finding
-	EndpointMethod    string              `json:"endpoint_method,omitempty"`
-	EndpointURL       string              `json:"endpoint_url,omitempty"`
-	Section           report.Section      `json:"section"`
-	ParameterName     string              `json:"parameter_name,omitempty"`
-	Context           string              `json:"context,omitempty"`
-	Verified          *report.AttemptView `json:"verified_candidate,omitempty"`
-	AttemptCount      int                 `json:"attempt_count"`
+	EndpointMethod string              `json:"endpoint_method,omitempty"`
+	EndpointURL    string              `json:"endpoint_url,omitempty"`
+	Section        report.Section      `json:"section"`
+	ParameterName  string              `json:"parameter_name,omitempty"`
+	Context        string              `json:"context,omitempty"`
+	Verified       *report.AttemptView `json:"verified_candidate,omitempty"`
+	AttemptCount   int                 `json:"attempt_count"`
+	// ReviewReason is the machine-readable reason (see report.ReviewReason);
+	// the client compares it to render reason-specific guidance, so the label
+	// alone is not enough.
+	ReviewReason      report.ReviewReason `json:"review_reason,omitempty"`
 	ReviewReasonLabel string              `json:"review_reason_label,omitempty"`
 	// Combined/ParameterBName: see report.FindingView — a finding that
 	// required TWO parameters mutated together in the SAME request. Empty/
@@ -192,6 +197,7 @@ type findingView struct {
 	Verified          *report.AttemptView   `json:"verified_candidate,omitempty"`
 	Attempts          []report.AttemptView  `json:"attempts,omitempty"`
 	Evidence          []report.EvidenceView `json:"evidence"`
+	ReviewReason      report.ReviewReason   `json:"review_reason,omitempty"`
 	ReviewReasonLabel string                `json:"review_reason_label,omitempty"`
 }
 
@@ -222,7 +228,7 @@ func (s *Server) handleGetFinding(w http.ResponseWriter, r *http.Request) {
 	view := &findingView{
 		Finding: f, ParsedDetail: decodeFindingDetail(f.Detail),
 		Section: rv.Section, Verified: rv.Verified, Attempts: rv.Attempts, Evidence: nonNil(rv.Evidence),
-		ReviewReasonLabel: rv.ReviewReasonLabel,
+		ReviewReason: rv.ReviewReason, ReviewReasonLabel: rv.ReviewReasonLabel,
 	}
 	if f.EndpointID != "" {
 		if ep, err := s.store.Endpoints().Get(r.Context(), f.EndpointID); err == nil {

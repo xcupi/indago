@@ -75,8 +75,8 @@ func TestCanonicalLinkPlansAttributeOnlyVector(t *testing.T) {
 	if got.Trigger != detection.TriggerInteraction {
 		t.Fatalf("the vector needs an operator activation, so it must be an interaction candidate, got %q", got.Trigger)
 	}
-	if !strings.Contains(got.Rationale, "activation") || !strings.Contains(got.Rationale, "never") {
-		t.Fatalf("rationale must state that passive verification never activates it, got %q", got.Rationale)
+	if !strings.Contains(got.Rationale, "bounded access-key activation") || !strings.Contains(got.Rationale, "marker-specific") {
+		t.Fatalf("rationale must describe bounded activation plus marker-only confirmation, got %q", got.Rationale)
 	}
 	for i := range plan.Candidates {
 		for j := i + 1; j < len(plan.Candidates); j++ {

@@ -231,16 +231,16 @@ func decodeDetail(b []byte) detailShape {
 type ReviewReason string
 
 const (
-	// ReviewInteractionOnly: the candidate that survived unescaped needs a user
-	// action (click/hover/navigation) the verifier deliberately never simulates
-	// (AGENTS.md §3) — it may be genuinely exploitable; passive verification
-	// simply could never confirm it either way.
+	// ReviewInteractionOnly: the candidate that survived unescaped needs an
+	// action beyond page load. The verifier dispatches one declared activation
+	// for a closed, recognized set; this reason remains when the action is not
+	// recognized or still produced no marker signal, so it may be exploitable.
 	ReviewInteractionOnly ReviewReason = "interaction_required"
 	// ReviewAllCandidatesFiltered: every candidate this site's context offered
-	// was encoded/stripped by the target (none survived raw). Indago tries only
-	// the small, canonical breakout(s) for that context — never alternate
-	// shapes/evasion variants (AGENTS.md §2.2) — so a DIFFERENTLY shaped
-	// breakout bypassing this specific filter is simply untested, not ruled out.
+	// was encoded/stripped by the target (none survived raw). The finding may
+	// list a bounded automatic Technique fallback as well as canonical shapes;
+	// either way, any differently-shaped payload outside the recorded attempts
+	// remains untested rather than ruled out.
 	ReviewAllCandidatesFiltered ReviewReason = "all_candidates_filtered"
 	// ReviewPossibleBlock: a request during testing came back with a
 	// suspicious status-code change from baseline (403/429/503) — the real
@@ -260,11 +260,11 @@ const (
 func (r ReviewReason) Label() string {
 	switch r {
 	case ReviewInteractionOnly:
-		return "a candidate reflected unescaped but requires a user action (click/hover/navigation) that passive browser verification deliberately never simulates — it may still be exploitable; this was never actually confirmed OR ruled out"
+		return "a candidate reflected unescaped and needs an action beyond page load; for a recognized declared mechanism the verifier dispatches one declared activation, and no marker signal was observed. Unsupported or page-specific actions may still need manual review, so this is not ruled out"
 	case ReviewAllCandidatesFiltered:
-		return "every candidate tried at this site was encoded or stripped by the target; Indago only tries the small, canonical breakout(s) for this context (never alternate shapes or evasion variants), so a differently-shaped payload bypassing this specific filter is untested, not ruled out"
+		return "every candidate recorded at this site was encoded or stripped by the target; bounded alternate technique shapes may also have been tried (and are listed above when present), but a differently-shaped payload outside the recorded attempts remains untested, not ruled out"
 	case ReviewPossibleBlock:
-		return "a request during testing came back with a suspicious status-code change from the baseline (e.g. 403/429/503) — this may be a WAF/rate-limit/maintenance block, not a clean negative; Indago never retries or evades a block (see AGENTS.md §2.2)"
+		return "a request during testing came back with a suspicious status-code change from the baseline (e.g. 403/429/503) — this may be a WAF/rate-limit/maintenance block, not a clean negative; the diagnostic itself does not retry, while any bounded fallback is separately gated by evidence and never bypasses a CAPTCHA (see AGENTS.md §2.2)"
 	case ReviewCaptchaDetected:
 		return "a response during testing matched a known CAPTCHA/bot-challenge pattern (reCAPTCHA/hCaptcha/Cloudflare challenge) that was not present in the baseline response — Indago only detects this, it never attempts to solve or bypass a CAPTCHA (see AGENTS.md §2.2)"
 	default:

@@ -459,6 +459,13 @@ func (c *cli) scan(sub string, args []string) error {
 	return fmt.Errorf("unknown scan subcommand %q (create, list, status, start, pause, resume, cancel, config)", sub)
 }
 
+// registerMaxCandidates registers the -max-candidates flag. It is a separate
+// function so the help text — which has to describe BOTH the canonical cap this
+// flag sets and the independently bounded automatic fallback — is testable.
+func registerMaxCandidates(fs *flag.FlagSet) *int {
+	return fs.Int("max-candidates", 0, "cap on CANONICAL candidates tried per injection point (0 = the profile's own; hard ceiling 32); this cap does not cover the separate automatic fallback, which after the canonical set at a point completes without confirmation may add up to 8 Technique-only bypass shapes at that same point (-enable-evasion plans those eagerly instead)")
+}
+
 func (c *cli) scanCreate(args []string) error {
 	fs := c.newFlags("scan create")
 	project := fs.String("project", "", "project ID")
@@ -475,8 +482,8 @@ func (c *cli) scanCreate(args []string) error {
 	loginPassSel := fs.String("login-password-selector", "", "CSS selector override for the password field; -auth password only, empty = heuristic (input[type=password])")
 	loginSubmitSel := fs.String("login-submit-selector", "", "CSS selector override for the submit control; -auth password only, empty = heuristic")
 	candProfile := fs.String("candidate-profile", "", "XSS candidate profile: minimal | standard | thorough (default: server default)")
-	maxCand := fs.Int("max-candidates", 0, "cap on candidates tried per injection point (0 = the profile's own; hard ceiling 32)")
-	enableEvasion := fs.Bool("enable-evasion", false, "opt in to WAF/filter-bypass candidate variants (case variation, alt separators, double URL-encoding) ON TOP OF the canonical set; OFF by default — only for an authorized engagement where a bypass is itself the reportable finding (see AGENTS.md §2.3)")
+	maxCand := registerMaxCandidates(fs)
+	enableEvasion := fs.Bool("enable-evasion", false, "eagerly try WAF/filter-bypass candidate variants (case variation, alt separators, double URL-encoding) ON TOP OF the canonical set; without this flag, Indago may run the same bounded Technique-only fallback only after canonical candidates at one in-scope point complete without confirmation (see AGENTS.md §2.2)")
 	var rawQuery rawQueryModeFlag
 	fs.Var(&rawQuery, "raw-query-injection", "opt in to testing the WHOLE query string as one injection point, for pages that echo their entire query (canonical <link href>, 404/search/error pages): bare flag = auto (only GET endpoints with no named query parameters), =always also probes endpoints that have named parameters; OFF by default, GET-only, capped at 2 shapes/endpoint and 40 probes/scan (see docs/raw-query-injection.md)")
 	enableIDOR := fs.Bool("idor", false, "opt in to the IDOR engine's object-identifier differential (GET/HEAD reads only); requires an authenticated session — OFF by default (see docs/idor.md)")
@@ -1107,8 +1114,8 @@ func printFindingDetail(w io.Writer, server string, fd *findingDetailOut) {
 	}
 	if fd.ReviewReasonLabel != "" {
 		fmt.Fprintf(w, "Review     needs manual review: %s\n", fd.ReviewReasonLabel)
-		if strings.Contains(fd.ReviewReasonLabel, "user action") {
-			fmt.Fprintln(w, "           Open the attempt URL(s) above yourself and perform the action (click/hover/navigate) to actually exercise it — Indago deliberately never simulates this (AGENTS.md \u00a73).")
+		if strings.Contains(fd.ReviewReasonLabel, "action beyond page load") {
+			fmt.Fprintln(w, "           For a recognized declared mechanism Indago already dispatched one bounded activation and saw no marker signal. Open the attempt URL(s) only to exercise a page-specific or unsupported action manually.")
 		}
 	}
 	if len(fd.ParsedDetail.Candidates) > 0 {

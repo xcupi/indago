@@ -170,7 +170,7 @@ func writeFinding(b *strings.Builder, n int, f *domain.Finding, v FindingView) {
 	if v.ReviewReasonLabel != "" {
 		fmt.Fprintf(b, "- **Why this needs manual review (not a clean negative):** %s\n", v.ReviewReasonLabel)
 		if v.ReviewReason == ReviewInteractionOnly {
-			b.WriteString("- **How to check it yourself:** open the Tested URL for the attempt(s) below in a real browser and perform the action the candidate needs (hover, click, navigate) — Indago deliberately never simulates this (AGENTS.md §3).\n")
+			b.WriteString("- **How to check it yourself:** for a recognized declared mechanism Indago already dispatched one bounded activation and saw no marker signal. Open the Tested URL for the attempt(s) below only if you need to exercise a page-specific or unsupported action manually.\n")
 		}
 	}
 	b.WriteString("\n")

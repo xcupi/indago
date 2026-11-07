@@ -43,6 +43,13 @@ type execution struct {
 	// because it had already completed before a restart).
 	discFinished atomic.Bool
 
+	// evasionPassDone marks that this execution's one-time, bounded automatic
+	// filter-bypass escalation (see evasion_escalation.go) has already been
+	// evaluated at a quiet queue. It runs BEFORE combinedPassDone: evidence
+	// from the canonical candidates is complete by then, and any bypass jobs
+	// it enqueues must drain before the unrelated combined fallback runs.
+	evasionPassDone atomic.Bool
+
 	// combinedPassDone marks that this execution's one-time, bounded
 	// combined (multi-parameter) candidate pass (see combined.go) has
 	// already been enqueued — never run twice in the same execution.
@@ -423,6 +430,22 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 				"scan", ex.scanID, "reason", reason)
 			return c.failExecution(ctx, ex, reason)
 		}
+		return false
+	}
+	// Bounded, one-time automatic filter-bypass escalation (see
+	// evasion_escalation.go): at the FIRST quiet tick, after every canonical
+	// candidate (and its browser verification) has drained, try the
+	// documented benign-marker bypass shapes for those reflected-XSS
+	// injection points whose canonical candidates all completed without a
+	// confirmed execution signal. It runs BEFORE the combined fallback so
+	// that evidence from the ordinary plan is complete, and so any bypass
+	// jobs it enqueues drain before the unrelated multi-parameter pass.
+	// Like combinedPassDone, the flag makes this exactly once per execution
+	// and the return value lets the monitor loop again rather than finish
+	// with the new jobs still queued.
+	if !ex.evasionPassDone.Load() {
+		ex.evasionPassDone.Store(true)
+		c.enqueueEvasionEscalationCandidates(ctx, ex.scanID)
 		return false
 	}
 	// Bounded, one-time combined (multi-parameter) candidate fallback pass

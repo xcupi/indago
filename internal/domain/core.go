@@ -201,18 +201,17 @@ type ScanConfig struct {
 	CandidateProfile string `json:"candidate_profile,omitempty"`
 	MaxCandidates    int    `json:"max_candidates,omitempty"`
 
-	// EnableEvasion opts into WAF/filter-bypass candidate variants (case
+	// EnableEvasion requests EAGER WAF/filter-bypass candidate variants (case
 	// variation, alternate whitespace/separators, HTML-entity/double-URL
 	// encoding of the breakout characters) IN ADDITION TO the canonical
-	// candidates — never instead of them. Off by default (conservative by
-	// design, AGENTS.md §2.3): bypass testing is a deliberate, operator-made
-	// choice for an authorized engagement (e.g. a bug bounty program where a
-	// WAF bypass is itself the reportable finding), not a default behavior.
-	// Every evasion candidate is still a benign-marker detection probe (never
+	// candidates — never instead of them. Without it, the scan controller may
+	// still run one separately bounded, evidence-gated Technique-only fallback
+	// after canonical candidates at the same reflected-XSS injection point finish
+	// without confirmation; see internal/scan/evasion_escalation.go. Every
+	// evasion candidate is still a benign-marker detection probe (never
 	// alert/cookie/exfiltration) and is still sent only through the SAME
-	// scope-enforcing engine as every other request — this widens the
-	// candidate SHAPES tried, not what may be targeted. See
-	// docs/reflection-candidates.md "Evasion candidates (opt-in)".
+	// scope-enforcing engine as every other request — this widens the candidate
+	// SHAPES tried, not what may be targeted. See docs/reflection-candidates.md.
 	EnableEvasion bool `json:"enable_evasion,omitempty"`
 
 	// RawQueryInjection opts into testing the WHOLE query string as one
