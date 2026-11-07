@@ -736,9 +736,9 @@ candidate (the canonical instance wins, so `Variation` stays empty there).
 | | `</script><img src=x onerror=M>` | `script_close_img` | load |
 | | `</script><details open ontoggle=M>` | `script_close_details` | load |
 | `url` at a scheme position | `javascript:M` | `scheme_injection` (canonical dup) | interaction |
-| | `javascript&colon;M` | `entity_colon` — decoded before URL parsing | interaction |
-| | `\tjavascript:M` | `leading_whitespace` — URL parser strips it | interaction |
-| | `data:text/html,<script>M</script>` | `data_uri` | interaction |
+| | `javascript&colon;M` | `entity_colon` — the HTML parser decodes character references before the URL is parsed, so this is a live `javascript:` URL; the verifier activates it with one click | interaction |
+| | `\tjavascript:M` | `leading_whitespace` — the URL parser strips it; activated with one click | interaction |
+| | `data:text/html,<script>M</script>` | `data_uri` — a different navigation target, not a click-class URL shape | interaction |
 
 `script_block` maps to the analyzer's `unknown:script_data_block` (a
 `<script type="text/plain">`-style body a browser never executes, so the direct
@@ -806,12 +806,12 @@ Real-Chromium half (`internal/scan/payload_variation_integration_test.go`, build
 tag `browser_integration`): one loopback lab serves a raw and a filtered route
 per context; one scan with the evasion opt-in (which also enables the packs)
 must produce a **Confirmed** finding at every filtered route, with the
-confirmed candidate equal to the surviving later variant. The URL route was the
-historical pre-activation exception: the entity-encoded colon reflected (the
-filter was bypassed) but the verifier did not activate the URL, so the verdict
-was Rejected. Recognized interaction candidates now receive one bounded
-activation; fresh URL-route validation is required before claiming a current
-confirmation result.
+confirmed candidate equal to the surviving later variant. The URL route is the
+one that needs the bounded activation: `javascript&colon;M` survives the filter
+and the HTML parser decodes it to a live `javascript:` URL, so the finding
+confirms **only** through the single click the verifier dispatches for a
+recognized interaction shape — the same route confirmed with `java<TAB>script:`
+and `java<NEWLINE>script:`, whose schemes the URL parser normalizes.
 
 Measured outcomes are recorded in the run handoff
 (`ps-payload-variation/HANDOFF.md`); this section describes the contract the
@@ -826,9 +826,11 @@ rejected or stripped. On the raw html/attribute/js_string/script_block routes
 the variation shapes confirmed alongside the canonical ones. Two honest
 exceptions: the canonical `${M}` stays **Inconclusive** (the documented
 template-literal provenance limit) and the pack's `</script><svg onload=M>` is
-what turns that site into a **Confirmed** finding. The recorded URL result was
-**Rejected** before bounded activation existed; current interaction behavior
-requires fresh live evidence.
+what turns that site into a **Confirmed** finding. The `url` route confirms with
+`javascript&colon;M` after the one recorded click; the leading-whitespace and
+mixed-case shapes stay Rejected there because this lab's filter removes
+`javascript:` case-insensitively and anywhere in the value, not only at its
+start — a truthful negative for that filter, not a verifier limitation.
 
 ## Combined (multi-parameter) candidates
 

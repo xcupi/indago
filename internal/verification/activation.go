@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -190,7 +192,7 @@ func classifyInteractionValue(v string) (ActivationClass, string) {
 			return ActivationKeyboard, fmt.Sprintf("keyboard-class: the candidate declares accesskey=%q, so the platform access-key shortcut %s is pressed once through real keyboard input (the victim's activation, not element.click())", key, AccessKeyChord(key))
 		}
 		return ActivationUnsupported, "the candidate declares an accesskey but its value carries no single printable ASCII key: no access-key shortcut can be dispatched, so it is not activatable by this verifier"
-	case containsJavascriptScheme(lower):
+	case containsJavascriptScheme(v):
 		return ActivationClick, "click-class: the candidate installs a javascript: URL, so its element is clicked once"
 	case strings.Contains(lower, "onclick"):
 		return ActivationClick, "click-class: the candidate installs a click handler, so its element is clicked once"
@@ -205,12 +207,48 @@ func classifyInteractionValue(v string) (ActivationClass, string) {
 }
 
 // containsJavascriptScheme reports whether v contains a javascript: scheme
-// after removing the ASCII tab/newline/CR characters a browser's URL parser
-// strips before parsing it — so the evasion variants ("java\tscript:",
-// "JaVaScRiPt:") are recognised as the same click-class shape.
+// after the two transformations a browser applies before the URL is parsed:
+//
+//  1. the HTML parser decodes character references in an attribute value, so
+//     "javascript&colon;" and "javascript&#58;" are live javascript: URLs in
+//     the DOM even though the raw candidate bytes never contain the literal.
+//     This is precisely the shape a filter matching "javascript:" is bypassed
+//     by, so refusing to activate it would leave the surviving bypass
+//     unconfirmable. Decoding happens BEFORE lower-casing, because named
+//     references are case-sensitive ("&COLON;" is not a reference).
+//  2. the URL parser strips ASCII tab/newline/CR anywhere in the URL, so
+//     "java	script:" parses as "javascript:".
+//
+// Recognition only: the candidate's bytes are never rewritten.
 func containsJavascriptScheme(v string) bool {
-	clean := strings.NewReplacer("\t", "", "\n", "", "\r", "").Replace(v)
-	return strings.Contains(clean, "javascript:")
+	decoded := html.UnescapeString(clampInvalidNumericRefs(v))
+	clean := strings.NewReplacer("	", "", "\n", "", "\r", "").Replace(decoded)
+	return strings.Contains(strings.ToLower(clean), "javascript:")
+}
+
+// numericCharRefRE matches a numeric character reference in either base, with
+// or without its trailing semicolon (both forms the HTML parser accepts).
+var numericCharRefRE = regexp.MustCompile(`(?i)&#(?:x([0-9a-f]+)|([0-9]+));?`)
+
+// clampInvalidNumericRefs rewrites the numeric character references the HTML
+// spec maps to U+FFFD — zero, a surrogate, or anything beyond U+10FFFF — to
+// that replacement character before decoding. html.UnescapeString would
+// otherwise fold an out-of-range value into a different rune
+// (&#4294967354; decodes to ':' in Go, where Chromium produces U+FFFD), which
+// would claim an activation the browser cannot perform.
+func clampInvalidNumericRefs(v string) string {
+	return numericCharRefRE.ReplaceAllStringFunc(v, func(ref string) string {
+		digits, base := ref[2:], 10
+		if len(digits) > 0 && (digits[0] == 'x' || digits[0] == 'X') {
+			digits, base = digits[1:], 16
+		}
+		digits = strings.TrimSuffix(digits, ";")
+		n, err := strconv.ParseUint(digits, base, 32)
+		if err != nil || n == 0 || n > 0x10FFFF || (n >= 0xD800 && n <= 0xDFFF) {
+			return "\uFFFD"
+		}
+		return ref
+	})
 }
 
 // activationOutcome is the value the page-side script returns.

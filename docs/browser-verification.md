@@ -49,8 +49,11 @@ its own.
 
 No LLM, no scoring, no "likely exploitable" — three cases, one deterministic
 function (`internal/verification/browser.go:decide`). A merely-reflected
-`javascript:` URL in an `<a href>` is the textbook case for `rejected`: nothing
-activates it on passive page load, so it must never read as confirmed.
+`javascript:` URL in an `<a href>` is the textbook case for `rejected` during
+passive page load: nothing activates it there. Reflection alone never confirms —
+a candidate that DECLARES the interaction trigger earns exactly one bounded
+click (see Boundaries), and the verdict still requires the marker-specific
+signal afterwards.
 
 ## What actually happens (`BrowserVerifier.Verify`)
 
@@ -206,3 +209,9 @@ A candidate with a recognized declared interaction trigger may receive exactly o
 bounded matching activation after the in-scope navigation; that activation is
 not evidence and confirmation still requires the marker-specific signal. There
 is no arbitrary click/hover/action search — see `AGENTS.md` §2–§3.
+Recognition for the click class applies the same normalization a browser does
+before parsing the URL: HTML character references in an attribute value are
+decoded first (`javascript&colon;`, `javascript&#58;`), then the ASCII
+tab/newline/CR the URL parser strips anywhere in the URL. Without that, a
+filter bypass that survives as an entity-encoded colon would be reflected and
+then never activated — a false negative on the one shape the bypass exists for.

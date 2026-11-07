@@ -12,10 +12,12 @@ package scan_test
 // not the first one the filter blocked.
 //
 // The URL-attribute filter blocks the literal "javascript:" but leaves the
-// &colon; entity alone. That finding stays Rejected by design: a javascript:
-// URL only runs when the link is activated, and the passive verifier never
-// simulates activation (AGENTS.md §3). The test asserts exactly that, rather
-// than pretending a DOM-only sink was confirmed.
+// &colon; entity alone. That finding confirms ONLY through the one bounded
+// click the verifier dispatches for a recognized javascript:-URL interaction
+// shape: the browser decodes the entity before parsing the URL, so it is a
+// live javascript: URL in the DOM. The test asserts the confirmation names
+// that activation, and that no confirmed attempt anywhere in the finding
+// reached confirmed without one.
 
 import (
 	"context"
@@ -156,6 +158,7 @@ func newVariationLab(t *testing.T) *site {
 type variationAttempt struct {
 	CandidateValue string         `json:"candidate_value"`
 	Verdict        domain.Verdict `json:"verdict"`
+	Notes          string         `json:"notes"`
 }
 
 func variationAttempts(f *domain.Finding) []variationAttempt {
@@ -272,30 +275,48 @@ func TestReflectedVariationPacksConfirmAfterFirstVariantIsBlocked(t *testing.T) 
 		})
 	}
 
-	// URL attribute: the filter is bypassed (the entity-encoded colon reflects),
-	// but a javascript: URL needs activation, so the honest verdict stays
-	// Rejected and the finding is flagged for manual review. It must never be
-	// Confirmed by the passive verifier.
+	// URL attribute: this filter removes the literal "javascript:" (case
+	// insensitively), so every shape that keeps those bytes is reflected as a
+	// harmless relative URL. The entity-encoded colon survives the filter and
+	// the HTML parser decodes it to a live javascript: URL, so it confirms —
+	// but ONLY through the one bounded click the verifier dispatches for a
+	// recognised interaction shape, never on page load.
 	t.Run("url_attribute", func(t *testing.T) {
 		m := pathMarker(byPath, "/flt/url")
 		if m == "" {
 			t.Fatalf("no marker recorded for /flt/url")
 		}
+		want := "javascript&colon;" + m
+		got := assertConfirmed(t, byPath, "/flt/url", want)
+		if got != want {
+			t.Fatalf("filtered url confirmed with %q, want the surviving variant %q", got, want)
+		}
+		var confirmed *domain.Finding
 		for _, f := range byPath["/flt/url"] {
 			if f.Verdict == domain.VerdictConfirmed {
-				t.Fatalf("url attribute finding was Confirmed without activation: %+v", f)
+				confirmed = f
 			}
 		}
-		var sawEntity bool
-		for _, f := range byPath["/flt/url"] {
-			for _, a := range variationAttempts(f) {
-				if a.CandidateValue == "javascript&colon;"+m {
-					sawEntity = true
-				}
+		if confirmed == nil {
+			t.Fatal("no confirmed finding at /flt/url")
+		}
+		// Every CONFIRMED attempt must name the activation that produced it: a
+		// javascript: URL can never fire during load, so a confirmed attempt
+		// without a recorded activation would be a fabricated positive. Check
+		// each attempt, not just the finding summary: a later load-only
+		// confirmation would otherwise hide behind the first one's summary.
+		sawConfirmedAttempt := false
+		for _, a := range variationAttempts(confirmed) {
+			if a.Verdict != domain.VerdictConfirmed {
+				continue
+			}
+			sawConfirmedAttempt = true
+			if !strings.Contains(a.Notes, "after one click activation") {
+				t.Fatalf("confirmed attempt %q does not record the click activation it needed: %q", a.CandidateValue, a.Notes)
 			}
 		}
-		if !sawEntity {
-			t.Fatalf("the entity-encoded colon variant was not attempted at /flt/url; findings=%v", len(byPath["/flt/url"]))
+		if !sawConfirmedAttempt {
+			t.Fatalf("confirmed finding at /flt/url records no confirmed attempt: %+v", confirmed.Summary)
 		}
 	})
 }
