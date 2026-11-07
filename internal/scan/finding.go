@@ -341,12 +341,6 @@ func upsertBlockFinding(ctx context.Context, st store.Store, scanID domain.ID, e
 	// results cannot be trusted as filter behaviour, so the bounded fallback
 	// must not be pointed at it.
 	throttled := mutatedStatus == 429 || mutatedStatus == 503
-	// The summary has to say which rule applied to THIS row: a filter
-	// rejection may still get the bounded pass, a throttled point does not.
-	summaryTail := " — this may not be a clean negative; the diagnostic itself does not retry, while any later bounded fallback is separately evidence-gated and never bypasses a CAPTCHA (AGENTS.md §2.2)"
-	if throttled {
-		summaryTail = " — this is backpressure or downtime rather than a filter decision on the payload, so the bounded bypass fallback is not escalated at this point; the diagnostic itself does not retry and never bypasses a CAPTCHA (AGENTS.md §2.2)"
-	}
 
 	existing, err := st.Findings().ListByScan(ctx, scanID)
 	if err != nil {
@@ -364,6 +358,7 @@ func upsertBlockFinding(ctx context.Context, st store.Store, scanID domain.ID, e
 		d.TestCaseIDs = appendUniqueID(d.TestCaseIDs, testCaseID)
 		d.BlockDetail = detail
 		d.Throttled = d.Throttled || throttled
+		f.Summary = blockSummaryText(detail, d.Throttled)
 		f.Detail = d.encode()
 		f.UpdatedAt = time.Now()
 		if err := st.Findings().Update(ctx, f); err != nil {
@@ -385,7 +380,7 @@ func upsertBlockFinding(ctx context.Context, st store.Store, scanID domain.ID, e
 		ID: domain.NewID(), ScanID: scanID, ProjectID: sc.ProjectID, VulnClass: domain.VulnReflectedXSS,
 		Verdict: domain.VerdictInconclusive, Severity: domain.SeverityInfo, Confidence: domain.ConfidenceMedium,
 		Title:            fmt.Sprintf("Possible block/filter while testing parameter %q (%s) at %s %s", focus.Name, focus.Location, ep.Method, endpointLabel(ep.URL)),
-		Summary:          detail + summaryTail,
+		Summary:          blockSummaryText(detail, throttled),
 		EndpointID:       ep.ID,
 		InjectionPointID: injectionPointID,
 		ParameterID:      focus.ID,
@@ -398,6 +393,18 @@ func upsertBlockFinding(ctx context.Context, st store.Store, scanID domain.ID, e
 		return nil, fmt.Errorf("create block finding: %w", err)
 	}
 	return f, nil
+}
+
+// blockSummaryText composes the operator-facing note for a block diagnostic. It
+// is a function of the row's CURRENT detail and STICKY throttle flag because the
+// same row is upserted once per suspicious status: a note written only at create
+// time goes stale, leaving a 403-worded summary next to a review label that says
+// a throttled point is not escalated (or the reverse).
+func blockSummaryText(detail string, throttled bool) string {
+	if throttled {
+		return detail + " — backpressure (429/503) was observed at this point, so this is not a clean filter negative and the bounded bypass fallback is not escalated here; the diagnostic itself does not retry and never bypasses a CAPTCHA (AGENTS.md §2.2)"
+	}
+	return detail + " — this may not be a clean negative; the diagnostic itself does not retry, while any later bounded fallback is separately evidence-gated and never bypasses a CAPTCHA (AGENTS.md §2.2)"
 }
 
 // captchaFindingDedupKey distinguishes a CAPTCHA diagnostic from both a real
