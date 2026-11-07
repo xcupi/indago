@@ -671,48 +671,58 @@ func hasBody(m domain.HTTPMethod) bool {
 	}
 }
 
-// possibleBlockNote flags a suspicious status-code change between the
-// baseline (unmodified) request and a mutated/candidate request that did NOT
-// reflect: if the baseline succeeded (2xx/3xx) but the mutated request came
-// back 403/429/503 — common WAF/rate-limit/maintenance signals — "not
-// reflected" could mean "blocked", not "safe". This signal itself is
-// diagnostic only: it sends no retry and never attempts to solve/bypass a
-// CAPTCHA. A later controller-level fallback is separately eligibility-gated
-// (canonical completion, real verifier, no CAPTCHA) and may use only the
-// bounded benign-marker techniques authorized by AGENTS.md §2.2. Returns ""
-// when nothing looks anomalous.
-// The bool return additionally tells the caller whether to record a
-// diagnostic Finding for this (see result.blockSuspected / upsertBlockFinding
-// in finding.go) — before that was wired, this signal only ever reached a raw
-// TestCase note, invisible on every report surface.
+// possibleBlockNote flags a status-code signal between the baseline (unmodified)
+// request and a mutated/candidate request. Two different facts produce a note:
+//
+//   - 429/503 on EITHER request. The target asked for less traffic at this
+//     point — backpressure or downtime, not a judgement on the payload — so the
+//     automatic fallback must skip it. This is checked first, independently of
+//     reflection (a throttle page can echo the probe) and independently of
+//     which side throttled: a throttled baseline hides whatever the mutation
+//     would have shown, and a 429 after a 404 baseline is the same request to
+//     slow down. AGENTS.md §2.2 says "any point where the target answered
+//     429/503".
+//   - 403 after a healthy baseline. That is a filter rejecting the payload —
+//     exactly what the bounded fallback exists for — so it stays eligible and
+//     only gets a diagnostic note.
+//
+// This signal itself is diagnostic only: it sends no retry and never attempts
+// to solve/bypass a CAPTCHA. The bool return tells the caller whether to record
+// a diagnostic Finding (see result.blockSuspected / upsertBlockFinding in
+// finding.go); without it the signal only reached a raw TestCase note,
+// invisible on every report surface. Returns "" when nothing looks anomalous.
 func possibleBlockNote(baselineStatus, mutatedStatus int) (string, bool) {
+	if throttleSignal(baselineStatus, mutatedStatus) {
+		return fmt.Sprintf(" (possible throttle/unavailability: status changed %d -> %d from baseline; "+
+			"the target asked for less traffic at this point, so the bounded bypass fallback is not "+
+			"escalated here and no CAPTCHA is ever bypassed — see AGENTS.md §2.2)",
+			baselineStatus, mutatedStatus), true
+	}
 	baselineOK := baselineStatus >= 200 && baselineStatus < 400
-	suspicious := mutatedStatus == 403 || mutatedStatus == 429 || mutatedStatus == 503
-	if baselineOK && suspicious && mutatedStatus != baselineStatus {
-		if throttleSignal(baselineStatus, mutatedStatus) {
-			return fmt.Sprintf(" (possible throttle/unavailability: status changed %d -> %d from baseline; "+
-				"this is backpressure on the probe rather than a filter decision, so the bounded bypass fallback is not escalated at this point and no CAPTCHA is ever bypassed — see AGENTS.md §2.2)",
-				baselineStatus, mutatedStatus), true
-		}
+	if baselineOK && mutatedStatus == 403 && mutatedStatus != baselineStatus {
 		return fmt.Sprintf(" (possible block/filter: status changed %d -> %d from baseline; "+
-			"this may not be a clean negative; the response itself is recorded once as a diagnostic, while any later bounded fallback is separately gated — see AGENTS.md §2.2)",
+			"this may not be a clean negative; the response itself is recorded once as a diagnostic, "+
+			"while any later bounded fallback is separately gated — see AGENTS.md §2.2)",
 			baselineStatus, mutatedStatus), true
 	}
 	return "", false
 }
 
-// throttleSignal reports a 429 (rate limit) or 503 (unavailable/maintenance)
-// status change from a healthy baseline. That is backpressure or downtime, not
-// a verdict on the payload, so the automatic evasion fallback must skip the
-// point (see findingDetail.Throttled).
+// throttleSignal reports a 429 (rate limit) or 503 (unavailable/maintenance) on
+// either side of the request pair. That is backpressure or downtime, not a
+// verdict on the payload, so the automatic evasion fallback must skip the point
+// (see findingDetail.Throttled).
 //
-// It is deliberately independent of reflection: a throttle/maintenance page can
-// echo the request (an error page showing the URL), and a reflected marker must
-// not hide the fact that the target asked for less traffic.
+// It is deliberately independent of reflection and of which side answered:
+// reflection only records what the body contained (it makes no verdict), a
+// throttle page can echo the probe, and a throttled baseline is just as much a
+// request to slow down as a throttled mutation.
 func throttleSignal(baselineStatus, mutatedStatus int) bool {
-	baselineOK := baselineStatus >= 200 && baselineStatus < 400
-	throttled := mutatedStatus == 429 || mutatedStatus == 503
-	return baselineOK && throttled && mutatedStatus != baselineStatus
+	return isThrottleStatus(baselineStatus) || isThrottleStatus(mutatedStatus)
+}
+
+func isThrottleStatus(status int) bool {
+	return status == 429 || status == 503
 }
 
 // ---------------------------------------------------------------------------

@@ -336,11 +336,12 @@ func blockFindingDedupKey(injectionPointID domain.ID) string {
 func upsertBlockFinding(ctx context.Context, st store.Store, scanID domain.ID, ep *domain.Endpoint, injectionPointID domain.ID, focus *domain.Parameter, baselineStatus, mutatedStatus int, testCaseID domain.ID) (*domain.Finding, error) {
 	key := blockFindingDedupKey(injectionPointID)
 	detail := fmt.Sprintf("status changed %d -> %d from baseline while testing this parameter", baselineStatus, mutatedStatus)
-	// A 429/503 reply is backpressure or downtime, not a verdict on the
-	// payload. Sticky on the row: once this point has shown it, its other
-	// results cannot be trusted as filter behaviour, so the bounded fallback
-	// must not be pointed at it.
-	throttled := mutatedStatus == 429 || mutatedStatus == 503
+	// A 429/503 reply on either request is backpressure or downtime, not a
+	// verdict on the payload. Sticky on the row: once this point has shown it,
+	// its other results cannot be trusted as filter behaviour, so the bounded
+	// fallback must not be pointed at it. Same predicate as the note, so the
+	// recorded flag and the operator text can never disagree about why.
+	throttled := throttleSignal(baselineStatus, mutatedStatus)
 
 	existing, err := st.Findings().ListByScan(ctx, scanID)
 	if err != nil {

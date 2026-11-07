@@ -131,12 +131,9 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 		EnableEvasion:    e.enableEvasion(ctx, tc.ScanID),
 	})
 
+	// See runCandidate: the status signal is independent of reflection, and
+	// possibleBlockNote reports 429/503 on either request.
 	note2, suspected := possibleBlockNote(bl.status, resp.Status)
-	// See runCandidate: a 429/503 stays backpressure even when the body echoes
-	// the probe, so the escalation gate must still see the signal.
-	if report.Reflected && throttleSignal(bl.status, resp.Status) {
-		suspected = true
-	}
 	r.outcome = domain.OutcomeSuccess
 	if report.Reflected {
 		r.note = fmt.Sprintf("%s: reflected at %d location(s); %s", note, report.Count, contextSummary(&report))
