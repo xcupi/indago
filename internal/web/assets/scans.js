@@ -1198,6 +1198,16 @@ function endpointsPanel(scanId) {
     return bar;
   }
 
+  // showListError keeps the current table on screen and adds/updates one
+  // banner above it. Used when a LIVE refresh fails: destroying the list would
+  // throw away what the operator is reading — including an expanded row —
+  // because of one transient error.
+  function showListError(msg) {
+    let box = listBody.querySelector(".list-err");
+    if (!box) { box = el("div", undefined, "err list-err"); listBody.prepend(box); }
+    box.textContent = msg;
+  }
+
   let controlsBuilt = false, loadSeq = 0, listSig = null;
   async function load(keepFocus) {
     const seq = ++loadSeq;
@@ -1208,7 +1218,19 @@ function endpointsPanel(scanId) {
     if (st.q) q.set("q", st.q);
     let data;
     try { data = await getJSON(api.scan(scanId) + "/explorer?" + q.toString()); }
-    catch (e) { if (seq === loadSeq) { listSig = null; listBody.replaceChildren(el("div", "Could not load endpoints.", "err")); } return; }
+    catch (e) {
+      if (seq === loadSeq) {
+        listSig = null;
+        // A failed live refresh must not wipe the table (or a row the operator
+        // expanded). Only a FIRST load has nothing worth preserving.
+        if (keepFocus && listBody.querySelector("tr[data-endpoint-id]")) {
+          showListError("Could not refresh endpoints; showing the last loaded list.");
+        } else {
+          listBody.replaceChildren(el("div", "Could not load endpoints.", "err"));
+        }
+      }
+      return;
+    }
     if (seq !== loadSeq) return; // superseded by a newer filter/search/refresh
     const sig = q.toString() + "|" + JSON.stringify(data);
     if (keepFocus && sig === listSig) return; // unchanged live tick: keep focus and open rows as they are
