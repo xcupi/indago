@@ -264,7 +264,7 @@ func (r ReviewReason) Label() string {
 	case ReviewAllCandidatesFiltered:
 		return "every candidate recorded at this site was encoded or stripped by the target; bounded alternate technique shapes may also have been tried (and are listed above when present), but a differently-shaped payload outside the recorded attempts remains untested, not ruled out"
 	case ReviewPossibleBlock:
-		return "a request during testing came back with a suspicious status-code change from the baseline (e.g. 403/429/503) — this may be a WAF/rate-limit/maintenance block, not a clean negative; the diagnostic itself does not retry, while any bounded fallback is separately gated by evidence and never bypasses a CAPTCHA (see AGENTS.md §2.2)"
+		return "a request during testing came back with a suspicious status-code change from the baseline (e.g. 403/429/503) — this may be a WAF/filter, rate-limit or maintenance block, not a clean negative; the diagnostic itself does not retry, any bounded fallback is separately gated by evidence and never bypasses a CAPTCHA, and a 429/503 point is NOT escalated at all because that is backpressure rather than a filter decision on the payload (a 403 filter rejection can still get the bounded pass; see AGENTS.md §2.2)"
 	case ReviewCaptchaDetected:
 		return "a response during testing matched a known CAPTCHA/bot-challenge pattern (reCAPTCHA/hCaptcha/Cloudflare challenge) that was not present in the baseline response — Indago only detects this, it never attempts to solve or bypass a CAPTCHA (see AGENTS.md §2.2)"
 	default:

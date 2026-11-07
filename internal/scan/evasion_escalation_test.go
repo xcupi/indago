@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -476,6 +478,74 @@ func TestEnqueueEvasionEscalationCandidates_SkipsCaptchaDiagnostic(t *testing.T)
 	evasionController(env, q).enqueueEvasionEscalationCandidates(ctx, env.scanID)
 	if got := automaticTechniqueCandidates(t, q, env.scanID); len(got) != 0 {
 		t.Fatalf("CAPTCHA diagnostic must suppress automatic evasion, got %+v", got)
+	}
+}
+
+func TestEnqueueEvasionEscalationCandidates_SkipsThrottledPoint(t *testing.T) {
+	for _, status := range []int{429, 503} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			ctx := context.Background()
+			env := newScanEnv(t)
+			ep := env.endpoint("https://target.example/search?q=hello", domain.MethodGET)
+			p := env.param(ep, "q", domain.LocationQuery, "hello")
+			ip := env.injection(ep, p)
+			q := queue.NewMemory()
+			_, rep := escalationParent(t, env, q, ep, ip)
+			for _, cand := range rep.Plan.Candidates {
+				completedCanonicalEscalationJob(t, env, q, ep, ip, cand)
+			}
+			now := time.Now()
+			block := findingDetail{
+				DedupKey: blockFindingDedupKey(ip.ID), BlockSuspected: true, Throttled: true,
+				BlockDetail: fmt.Sprintf("status changed 200 -> %d from baseline", status),
+			}
+			if err := env.st.Findings().Create(ctx, &domain.Finding{
+				ID: domain.NewID(), ScanID: env.scanID, ProjectID: env.sc.ProjectID,
+				VulnClass: domain.VulnReflectedXSS, Verdict: domain.VerdictInconclusive,
+				EndpointID: ep.ID, InjectionPointID: ip.ID, Detail: block.encode(),
+				CreatedAt: now, UpdatedAt: now,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			evasionController(env, q).enqueueEvasionEscalationCandidates(ctx, env.scanID)
+			if got := automaticTechniqueCandidates(t, q, env.scanID); len(got) != 0 {
+				t.Fatalf("a %d (rate-limit/maintenance) signal must not be escalated through: got %+v", status, got)
+			}
+		})
+	}
+}
+
+func TestEnqueueEvasionEscalationCandidates_StillEscalatesAfterFilterRejection(t *testing.T) {
+	ctx := context.Background()
+	env := newScanEnv(t)
+	ep := env.endpoint("https://target.example/search?q=hello", domain.MethodGET)
+	p := env.param(ep, "q", domain.LocationQuery, "hello")
+	ip := env.injection(ep, p)
+	q := queue.NewMemory()
+	_, rep := escalationParent(t, env, q, ep, ip)
+	for _, cand := range rep.Plan.Candidates {
+		completedCanonicalEscalationJob(t, env, q, ep, ip, cand)
+	}
+	now := time.Now()
+	// 403 means a filter rejected the PAYLOAD, which is exactly the case the
+	// bounded bypass pass exists for: it must stay eligible.
+	block := findingDetail{
+		DedupKey: blockFindingDedupKey(ip.ID), BlockSuspected: true,
+		BlockDetail: "status changed 200 -> 403 from baseline",
+	}
+	if err := env.st.Findings().Create(ctx, &domain.Finding{
+		ID: domain.NewID(), ScanID: env.scanID, ProjectID: env.sc.ProjectID,
+		VulnClass: domain.VulnReflectedXSS, Verdict: domain.VerdictInconclusive,
+		EndpointID: ep.ID, InjectionPointID: ip.ID, Detail: block.encode(),
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	evasionController(env, q).enqueueEvasionEscalationCandidates(ctx, env.scanID)
+	if got := automaticTechniqueCandidates(t, q, env.scanID); len(got) == 0 {
+		t.Fatal("a 403 filter rejection must still get the bounded bypass pass")
 	}
 }
 

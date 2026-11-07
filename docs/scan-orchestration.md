@@ -277,6 +277,7 @@ A monitor evaluates each running scan every `PollInterval`:
    its bounded one-time passes instead of completing: automatic reflected-XSS
    evasion escalation (only for an already-reflected injection point whose
    canonical child jobs completed successfully, no CAPTCHA/confirmation exists,
+   no 429/503 backpressure was seen — a 403 filter rejection still qualifies —
    and browser replay is available), then the combined multi-parameter fallback,
    then the independent DOM-XSS/IDOR/access-control passes. Any newly enqueued
    work drains before the next quiet tick. The evasion queue ledger is durable:

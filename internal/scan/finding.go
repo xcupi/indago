@@ -67,6 +67,14 @@ type findingDetail struct {
 	// they never share a row).
 	BlockSuspected bool   `json:"block_suspected,omitempty"`
 	BlockDetail    string `json:"block_detail,omitempty"`
+	// Throttled distinguishes a NON-FILTER block signal from a filter
+	// decision: the target answered 429 (rate limit) or 503 (unavailable /
+	// maintenance), so it never judged the payload. The automatic evasion
+	// fallback is suppressed there — re-sending bypass shapes to a server
+	// asking for less traffic wastes requests and records meaningless
+	// "rejected" attempts — while a 403 (a filter rejecting the payload)
+	// stays eligible, because that is the bypass case the fallback exists for.
+	Throttled bool `json:"throttled,omitempty"`
 
 	// CaptchaSuspected/CaptchaLabel: see upsertCaptchaFinding. Set only on a
 	// diagnostic Finding recording a CAPTCHA/bot-challenge that newly
@@ -328,6 +336,17 @@ func blockFindingDedupKey(injectionPointID domain.ID) string {
 func upsertBlockFinding(ctx context.Context, st store.Store, scanID domain.ID, ep *domain.Endpoint, injectionPointID domain.ID, focus *domain.Parameter, baselineStatus, mutatedStatus int, testCaseID domain.ID) (*domain.Finding, error) {
 	key := blockFindingDedupKey(injectionPointID)
 	detail := fmt.Sprintf("status changed %d -> %d from baseline while testing this parameter", baselineStatus, mutatedStatus)
+	// A 429/503 reply is backpressure or downtime, not a verdict on the
+	// payload. Sticky on the row: once this point has shown it, its other
+	// results cannot be trusted as filter behaviour, so the bounded fallback
+	// must not be pointed at it.
+	throttled := mutatedStatus == 429 || mutatedStatus == 503
+	// The summary has to say which rule applied to THIS row: a filter
+	// rejection may still get the bounded pass, a throttled point does not.
+	summaryTail := " — this may not be a clean negative; the diagnostic itself does not retry, while any later bounded fallback is separately evidence-gated and never bypasses a CAPTCHA (AGENTS.md §2.2)"
+	if throttled {
+		summaryTail = " — this is backpressure or downtime rather than a filter decision on the payload, so the bounded bypass fallback is not escalated at this point; the diagnostic itself does not retry and never bypasses a CAPTCHA (AGENTS.md §2.2)"
+	}
 
 	existing, err := st.Findings().ListByScan(ctx, scanID)
 	if err != nil {
@@ -344,6 +363,7 @@ func upsertBlockFinding(ctx context.Context, st store.Store, scanID domain.ID, e
 		d.Occurrences++
 		d.TestCaseIDs = appendUniqueID(d.TestCaseIDs, testCaseID)
 		d.BlockDetail = detail
+		d.Throttled = d.Throttled || throttled
 		f.Detail = d.encode()
 		f.UpdatedAt = time.Now()
 		if err := st.Findings().Update(ctx, f); err != nil {
@@ -359,13 +379,13 @@ func upsertBlockFinding(ctx context.Context, st store.Store, scanID domain.ID, e
 	now := time.Now()
 	d := findingDetail{
 		Method: ep.Method, ParameterName: focus.Name, DedupKey: key, Occurrences: 1,
-		TestCaseIDs: []domain.ID{testCaseID}, BlockSuspected: true, BlockDetail: detail,
+		TestCaseIDs: []domain.ID{testCaseID}, BlockSuspected: true, BlockDetail: detail, Throttled: throttled,
 	}
 	f := &domain.Finding{
 		ID: domain.NewID(), ScanID: scanID, ProjectID: sc.ProjectID, VulnClass: domain.VulnReflectedXSS,
 		Verdict: domain.VerdictInconclusive, Severity: domain.SeverityInfo, Confidence: domain.ConfidenceMedium,
 		Title:            fmt.Sprintf("Possible block/filter while testing parameter %q (%s) at %s %s", focus.Name, focus.Location, ep.Method, endpointLabel(ep.URL)),
-		Summary:          detail + " — this may not be a clean negative; the diagnostic itself does not retry, while any later bounded fallback is separately evidence-gated and never bypasses a CAPTCHA (AGENTS.md §2.2)",
+		Summary:          detail + summaryTail,
 		EndpointID:       ep.ID,
 		InjectionPointID: injectionPointID,
 		ParameterID:      focus.ID,

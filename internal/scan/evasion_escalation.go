@@ -159,18 +159,28 @@ func selectEvasionEscalationSources(cases []*domain.TestCase, jobs []*domain.Tes
 
 	confirmed := map[domain.ID]bool{}
 	captchaSuspected := map[domain.ID]bool{}
+	throttled := map[domain.ID]bool{}
 	for _, finding := range findings {
 		if finding == nil || finding.VulnClass != domain.VulnReflectedXSS {
 			continue
 		}
+		d := decodeFindingDetail(finding.Detail)
 		if finding.Verdict == domain.VerdictConfirmed {
 			confirmed[finding.InjectionPointID] = true
 		}
 		// CAPTCHA handling stays detect-only. A CAPTCHA diagnostic is not a
 		// normal filter miss to escalate through: automatic payload-shape
 		// retries there would contradict AGENTS.md §2.2's absolute boundary.
-		if decodeFindingDetail(finding.Detail).CaptchaSuspected {
+		if d.CaptchaSuspected {
 			captchaSuspected[finding.InjectionPointID] = true
+		}
+		// A 429/503 point was throttled or unavailable, so its canonical
+		// misses say nothing about the filter. Re-sending bypass shapes
+		// there would ignore the target's own backpressure and record
+		// meaningless "rejected" attempts; a 403 stays eligible because that
+		// IS a filter deciding on the payload (AGENTS.md §2.2).
+		if d.Throttled {
+			throttled[finding.InjectionPointID] = true
 		}
 	}
 
@@ -183,7 +193,7 @@ func selectEvasionEscalationSources(cases []*domain.TestCase, jobs []*domain.Tes
 		if parent == nil || parent.Type != domain.JobTest || len(parent.Payload) != 0 || parent.State != domain.JobSucceeded {
 			continue
 		}
-		if confirmed[tc.InjectionPointID] || captchaSuspected[tc.InjectionPointID] || malformedInjection[tc.InjectionPointID] {
+		if confirmed[tc.InjectionPointID] || captchaSuspected[tc.InjectionPointID] || throttled[tc.InjectionPointID] || malformedInjection[tc.InjectionPointID] {
 			continue
 		}
 		report, err := detection.ParseReflection(tc.Detail)

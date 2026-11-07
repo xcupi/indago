@@ -496,8 +496,10 @@ open-ended click/hover/action search. The default plan contains no evasion
 entries. The scan controller can add a one-time, bounded
 Technique-only fallback only after the durable canonical jobs at that exact
 reflected-XSS injection point completed without a confirmation; it skips
-CAPTCHA diagnostics, a stub/non-replayable verifier, incomplete jobs, and a
-malformed ledger. On restart it preserves every already-recorded technique
+CAPTCHA diagnostics, a throttled or unavailable point (429/503 — backpressure,
+not a filter decision on the payload; a 403 stays eligible), a
+stub/non-replayable verifier, incomplete jobs, and a malformed ledger. On
+restart it preserves every already-recorded technique
 DedupKey and enqueues only a missing tail. An explicit `EnableEvasion` scan
 remains eager.
 See `AGENTS.md` §2–§3.
@@ -542,7 +544,9 @@ when the operator selects `ScanConfig.EnableEvasion` (CLI
 scan controller's evidence-gated fallback. The latter is deliberately stricter:
 it starts only after a persisted, reflected canonical plan at one injection
 point has every canonical child job completed successfully, no confirmed
-Reflected-XSS finding, no CAPTCHA diagnostic, and a real replayable verifier;
+Reflected-XSS finding, no CAPTCHA diagnostic, no 429/503 backpressure signal
+(a filter rejection such as 403 does not disqualify the point), and a real
+replayable verifier;
 it keeps only `Candidate.Technique` entries, honors the profile filters, caps
 the result at `MaxEvasionCandidatesPerInjectionPoint` (8), and uses the queue
 as a durable per-DedupKey ledger to fill only a restart-interrupted tail.
