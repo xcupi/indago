@@ -210,6 +210,15 @@ type PlanOptions struct {
 	// end); this field exists so a future dedicated flag, or a direct planner
 	// caller, can ask for the packs alone.
 	EnableVariationPacks bool
+	// AngularCSPBypass plans the official AngularJS CSP-bypass shape
+	// (ng-focus + $event.composedPath()) at an ordinary HTML-text site.
+	// Defaults to false, so the default plan is byte-identical to before the
+	// shape existed. The scan layer sets it from the MUTATED response only:
+	// see AngularCSPBypassEligible in csp.go — the response must carry a CSP
+	// that forbids inline script AND show AngularJS. It is not a technique
+	// the automatic evasion escalation may re-derive, so nothing else sets
+	// it.
+	AngularCSPBypass bool
 }
 
 // PlanCandidates builds the candidate plan for rep and stores it in rep.Plan. It
@@ -233,6 +242,15 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 			continue
 		}
 		tpls := templatesFor(*loc.Context, marker)
+		// The official AngularJS CSP bypass is only plannable in ordinary
+		// element content: it injects a whole <input> element, so a comment,
+		// RCDATA or RAWTEXT site (which closingPrefix would have to close
+		// first) cannot carry the value the technique requires. The scan
+		// layer only sets the flag when the response's own CSP lacks
+		// 'unsafe-inline' AND the page shows Angular — see csp.go.
+		if opts.AngularCSPBypass && loc.Context.Context == CtxHTMLText && closingPrefix(*loc.Context) == "" {
+			tpls = append(tpls, angularCSPBypassTemplate(marker))
+		}
 		// A RAW QUERY-STRING injection point that lands in a URL inside an
 		// HTML attribute (the canonical <link rel="canonical" href="...">
 		// class) needs the attribute-breakout shapes too. templatesFor's URL
@@ -555,6 +573,32 @@ func htmlTextTemplates(a ContextAnalysis, m string) []candTemplate {
 			prefixReason(prefix, "inject an SVG <animate> element whose onbegin handler fires as soon as the (default, immediate) animation begins")),
 		markupProbe(prefix+"<"+m+"x>", "<>", 60,
 			prefixReason(prefix, "inject a marker element to detect raw markup injection without script")),
+	}
+}
+
+// angularCSPBypassTemplate is the official AngularJS CSP-bypass shape. It is
+// planned only through PlanOptions.AngularCSPBypass (see csp.go), because it is
+// useful only when the page's policy forbids inline script and Angular is
+// present.
+//
+// The value declares a load trigger: the input carries autofocus, so the
+// browser focuses it without any user interaction. Angular compiles the
+// ng-focus attribute, and its own expression evaluator runs the expression on
+// that focus; composedPath() supplies the event path (which ends at window) and
+// orderBy evaluates its string predicate against each entry of that path, so
+// the marker expression runs without the policy needing to allow eval or a
+// Function constructor. The marker is a benign identifier and is deliberately
+// the ONLY thing the expression names.
+func angularCSPBypassTemplate(m string) candTemplate {
+	return candTemplate{
+		value:    AngularCSPBypassValue(m),
+		needs:    "<>",
+		priority: 92,
+		rationale: "CSP forbids inline script and eval, but Angular still compiles the ng-focus attribute expression: on focus Angular's own evaluator runs " +
+			"$event.composedPath()|orderBy, which evaluates the benign marker as the predicate against the event path without a Function constructor, so the marker " +
+			"expression runs even though no inline handler or eval is allowed",
+		trigger:   TriggerLoad,
+		technique: AngularCSPBypassTechnique,
 	}
 }
 

@@ -609,6 +609,40 @@ scanner process does not have — adding it would be a materially different,
 larger change and needs its own explicit decision, not a quiet extension of
 this generator.
 
+### Automatic AngularJS CSP bypass (`angular_csp_bypass`)
+
+The official AngularJS CSP bypass — `<input autofocus
+ng-focus="$event.composedPath()|orderBy:'MARKER'">` — is a canonical candidate
+(`Candidate.Technique = "angular_csp_bypass"`, load trigger, priority 92), but it
+is planned **only** when the MUTATED response justifies it:
+`internal/detection/csp.go`'s `AngularCSPBypassEligible` must see BOTH (a) a
+`Content-Security-Policy` whose `script-src` (or `default-src` when `script-src`
+is absent) does **not** contain `'unsafe-inline'`, and (b) Angular on the page
+(`ng-app` / `data-ng-app` / `x-ng-app` / `ng:app` / `ng-controller`, or a
+`<script>` tag loading an Angular build). The gate is deliberately narrow: with
+no CSP there is nothing to bypass; with `'unsafe-inline'` every ordinary
+inline-handler candidate already runs, so the Angular shape would add a request
+without adding a mechanism; and on a page with no Angular compiler the
+`ng-focus` attribute is inert markup. The flag is computed only from the
+mutated response (`internal/scan/reflection.go`) and is never re-derived by the
+automatic evasion escalation, so it cannot leak into a context that fails the
+gate. The value is benign: the marker is the only identifier the expression
+names.
+
+Measured limit (real AngularJS 1.2.32, `script-src 'self'`, Chromium): the
+runtime runs in CSP-safe mode and accepts and evaluates the exact
+`composedPath()|orderBy` expression, but resolves the unknown marker identifier
+to `undefined` instead of raising `ReferenceError: <marker> is not defined`.
+This is not only a 1.2 quirk: Angular's expression evaluator reads identifiers
+off the scope object, and the official payload's observable effect comes from
+*calling a real global* (e.g. `alert(...)`) that `orderBy` reaches through the
+`window` entry in the composed path — precisely the effect the benign-marker
+rule forbids. The verifier's only execution authority is the marker
+`ReferenceError` provenance signature, so this candidate is delivered and
+recorded but cannot Confirm with a benign marker. The gate, the delivery and the
+measured runtime semantics are pinned by
+`internal/scan/angular_csp_bypass_integration_test.go`.
+
 ### Filter-allow-list shapes
 
 The rewriting techniques above assume the filter is trying to *recognize* a
