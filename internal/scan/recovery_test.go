@@ -194,6 +194,7 @@ func TestRestartRecoversAndResumesScan(t *testing.T) {
 	// completed (including those requeued by recovery).
 	want := done.Discovery.Endpoints + done.Discovery.InjectionPoints
 	want += countDistinctNavigableURLs(eps)
+	want += accessBypassJobCount(eps)
 	if done.Jobs.Total() != want || done.Jobs.Succeeded != want {
 		t.Fatalf("jobs=%+v, want %d total and succeeded (no duplicates, none lost)", done.Jobs, want)
 	}

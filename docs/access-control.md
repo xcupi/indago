@@ -109,3 +109,26 @@ setting cookie "Admin"="<redacted>" made the privileged surface reachable
 - Loopback fixture with a different real-world spelling (`is_staff=no` on
   `/login`, panel at `/admin`): confirmed via the observed-literal flip, not via
   the name vocabulary.
+
+## Cases 28/29: gateway bypasses (server-side, differential)
+
+Two bypass classes are proved without a browser and without any state change.
+
+* **Header path override (28).** `GET <origin>/` with `X-Original-URL: <path>` (then
+  `X-Rewrite-URL`). Only tried when the plain request to `<path>` was DENIED
+  (401/403), and only accepted when the variant returns 2xx AND the body carries an
+  administrative-surface marker. The claim is precise: the gateway gates the URL,
+  the origin trusts the header.
+* **Method bypass (29).** The path is denied for `POST` but answers `GET` with the
+  application's OWN validation error ("Missing parameter …"), which only the handler
+  produces. The POST probe carries no body and no query, so the action's parameters
+  can never be supplied and nothing can be mutated.
+
+Rules live in `internal/accesscontrol/bypass.go` (`HeaderOverrideReached`,
+`MethodBypassReached`), the executor mode in
+`internal/scan/accesscontrol_bypass.go`, and the paths in `BypassPaths` — three
+bounded entries (`/admin`, `/admin-roles`, `/administration`), never a wordlist.
+
+Measured live: PortSwigger case 28 (`Access control: header path override reaches
+/admin`) and case 29 (`Access control: method-based bypass at GET /admin-roles`),
+both confirmed; a fixture that denies both records Rejected and creates no finding.

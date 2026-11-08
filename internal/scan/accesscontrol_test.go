@@ -350,6 +350,16 @@ func TestAccessControlCorrelationKeepsOneFinding(t *testing.T) {
 // TestEnqueueAccessControlProbesSelectsRobotsAndSitemapAdminPaths covers the
 // bounded pass: only GET endpoints discovered by robots/sitemap whose path is
 // admin-like become jobs.
+// isBypassJob reports whether a job belongs to the bounded bypass pass rather
+// than the disclosure-driven panel pass.
+func isBypassJob(j *domain.TestJob) bool {
+	var p struct {
+		Mode string `json:"mode"`
+	}
+	_ = json.Unmarshal(j.Payload, &p)
+	return p.Mode == accessModeBypass
+}
+
 func TestEnqueueAccessControlProbesSelectsRobotsAndSitemapAdminPaths(t *testing.T) {
 	env := newScanEnv(t)
 	q := queue.NewMemory()
@@ -372,6 +382,9 @@ func TestEnqueueAccessControlProbesSelectsRobotsAndSitemapAdminPaths(t *testing.
 		if j.Target.URL == "" || j.Type != domain.JobAccessControl || j.ScanID != env.scanID {
 			t.Fatalf("bad job: %+v", j)
 		}
+		if isBypassJob(j) {
+			continue // the bypass pass is asserted by its own tests
+		}
 		got[j.Target.URL] = true
 	}
 	if len(got) != 2 || !got[admin.URL] || !got[dash.URL] {
@@ -390,7 +403,14 @@ func TestEnqueueAccessControlProbesNeedsRobotsOrSitemap(t *testing.T) {
 	acEndpoint(t, env, "http://127.0.0.1:1/users", domain.SourceRobots, domain.MethodGET)
 
 	c.enqueueAccessControlProbes(context.Background(), env.scanID)
-	if j, _ := q.Lease(context.Background(), "t", env.scanID, []domain.JobType{domain.JobAccessControl}, time.Minute); j != nil {
+	for {
+		j, _ := q.Lease(context.Background(), "t", env.scanID, []domain.JobType{domain.JobAccessControl}, time.Minute)
+		if j == nil {
+			break
+		}
+		if isBypassJob(j) {
+			continue // bounded bypass jobs are asserted by their own tests
+		}
 		t.Fatalf("no access-control job may be enqueued for an undisclosed or non-admin path: %+v", j)
 	}
 }

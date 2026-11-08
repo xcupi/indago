@@ -183,6 +183,22 @@ type accessControlDetail struct {
 	BudgetExhausted bool                   `json:"probe_budget_exhausted,omitempty"`
 	Skipped         bool                   `json:"skipped,omitempty"`
 	SkipReason      string                 `json:"skip_reason,omitempty"`
+
+	// Case 28/29 (bypass) fields.
+	Origin         string                     `json:"origin,omitempty"`
+	PrivilegedPath string                     `json:"privileged_path,omitempty"`
+	GetStatus      int                        `json:"get_status,omitempty"`
+	PostStatus     int                        `json:"post_status,omitempty"`
+	Bypass         string                     `json:"bypass,omitempty"`
+	HeaderProbes   []accessControlHeaderProbe `json:"header_probes,omitempty"`
+}
+
+// accessControlHeaderProbe records one X-Original-URL / X-Rewrite-URL attempt.
+type accessControlHeaderProbe struct {
+	Header  string `json:"header"`
+	Path    string `json:"path"`
+	Status  int    `json:"status"`
+	Reached bool   `json:"reached"`
 }
 
 // accessControlAttempt is one probe made by any mode.
@@ -419,6 +435,8 @@ func (e *accessControlExecutor) run(ctx context.Context, job *domain.TestJob, tc
 	switch accessControlMode(job) {
 	case accessModePage:
 		return e.runPageDisclosure(ctx, job, tc)
+	case accessModeBypass:
+		return e.runBypass(ctx, job, tc)
 	case accessModeRoleFlag:
 		return e.runRoleFlag(ctx, job, tc)
 	case accessModeRoleField:
@@ -1277,6 +1295,10 @@ func (c *Controller) enqueueAccessControlProbes(ctx context.Context, scanID doma
 	if n > 0 {
 		c.log.Info("access-control probes: enqueued", "scan", scanID, "jobs", n)
 	}
+	// Cases 28/29: differential bypass probes on the bounded privileged paths.
+	// They are independent of what discovery disclosed (the whole point is that
+	// the gateway hides the path), so they always run.
+	c.enqueueAccessBypassProbes(ctx, scanID)
 }
 
 // enqueueAccessControlDisclosureProbes queues the page-disclosure half of case
