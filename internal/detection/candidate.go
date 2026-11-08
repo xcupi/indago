@@ -236,6 +236,13 @@ type PlanOptions struct {
 	// Set from the mutated response only (see createCSPParamCandidate), never
 	// re-derived by the evasion escalation.
 	CSPReportParam string
+	// DanglingMarkup plans the markup-only fallback for a policy that forbids
+	// inline script: a dangling form that captures the page's own hidden CSRF
+	// input. Planned only at a quoted attribute value (that is where closing the
+	// value and the element yields a real form), and only when the mutated
+	// response's CSP forbids inline script — without a policy, ordinary script
+	// candidates already cover the page.
+	DanglingMarkup bool
 }
 
 // PlanCandidates builds the candidate plan for rep and stores it in rep.Plan. It
@@ -276,6 +283,13 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 		// actually executes the reflected script.
 		if opts.CSPReportParam != "" && loc.Context.Context == CtxHTMLText && closingPrefix(*loc.Context) == "" {
 			tpls = append(tpls, cspDirectiveInjectionTemplate(marker, opts.CSPReportParam))
+		}
+		// A policy that forbids inline script leaves markup-only paths. At a
+		// quoted attribute value, a dangling form captures the page's own hidden
+		// inputs (the CSRF token) — the verifier can prove that from the DOM
+		// alone, with no request leaving the browser.
+		if opts.DanglingMarkup && loc.Context.Context == CtxHTMLAttrValue && attrQuoteIsDouble(*loc.Context) {
+			tpls = append(tpls, danglingFormTemplate(marker))
 		}
 		// A RAW QUERY-STRING injection point that lands in a URL inside an
 		// HTML attribute (the canonical <link rel="canonical" href="...">
@@ -681,6 +695,33 @@ func angularCSPExpressionTemplate(m string) candTemplate {
 			"marker from two literals at runtime, so the rendered page carries a string the request never contained, proving the policy did not stop evaluation",
 		trigger:   TriggerLoad,
 		technique: AngularCSPExpressionTechnique,
+	}
+}
+
+// attrQuoteIsDouble reports whether the site's attribute delimiter is (or is
+// assumed to be) the double quote. The dangling-form value closes it, so a
+// site PROVEN to use single quotes must not receive it.
+func attrQuoteIsDouble(a ContextAnalysis) bool {
+	if !a.QuoteProven {
+		return true
+	}
+	return a.Quote == "" || a.Quote == "double"
+}
+
+// danglingFormTemplate is the markup-only fallback: it closes the attribute
+// value and the page's element, closes the page's own form, and opens one whose
+// action carries the marker. The page's hidden CSRF input, rendered after the
+// injection point, is parsed INSIDE that form — which is what the verifier
+// checks for, so nothing has to be submitted or exfiltrated.
+func danglingFormTemplate(m string) candTemplate {
+	return candTemplate{
+		value:     DanglingFormValue(m),
+		needs:     `"<`,
+		priority:  98,
+		rationale: "the policy forbids inline script, so script execution cannot prove this injection; instead the value closes the attribute, the element and the page's own form, then opens a form whose action carries the benign marker — the page's hidden CSRF input is then parsed as a child of that form, which only a broken parse can produce, and the verifier confirms exactly that from the DOM",
+		trigger:   TriggerInteraction,
+		technique: DanglingFormTechnique,
+		strict:    true,
 	}
 }
 

