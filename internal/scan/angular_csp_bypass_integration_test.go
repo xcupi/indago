@@ -199,6 +199,43 @@ func TestAngularCSPBypassIsPlannedOnlyForCSPWithoutUnsafeInlineAndAngular(t *tes
 		t.Fatalf("a Confirmed bypass attempt must name its execution signal: %q", replayed.Notes)
 	}
 
+	// The interpolation sibling is the shape this Angular line CAN confirm: its
+	// value joins the marker from two literals at runtime, so the rendered page
+	// carries a string the request never carried. That is only possible if the
+	// page's own Angular compiler evaluated the expression, which is exactly the
+	// CSP bypass the gate exists for.
+	var exprValue string
+	for _, f := range byPath["/lab"] {
+		for _, c := range angularDetail(t, f).Candidates {
+			if c.Technique == detection.AngularCSPExpressionTechnique {
+				exprValue = c.Value
+			}
+		}
+	}
+	if exprValue == "" {
+		t.Fatalf("/lab must plan the %s candidate; findings=%d", detection.AngularCSPExpressionTechnique, len(byPath["/lab"]))
+	}
+	var exprAttempt *angularVerifyAttempt
+	for _, f := range byPath["/lab"] {
+		for _, a := range angularDetail(t, f).Attempts {
+			if a.CandidateValue == exprValue {
+				a := a
+				exprAttempt = &a
+			}
+		}
+	}
+	if exprAttempt == nil {
+		t.Fatalf("/lab interpolation candidate %q was never replayed by browser verification", exprValue)
+	}
+	if exprAttempt.Verdict != domain.VerdictConfirmed {
+		t.Fatalf("/lab interpolation must Confirm under script-src 'self' (the page evaluated it), got verdict=%s notes=%q",
+			exprAttempt.Verdict, exprAttempt.Notes)
+	}
+	if !strings.Contains(exprAttempt.Notes, "never carried") {
+		t.Fatalf("a Confirmed interpolation must name its evidence (a result the request never carried): %q", exprAttempt.Notes)
+	}
+	t.Logf("/lab interpolation confirmation: verdict=%s notes=%q", exprAttempt.Verdict, exprAttempt.Notes)
+
 	// RED control: /no-angular has the identical policy and reflection but no
 	// Angular, so the gate must not plan the bypass, and the policy blocks every
 	// inline shape, so nothing may Confirm.
@@ -207,8 +244,8 @@ func TestAngularCSPBypassIsPlannedOnlyForCSPWithoutUnsafeInlineAndAngular(t *tes
 	}
 	for _, f := range byPath["/no-angular"] {
 		for _, c := range angularDetail(t, f).Candidates {
-			if c.Technique == detection.AngularCSPBypassTechnique {
-				t.Fatalf("/no-angular must not plan %s (no Angular on the page): %q", detection.AngularCSPBypassTechnique, c.Value)
+			if c.Technique == detection.AngularCSPBypassTechnique || c.Technique == detection.AngularCSPExpressionTechnique {
+				t.Fatalf("/no-angular must not plan %s (no Angular on the page): %q", c.Technique, c.Value)
 			}
 		}
 		if f.Verdict == domain.VerdictConfirmed {

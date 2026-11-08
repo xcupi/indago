@@ -46,6 +46,31 @@ func AngularCSPBypassValue(marker string) string {
 	return `<input autofocus ng-focus="$event.composedPath()|orderBy:'` + marker + `'">`
 }
 
+// AngularCSPExpressionTechnique is the Candidate.Technique tag of the second
+// shape planned under the same gate: a plain text-node interpolation that the
+// page's own Angular compiler evaluates. It exists because the ng-focus shape
+// cannot be confirmed with a benign marker (Angular's CSP-safe interpreter
+// resolves an unknown identifier to undefined instead of raising the
+// marker-ReferenceError the verifier requires), while an interpolation gives a
+// deterministic result to compare against.
+const AngularCSPExpressionTechnique = "angular_csp_expression"
+
+// AngularCSPExpressionValue builds an interpolation whose evaluated RESULT is a
+// string the request never carries: the marker and a suffix are separate
+// string literals joined at runtime, so `{{'<marker>'+'x'}}` renders
+// "<marker>x" while the bytes actually sent contain "'<marker>'+'x'". Only a
+// page that compiles and evaluates the expression can produce the contiguous
+// result — an echo of the request cannot.
+func AngularCSPExpressionValue(marker string) string {
+	return "{{'" + marker + "'+'x'}}"
+}
+
+// AngularCSPExpressionResult is the exact string AngularCSPExpressionValue
+// evaluates to. The verifier searches the rendered page for it.
+func AngularCSPExpressionResult(marker string) string {
+	return marker + "x"
+}
+
 // cspForbidsInlineScript reports whether the header's policy (or, for a
 // comma-separated list, any one of its policies) restricts script sources
 // without allowing 'unsafe-inline'. A resource is only allowed when EVERY

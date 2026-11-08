@@ -101,6 +101,16 @@ func angularCandidate(t *testing.T, p *detection.CandidatePlan) (detection.Candi
 	return detection.Candidate{}, false
 }
 
+func expressionCandidate(t *testing.T, p *detection.CandidatePlan) (detection.Candidate, bool) {
+	t.Helper()
+	for _, c := range p.Candidates {
+		if c.Technique == detection.AngularCSPExpressionTechnique {
+			return c, true
+		}
+	}
+	return detection.Candidate{}, false
+}
+
 func TestPlanAngularCSPBypassGatedAndFirst(t *testing.T) {
 	on := planAngular(t, angularPlanDoc, true)
 	cand, ok := angularCandidate(t, on)
@@ -131,11 +141,40 @@ func TestPlanAngularCSPBypassGatedAndFirst(t *testing.T) {
 			t.Fatalf("candidate value must stay benign, found %q in %q", banned, cand.Value)
 		}
 	}
-	if on.Candidates[0].Technique != detection.AngularCSPBypassTechnique {
-		t.Fatalf("the bypass must sort first within the standard profile, got %q first (all: %v)", on.Candidates[0].Technique, valuesOf(on))
+	if on.Candidates[0].Technique != detection.AngularCSPExpressionTechnique {
+		t.Fatalf("the confirmable interpolation must sort first within the standard profile, got %q first (all: %v)", on.Candidates[0].Technique, valuesOf(on))
 	}
 	if len(on.Candidates) > 8 {
 		t.Fatalf("standard profile cap is 8, plan has %d", len(on.Candidates))
+	}
+
+	// The interpolation is the shape that can actually be CONFIRMED: its value
+	// joins the marker from two literals at runtime, so the rendered page can
+	// only carry the joined result if Angular evaluated it. Both shapes are
+	// planned under the same gate, and the interpolation sorts first because the
+	// standard profile truncates the plan — the confirmable one must never be
+	// the one dropped.
+	expr, ok := expressionCandidate(t, on)
+	if !ok {
+		t.Fatalf("AngularCSPBypass=true must plan the %s candidate; got %v", detection.AngularCSPExpressionTechnique, valuesOf(on))
+	}
+	if expr.Value != detection.AngularCSPExpressionValue(candProbe.Token) {
+		t.Fatalf("expression candidate value = %q, want AngularCSPExpressionValue(marker)", expr.Value)
+	}
+	if expr.Priority != 94 || expr.Trigger != detection.TriggerLoad {
+		t.Fatalf("expression candidate priority/trigger = %d/%q, want 94/load", expr.Priority, expr.Trigger)
+	}
+	if got, want := detection.AngularCSPExpressionResult(candProbe.Token), candProbe.Token+"x"; got != want {
+		t.Fatalf("expression result = %q, want %q", got, want)
+	}
+	if strings.Contains(expr.Value, detection.AngularCSPExpressionResult(candProbe.Token)) {
+		t.Fatalf("the evaluated result %q must NOT appear literally in the value %q — otherwise an echo could fake it",
+			detection.AngularCSPExpressionResult(candProbe.Token), expr.Value)
+	}
+	for _, banned := range []string{"alert", "cookie", "fetch", "XMLHttpRequest"} {
+		if strings.Contains(strings.ToLower(expr.Value), banned) {
+			t.Fatalf("expression candidate must stay benign, found %q in %q", banned, expr.Value)
+		}
 	}
 
 	off := planAngular(t, angularPlanDoc, false)

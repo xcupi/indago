@@ -249,7 +249,7 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 		// layer only sets the flag when the response's own CSP lacks
 		// 'unsafe-inline' AND the page shows Angular — see csp.go.
 		if opts.AngularCSPBypass && loc.Context.Context == CtxHTMLText && closingPrefix(*loc.Context) == "" {
-			tpls = append(tpls, angularCSPBypassTemplate(marker))
+			tpls = append(tpls, angularCSPExpressionTemplate(marker), angularCSPBypassTemplate(marker))
 		}
 		// A RAW QUERY-STRING injection point that lands in a URL inside an
 		// HTML attribute (the canonical <link rel="canonical" href="...">
@@ -599,6 +599,33 @@ func angularCSPBypassTemplate(m string) candTemplate {
 			"expression runs even though no inline handler or eval is allowed",
 		trigger:   TriggerLoad,
 		technique: AngularCSPBypassTechnique,
+	}
+}
+
+// angularCSPExpressionTemplate is the CONFIRMABLE sibling of the ng-focus
+// shape, planned under the same gate (see PlanOptions.AngularCSPBypass).
+//
+// Why it exists: the ng-focus shape proves the page compiles and evaluates the
+// expression, but its only observable trace is Angular resolving an unknown
+// identifier to `undefined`, which the verifier cannot accept as execution (it
+// requires a marker ReferenceError, and a marker-named TypeError is forgeable).
+// An interpolation gives the verifier something deterministic instead: the value
+// concatenates the marker with a suffix at RUNTIME, so the assembled result is a
+// string the request bytes never contained. Finding it in the rendered page is
+// proof the page's own Angular compiler evaluated attacker-supplied text under a
+// policy that forbids inline script — which is exactly the bypass.
+//
+// It is still benign: string concatenation only, no dialog, no DOM API, no
+// network. Load trigger: interpolation compiles with the page, no interaction.
+func angularCSPExpressionTemplate(m string) candTemplate {
+	return candTemplate{
+		value:    AngularCSPExpressionValue(m),
+		needs:    "",
+		priority: 94,
+		rationale: "CSP forbids inline script, but AngularJS still compiles text-node interpolation with its own evaluator: the expression concatenates the " +
+			"marker from two literals at runtime, so the rendered page carries a string the request never contained, proving the policy did not stop evaluation",
+		trigger:   TriggerLoad,
+		technique: AngularCSPExpressionTechnique,
 	}
 }
 

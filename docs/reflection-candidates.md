@@ -637,11 +637,36 @@ This is not only a 1.2 quirk: Angular's expression evaluator reads identifiers
 off the scope object, and the official payload's observable effect comes from
 *calling a real global* (e.g. `alert(...)`) that `orderBy` reaches through the
 `window` entry in the composed path — precisely the effect the benign-marker
-rule forbids. The verifier's only execution authority is the marker
-`ReferenceError` provenance signature, so this candidate is delivered and
-recorded but cannot Confirm with a benign marker. The gate, the delivery and the
-measured runtime semantics are pinned by
-`internal/scan/angular_csp_bypass_integration_test.go`.
+rule forbids. So the `ng-focus` shape is delivered and recorded, and stays
+Rejected with a benign marker on its own.
+
+### Confirmable sibling: the interpolation result (`angular_csp_expression`)
+
+The gate plans a second shape so this class can still be CONFIRMED
+automatically, without a dialog and without an interaction:
+`{{'MARKER'+'x'}}` — a text-node interpolation whose RESULT is built at
+runtime. The marker is intact inside the first literal (so ordinary reflection
+analysis still sees it), while the assembled string `MARKERx` exists **nowhere
+in the request bytes**: the value sent contains `'MARKER'+'x'`.
+
+That asymmetry is the confirmation authority. Finding `MARKERx` in the rendered
+page proves the page's own Angular compiler compiled and EVALUATED the
+attacker-supplied expression — the CSP bypass itself — because an echo of the
+request can only reproduce the two literals. The verifier checks exactly this
+(`SignalAngularEvaluation` in `internal/verification/signal.go`): the rendered
+DOM contains the joined result AND no byte this attempt sent contains it. On
+`script-src 'self'` a page with Angular confirms; the same page without Angular
+keeps the braces as literal text and cannot.
+
+The shape is still benign — string concatenation only, no dialog, no DOM API, no
+network — and it is load-triggered: interpolation compiles with the page, so no
+activation is needed. It sorts first (priority 94) because the standard profile
+truncates the plan and the confirmable shape must never be the one dropped.
+Measured end to end against the vendored AngularJS 1.2.32 under
+`script-src 'self'`: verdict Confirmed, notes naming the assembled string. The
+gate, both shapes, the runtime semantics and the Angular-free RED control are
+pinned by `internal/scan/angular_csp_bypass_integration_test.go`.
+
 
 ### Filter-allow-list shapes
 
