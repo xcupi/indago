@@ -668,6 +668,32 @@ gate, both shapes, the runtime semantics and the Angular-free RED control are
 pinned by `internal/scan/angular_csp_bypass_integration_test.go`.
 
 
+### CSP report-uri parameter injection (`csp_directive_injection`)
+
+A policy that reports violations names a URL in its own header:
+`Content-Security-Policy: script-src 'self'; report-uri /csp-report?token=…`.
+That query is a second injection surface, and a server that copies a request
+parameter into it unencoded writes attacker-controlled bytes into the POLICY
+itself. `;script-src-elem 'unsafe-inline'` then re-permits exactly the inline
+`<script>` the policy was there to stop.
+
+`internal/detection/csp.go`'s `CSPReportURIParams` extracts the parameter names
+from `report-uri` (and `report-to`) — conservative: only those two directives,
+only named parameters, capped at four. When the mutated response names one AND
+the body reflects as ordinary element content, the planner adds ONE candidate:
+
+* `Value`      = `<script>MARKER</script>` in the reflected body parameter,
+* `ExtraQuery` = `<reportParam>=;script-src-elem 'unsafe-inline'`, sent in the
+  SAME request (see `Candidate.ExtraQuery`; the request builder appends it after
+  the named parameters, byte-exact).
+
+Confirmation is the existing marker-`ReferenceError` authority: the script only
+raises it if the injected directive really relaxed the policy. A route that
+encodes the same parameter cannot confirm — the browser stays strict and the
+script never compiles. Measured against a loopback lab in
+`internal/scan/csp_injection_integration_test.go` (injectable route confirms,
+encoded control does not) and against PortSwigger's CSP-bypass lab.
+
 ### Filter-allow-list shapes
 
 The rewriting techniques above assume the filter is trying to *recognize* a

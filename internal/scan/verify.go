@@ -321,7 +321,7 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 	var vres *verification.Result
 	var verifyErr error
 	withDynamicTokenLock(e.tokenMu, params, focus, func() {
-		inj := &injection{param: focus, value: vj.Candidate.Value}
+		inj := &injection{param: focus, value: vj.Candidate.Value, extraQuery: vj.Candidate.ExtraQuery}
 		if focusB != nil {
 			inj.paramB, inj.valueB = focusB, vj.Candidate.ValueB
 		}

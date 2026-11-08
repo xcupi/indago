@@ -143,7 +143,7 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 	var resp *httpengine.Response
 	var dur time.Duration
 	withDynamicTokenLock(e.tokenMu, params, focus, func() {
-		inj := &injection{param: focus, value: cand.Value}
+		inj := &injection{param: focus, value: cand.Value, extraQuery: cand.ExtraQuery}
 		if focusB != nil {
 			inj.paramB, inj.valueB = focusB, cand.ValueB
 		}

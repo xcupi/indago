@@ -122,6 +122,13 @@ type Candidate struct {
 	// can tell the two siblings apart without diffing their bytes, the way
 	// Delimiter does for quote styles.
 	Separator string `json:"separator,omitempty"`
+	// ExtraQuery, when non-empty, is a URL query fragment this candidate must
+	// appended to the request AFTER the named parameters: "name=<encoded>".
+	// It carries a second injection surface that is not a discovered
+	// parameter — today only the CSP report-uri's own query parameter, which a
+	// directive-injection attack needs in the SAME request as the body payload
+	// so the relaxed policy applies to the reflected script.
+	ExtraQuery string `json:"extra_query,omitempty"`
 	// Trigger is how this breakout could ever produce an execution signal:
 	// TriggerLoad fires on page load (no activation needed); TriggerInteraction
 	// needs an action after navigation, for which the verifier may dispatch one
@@ -219,6 +226,16 @@ type PlanOptions struct {
 	// the automatic evasion escalation may re-derive, so nothing else sets
 	// it.
 	AngularCSPBypass bool
+	// CSPReportParam, when non-empty, names a query parameter the response's
+	// own Content-Security-Policy names inside its report-uri URL. Such a
+	// parameter is a HEADER injection surface: a value reflected there lands in
+	// the policy itself, so ";script-src-elem 'unsafe-inline'" relaxes it. The
+	// planner then adds ONE candidate that carries that directive in the
+	// parameter AND a reflected <script> body payload in the SAME request, so
+	// the browser verifier can prove the script runs under the relaxed policy.
+	// Set from the mutated response only (see createCSPParamCandidate), never
+	// re-derived by the evasion escalation.
+	CSPReportParam string
 }
 
 // PlanCandidates builds the candidate plan for rep and stores it in rep.Plan. It
@@ -250,6 +267,15 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 		// 'unsafe-inline' AND the page shows Angular — see csp.go.
 		if opts.AngularCSPBypass && loc.Context.Context == CtxHTMLText && closingPrefix(*loc.Context) == "" {
 			tpls = append(tpls, angularCSPExpressionTemplate(marker), angularCSPBypassTemplate(marker))
+		}
+		// A parameter the policy itself names (report-uri) is a header
+		// injection surface. When the body also reflects here as ordinary
+		// element content, ONE candidate carries the directive injection in
+		// that parameter and a <script> payload in this one, in the same
+		// request — the only way the browser can prove the relaxed policy
+		// actually executes the reflected script.
+		if opts.CSPReportParam != "" && loc.Context.Context == CtxHTMLText && closingPrefix(*loc.Context) == "" {
+			tpls = append(tpls, cspDirectiveInjectionTemplate(marker, opts.CSPReportParam))
 		}
 		// A RAW QUERY-STRING injection point that lands in a URL inside an
 		// HTML attribute (the canonical <link rel="canonical" href="...">
@@ -310,6 +336,7 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 				Context:          loc.Context.Context,
 				ContextSub:       loc.Context.Sub,
 				Value:            tpl.value,
+				ExtraQuery:       tpl.extraQuery,
 				Delimiter:        tpl.delimiter,
 				Trigger:          tpl.trigger,
 				Technique:        tpl.technique,
@@ -457,13 +484,16 @@ func categoryOf(ctx Context) CandidateCategory {
 // candTemplate is a context-specific breakout shape before transformation-aware
 // prioritization. needs lists the canary metacharacters (<,>,",') it depends on.
 type candTemplate struct {
-	value     string
-	needs     string
-	priority  int
-	rationale string
-	trigger   string // TriggerLoad / TriggerInteraction / TriggerNone
-	technique string // "" for every canonical template; see evasion.go
-	variation string // "" for every canonical/evasion template; see variation.go
+	value string
+	// extraQuery is copied into Candidate.ExtraQuery: a URL query fragment the
+	// request must carry beyond the named parameters (see Candidate.ExtraQuery).
+	extraQuery string
+	needs      string
+	priority   int
+	rationale  string
+	trigger    string // TriggerLoad / TriggerInteraction / TriggerNone
+	technique  string // "" for every canonical template; see evasion.go
+	variation  string // "" for every canonical/evasion template; see variation.go
 	// delimiter is the attribute quote style the shape closes ("double" or
 	// "single"), empty when it closes no quote. Copied into Candidate.Delimiter
 	// so a plan (and a report) can say which style an attempt assumed.
@@ -617,6 +647,31 @@ func angularCSPBypassTemplate(m string) candTemplate {
 //
 // It is still benign: string concatenation only, no dialog, no DOM API, no
 // network. Load trigger: interpolation compiles with the page, no interaction.
+// cspDirectiveInjectionTemplate is the one candidate that can CONFIRM a
+// header-level CSP bypass: the policy names a query parameter inside its own
+// report-uri, so a value reflected there lands in the header. The value carries
+// ";script-src-elem 'unsafe-inline'" in that parameter (ExtraQuery) and a
+// reflected <script> in the body parameter (value), in the SAME request — the
+// relaxed policy therefore governs the script element, and the marker
+// ReferenceError the verifier already trusts becomes reachable.
+//
+// It is planned only when the mutated response's policy actually names such a
+// parameter (PlanOptions.CSPReportParam) and this site reflects as ordinary
+// element content. Nothing here is guessed.
+func cspDirectiveInjectionTemplate(m, reportParam string) candTemplate {
+	return candTemplate{
+		value:      "<script>" + m + "</script>",
+		extraQuery: CSPDirectiveInjectionQuery(reportParam),
+		needs:      "<>",
+		priority:   96,
+		rationale: "the response's Content-Security-Policy names the query parameter \"" + reportParam + "\" inside its report-uri, so a value reflected there is written into the policy itself: this " +
+			"request sends \";script-src-elem 'unsafe-inline'\" in that parameter while reflecting a <script> referencing the benign marker, so the marker only raises a " +
+			"ReferenceError if the injected directive really relaxed the policy and the script element executed",
+		trigger:   TriggerLoad,
+		technique: CSPDirectiveInjectionTechnique,
+	}
+}
+
 func angularCSPExpressionTemplate(m string) candTemplate {
 	return candTemplate{
 		value:    AngularCSPExpressionValue(m),
