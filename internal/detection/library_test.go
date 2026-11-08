@@ -37,12 +37,12 @@ func TestLibraryTemplatesRespectContext(t *testing.T) {
 		t.Fatalf("library planned %d vectors at a JS string site, want 0", len(js))
 	}
 	text := libraryTemplatesFor(ContextAnalysis{Context: CtxHTMLText}, "M")
-	if len(text) < 8 {
-		t.Fatalf("library planned only %d vectors at element content, want the table's load families", len(text))
+	if len(text) != len(Library) {
+		t.Fatalf("library planned %d vectors at element content, want all %d", len(text), len(Library))
 	}
 	found := false
 	for _, tpl := range text {
-		if strings.Contains(tpl.value, "ontoggle=M") {
+		if strings.Contains(tpl.value, "<video><source onerror=M>") {
 			found = true
 		}
 		if tpl.trigger != TriggerLoad && tpl.trigger != TriggerInteraction {
@@ -50,7 +50,7 @@ func TestLibraryTemplatesRespectContext(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("the details/ontoggle family was not planned at element content")
+		t.Fatal("the video/source family was not planned at element content")
 	}
 }
 
@@ -78,5 +78,29 @@ func TestLibraryIsOptInAtPlanLevel(t *testing.T) {
 	}
 	if got := countLibrary(on); got == 0 {
 		t.Fatal("EnableLibrary planned no library candidates")
+	}
+}
+
+// The library must not re-send a shape the canonical planner already carries:
+// tags here are the ones candidate.go already builds (details/ontoggle, the
+// autofocus trio, body onpageshow/onload, svg animate, img/svg/script/a).
+// A new family that needs one of these tags belongs in candidate.go instead.
+func TestLibraryDoesNotDuplicateCanonicalShapes(t *testing.T) {
+	carried := map[string]bool{
+		"details": true, "input": true, "select": true, "textarea": true,
+		"body": true, "svg": true, "img": true, "script": true, "a": true,
+	}
+	for _, v := range Library {
+		payload := v.Build("M")
+		tag := payload[1:]
+		for i, r := range tag {
+			if r == '>' || r == ' ' || r == '/' {
+				tag = tag[:i]
+				break
+			}
+		}
+		if carried[strings.ToLower(tag)] {
+			t.Fatalf("%s builds <%s>, a tag the canonical planner already carries; prune it or move it to candidate.go", v.ID, tag)
+		}
 	}
 }

