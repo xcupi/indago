@@ -245,10 +245,8 @@ type createScanReq struct {
 	// Controller.CreateScan) rather than silently no-op the override.
 	RandomizeTLSFingerprint bool `json:"randomize_tls_fingerprint"`
 
-	// EnableIDOR opts this scan into the IDOR engine's object-identifier
-	// differential (see domain.ScanConfig.EnableIDOR). Off by default; the
-	// server rejects it for an anonymous scan, which has no caller identity.
-	EnableIDOR bool `json:"enable_idor"`
+	// The IDOR engine (object-identifier differential) has no enable switch:
+	// it runs automatically for a scan that carries a real caller identity.
 	// IDORCandidates are operator-supplied foreign object identifiers, e.g.
 	// the victim username an authorized lab brief names. Bounded/validated by
 	// the controller; explicit values always come first and are merged ahead
@@ -256,9 +254,9 @@ type createScanReq struct {
 	// "use the harvested set" — no candidate is ever guessed.
 	IDORCandidates []string `json:"idor_candidates"`
 	// EnableIDOREnumeration opts into the IDOR engine's bounded enumeration
-	// pass (numeric neighbours + a fixed short-slug set). Requires enable_idor;
-	// off by default. IDOREnumerationNeighbours is N (0 = engine default 5,
-	// ceiling 10). See docs/idor.md.
+	// pass (numeric neighbours + a fixed short-slug set). Requires an
+	// authenticated session; off by default. IDOREnumerationNeighbours is N
+	// (0 = engine default 5, ceiling 10). See docs/idor.md.
 	EnableIDOREnumeration     bool `json:"idor_enumerate"`
 	IDOREnumerationNeighbours int  `json:"idor_enumerate_n"`
 
@@ -346,7 +344,6 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		RawQueryInjection:         req.RawQueryInjection,
 		ProxyPool:                 cleanList(req.ProxyPool),
 		RandomizeTLSFingerprint:   req.RandomizeTLSFingerprint,
-		EnableIDOR:                req.EnableIDOR,
 		IDORCandidates:            req.IDORCandidates,
 		EnableIDOREnumeration:     req.EnableIDOREnumeration,
 		IDOREnumerationNeighbours: req.IDOREnumerationNeighbours,

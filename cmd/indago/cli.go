@@ -519,10 +519,9 @@ func (c *cli) scanCreate(args []string) error {
 	enableEvasion := fs.Bool("enable-evasion", false, "eagerly try WAF/filter-bypass candidate variants (case variation, alt separators, double URL-encoding) ON TOP OF the canonical set; without this flag, Indago may run the same bounded Technique-only fallback only after canonical candidates at one in-scope point complete without confirmation (see AGENTS.md §2.2)")
 	var rawQuery rawQueryModeFlag
 	fs.Var(&rawQuery, "raw-query-injection", "opt in to testing the WHOLE query string as one injection point, for pages that echo their entire query (canonical <link href>, 404/search/error pages): bare flag = auto (a GET endpoint with NO query parameters gets the bare+named probes; one that already has query parameters gets ONE append probe, ?<existing>&<payload>, skipped only when that endpoint already has a confirmed finding), =always also probes endpoints that have named parameters; OFF by default, GET-only, capped at 3 shapes/endpoint and 40 probes/scan (see docs/reflection-candidates.md)")
-	enableIDOR := fs.Bool("idor", false, "opt in to the IDOR engine's object-identifier differential (GET/HEAD reads only); requires an authenticated session — OFF by default (see docs/idor.md)")
 	var idorCandidates stringList
-	fs.Var(&idorCandidates, "idor-candidates", "foreign object identifier to try for the IDOR differential, e.g. the victim username an authorized lab brief names (repeatable, max 10; never invented by Indago)")
-	enableIDOREnum := fs.Bool("idor-enumerate", false, "opt in to BOUNDED identifier enumeration for the IDOR engine: numeric neighbours (value-1, value+1, 1..N) and a fixed short-slug set (admin, test, demo, guest); requires -idor, OFF by default (see docs/idor.md)")
+	fs.Var(&idorCandidates, "idor-candidates", "foreign object identifier to try for the automatic IDOR differential, e.g. the victim username an authorized lab brief names (repeatable, max 10; never invented by Indago)")
+	enableIDOREnum := fs.Bool("idor-enumerate", false, "opt in to BOUNDED identifier enumeration for the IDOR engine: numeric neighbours (value-1, value+1, 1..N) and a fixed short-slug set (admin, test, demo, guest); requires an authenticated session, OFF by default (see docs/idor.md)")
 	idorEnumN := fs.Int("idor-enumerate-n", 0, "N for -idor-enumerate: how many low integers 1..N to try (default 5, ceiling 10)")
 	enableRoleParam := fs.Bool("role-param", false, "opt in to the access-control engine's client-controlled flag differential (case 20): fetch a privileged endpoint with a role-shaped query parameter/cookie absent and then set to an admin-like value, and confirm ONLY when the privileged admin action surface becomes reachable; GET only, same-origin, bounded — OFF by default (see docs/access-control.md)")
 	enableACP := fs.Bool("access-control-pages", false, "opt in to the access-control engine's page-disclosure pass: re-fetch discovered pages, extract administrative path literals from their OWN inline/same-origin scripts, and probe each disclosed path anonymously (case 19's unpredictable path); never a wordlist, GET only, bounded — OFF by default")
@@ -548,7 +547,6 @@ func (c *cli) scanCreate(args []string) error {
 		"profile": *profile, "seed_urls": []string(seeds),
 		"quick_scan": *quick, "max_depth": *depth, "max_pages": *maxPages, "max_endpoints": *maxEndpoints,
 		"enable_evasion": *enableEvasion,
-		"enable_idor":    *enableIDOR,
 	}
 	if *enableRoleParam {
 		req["enable_role_param"] = true
