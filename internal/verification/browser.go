@@ -243,6 +243,15 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 		}
 	}
 
+	// Dangling markup: the injected form rendered around the page's own hidden
+	// input(s). This is the markup-only proof for a policy that forbids script,
+	// and it needs no request to leave the browser (see dangling.go).
+	if !matched && token != "" && in.Candidate.Technique == detection.DanglingFormTechnique {
+		if names, ok := danglingFormCaptured(ctx, page, token); ok {
+			sig, sigText, matched = SignalDOMFormCapture, names, true
+		}
+	}
+
 	// Activation — see activation.go. Only a candidate that declares a
 	// non-load trigger, reflected the marker, and produced no load-time signal
 	// is eligible: a load-trigger candidate's behaviour never changes, and a
@@ -311,6 +320,9 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	// Name the actual evidence for the interpolation case: the generic
 	// confirmation note talks about an unresolved identifier, which is not what
 	// this channel observed.
+	if sig == SignalDOMFormCapture && verdict == domain.VerdictConfirmed {
+		notes = "the injected dangling form captured the page's own hidden input(s) [" + sigText + "]: the value carried a request the page never sent, so the parse was broken and page-rendered data landed inside attacker markup (no request left the browser)"
+	}
 	if evaluated != "" && verdict == domain.VerdictConfirmed {
 		notes = "the page's AngularJS compiler evaluated the injected interpolation under its own Content-Security-Policy: the rendered page contains " +
 			evaluated + ", a string the request never carried (the value joins two literals at runtime), so the expression ran despite the policy forbidding inline script"

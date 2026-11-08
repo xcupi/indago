@@ -108,6 +108,7 @@ required = {
     "TestAngularCSPBypassIsPlannedOnlyForCSPWithoutUnsafeInlineAndAngular",
     "TestVendoredAngularEvaluatesNGFocusUnderCSPWithoutReferenceError",
     "TestCSPReportURIParamInjectionConfirmsOnlyWhenThePolicyIsInjectable",
+    "TestDanglingFormCaptureConfirmsOnlyWhenTheParseIsBroken",
 }
 if not shutil.which("node"):
     raise SystemExit("required Node.js unavailable")

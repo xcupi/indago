@@ -45,6 +45,13 @@ const (
 	// compiled AND evaluated — the CSP-bypass claim itself (see the
 	// angular_csp_expression shape).
 	SignalAngularEvaluation Signal = "angular_evaluation"
+	// SignalDOMFormCapture: the injected dangling form rendered around the
+	// page's OWN hidden input(s). The form's action carries this scan's marker,
+	// and an input inside it holds a value the request never contained, so the
+	// only explanation is that the injected markup broke the parse and captured
+	// page-rendered data. No request leaves the browser: the form is never
+	// submitted, and its action uses the reserved .invalid TLD.
+	SignalDOMFormCapture Signal = "dom_form_capture"
 )
 
 // matchExecutionSignal scans pageErrors then consoleErrors (in that priority:

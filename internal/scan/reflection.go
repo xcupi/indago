@@ -147,6 +147,9 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 		// injection surface; the planner pairs it with a body <script> so the
 		// browser can prove the directive injection actually executes.
 		CSPReportParam: firstCSPReportParam(resp.Headers.Get("Content-Security-Policy")),
+		// Markup-only fallback: when the policy forbids inline script, a
+		// dangling form can still capture the page's own hidden inputs.
+		DanglingMarkup: detection.CSPForbidsInline(resp.Headers.Get("Content-Security-Policy")),
 	})
 
 	// See runCandidate: the status signal is independent of reflection, and
