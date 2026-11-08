@@ -223,6 +223,14 @@ func recordingHandlers() (map[domain.JobType]worker.Handler, func() []string) {
 			mu.Unlock()
 			return nil
 		}),
+		// The access-control bypass pass queues bounded per-path jobs; a real
+		// worker handles them, so this double must too.
+		domain.JobAccessControl: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
+			mu.Lock()
+			urls = append(urls, j.Target.URL)
+			mu.Unlock()
+			return nil
+		}),
 	}
 	return h, func() []string {
 		mu.Lock()
@@ -336,6 +344,9 @@ func TestScanCompletesAfterDiscoveryAndJobs(t *testing.T) {
 	// add it to the expected totals rather than treating it as unrelated.
 	eps, _ := st.Endpoints().ListByScan(ctx, sc.ID)
 	total += countDistinctNavigableURLs(eps)
+	// Plus the access-control bypass pass: one job per bounded privileged path
+	// per origin (see accesscontrol_bypass.go).
+	total += accessBypassJobCount(eps)
 	if done.Jobs.Total() != total || done.Jobs.Succeeded != total {
 		t.Fatalf("jobs=%+v, want %d succeeded", done.Jobs, total)
 	}
