@@ -353,3 +353,28 @@ describes Reflected XSS + DOM XSS as the implemented engines. This slice makes
 the IDOR engine real, so AGENTS.md §3 must be raised to the operator for
 approval before this can be described as an approved product boundary. The
 exact wording is in `HANDOFF.md`.
+
+## Redirect-body leaks (case 32)
+
+Some applications answer a foreign object with `302 -> /login` and still put the
+account page in the BODY of that redirect. Following the redirect turns the only
+copy of the evidence into a login page, and the differential used to end
+Inconclusive.
+
+The engine now replays the candidate request **once** with
+`httpengine.Request.NoRedirects` when the followed response both redirected and
+looked like a login page. The 3xx body is what `Decide` classifies, and the
+finding says so: *the redirect response (HTTP 302) leaked the object instead of
+sending only a Location*.
+
+- `NoRedirects` is honoured by `scopedEngine.Do` before its own redirect loop, so
+  no out-of-scope hop is ever taken; the direct `Client` honours it in
+  `CheckRedirect`.
+- The replay spends one probe permit from the same scan-wide budget; when the
+  budget is gone the original response stands.
+- A redirect whose body carries no identity data is still Inconclusive — the
+  negative control `TestIDORLoginRedirectIsInconclusive` covers it.
+
+The victim identifier is unchanged: username-shaped ids are operator input
+(`-idor-candidates`, or harvest when the app exposes them) or bounded
+enumeration. This engine never invents usernames.

@@ -337,6 +337,62 @@ func TestIDORLoginRedirectIsInconclusive(t *testing.T) {
 	}
 }
 
+// TestIDORRedirectBodyLeakConfirms is case 32: the object is disclosed in the
+// BODY of the redirect that sends the caller away (302 -> /login, account page
+// inside). Following that redirect used to make the response look like a login
+// page and the case stayed Inconclusive; the engine now replays the request with
+// redirects disabled and classifies the 3xx body.
+func TestIDORRedirectBodyLeakConfirms(t *testing.T) {
+	env, srv := newIDOREnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch {
+		case r.URL.Path == "/login":
+			fmt.Fprint(w, `<form><input name="username"><input type="password" name="password"></form>`)
+		case r.URL.Path == "/my-account" && (r.URL.Query().Get("id") == "" || r.URL.Query().Get("id") == "wiener"):
+			fmt.Fprint(w, `<h1>My Account</h1><p>Your username is <strong>wiener</strong></p><p>Email: wiener@example.com</p>`)
+		case r.URL.Path == "/my-account" && r.URL.Query().Get("id") == "carlos":
+			w.Header().Set("Location", "/login")
+			w.WriteHeader(http.StatusFound)
+			fmt.Fprint(w, `<h1>My Account</h1><p>Your username is <strong>carlos</strong></p><p>Email: carlos@example.com</p>`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	env.sc.Config.IDORCandidates = []string{"carlos"}
+	ep := env.endpoint(srv.URL+"/my-account?id=wiener", domain.MethodGET)
+	focus := env.param(ep, "id", domain.LocationQuery, "wiener")
+	ip := env.injection(ep, focus)
+
+	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, env.sc.Config.IDORCandidates, idor.EnumerationOptions{})
+	if err := ex.Handle(context.Background(), env.idorJobHelper(ep, ip)); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	d := idorDecision(t, env.probeCase())
+	if d.Verdict != domain.VerdictConfirmed {
+		t.Fatalf("verdict = %q (%s), want confirmed", d.Verdict, d.Reason)
+	}
+	if !d.RedirectBody {
+		t.Fatal("the decision must record that the object was read from a redirect body")
+	}
+	if !strings.Contains(d.Reason, "redirect response") {
+		t.Fatalf("reason should name the redirect-body leak: %q", d.Reason)
+	}
+	var foreign *idorAttempt
+	for i := range d.Attempts {
+		if d.Attempts[i].Candidate == "carlos" && d.Attempts[i].Outcome == string(idor.OutcomeConfirmed) {
+			foreign = &d.Attempts[i]
+		}
+	}
+	if foreign == nil || foreign.Foreign == nil || foreign.Foreign.Value != "carlos" {
+		t.Fatalf("confirmed attempt must name carlos: %+v", d.Attempts)
+	}
+	fs := env.findings()
+	if len(fs) != 1 || fs[0].VulnClass != domain.VulnIDOR {
+		t.Fatalf("findings = %+v, want one idor finding", fs)
+	}
+}
+
 func TestIDOROpaqueIdentifierSkipsWithoutGuessing(t *testing.T) {
 	const own = "8f14e45f-ceea-467f-a8d5-1b3c4d5e6f70"
 	env, srv := newIDOREnv(t, func(w http.ResponseWriter, r *http.Request) {

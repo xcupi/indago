@@ -132,6 +132,31 @@ func TestScopedEngineFollowsInScopeRedirects(t *testing.T) {
 	}
 }
 
+// TestScopedEngineNoRedirectsReturnsTheRedirectItself is the primitive case 32
+// needs: a caller must be able to read the 3xx body instead of the page the
+// redirect points at.
+func TestScopedEngineNoRedirectsReturnsTheRedirectItself(t *testing.T) {
+	var log pathLog
+	srv := scopedTestServer(t, &log)
+	eng := newScopedEngine(noFollowClient(t), appScope())
+
+	req := httpengine.GET(srv.URL + "/app/hop1")
+	req.NoRedirects = true
+	resp, err := eng.Do(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != http.StatusFound {
+		t.Fatalf("status = %d, want 302 handed back", resp.Status)
+	}
+	if len(resp.RedirectChain) != 0 || resp.FinalURL != srv.URL+"/app/hop1" {
+		t.Fatalf("chain=%v final=%q, want no hop recorded", resp.RedirectChain, resp.FinalURL)
+	}
+	if log.saw("/app/ok") {
+		t.Fatal("the redirect target was requested although NoRedirects was set")
+	}
+}
+
 func TestScopedEngineRedirectMethodSemantics(t *testing.T) {
 	var log pathLog
 	srv := scopedTestServer(t, &log)

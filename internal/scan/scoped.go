@@ -115,7 +115,10 @@ func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpen
 		if err != nil {
 			return nil, err
 		}
-		if !isRedirectStatus(resp.Status) {
+		// A NoRedirects request wants the 3xx itself (a redirect body can be
+		// the only place an object is disclosed); hand it back before the
+		// scope-enforcing loop follows it away.
+		if cur.NoRedirects || !isRedirectStatus(resp.Status) {
 			resp.RedirectChain = chain
 			resp.FinalURL = cur.URL
 			return resp, nil

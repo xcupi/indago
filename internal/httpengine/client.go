@@ -314,7 +314,7 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 				// sends per hop, so this only affects direct Client use.)
 				r.Header.Del("Cookie")
 			}
-			if !c.followRedirects {
+			if !c.followRedirects || req.NoRedirects {
 				return http.ErrUseLastResponse
 			}
 			if len(via) >= c.maxRedirects {

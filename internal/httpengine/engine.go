@@ -42,7 +42,12 @@ type Request struct {
 	// state the caller did not declare through Cookies must not reach the wire
 	// under an isolation mode. Used by differential probes that must compare an
 	// anonymous request with an authenticated one.
-	NoCookies bool
+	// NoRedirects returns the FIRST 3xx response as-is instead of following
+	// it. Used to inspect a redirect body: some applications leak the object
+	// in the 302 they send the caller away with, and following it destroys the
+	// only copy of that evidence.
+	NoRedirects bool
+	NoCookies   bool
 	// Jarless hides the configured cookie jar from this request in BOTH
 	// directions: no cookie stored by an earlier response is attached, and this
 	// response's Set-Cookie is not stored. Unlike NoCookies, Cookies IS still
