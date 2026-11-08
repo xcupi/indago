@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -40,12 +41,33 @@ func newIDOREnv(t *testing.T, handler http.HandlerFunc) (*idorEnv, *httptest.Ser
 		handler(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	env.sc.Config.EnableIDOR = true
+	authenticateIDOR(t, env.scanEnv)
 	env.sc.SeedURLs = []string{srv.URL}
 	if err := env.st.Scans().Update(context.Background(), env.sc); err != nil {
 		t.Fatal(err)
 	}
 	return env, srv
+}
+
+// authenticateIDOR gives the scan a REAL caller identity: an active session
+// with a non-anonymous auth mode. The IDOR engine is automatic — this, not a
+// config flag, is the only thing that turns the pass on.
+func authenticateIDOR(t *testing.T, env *scanEnv) {
+	t.Helper()
+	now := time.Now().UTC()
+	sess := &domain.Session{
+		ID:        domain.NewID(),
+		ScanID:    env.scanID,
+		Mode:      domain.AuthExisting,
+		State:     domain.SessionActive,
+		StatePath: filepath.Join(t.TempDir(), "session.json"),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := env.st.Sessions().Create(context.Background(), sess); err != nil {
+		t.Fatalf("seed authenticated session: %v", err)
+	}
+	env.sc.SessionID = sess.ID
 }
 
 func (e *idorEnv) saw() []string {
@@ -389,7 +411,7 @@ func TestIDORStateChangingParameterIsOutOfSlice(t *testing.T) {
 
 func TestEnqueueIDORProbesSelectsOnlyObjectIdentifiers(t *testing.T) {
 	env := newScanEnv(t)
-	env.sc.Config.EnableIDOR = true
+	authenticateIDOR(t, env)
 	if err := env.st.Scans().Update(context.Background(), env.sc); err != nil {
 		t.Fatal(err)
 	}
@@ -424,18 +446,60 @@ func TestEnqueueIDORProbesSelectsOnlyObjectIdentifiers(t *testing.T) {
 	}
 }
 
-func TestEnqueueIDORProbesRequiresOptIn(t *testing.T) {
-	env := newScanEnv(t)
-	q := queue.NewMemory()
-	c := &Controller{store: env.st, queue: q, log: execLog()}
-	ep := env.endpoint("http://127.0.0.1:1/my-account?id=wiener", domain.MethodGET)
-	env.param(ep, "id", domain.LocationQuery, "wiener")
+// TestEnqueueIDORProbesIsAutomaticOnlyWithACallerIdentity pins the new contract:
+// there is no opt-in flag any more, so the scan's own session decides. An
+// anonymous scan and an EXPIRED session plan nothing (there is no caller to
+// compare against); an active authenticated session plans the pass with no
+// configuration at all.
+func TestEnqueueIDORProbesIsAutomaticOnlyWithACallerIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		mode  domain.AuthMode
+		state domain.SessionState
+		want  int
+	}{
+		{"no session", "", "", 0},
+		{"anonymous session", domain.AuthAnonymous, domain.SessionActive, 0},
+		{"expired session", domain.AuthExisting, domain.SessionExpired, 0},
+		{"active session", domain.AuthExisting, domain.SessionActive, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newScanEnv(t)
+			if tc.mode != "" {
+				now := time.Now().UTC()
+				sess := &domain.Session{
+					ID: domain.NewID(), ScanID: env.scanID,
+					Mode: tc.mode, State: tc.state,
+					StatePath: filepath.Join(t.TempDir(), "session.json"),
+					CreatedAt: now, UpdatedAt: now,
+				}
+				if err := env.st.Sessions().Create(context.Background(), sess); err != nil {
+					t.Fatal(err)
+				}
+				env.sc.SessionID = sess.ID
+				if err := env.st.Scans().Update(context.Background(), env.sc); err != nil {
+					t.Fatal(err)
+				}
+			}
+			q := queue.NewMemory()
+			c := &Controller{store: env.st, queue: q, log: execLog()}
+			ep := env.endpoint("http://127.0.0.1:1/my-account?id=wiener", domain.MethodGET)
+			env.param(ep, "id", domain.LocationQuery, "wiener")
 
-	c.enqueueIDORProbes(context.Background(), env.scanID)
+			c.enqueueIDORProbes(context.Background(), env.scanID)
 
-	j, _ := q.Lease(context.Background(), "t", env.scanID, []domain.JobType{domain.JobIDOR}, time.Minute)
-	if j != nil {
-		t.Fatalf("IDOR probes must not run without the scan's explicit opt-in: %+v", j)
+			var jobs int
+			for {
+				j, err := q.Lease(context.Background(), "t", env.scanID, []domain.JobType{domain.JobIDOR}, time.Minute)
+				if err != nil || j == nil {
+					break
+				}
+				jobs++
+			}
+			if jobs != tc.want {
+				t.Fatalf("enqueued %d IDOR jobs, want %d (mode=%q state=%q)", jobs, tc.want, tc.mode, tc.state)
+			}
+		})
 	}
 }
 

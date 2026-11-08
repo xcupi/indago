@@ -331,30 +331,30 @@ func TestIDORZeroPaddedBaselineKeepsPadding(t *testing.T) {
 	}
 }
 
-// TestValidateIDOREnumeration pins the scan-creation gate: enumeration cannot
-// be enabled without the engine, N cannot be set without the switch, and N is
-// hard-capped.
+// TestValidateIDOREnumeration pins the scan-creation gate: enumeration needs an
+// authenticated session to compare against, N cannot be set without the switch,
+// and N is hard-capped.
 func TestValidateIDOREnumeration(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		idor      bool
+		mode      domain.AuthMode
 		enumerate bool
 		n         int
 		wantErr   bool
 	}{
-		{"off by default", false, false, 0, false},
-		{"engine on, enumeration off", true, false, 0, false},
-		{"enumeration without the engine", false, true, 0, true},
-		{"N without the switch", true, false, 3, true},
-		{"valid N", true, true, 3, false},
-		{"negative N", true, true, -1, true},
-		{"N above the ceiling", true, true, idor.MaxEnumerationNeighbours + 1, true},
+		{"off by default", domain.AuthAnonymous, false, 0, false},
+		{"authenticated, enumeration off", domain.AuthExisting, false, 0, false},
+		{"enumeration without a session", domain.AuthAnonymous, true, 0, true},
+		{"N without the switch", domain.AuthExisting, false, 3, true},
+		{"valid N", domain.AuthExisting, true, 3, false},
+		{"negative N", domain.AuthExisting, true, -1, true},
+		{"N above the ceiling", domain.AuthExisting, true, idor.MaxEnumerationNeighbours + 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateIDOREnumeration(tc.idor, tc.enumerate, tc.n)
+			err := validateIDOREnumeration(tc.mode, tc.enumerate, tc.n)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("validateIDOREnumeration(%v, %v, %d) = %v, want error %v",
-					tc.idor, tc.enumerate, tc.n, err, tc.wantErr)
+					tc.mode, tc.enumerate, tc.n, err, tc.wantErr)
 			}
 		})
 	}

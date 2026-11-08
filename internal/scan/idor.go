@@ -1180,17 +1180,43 @@ func mergeIDORAttempts(existing, add []idorAttempt) []idorAttempt {
 // probe pass: one JobIDOR per object-identifier injection point
 // ---------------------------------------------------------------------------
 
-// enqueueIDORProbes runs once per execution, after the XSS and DOM-XSS passes,
-// for a scan that explicitly opted into the IDOR engine. Bounded by the
-// discovered parameters: it only queues GET/HEAD query/path object-id
-// injection points.
+// idorCallerIdentity reports whether this scan has a REAL caller identity for
+// the object-identifier differential to compare against: a session row that is
+// authenticated (any mode except anonymous) and currently active. The identity
+// itself is still established from the target (see establishIDORIdentity) — this
+// only decides whether there is a session worth establishing it from, so a
+// scan's own auth state stays the single source of truth.
+func (c *Controller) idorCallerIdentity(ctx context.Context, sc *domain.Scan) bool {
+	if sc == nil || sc.SessionID.Empty() {
+		return false
+	}
+	sess, err := c.store.Sessions().Get(ctx, sc.SessionID)
+	if err != nil || sess == nil {
+		return false
+	}
+	if sess.Mode == domain.AuthAnonymous || !sess.Mode.IsValid() {
+		return false
+	}
+	return sess.State == domain.SessionActive
+}
+
+// enqueueIDORProbes runs once per execution, after the XSS and DOM-XSS passes.
+// It is automatic: the only precondition is a real caller identity (see
+// idorCallerIdentity). Bounded by the discovered parameters: it only queues
+// GET/HEAD query/path object-id injection points.
 func (c *Controller) enqueueIDORProbes(ctx context.Context, scanID domain.ID) {
 	sc, err := c.store.Scans().Get(ctx, scanID)
 	if err != nil {
 		c.log.Warn("idor probes: load scan", "scan", scanID, "err", err)
 		return
 	}
-	if !sc.Config.EnableIDOR {
+	// The engine is automatic: no opt-in flag decides this. What it needs is a
+	// real caller identity (the differential compares the caller's own object
+	// against a foreign one) and at least one object-identifier-shaped
+	// parameter, which idorParameter enforces per parameter below. A scan with
+	// no session has nobody to compare against, so it plans nothing — that is
+	// the only gate left.
+	if !c.idorCallerIdentity(ctx, sc) {
 		return
 	}
 	endpoints, err := c.store.Endpoints().ListByScan(ctx, scanID)

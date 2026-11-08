@@ -36,7 +36,7 @@ to the ordinary **HTTP worker group** — no special case in the worker.
 discovery (authenticated)                      controller, once per execution,
   └─ endpoints + parameters                     on the same quiet tick as the
         │                                       DOM-XSS pass (neither gates
-        │  opt-in: ScanConfig.EnableIDOR        the other)
+        │  gate: an authenticated, active        the other)
         ▼                                              │
    JobIDOR (one per object-identifier injection point)
         │
@@ -288,19 +288,22 @@ Scan creation (CLI):
 
 ```
 indago scan create -project P -target T -auth existing -auth-state state.json \
-  -idor -idor-candidates carlos
+  -idor-candidates carlos
 ```
 
-* `-idor` / `enable_idor`: opt-in. Off by default. Rejected at creation time for
-  an anonymous scan (there is no caller identity to establish).
+* There is **no** `-idor` / `enable_idor` switch any more. The engine runs
+  automatically for any scan that carries a real caller identity — an
+  authenticated, active session (`-auth existing|interactive|mfa|password`)
+  and at least one object-identifier-shaped parameter. An anonymous scan plans
+  nothing, because there is no caller to compare against.
 * `-idor-candidates` / `idor_candidates`: repeatable, at most 10,
   identifier-shaped values only.
 * `-idor-enumerate` / `idor_enumerate`: opt-in bounded enumeration. Off by
-  default. Requires `-idor`; rejected at creation otherwise.
+  default. Requires an authenticated session; rejected at creation otherwise.
 * `-idor-enumerate-n` / `idor_enumerate_n`: N for `1..N` (default 5, ceiling
   10). Rejected when set without `-idor-enumerate`.
 
-The API (`POST /api/scans`) accepts the same four fields.
+The API (`POST /api/scans`) accepts the same fields (minus `enable_idor`).
 
 ## 5. Tests
 
@@ -325,7 +328,7 @@ The API (`POST /api/scans`) accepts the same four fields.
   servers: Confirmed on foreign data with both requests as evidence;
   same-principal and no-identity fixtures never Confirmed; login redirect not
   Confirmed; opaque identifier skipped without guessing; POST skipped with no
-  request sent; probe-pass selection; opt-in gate; worker-group routing. Plus
+  request sent; probe-pass selection; the automatic caller-identity gate; worker-group routing. Plus
   the regressions for this slice:
   * `TestIDORConfirmsLiveLabShape` — the exact live page shape confirms, the
     caller extracts as `username=wiener` (not `is`), and the account endpoint

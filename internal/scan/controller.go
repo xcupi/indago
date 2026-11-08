@@ -311,17 +311,18 @@ type CreateScanParams struct {
 	// RandomizeTLSFingerprint — see domain.ScanConfig.RandomizeTLSFingerprint.
 	// Off by default; mutually exclusive with ProxyPool (validated below).
 	RandomizeTLSFingerprint bool
-	// EnableIDOR opts into the IDOR engine's object-identifier differential —
-	// see domain.ScanConfig.EnableIDOR. Off by default; requires a real
-	// authenticated session (there is no identity to compare against without
-	// one).
-	EnableIDOR bool
 	// IDORCandidates are operator-supplied foreign object identifiers — see
 	// domain.ScanConfig.IDORCandidates. Bounded and validated at creation.
+	//
+	// There is no separate "enable the IDOR engine" switch: the engine runs
+	// automatically for any scan that carries a real caller identity, exactly
+	// like the other engines' automatic passes.
 	IDORCandidates []string
 	// EnableIDOREnumeration / IDOREnumerationNeighbours — see
-	// domain.ScanConfig.EnableIDOREnumeration. Off by default; requires the
-	// IDOR engine itself to be enabled.
+	// domain.ScanConfig.EnableIDOREnumeration. Enumeration is a second,
+	// explicit opt-in ON TOP of the automatic engine because it deliberately
+	// sends foreign identifiers the caller did not disclose; it requires an
+	// authenticated session like the engine itself.
 	EnableIDOREnumeration     bool
 	IDOREnumerationNeighbours int
 	// EnableRoleParam opts into the access-control engine's client-controlled
@@ -450,17 +451,25 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 			"Go's HTTP transport performs TLS internally after any proxy tunnel, never through a "+
 			"custom TLS dialer, so the fingerprint override would silently have no effect through a proxy", ErrBadConfig)
 	}
-	// IDOR engine opt-in and its operator-supplied candidate identifiers.
-	cfg.EnableIDOR = p.EnableIDOR
+	// The session mode decides several validations below (IDOR enumeration,
+	// the role-field slice), so resolve it once, up front.
+	mode := p.AuthMode
+	if !mode.IsValid() {
+		mode = domain.AuthAnonymous
+	}
+	// IDOR engine: automatic, so there is nothing to opt into here. Only the
+	// operator-supplied candidate identifiers are carried over.
 	cfg.IDORCandidates = cleanIDORCandidates(p.IDORCandidates)
 	if err := validateIDORCandidates(cfg.IDORCandidates); err != nil {
 		return nil, err
 	}
-	// Bounded enumeration is a second, explicit opt-in ON TOP of the engine;
-	// enabling it without the engine would silently do nothing, so fail closed.
+	// Bounded enumeration stays a second, explicit opt-in ON TOP of the
+	// automatic engine: it deliberately sends foreign identifiers the caller
+	// never disclosed. It still needs an authenticated session, so refuse the
+	// combination at creation instead of running a pass that can only skip.
 	cfg.EnableIDOREnumeration = p.EnableIDOREnumeration
 	cfg.IDOREnumerationNeighbours = p.IDOREnumerationNeighbours
-	if err := validateIDOREnumeration(cfg.EnableIDOR, cfg.EnableIDOREnumeration, cfg.IDOREnumerationNeighbours); err != nil {
+	if err := validateIDOREnumeration(mode, cfg.EnableIDOREnumeration, cfg.IDOREnumerationNeighbours); err != nil {
 		return nil, err
 	}
 	// Access-control differentials. The flag differential is read-only; the
@@ -470,20 +479,9 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.EnableAccessControlPages = p.EnableAccessControlPages
 	cfg.EnableRoleWrite = p.EnableRoleWrite
 
-	mode := p.AuthMode
-	if !mode.IsValid() {
-		mode = domain.AuthAnonymous
-	}
 	statePath, err := c.resolveAuth(ctx, mode, p, scope)
 	if err != nil {
 		return nil, err
-	}
-	// Fail closed at creation: the IDOR engine's whole differential rests on a
-	// caller identity established from an authenticated session. An anonymous
-	// scan has none, so reject the combination instead of running a pass that
-	// can only skip.
-	if cfg.EnableIDOR && mode == domain.AuthAnonymous {
-		return nil, fmt.Errorf("%w: enable_idor requires an authenticated session (auth_mode %q has no caller identity); use -auth existing/-auth interactive/-auth mfa/-auth password", ErrBadConfig, mode)
 	}
 	// The role-field slice writes the caller's own profile and decides from
 	// that caller's privileged access. Without a session there is nobody to
@@ -1038,9 +1036,9 @@ func validateIDORCandidates(cands []string) error {
 // validateIDOREnumeration rejects a configuration that cannot do what the
 // operator asked: enumeration without the engine, or N outside the engine's
 // stated range. Bounded means bounded — a typo must not become a wordlist.
-func validateIDOREnumeration(enableIDOR, enableEnum bool, neighbours int) error {
-	if enableEnum && !enableIDOR {
-		return fmt.Errorf("%w: idor_enumerate requires enable_idor", ErrBadConfig)
+func validateIDOREnumeration(authMode domain.AuthMode, enableEnum bool, neighbours int) error {
+	if enableEnum && authMode == domain.AuthAnonymous {
+		return fmt.Errorf("%w: idor_enumerate requires an authenticated session (auth_mode %q has no caller identity to compare against); use -auth existing/-auth interactive/-auth mfa/-auth password", ErrBadConfig, authMode)
 	}
 	if neighbours != 0 && !enableEnum {
 		return fmt.Errorf("%w: idor_enumerate_n requires idor_enumerate", ErrBadConfig)

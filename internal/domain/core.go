@@ -257,28 +257,26 @@ type ScanConfig struct {
 	// has no way to reach into.
 	RandomizeTLSFingerprint bool `json:"randomize_tls_fingerprint,omitempty"`
 
-	// EnableIDOR opts this scan into the IDOR engine's object-identifier
-	// differential (see internal/idor and docs/idor.md). Off by default
-	// (conservative by design): it reads objects selected by other
-	// identifiers, so an operator turns it on explicitly for an authorized
-	// access-control engagement. It requires an authenticated session — the
-	// engine establishes the caller's identity from the target itself, and
-	// without a session there is no identity to compare against.
-	EnableIDOR bool `json:"enable_idor,omitempty"`
-	// IDORCandidates are operator-supplied foreign object identifiers for
-	// EnableIDOR, e.g. the victim username a lab brief names ("carlos") or an
-	// unpredictable id. They are only ever tried as read-only GET/HEAD object
-	// lookups inside the scan's scope; the engine never invents them. Empty
-	// leaves derivation to bounded numeric neighbours of the caller's own
-	// identifier.
+	// The IDOR engine (object-identifier differential, see internal/idor and
+	// docs/idor.md) has no enable switch: it runs automatically for any scan
+	// that carries a real caller identity, because the differential needs
+	// exactly that — an authenticated session to establish the caller from and
+	// an object-identifier-shaped parameter to vary. An anonymous scan plans
+	// nothing, since it has no identity to compare against.
+	//
+	// IDORCandidates are operator-supplied foreign object identifiers, e.g.
+	// the victim username a lab brief names ("carlos") or an unpredictable id.
+	// They are only ever tried as read-only GET/HEAD object lookups inside the
+	// scan's scope; the engine never invents them. Empty leaves derivation to
+	// bounded numeric neighbours of the caller's own identifier.
 	IDORCandidates []string `json:"idor_candidates,omitempty"`
 
 	// EnableIDOREnumeration opts into the bounded enumeration pass: when a
 	// parameter's observed identifier is numeric (7), try 6, 8 and 1..N; when
 	// it is a short slug, try the fixed common neighbours admin/test/demo/
-	// guest. It is a separate, explicit switch ON TOP of EnableIDOR, OFF by
-	// default, and never a wordlist (see internal/idor/enumerate.go and
-	// docs/idor.md). Requires EnableIDOR.
+	// guest. It is a separate, explicit switch ON TOP of the automatic engine,
+	// OFF by default, and never a wordlist (see internal/idor/enumerate.go and
+	// docs/idor.md). Requires an authenticated session.
 	EnableIDOREnumeration bool `json:"idor_enumerate,omitempty"`
 	// IDOREnumerationNeighbours is N: how many low integers 1..N are tried for
 	// a numeric baseline. 0 means the engine default (5); the hard ceiling is
