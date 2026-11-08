@@ -217,6 +217,11 @@ type PlanOptions struct {
 	// end); this field exists so a future dedicated flag, or a direct planner
 	// caller, can ask for the packs alone.
 	EnableVariationPacks bool
+	// EnableLibrary additionally plans the cheat-sheet library families (see
+	// library.go) for the contexts that can carry them, ON TOP OF the canonical
+	// candidates. Defaults to false, so the default plan stays byte-identical;
+	// the profile still caps how many are actually sent.
+	EnableLibrary bool
 	// AngularCSPBypass plans the official AngularJS CSP-bypass shape
 	// (ng-focus + $event.composedPath()) at an ordinary HTML-text site.
 	// Defaults to false, so the default plan is byte-identical to before the
@@ -266,6 +271,9 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 			continue
 		}
 		tpls := templatesFor(*loc.Context, marker)
+		if opts.EnableLibrary {
+			tpls = append(tpls, libraryTemplatesFor(*loc.Context, marker)...)
+		}
 		// The official AngularJS CSP bypass is only plannable in ordinary
 		// element content: it injects a whole <input> element, so a comment,
 		// RCDATA or RAWTEXT site (which closingPrefix would have to close

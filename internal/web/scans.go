@@ -276,6 +276,8 @@ type createScanReq struct {
 	// EnableObjectFamilyProbe opts into the case 34 object-family slice: the
 	// scan submits its own object and probes the neighbouring ids.
 	EnableObjectFamilyProbe bool `json:"enable_object_family_probe"`
+	// EnableXSSLibrary opts into the cheat-sheet library families.
+	EnableXSSLibrary bool `json:"enable_xss_library"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -358,6 +360,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		EnableRoleWrite:           req.EnableRoleWrite,
 		EnableAdminStepProbe:      req.EnableAdminStepProbe,
 		EnableObjectFamilyProbe:   req.EnableObjectFamilyProbe,
+		EnableXSSLibrary:          req.EnableXSSLibrary,
 	})
 	if err != nil {
 		s.writeScanError(w, err)

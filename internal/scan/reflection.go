@@ -138,6 +138,7 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 		InjectionPointID: tc.InjectionPointID,
 		Profile:          e.candidateProfile(ctx, tc.ScanID),
 		EnableEvasion:    e.enableEvasion(ctx, tc.ScanID),
+		EnableLibrary:    e.enableLibrary(ctx, tc.ScanID),
 		// The official AngularJS CSP bypass is planned only when THIS
 		// response both forbids inline script and shows Angular (csp.go).
 		// The mutated response is the one the candidate will be sent to, so
@@ -209,6 +210,18 @@ func (e *executor) enableEvasion(ctx context.Context, scanID domain.ID) bool {
 		return false
 	}
 	return sc.Config.EnableEvasion
+}
+
+// enableLibrary reports whether this scan opted into the cheat-sheet library
+// families. Off by default: every new family costs requests, and the operator
+// decides when a target needs the wider net.
+func (e *executor) enableLibrary(ctx context.Context, scanID domain.ID) bool {
+	sc, err := e.store.Scans().Get(ctx, scanID)
+	if err != nil {
+		e.log.Warn("load scan for library flag; defaulting to off", "scan", scanID, "err", err)
+		return false
+	}
+	return sc.Config.EnableXSSLibrary
 }
 
 // contextSummary renders the distinct site contexts, e.g. "context: html_text, js_string".
