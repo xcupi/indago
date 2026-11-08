@@ -130,6 +130,44 @@ func HasDenialMarker(body string) bool {
 	return false
 }
 
+// HandlerRan reports whether a mutation probe reached the application handler
+// on a request the baseline step denied. It is the shared signal for cases 35
+// and 36: the same session is refused when it takes the ordinary path, and
+// reaches the handler when it adds only the confirmation flag (35) or the
+// administrative Referer (36).
+//
+// The variant must NOT be a denial, must not carry a denial marker, and must
+// say something the application wrote: a bare "Bad Request"/"Unauthorized"
+// gateway phrase proves nothing, and neither does a body identical to the
+// denial's.
+func HandlerRan(baselineStatus, variantStatus int, baselineBody, variantBody string) bool {
+	if !IsDenialStatus(baselineStatus) {
+		return false
+	}
+	if variantStatus < 200 || variantStatus >= 500 || IsDenialStatus(variantStatus) {
+		return false
+	}
+	body := strings.TrimSpace(variantBody)
+	if body == "" || HasDenialMarker(body) {
+		return false
+	}
+	if isBareStatusText(body) {
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(baselineBody), body)
+}
+
+// isBareStatusText rejects bodies that are just an HTTP reason phrase: those are
+// produced by gateways and proxies, not by an application handler.
+func isBareStatusText(body string) bool {
+	switch strings.ToLower(strings.Trim(strings.TrimSpace(body), `"'.`)) {
+	case "bad request", "unauthorized", "forbidden", "not found", "error",
+		"method not allowed", "internal server error", "not acceptable":
+		return true
+	}
+	return false
+}
+
 // BypassPaths are the bounded privileged surfaces the bypass probes cover: the
 // administrative panel and its role-management action — the two shapes the two
 // bypass classes are measured on. No wordlist, and no path is invented at run

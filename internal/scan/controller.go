@@ -336,6 +336,8 @@ type CreateScanParams struct {
 	// server's AllowStateChanging opt-in because it writes the caller's own
 	// profile.
 	EnableRoleWrite bool
+	// EnableAdminStepProbe opts into the cases 35/36 admin-action probes.
+	EnableAdminStepProbe bool
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -478,6 +480,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.EnableRoleParam = p.EnableRoleParam
 	cfg.EnableAccessControlPages = p.EnableAccessControlPages
 	cfg.EnableRoleWrite = p.EnableRoleWrite
+	cfg.EnableAdminStepProbe = p.EnableAdminStepProbe
 
 	statePath, err := c.resolveAuth(ctx, mode, p, scope)
 	if err != nil {
@@ -487,6 +490,9 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	// that caller's privileged access. Without a session there is nobody to
 	// escalate, and without the server's state-changing opt-in the write would
 	// only ever be skipped — both are refused at creation instead.
+	if cfg.EnableAdminStepProbe && mode == domain.AuthAnonymous {
+		return nil, fmt.Errorf("%w: enable_admin_step_probe requires an authenticated session (there is no caller to authorize); use -auth existing/-auth interactive/-auth mfa/-auth password", ErrBadConfig)
+	}
 	if cfg.EnableRoleWrite {
 		if mode == domain.AuthAnonymous {
 			return nil, fmt.Errorf("%w: enable_role_write requires an authenticated session (auth_mode %q has no caller profile); use -auth existing/-auth interactive/-auth mfa/-auth password", ErrBadConfig, mode)

@@ -191,6 +191,12 @@ type accessControlDetail struct {
 	PostStatus     int                        `json:"post_status,omitempty"`
 	Bypass         string                     `json:"bypass,omitempty"`
 	HeaderProbes   []accessControlHeaderProbe `json:"header_probes,omitempty"`
+
+	// Cases 35/36 (admin action step) fields.
+	StepBaseline  int `json:"step_baseline,omitempty"`
+	StepConfirm   int `json:"step_confirmed,omitempty"`
+	StepReferer   int `json:"step_referer,omitempty"`
+	StepAnonymous int `json:"step_anonymous,omitempty"`
 }
 
 // accessControlHeaderProbe records one X-Original-URL / X-Rewrite-URL attempt.
@@ -437,6 +443,8 @@ func (e *accessControlExecutor) run(ctx context.Context, job *domain.TestJob, tc
 		return e.runPageDisclosure(ctx, job, tc)
 	case accessModeBypass:
 		return e.runBypass(ctx, job, tc)
+	case accessModeMutation:
+		return e.runMutationProbe(ctx, job, tc)
 	case accessModeRoleFlag:
 		return e.runRoleFlag(ctx, job, tc)
 	case accessModeRoleField:
@@ -1299,6 +1307,7 @@ func (c *Controller) enqueueAccessControlProbes(ctx context.Context, scanID doma
 	// They are independent of what discovery disclosed (the whole point is that
 	// the gateway hides the path), so they always run.
 	c.enqueueAccessBypassProbes(ctx, scanID)
+	c.enqueueMutationProbes(ctx, scanID)
 }
 
 // enqueueAccessControlDisclosureProbes queues the page-disclosure half of case
