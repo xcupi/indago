@@ -356,6 +356,7 @@ func TestScanCompletesAfterDiscoveryAndJobs(t *testing.T) {
 	// per origin (see accesscontrol_bypass.go).
 	total += accessBypassJobCount(eps)
 	total += disclosureJobCount(eps)
+	total += errorProbeJobCount(eps)
 	if done.Jobs.Total() != total || done.Jobs.Succeeded != total {
 		t.Fatalf("jobs=%+v, want %d succeeded", done.Jobs, total)
 	}

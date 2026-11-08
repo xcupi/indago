@@ -47,6 +47,25 @@ confirmation: a page named `/debug` that discloses nothing is never a finding.
   connection)* — confirmed / high. Found via `robots.txt → /backup` and the
   listing's own link.
 
+## Case 37: the wrong-typed value
+
+The one case in this family that sends a request of its own. For each discovered
+`GET` endpoint whose query carries a **numeric** value, the pass re-requests it
+once with that value replaced by a word (`indago-not-a-value`) — bounded at **20
+per scan**. A handler that parses the number before answering throws, and what it
+prints is the disclosure.
+
+`ClassifyError` requires an error status (4xx/5xx) **and** a real stack-trace
+fragment (`at java.`, `Traceback (most recent call last)`, `PHP Fatal error`, …).
+The verdict names the runtime plus the framework version when the body carries one
+(`apache struts 2 2.3.31`), falling back to `Server`/`X-Powered-By`. A polite
+"Internal Server Error" page and a 200 that merely mentions a class name are not
+disclosures.
+
+Measured live: case 37 (scan `b929ea93`) — *parameter productId with a wrong-typed
+value: an error response prints the server's own Java stack trace and names apache
+struts 2 2.3.31* — confirmed / high.
+
 ## Wiring
 
 `JobDisclosure` shares the HTTP worker group and the findings mutex. The pass runs
