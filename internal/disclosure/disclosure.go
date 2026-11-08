@@ -294,3 +294,79 @@ func CandidateLinks(body []byte) []string {
 	}
 	return out
 }
+
+// KindErrorDisclosure is the verbose-error case (37): a wrong-typed value makes
+// the application answer with its own stack trace, which names internals and
+// often the framework version.
+const KindErrorDisclosure Kind = "error_message"
+
+var (
+	// stackTraceMarkers are the shapes a server-side crash prints, each with the
+	// label the finding uses. Every entry is a fragment of a real runtime's
+	// trace, not a word a page uses in prose.
+	stackTraceMarkers = []struct{ label, marker string }{
+		{"Java", "at java."},
+		{"Java", "java.lang."},
+		{"Java", "exception in thread"},
+		{"Python", "traceback (most recent call last)"},
+		{".NET", "system.nullreferenceexception"},
+		{"PHP", "php fatal error"},
+		{"stack trace", "stack trace:"},
+		{"Spring/Java", "org.springframework"},
+		{".NET", "at system."},
+		{"SQL error", "sqlstate["},
+	}
+	// frameworkVersionRE names a framework and the version beside it.
+	frameworkVersionRE = regexp.MustCompile(`(?i)\b(apache\s+struts|struts|spring(?:\s+boot)?|hibernate|django|flask|rails|laravel|tomcat|jetty|express|asp\.net)\b[^\n<]{0,24}?\b\d+\.\d+(?:\.\d+)?\b`)
+	// poweredByRE reports a version in the Server/X-Powered-By headers.
+	poweredByRE = regexp.MustCompile(`(?i)\b([a-z][a-z0-9_.-]{2,})\s*/?\s*(\d+\.\d+(?:\.\d+)?)\b`)
+)
+
+// ClassifyError decides whether an error response discloses the server's
+// internals. The response must be an error (4xx/5xx) AND carry a real stack
+// trace; a framework version alone is reported as detail, never as the reason.
+func ClassifyError(status int, contentType string, body []byte, headers map[string][]string) (Verdict, bool) {
+	if status < 400 || len(bytes.TrimSpace(body)) == 0 {
+		return Verdict{}, false
+	}
+	// An HTML error page that only says "something went wrong" is not this case.
+	if strings.Contains(strings.ToLower(contentType), "html") {
+		lower := bytes.ToLower(body)
+		if !bytes.Contains(lower, []byte("at java.")) && !bytes.Contains(lower, []byte("traceback")) &&
+			!bytes.Contains(lower, []byte("stack trace")) && !bytes.Contains(lower, []byte("php fatal error")) {
+			return Verdict{}, false
+		}
+	}
+	text := strings.ToLower(string(body))
+	label := ""
+	for _, m := range stackTraceMarkers {
+		if strings.Contains(text, m.marker) {
+			label = m.label
+			break
+		}
+	}
+	if label == "" {
+		return Verdict{}, false
+	}
+	detail := ""
+	if m := frameworkVersionRE.FindString(text); m != "" {
+		detail = strings.TrimSpace(m)
+	} else {
+		for _, h := range []string{"Server", "X-Powered-By", "X-AspNet-Version", "X-Generator"} {
+			for _, v := range headers[h] {
+				if mm := poweredByRE.FindString(strings.TrimSpace(v)); mm != "" {
+					detail = strings.TrimSpace(mm)
+					break
+				}
+			}
+			if detail != "" {
+				break
+			}
+		}
+	}
+	reason := "an error response prints the server's own " + label + " stack trace"
+	if detail != "" {
+		reason += " and names " + detail
+	}
+	return Verdict{Kind: KindErrorDisclosure, Reason: reason, Detail: detail}, true
+}

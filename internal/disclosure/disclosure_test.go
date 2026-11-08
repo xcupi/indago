@@ -81,3 +81,33 @@ func TestLooksInteresting(t *testing.T) {
 		t.Fatal("kind label drifted")
 	}
 }
+
+func TestClassifyError(t *testing.T) {
+	javaTrace := []byte(`Internal Server Error: java.lang.NumberFormatException: For input string: "xyz"
+	at java.base/java.lang.NumberFormatException.forInputString(NumberFormatException.java:67)
+	at lab.p.l4.x.a.r(Unknown Source)
+Struts 2 2.3.31`)
+
+	v, ok := disclosure.ClassifyError(500, "", javaTrace, nil)
+	if !ok || v.Kind != disclosure.KindErrorDisclosure {
+		t.Fatalf("ClassifyError(java) = %+v ok=%v, want error_message", v, ok)
+	}
+	if !strings.Contains(strings.ToLower(v.Detail), "struts") {
+		t.Fatalf("detail = %q, want the framework version", v.Detail)
+	}
+
+	// A polite 500 is not a disclosure.
+	if _, ok := disclosure.ClassifyError(500, "text/html", []byte(`<html><body>Internal Server Error</body></html>`), nil); ok {
+		t.Fatal("a plain 500 must not be classified")
+	}
+	// A 200 page carrying trace-like prose is not an error disclosure.
+	if _, ok := disclosure.ClassifyError(200, "text/html", []byte(`<p>We log at java.lang level.</p>`), nil); ok {
+		t.Fatal("a 200 must never be an error disclosure")
+	}
+	// A stack trace without a body version falls back to the headers.
+	v2, ok := disclosure.ClassifyError(500, "text/plain",
+		[]byte("Traceback (most recent call last):\n  File \"app.py\", line 1"), map[string][]string{"X-Powered-By": {"Express/4.18.2"}})
+	if !ok || !strings.Contains(v2.Detail, "4.18.2") {
+		t.Fatalf("header fallback = %+v ok=%v, want the X-Powered-By version", v2, ok)
+	}
+}

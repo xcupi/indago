@@ -519,6 +519,9 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 	if !ex.disclosurePassDone.Load() {
 		ex.disclosurePassDone.Store(true)
 		c.enqueueDisclosureProbes(ctx, ex.scanID)
+		// Case 37 rides the same pass: one wrong-typed GET per numeric query
+		// parameter, bounded.
+		c.enqueueDisclosureErrorProbes(ctx, ex.scanID)
 		passes = true
 	}
 	if !ex.roleFieldPassDone.Load() {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -147,5 +148,35 @@ func TestDisclosureFollowsDirectoryListing(t *testing.T) {
 	_, findings, _ := runDisclosureJob(t, srv.URL+"/backup")
 	if len(findings) != 1 || findings[0].VulnClass != domain.VulnInfoDisclosure {
 		t.Fatalf("findings = %+v, want one for the listed backup artefact", findings)
+	}
+}
+
+func TestDisclosureConfirmsErrorTrace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("productId") == "indago-not-a-value" {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, "Internal Server Error: java.lang.NumberFormatException: For input string: \"indago-not-a-value\"\n\tat java.base/java.lang.Integer.parseInt(Integer.java:661)\n\tat lab.p.l4.x.a.r(Unknown Source)\nStruts 2 2.3.31")
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body>product page</body></html>`)
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := acEndpoint(t, env, srv.URL+"/product?productId=1", domain.SourceCrawler, domain.MethodGET)
+	ex := newDisclosureExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), &sync.Mutex{})
+	job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobDisclosure,
+		Target:  domain.JobTarget{EndpointID: ep.ID, URL: ep.URL},
+		Payload: []byte(`{"mode":"error_probe","param":"productId"}`), MaxAttempts: 1}
+	if err := ex.Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	fs := env.findings()
+	if len(fs) != 1 || fs[0].VulnClass != domain.VulnInfoDisclosure {
+		t.Fatalf("findings = %+v, want one information_disclosure finding", fs)
+	}
+	if !strings.Contains(fs[0].Summary, "stack trace") || !strings.Contains(strings.ToLower(fs[0].Summary), "struts") {
+		t.Fatalf("summary = %q, want the trace and the version", fs[0].Summary)
 	}
 }

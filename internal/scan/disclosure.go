@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,7 +26,12 @@ import (
 )
 
 const (
-	disclosureEngine      = "disclosure"
+	disclosureEngine = "disclosure"
+	// disclosureModeErrorProbe marks a job that re-requests one endpoint with a
+	// wrong-typed value to make the application print its own stack trace (37).
+	disclosureModeErrorProbe = "error_probe"
+	// maxErrorProbes bounds the wrong-typed pass per scan.
+	maxErrorProbes        = 20
 	maxDisclosureProbes   = 40
 	disclosurePriority    = 22
 	disclosurePriorityHit = 20
@@ -60,7 +66,16 @@ func (e *disclosureExecutor) Handle(ctx context.Context, job *domain.TestJob) er
 		return err
 	}
 
-	resp, err := e.fetch(ctx, job.Target.URL)
+	target := job.Target.URL
+	probeParam := ""
+	if mode, param := disclosurePayload(job); mode == disclosureModeErrorProbe {
+		probeParam = param
+		if rewritten := wrongTypedURL(target, param); rewritten != "" {
+			target = rewritten
+		}
+	}
+
+	resp, err := e.fetch(ctx, target)
 	now := time.Now()
 	tc.FinishedAt, tc.UpdatedAt = &now, now
 	if err != nil {
@@ -69,10 +84,19 @@ func (e *disclosureExecutor) Handle(ctx context.Context, job *domain.TestJob) er
 		_ = e.store.TestCases().Update(ctx, tc)
 		return nil
 	}
-	tc.Method, tc.URL = "GET", job.Target.URL
+	tc.Method, tc.URL = "GET", target
 	tc.Status, tc.Outcome = domain.TestCaseCompleted, domain.OutcomeSuccess
 
-	v, ok := disclosure.Classify(job.Target.URL, resp.Status, resp.Headers.Get("Content-Type"), resp.Body)
+	var v disclosure.Verdict
+	var ok bool
+	if probeParam != "" {
+		v, ok = disclosure.ClassifyError(resp.Status, resp.Headers.Get("Content-Type"), resp.Body, resp.Headers)
+		if ok {
+			v.Reason = "parameter " + probeParam + " with a wrong-typed value: " + v.Reason
+		}
+	} else {
+		v, ok = disclosure.Classify(target, resp.Status, resp.Headers.Get("Content-Type"), resp.Body)
+	}
 	if ok {
 		e.record(ctx, tc, resp, job.Target.URL, v)
 	}
@@ -253,6 +277,8 @@ func titleForDisclosure(k disclosure.Kind) string {
 		return "Information disclosure: debug page exposes runtime configuration"
 	case disclosure.KindBackupSource:
 		return "Information disclosure: backup file serves source code"
+	case disclosure.KindErrorDisclosure:
+		return "Information disclosure: error message discloses a stack trace and framework version"
 	}
 	return "Information disclosure"
 }
@@ -304,4 +330,89 @@ func (c *Controller) enqueueDisclosureProbes(ctx context.Context, scanID domain.
 	if queued > 0 {
 		c.log.Info("disclosure probes: enqueued", "scan", scanID, "jobs", queued)
 	}
+}
+
+// disclosurePayload reads the job's mode and parameter.
+func disclosurePayload(job *domain.TestJob) (mode, param string) {
+	var p struct {
+		Mode  string `json:"mode"`
+		Param string `json:"param"`
+	}
+	_ = json.Unmarshal(job.Payload, &p)
+	return p.Mode, p.Param
+}
+
+// wrongTypedURL replaces one query parameter's value with a token of the wrong
+// type. A numeric parameter fed a word is exactly what makes a Java/ASP.NET/PHP
+// handler throw before it can answer politely.
+func wrongTypedURL(rawURL, param string) string {
+	if param == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.RawQuery == "" {
+		return ""
+	}
+	q := u.Query()
+	if _, ok := q[param]; !ok {
+		return ""
+	}
+	q.Set(param, "indago-not-a-value")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// enqueueDisclosureErrorProbes queues the wrong-typed pass: one job per GET
+// endpoint whose query carries a numeric value, bounded.
+func (c *Controller) enqueueDisclosureErrorProbes(ctx context.Context, scanID domain.ID) {
+	endpoints, err := c.store.Endpoints().ListByScan(ctx, scanID)
+	if err != nil {
+		c.log.Warn("error probes: list endpoints", "scan", scanID, "err", err)
+		return
+	}
+	now := time.Now()
+	n := 0
+	for _, ep := range endpoints {
+		if n >= maxErrorProbes {
+			break
+		}
+		if ep.Method != domain.MethodGET {
+			continue
+		}
+		u, err := url.Parse(ep.URL)
+		if err != nil || u.RawQuery == "" {
+			continue
+		}
+		param := numericQueryParam(u)
+		if param == "" {
+			continue
+		}
+		payload, _ := json.Marshal(map[string]string{"mode": disclosureModeErrorProbe, "param": param})
+		job := &domain.TestJob{
+			ID: domain.NewID(), ScanID: scanID, Type: domain.JobDisclosure, State: domain.JobQueued,
+			Priority: disclosurePriorityHit, Target: domain.JobTarget{EndpointID: ep.ID, URL: ep.URL},
+			Payload: payload, MaxAttempts: 2, AvailableAt: now, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := c.queue.Enqueue(ctx, job); err != nil {
+			continue
+		}
+		n++
+	}
+	if n > 0 {
+		c.log.Info("error probes: enqueued", "scan", scanID, "jobs", n)
+	}
+}
+
+// numericQueryParam returns the first query parameter whose value is a number:
+// those are the ones a wrong-typed value crashes.
+func numericQueryParam(u *url.URL) string {
+	for k, vs := range u.Query() {
+		if len(vs) == 0 || vs[0] == "" {
+			continue
+		}
+		if _, err := strconv.Atoi(vs[0]); err == nil {
+			return k
+		}
+	}
+	return ""
 }
