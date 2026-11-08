@@ -338,6 +338,8 @@ type CreateScanParams struct {
 	EnableRoleWrite bool
 	// EnableAdminStepProbe opts into the cases 35/36 admin-action probes.
 	EnableAdminStepProbe bool
+	// EnableObjectFamilyProbe opts into the case 34 object-family slice.
+	EnableObjectFamilyProbe bool
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -481,6 +483,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.EnableAccessControlPages = p.EnableAccessControlPages
 	cfg.EnableRoleWrite = p.EnableRoleWrite
 	cfg.EnableAdminStepProbe = p.EnableAdminStepProbe
+	cfg.EnableObjectFamilyProbe = p.EnableObjectFamilyProbe
 
 	statePath, err := c.resolveAuth(ctx, mode, p, scope)
 	if err != nil {
@@ -490,6 +493,9 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	// that caller's privileged access. Without a session there is nobody to
 	// escalate, and without the server's state-changing opt-in the write would
 	// only ever be skipped — both are refused at creation instead.
+	if cfg.EnableObjectFamilyProbe && mode == domain.AuthAnonymous {
+		return nil, fmt.Errorf("%w: enable_object_family_probe requires an authenticated session (the probe authors an object as the caller); use -auth existing/-auth interactive/-auth mfa/-auth password", ErrBadConfig)
+	}
 	if cfg.EnableAdminStepProbe && mode == domain.AuthAnonymous {
 		return nil, fmt.Errorf("%w: enable_admin_step_probe requires an authenticated session (there is no caller to authorize); use -auth existing/-auth interactive/-auth mfa/-auth password", ErrBadConfig)
 	}

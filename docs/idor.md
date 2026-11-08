@@ -378,3 +378,36 @@ sending only a Location*.
 The victim identifier is unchanged: username-shaped ids are operator input
 (`-idor-candidates`, or harvest when the app exposes them) or bounded
 enumeration. This engine never invents usernames.
+
+## Object families (case 34)
+
+Some endpoints never take an identifier — they mint one. The chat page's own
+script posts a transcript to `/download-transcript` and the answer is
+`302 -> /download-transcript/2.txt`: the caller's own object. The neighbours'
+identifiers are then the arithmetic around that number, which the application
+itself named.
+
+The slice is opt-in (`-object-family-probe` / `enable_object_family_probe`,
+requires an authenticated session) because the first request POSTs a document
+the scan authored. It reads the page's own bytes only:
+
+1. inline and linked same-origin scripts are fetched (bounded: 3),
+2. the free-text form field name comes from the page's own `FormData` calls,
+3. the endpoint literal comes from the page's own quoted paths (never a wordlist),
+4. the scan POSTs its own marker, and the redirect target must parse as
+   `<base>/<n>[.<ext>]` with the same base it posted to,
+5. the scan reads its own object and requires its marker to be there (proof it
+   created this object), then probes the bounded set: `n-1`, `n+1`, and the
+   family's first object (`1`) when that is not already one of them.
+
+Confirmation is NOT the identity-field differential: a plain text transcript
+names nobody. The rule (`idor.ObjectFamilyDecision`) is narrower: the sibling
+must answer 200 with a DIFFERENT document, must not contain the scan's marker,
+must not be a denial, and must disclose a credential (`password`, `api key`,
+`secret`, `access token`). A sibling equal to the caller's own document, or one
+with no credential, is Inconclusive — never Confirmed.
+
+Measured live on case 34 (scan 6d80d4d6): the scan's own object
+`/download-transcript/5.txt` carried its marker while `/download-transcript/1.txt`
+returned a different transcript disclosing a password — confirmed, 8 evidence
+blobs.

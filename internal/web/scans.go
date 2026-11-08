@@ -273,6 +273,9 @@ type createScanReq struct {
 	// EnableAdminStepProbe opts into the cases 35/36 admin-action probes (a
 	// non-existent username, so no role can change). Requires a session.
 	EnableAdminStepProbe bool `json:"enable_admin_step_probe"`
+	// EnableObjectFamilyProbe opts into the case 34 object-family slice: the
+	// scan submits its own object and probes the neighbouring ids.
+	EnableObjectFamilyProbe bool `json:"enable_object_family_probe"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -354,6 +357,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		EnableAccessControlPages:  req.EnableAccessControlPages,
 		EnableRoleWrite:           req.EnableRoleWrite,
 		EnableAdminStepProbe:      req.EnableAdminStepProbe,
+		EnableObjectFamilyProbe:   req.EnableObjectFamilyProbe,
 	})
 	if err != nil {
 		s.writeScanError(w, err)
