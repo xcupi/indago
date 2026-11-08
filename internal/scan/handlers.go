@@ -49,6 +49,8 @@ func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope, 
 		hasSession = true
 	}
 	h[domain.JobAccessControl] = newAccessControlExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log, findingsMu, hasSession)
+	// Disclosure shares findingsMu too: same Findings() rows, disjoint dedup keys.
+	h[domain.JobDisclosure] = newDisclosureExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log, findingsMu)
 	return h
 }
 

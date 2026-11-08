@@ -21,12 +21,17 @@ const (
 	// from the response content an anonymous request receives, never from an
 	// LLM. See docs/access-control.md.
 	VulnAccessControl VulnClass = "access_control"
+	// VulnInfoDisclosure is information disclosure: a reachable surface hands
+	// the caller the runtime's own configuration (a debug page) or source code
+	// (a backup artefact). Decided from response bytes only, never by an LLM.
+	// See docs/disclosure.md.
+	VulnInfoDisclosure VulnClass = "information_disclosure"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure:
 		return true
 	default:
 		return false

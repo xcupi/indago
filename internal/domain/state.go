@@ -253,6 +253,9 @@ const (
 	// the raw HTTP engine (GET/HEAD reads only) and is dispatched to the
 	// HTTP worker group.
 	JobIDOR JobType = "idor"
+	// JobDisclosure runs the information-disclosure classification for one
+	// endpoint (cases 38/39): one GET, no mutation.
+	JobDisclosure JobType = "disclosure"
 	// JobAccessControl probes one discovered admin-like path for missing
 	// function-level authorization: it sends an anonymous GET and, when the
 	// scan has a session, the same GET as the authenticated non-admin, then
@@ -264,7 +267,7 @@ const (
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure:
 		return true
 	default:
 		return false

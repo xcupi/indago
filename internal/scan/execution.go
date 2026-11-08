@@ -86,6 +86,9 @@ type execution struct {
 	// roleFieldPassDone marks the one-time role-field write pass (case 21) for
 	// scans that opted into it.
 	roleFieldPassDone atomic.Bool
+	// disclosurePassDone marks the one-time information-disclosure pass
+	// (cases 38/39) for this execution.
+	disclosurePassDone atomic.Bool
 }
 
 // pause routes a scan pause to both the worker pool and discovery.
@@ -511,6 +514,13 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 	// Case 21: role-field write on the caller's own profile. Opt-in AND
 	// state-changing opt-in; scan creation already refuses any other
 	// combination, and the executor re-checks before sending.
+	// Cases 38/39: information disclosure. Passive — one GET per candidate
+	// endpoint, no mutation, no opt-in (see disclosure.go).
+	if !ex.disclosurePassDone.Load() {
+		ex.disclosurePassDone.Store(true)
+		c.enqueueDisclosureProbes(ctx, ex.scanID)
+		passes = true
+	}
 	if !ex.roleFieldPassDone.Load() {
 		ex.roleFieldPassDone.Store(true)
 		c.enqueueRoleFieldProbes(ctx, ex.scanID)
