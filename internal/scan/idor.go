@@ -68,14 +68,17 @@ type idorDetail struct {
 	ProbesLeft       int                  `json:"probes_left,omitempty"`
 	BudgetExhausted  bool                 `json:"probe_budget_exhausted,omitempty"`
 	SessionBlocked   bool                 `json:"session_blocked,omitempty"`
-	Attempts         []idorAttempt        `json:"attempts,omitempty"`
-	Verdict          domain.Verdict       `json:"verdict,omitempty"`
-	Reason           string               `json:"reason,omitempty"`
-	DedupKey         string               `json:"dedup_key,omitempty"`
-	Occurrences      int                  `json:"occurrences,omitempty"`
-	TestCaseIDs      []domain.ID          `json:"test_case_ids,omitempty"`
-	Skipped          bool                 `json:"skipped,omitempty"`
-	SkipReason       string               `json:"skip_reason,omitempty"`
+	// RedirectBody records that the object was disclosed in the BODY of a
+	// redirect (case 32): the response was replayed without following it.
+	RedirectBody bool           `json:"redirect_body,omitempty"`
+	Attempts     []idorAttempt  `json:"attempts,omitempty"`
+	Verdict      domain.Verdict `json:"verdict,omitempty"`
+	Reason       string         `json:"reason,omitempty"`
+	DedupKey     string         `json:"dedup_key,omitempty"`
+	Occurrences  int            `json:"occurrences,omitempty"`
+	TestCaseIDs  []domain.ID    `json:"test_case_ids,omitempty"`
+	Skipped      bool           `json:"skipped,omitempty"`
+	SkipReason   string         `json:"skip_reason,omitempty"`
 }
 
 // idorAttempt is one foreign object request (B) and what it proved.
@@ -386,6 +389,20 @@ func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.
 				URL: req.URL, Outcome: string(domain.OutcomeError), Reason: "request failed: " + truncate(errText(reqErr), 200)})
 			continue
 		}
+		// Case 32: the object can be disclosed in the BODY of the redirect that
+		// sends the caller away (302 -> /login with the account page inside).
+		// Following that redirect destroys the only copy of the evidence, so the
+		// same request is replayed ONCE with redirects disabled and the 3xx body
+		// is what the differential classifies. The replay spends one more probe
+		// permit: when the budget is gone the original response stands.
+		if len(resp.RedirectChain) > 0 && idor.LooksLikeLoginPage(resp.Body) && e.probes.take() {
+			noRedirect := *req
+			noRedirect.NoRedirects = true
+			if r2, out2, _, _ := e.send(ctx, &noRedirect); out2 == domain.OutcomeSuccess && r2.Status >= 300 && r2.Status < 400 {
+				resp = r2
+				d.RedirectBody = true
+			}
+		}
 		// Request B's request/response pair is stored BEFORE the decision is
 		// recorded, so a Confirmed verdict can never exist without the
 		// foreign-object evidence that proves it.
@@ -397,6 +414,9 @@ func (e *idorExecutor) run(ctx context.Context, job *domain.TestJob, tc *domain.
 			tc.EvidenceIDs = appendUniqueIDs(tc.EvidenceIDs, ids)
 		}
 		dec := idor.DecideWithBaseline(d.CallerIdentity, cand.Value, resp.Status, resp.Body, baseResp.Body)
+		if d.RedirectBody && dec.Outcome == idor.OutcomeConfirmed {
+			dec.Reason = fmt.Sprintf("the redirect response (HTTP %d) leaked the object instead of sending only a Location: %s", resp.Status, dec.Reason)
+		}
 		// Evidence integrity: when an evidence store is configured, a
 		// Confirmed verdict must be reproducible from stored request A and
 		// request B blobs. A persistence failure downgrades the outcome
