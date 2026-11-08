@@ -500,3 +500,49 @@ func TestCandidateConcurrentExecution(t *testing.T) {
 		t.Fatalf("peak concurrency = %d; want between 2 and %d", p, limit)
 	}
 }
+
+// TestCandidateSkippedWhenParameterAlreadyConfirmed is the early-stop rule: once
+// a parameter carries a Confirmed reflected-XSS finding, its remaining planned
+// candidates must not be sent at all.
+func TestCandidateSkippedWhenParameterAlreadyConfirmed(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<div>ok</div>")
+	}))
+	defer srv.Close()
+
+	env := newExecEnv(t)
+	ep := env.endpoint(srv.URL+"/s", domain.MethodGET)
+	focus := env.param(ep, "q", domain.LocationQuery, "hello")
+	ip := env.injection(ep, focus)
+
+	now := time.Now()
+	if err := env.st.Findings().Create(context.Background(), &domain.Finding{
+		ID: domain.NewID(), ScanID: env.scanID, ProjectID: domain.NewID(),
+		VulnClass: domain.VulnReflectedXSS, Verdict: domain.VerdictConfirmed,
+		Severity: domain.SeverityHigh, Confidence: domain.ConfidenceHigh,
+		EndpointID: ep.ID, ParameterID: focus.ID, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cand := detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText,
+		Value: "<svg onload=" + marker(env.scanID, ip.ID) + ">", Priority: 90, DedupKey: "k"}
+	job := env.candJob(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, cand)
+
+	if err := env.executor(scopedClient(t, openScope()), ExecutorConfig{}).Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("the candidate was sent %d times although the parameter is already confirmed", got)
+	}
+	tc := env.only()
+	if tc.Status != domain.TestCaseSkipped {
+		t.Fatalf("status = %s, want skipped", tc.Status)
+	}
+	if !strings.Contains(tc.Note, "already has a confirmed XSS finding") {
+		t.Fatalf("note = %q, want the early-stop reason", tc.Note)
+	}
+}
