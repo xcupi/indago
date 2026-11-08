@@ -322,6 +322,15 @@ type ScanConfig struct {
 	// and the anonymous control is refused too. Nothing can change: the named
 	// user never exists. Off by default; requires an authenticated session.
 	EnableAdminStepProbe bool `json:"enable_admin_step_probe,omitempty"`
+
+	// EnableObjectFamilyProbe opts this scan into the object-family slice
+	// (case 34): a page's own scripts name an endpoint that CREATES an object
+	// and the field that carries it, so the scan submits its own marker, reads
+	// the object the server names, and probes the two neighbouring ids. It
+	// POSTs a document the scan authored, so it is off by default and requires
+	// an authenticated session. A finding needs a sibling that differs from the
+	// caller's own document AND discloses a credential.
+	EnableObjectFamilyProbe bool `json:"enable_object_family_probe,omitempty"`
 }
 
 // StopMode controls when a scan stops relative to confirmed findings.

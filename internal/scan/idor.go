@@ -79,6 +79,14 @@ type idorDetail struct {
 	TestCaseIDs  []domain.ID    `json:"test_case_ids,omitempty"`
 	Skipped      bool           `json:"skipped,omitempty"`
 	SkipReason   string         `json:"skip_reason,omitempty"`
+
+	// Object family (case 34): the object this scan created, and the family it
+	// named.
+	ObjectFamily bool   `json:"object_family,omitempty"`
+	ObjectField  string `json:"object_field,omitempty"`
+	FamilyBase   string `json:"family_base,omitempty"`
+	OwnObject    string `json:"own_object,omitempty"`
+	CreateStatus int    `json:"create_status,omitempty"`
 }
 
 // idorAttempt is one foreign object request (B) and what it proved.
@@ -216,7 +224,15 @@ func (e *idorExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 		return fmt.Errorf("persist test case: %w", err)
 	}
 
-	d, outcome, err, permanent, skipped := e.run(ctx, job, tc)
+	var d idorDetail
+	var outcome domain.TestOutcome
+	var err error
+	var permanent, skipped bool
+	if idorPayloadMode(job) == idorModeObjectFamily {
+		d, outcome, err, permanent, skipped = e.runObjectFamily(ctx, job, tc)
+	} else {
+		d, outcome, err, permanent, skipped = e.run(ctx, job, tc)
+	}
 
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
@@ -1236,6 +1252,9 @@ func (c *Controller) enqueueIDORProbes(ctx context.Context, scanID domain.ID) {
 	// parameter, which idorParameter enforces per parameter below. A scan with
 	// no session has nobody to compare against, so it plans nothing — that is
 	// the only gate left.
+	// Case 34 is a different shape and has its own opt-in; it needs the same
+	// real caller identity, so it is queued under the same gate.
+	c.enqueueObjectFamilyProbes(ctx, scanID)
 	if !c.idorCallerIdentity(ctx, sc) {
 		return
 	}
