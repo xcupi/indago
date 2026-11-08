@@ -609,6 +609,65 @@ scanner process does not have — adding it would be a materially different,
 larger change and needs its own explicit decision, not a quiet extension of
 this generator.
 
+### Automatic AngularJS CSP bypass (`angular_csp_bypass`)
+
+The official AngularJS CSP bypass — `<input autofocus
+ng-focus="$event.composedPath()|orderBy:'MARKER'">` — is a canonical candidate
+(`Candidate.Technique = "angular_csp_bypass"`, load trigger, priority 92), but it
+is planned **only** when the MUTATED response justifies it:
+`internal/detection/csp.go`'s `AngularCSPBypassEligible` must see BOTH (a) a
+`Content-Security-Policy` whose `script-src` (or `default-src` when `script-src`
+is absent) does **not** contain `'unsafe-inline'`, and (b) Angular on the page
+(`ng-app` / `data-ng-app` / `x-ng-app` / `ng:app` / `ng-controller`, or a
+`<script>` tag loading an Angular build). The gate is deliberately narrow: with
+no CSP there is nothing to bypass; with `'unsafe-inline'` every ordinary
+inline-handler candidate already runs, so the Angular shape would add a request
+without adding a mechanism; and on a page with no Angular compiler the
+`ng-focus` attribute is inert markup. The flag is computed only from the
+mutated response (`internal/scan/reflection.go`) and is never re-derived by the
+automatic evasion escalation, so it cannot leak into a context that fails the
+gate. The value is benign: the marker is the only identifier the expression
+names.
+
+Measured limit (real AngularJS 1.2.32, `script-src 'self'`, Chromium): the
+runtime runs in CSP-safe mode and accepts and evaluates the exact
+`composedPath()|orderBy` expression, but resolves the unknown marker identifier
+to `undefined` instead of raising `ReferenceError: <marker> is not defined`.
+This is not only a 1.2 quirk: Angular's expression evaluator reads identifiers
+off the scope object, and the official payload's observable effect comes from
+*calling a real global* (e.g. `alert(...)`) that `orderBy` reaches through the
+`window` entry in the composed path — precisely the effect the benign-marker
+rule forbids. So the `ng-focus` shape is delivered and recorded, and stays
+Rejected with a benign marker on its own.
+
+### Confirmable sibling: the interpolation result (`angular_csp_expression`)
+
+The gate plans a second shape so this class can still be CONFIRMED
+automatically, without a dialog and without an interaction:
+`{{'MARKER'+'x'}}` — a text-node interpolation whose RESULT is built at
+runtime. The marker is intact inside the first literal (so ordinary reflection
+analysis still sees it), while the assembled string `MARKERx` exists **nowhere
+in the request bytes**: the value sent contains `'MARKER'+'x'`.
+
+That asymmetry is the confirmation authority. Finding `MARKERx` in the rendered
+page proves the page's own Angular compiler compiled and EVALUATED the
+attacker-supplied expression — the CSP bypass itself — because an echo of the
+request can only reproduce the two literals. The verifier checks exactly this
+(`SignalAngularEvaluation` in `internal/verification/signal.go`): the rendered
+DOM contains the joined result AND no byte this attempt sent contains it. On
+`script-src 'self'` a page with Angular confirms; the same page without Angular
+keeps the braces as literal text and cannot.
+
+The shape is still benign — string concatenation only, no dialog, no DOM API, no
+network — and it is load-triggered: interpolation compiles with the page, so no
+activation is needed. It sorts first (priority 94) because the standard profile
+truncates the plan and the confirmable shape must never be the one dropped.
+Measured end to end against the vendored AngularJS 1.2.32 under
+`script-src 'self'`: verdict Confirmed, notes naming the assembled string. The
+gate, both shapes, the runtime semantics and the Angular-free RED control are
+pinned by `internal/scan/angular_csp_bypass_integration_test.go`.
+
+
 ### Filter-allow-list shapes
 
 The rewriting techniques above assume the filter is trying to *recognize* a

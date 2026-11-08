@@ -228,6 +228,21 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	sig, sigText, matched := MatchRuntimeExecution(token, provenance)
 	markerInDOM := containsToken(html, token)
 
+	// AngularJS interpolation under a policy that forbids inline script: the
+	// candidate concatenates the marker with a suffix at RUNTIME, so its
+	// evaluated result is a string the request never carried. Seeing that
+	// contiguous result in the rendered page proves the page's own Angular
+	// compiler evaluated attacker-supplied text — the CSP bypass itself, not a
+	// reflection. The request-side check is what makes it non-forgeable: an
+	// echo of the candidate value contains the two literals, never the joined
+	// result.
+	evaluated := ""
+	if token != "" && in.Candidate.Technique == detection.AngularCSPExpressionTechnique {
+		if want := detection.AngularCSPExpressionResult(token); containsToken(html, want) && !requestCarried(in, want) {
+			evaluated = want
+		}
+	}
+
 	// Activation — see activation.go. Only a candidate that declares a
 	// non-load trigger, reflected the marker, and produced no load-time signal
 	// is eligible: a load-trigger candidate's behaviour never changes, and a
@@ -281,10 +296,24 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 		}
 	}
 
+	// The interpolation result outranks nothing and is checked last: an actual
+	// engine-level or dialog signal, when present, is the stronger evidence and
+	// keeps its own note.
+	if !matched && evaluated != "" {
+		sig, sigText, matched = SignalAngularEvaluation, evaluated, true
+	}
+
 	verdict, confidence, notes := DecideWithProvenance(token, matched, markerInDOM, provenance)
 	if provenanceErr != nil {
 		verdict, confidence = domain.VerdictInconclusive, domain.ConfidenceLow
 		notes = "execution provenance could not be enabled: " + provenanceErr.Error() + "; replay manually"
+	}
+	// Name the actual evidence for the interpolation case: the generic
+	// confirmation note talks about an unresolved identifier, which is not what
+	// this channel observed.
+	if evaluated != "" && verdict == domain.VerdictConfirmed {
+		notes = "the page's AngularJS compiler evaluated the injected interpolation under its own Content-Security-Policy: the rendered page contains " +
+			evaluated + ", a string the request never carried (the value joins two literals at runtime), so the expression ran despite the policy forbidding inline script"
 	}
 	if !matched && verdict == domain.VerdictRejected && act != nil && act.Status == ActivationStatusDispatched {
 		// The page's own policy can refuse to compile the injected inline
@@ -359,6 +388,25 @@ func validJSONPost(body []byte, contentType string) bool {
 // containsToken reports whether the rendered HTML contains the marker token.
 func containsToken(html, token string) bool {
 	return token != "" && strings.Contains(html, token)
+}
+
+// requestCarried reports whether any byte this attempt SENT already contains
+// want: the navigation URL (query and path), every form field value, or the
+// JSON body. The AngularJS interpolation channel only confirms when the string
+// it finds in the rendered page was NOT sent, i.e. the page had to compute it.
+func requestCarried(in Input, want string) bool {
+	if want == "" {
+		return false
+	}
+	if strings.Contains(in.URL, want) {
+		return true
+	}
+	for _, v := range in.FormValues {
+		if strings.Contains(v, want) {
+			return true
+		}
+	}
+	return len(in.JSONBody) > 0 && strings.Contains(string(in.JSONBody), want)
 }
 
 // sinceIndex returns the elements observed after baseline (a count taken

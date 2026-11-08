@@ -37,6 +37,14 @@ const (
 	// whose AngularJS sandbox otherwise swallows expressions (see the
 	// angular_sandbox_escape shape).
 	SignalDialog Signal = "dialog"
+	// SignalAngularEvaluation: the rendered page contains a string that the
+	// REQUEST never carried and that only the page's own expression evaluator
+	// could have assembled (an AngularJS interpolation whose result is built
+	// from two literals at runtime). A page that merely echoes the request
+	// cannot produce the contiguous result, so this proves the candidate was
+	// compiled AND evaluated — the CSP-bypass claim itself (see the
+	// angular_csp_expression shape).
+	SignalAngularEvaluation Signal = "angular_evaluation"
 )
 
 // matchExecutionSignal scans pageErrors then consoleErrors (in that priority:

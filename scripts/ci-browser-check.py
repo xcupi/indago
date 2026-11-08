@@ -102,6 +102,11 @@ required = {
     # lexical scope. The external-script ES5 positive must really Confirm.
     "TestDOMXSSHarnessEvalAttribution",
     "TestDOMXSSExternalScriptES5StaticAnalysis",
+    # The automatic AngularJS CSP-bypass gate: the candidate is planned and
+    # delivered only when the mutated response forbids inline script AND shows
+    # Angular; the byte-identical control without Angular must not plan it.
+    "TestAngularCSPBypassIsPlannedOnlyForCSPWithoutUnsafeInlineAndAngular",
+    "TestVendoredAngularEvaluatesNGFocusUnderCSPWithoutReferenceError",
 }
 if not shutil.which("node"):
     raise SystemExit("required Node.js unavailable")

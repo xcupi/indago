@@ -129,6 +129,11 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 		InjectionPointID: tc.InjectionPointID,
 		Profile:          e.candidateProfile(ctx, tc.ScanID),
 		EnableEvasion:    e.enableEvasion(ctx, tc.ScanID),
+		// The official AngularJS CSP bypass is planned only when THIS
+		// response both forbids inline script and shows Angular (csp.go).
+		// The mutated response is the one the candidate will be sent to, so
+		// its policy — not the baseline's — decides.
+		AngularCSPBypass: detection.AngularCSPBypassEligible(resp.Headers.Get("Content-Security-Policy"), resp.Body),
 	})
 
 	// See runCandidate: the status signal is independent of reflection, and
