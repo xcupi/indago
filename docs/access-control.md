@@ -156,6 +156,12 @@ proof that the authorization check did not run.
 Without the anonymous control a public endpoint would look identical, so that
 control is mandatory, not advisory.
 
+**When it runs.** Automatically for every scan that carries a session once the
+server has been started with `-allow-state-changing` (the operator's server-wide
+authorization to send non-GET requests). The per-scan `-admin-step-probe` flag
+remains as a narrower opt-in for a server started without it; scan creation
+refuses the flag for an anonymous scan.
+
 Measured live: case 35 confirmed (`confirmation-step bypass`, scan f31e784b) and
 case 36 confirmed (`referer-based bypass`, scan 8949d2af), both with the
 anonymous control at 401. On case 36 a *manual* request with the real Referer

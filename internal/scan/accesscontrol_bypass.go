@@ -302,7 +302,20 @@ func variantLabel(name string) string {
 // construction: the username it names never exists.
 func (c *Controller) enqueueMutationProbes(ctx context.Context, scanID domain.ID) {
 	sc, err := c.store.Scans().Get(ctx, scanID)
-	if err != nil || !sc.Config.EnableAdminStepProbe {
+	if err != nil {
+		return
+	}
+	// Automatic once the SERVER has been started with -allow-state-changing (an
+	// explicit, server-wide authorization to send non-GET requests); the
+	// per-scan flag stays as a narrower opt-in for a server that has not.
+	// The probe itself names a username that does not exist, so no role can
+	// change whatever the answer is.
+	if !sc.Config.EnableAdminStepProbe && !c.opts.Executor.AllowStateChanging {
+		return
+	}
+	// Either path needs a real caller: the probe compares what the gateway
+	// refuses for THIS session with what the handler accepts for it.
+	if !c.idorCallerIdentity(ctx, sc) {
 		return
 	}
 	endpoints, err := c.store.Endpoints().ListByScan(ctx, scanID)

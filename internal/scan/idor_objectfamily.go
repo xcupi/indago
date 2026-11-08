@@ -270,7 +270,16 @@ func (e *idorExecutor) createObjectFamilyFinding(ctx context.Context, job *domai
 // scan opted in; the probe itself is bounded (scripts, paths, siblings).
 func (c *Controller) enqueueObjectFamilyProbes(ctx context.Context, scanID domain.ID) {
 	sc, err := c.store.Scans().Get(ctx, scanID)
-	if err != nil || !sc.Config.EnableObjectFamilyProbe {
+	if err != nil {
+		return
+	}
+	// Same rule as cases 35/36: the server's -allow-state-changing authorizes
+	// the POST that creates the caller's own object, and the per-scan flag
+	// remains for a server that has not been started with it.
+	if !sc.Config.EnableObjectFamilyProbe && !c.opts.Executor.AllowStateChanging {
+		return
+	}
+	if !c.idorCallerIdentity(ctx, sc) {
 		return
 	}
 	endpoints, err := c.store.Endpoints().ListByScan(ctx, scanID)
