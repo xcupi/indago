@@ -180,7 +180,7 @@ func TestVerifyPassesRateLimiter(t *testing.T) {
 
 	fv := &fakeVerifier{result: confirmedResult(verification.SignalPageError)}
 	lim := ratelimit.New(2)
-	vx := newVerifyExecutor(env.st, nil, fv, env.ev, domain.Scope{IncludeHosts: []string{"127.0.0.1"}, IncludePathPrefixes: []string{"/s"}}, ExecutorConfig{}, execLog(), nil, nil, nil, lim)
+	vx := newVerifyExecutor(env.st, nil, fv, env.ev, nil, domain.Scope{IncludeHosts: []string{"127.0.0.1"}, IncludePathPrefixes: []string{"/s"}}, ExecutorConfig{}, execLog(), nil, nil, nil, lim)
 	job := env.verifyJobFor(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, basicCandidate(), f.ID)
 	if err := vx.Handle(context.Background(), job); err != nil {
 		t.Fatal(err)

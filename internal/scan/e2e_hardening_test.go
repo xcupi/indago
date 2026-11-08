@@ -79,8 +79,11 @@ func TestE2E_ConcurrentScansShareBrowserPoolSafely(t *testing.T) {
 		if want := countDistinctNavigableURLs(eps); domJobs != want {
 			t.Fatalf("DOM jobs = %d, want full endpoint/source workload %d", domJobs, want)
 		}
-		if done.Jobs.Succeeded != done.Jobs.Total() {
-			t.Fatalf("incomplete/failed concurrent scan jobs: %+v", done.Jobs)
+		// Cancellations are not automatically a gap any more: the XSS early stop
+		// drops redundant work for a parameter that already has a Confirmed
+		// finding. Only cancellations the early stop CANNOT explain fail here.
+		if explained := earlyStopCancels(ctx, st, q, done.Scan.ID); done.Jobs.Succeeded+explained != done.Jobs.Total() {
+			t.Fatalf("incomplete/failed concurrent scan jobs: %+v (early-stop cancellations=%d)", done.Jobs, explained)
 		}
 		t.Logf("concurrent scan completed: jobs=%d DOM jobs=%d elapsed=%s", done.Jobs.Total(), domJobs, time.Since(started))
 	}
@@ -327,7 +330,7 @@ func TestE2E_LargeCrawl(t *testing.T) {
 			t.Fatalf("duplicate endpoint in a large crawl: %q x%d", fp, c)
 		}
 	}
-	if done.Jobs.Total() != done.Jobs.Succeeded {
+	if explained := earlyStopCancels(ctx, st, q, done.Scan.ID); done.Jobs.Total() != done.Jobs.Succeeded+explained {
 		t.Fatalf("not every job succeeded: %+v", done.Jobs)
 	}
 }

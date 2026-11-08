@@ -45,6 +45,19 @@ func (e *scanEnv) verify(ep *domain.Endpoint, ip *domain.InjectionPoint, cand de
 	}
 }
 
+// correlate runs one verification's CORRELATION step directly — the state a
+// pair of verify jobs is in when both were leased before either finished. The
+// executor's early-stop policy (a confirmed parameter stops its queued
+// siblings) is deliberately not exercised here: it is covered by
+// TestVerifySkipsWhenParameterAlreadyConfirmed and
+// TestVerifyConfirmedCancelsQueuedSiblings, and it must never hide the model's
+// own guarantees about out-of-order results.
+func (e *scanEnv) correlate(f *domain.Finding, cand detection.Candidate, candTC *domain.TestCase, vres *verification.Result) {
+	e.t.Helper()
+	vx := e.verifyExec(nil, openScope(), ExecutorConfig{})
+	vx.correlateVerification(context.Background(), f.ID, cand, candTC.ID, vres, domain.NewID(), nil, candTC.URL)
+}
+
 func (e *scanEnv) findings() []*domain.Finding {
 	e.t.Helper()
 	fs, err := e.st.Findings().ListByScan(context.Background(), e.scanID)
@@ -77,9 +90,9 @@ func TestConfirmedAndRejectedCandidatesAtOneLocationAreOneFinding(t *testing.T) 
 			}
 
 			confirm := func() {
-				env.verify(ep, ip, good, f, goodTC, &fakeVerifier{result: confirmedResult(verification.SignalPageError)})
+				env.correlate(f, good, goodTC, confirmedResult(verification.SignalPageError))
 			}
-			reject := func() { env.verify(ep, ip, probe, f, probeTC, &fakeVerifier{result: rejectedResult()}) }
+			reject := func() { env.correlate(f, probe, probeTC, rejectedResult()) }
 			if rejectedFirst {
 				reject()
 				confirm()

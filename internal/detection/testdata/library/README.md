@@ -37,3 +37,18 @@ Execution-verified payloads in the confirmed scan:
 
 The control matters: it shows the same target, profile and seeds produce no
 finding without the flag, so the confirmation is attributable to the library.
+
+## Early-stop measurement (same harness)
+
+The same target also measures the XSS early stop: once a parameter carries a
+Confirmed finding, the queued work for that injection point is dropped instead
+of being sent.
+
+| scan | build | execution-verified | verify jobs cancelled |
+| --- | --- | --- | --- |
+| `7e808a5d-f036-4f84-8df2-a969fd3c2ca7` | before | 3 | 0 |
+| `b5c640ac-4256-4fcb-a01d-8579652c120e` | after | 1 | 5 |
+
+One browser launch for a settled parameter, not three. The candidate (HTTP)
+jobs still ran — they finish long before any browser proof exists, so only the
+expensive stage can be stopped this way; see the PR for what that leaves open.

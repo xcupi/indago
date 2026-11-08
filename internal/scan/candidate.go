@@ -9,6 +9,7 @@ import (
 	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/store"
 )
 
 // This file executes the candidate plan the reflection step produces. After a
@@ -62,10 +63,18 @@ func parseCandidateJob(job *domain.TestJob) (detection.Candidate, bool, error) {
 // parameter is enough, so the remaining planned candidates are skipped instead
 // of being sent.
 func (e *executor) parameterConfirmed(ctx context.Context, scanID, paramID domain.ID) bool {
-	if paramID.Empty() || e.store == nil {
+	return parameterConfirmed(ctx, e.store, scanID, paramID)
+}
+
+// parameterConfirmed reports whether an injection point already carries a
+// Confirmed reflected-XSS finding. Shared by the candidate executor (which uses
+// it to avoid sending the rest of a plan) and the verify executor (which uses it
+// to avoid launching a browser for a parameter whose verdict is already settled).
+func parameterConfirmed(ctx context.Context, st store.Store, scanID, paramID domain.ID) bool {
+	if paramID.Empty() || st == nil {
 		return false
 	}
-	findings, err := e.store.Findings().ListByScan(ctx, scanID)
+	findings, err := st.Findings().ListByScan(ctx, scanID)
 	if err != nil {
 		return false
 	}

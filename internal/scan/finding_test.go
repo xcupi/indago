@@ -389,8 +389,6 @@ func TestCorrelateVerificationConfirmedIsStickyAgainstLaterWeakerResult(t *testi
 	ep := env.endpoint(srv, domain.MethodGET)
 	focus := env.param(ep, "q", domain.LocationQuery, "hi")
 	ip := env.injection(ep, focus)
-	target := domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}
-
 	cand1 := candAt(detection.CatHTMLText, detection.CtxHTMLText, "<svg onload=m>")
 	cand2 := candAt(detection.CatHTMLText, detection.CtxHTMLText, "<mx>")
 	tc1 := env.candidateTestCase(ip, env.evidenceRow(domain.EvidenceRequest))
@@ -402,22 +400,14 @@ func TestCorrelateVerificationConfirmedIsStickyAgainstLaterWeakerResult(t *testi
 		t.Fatal("setup: both candidates must correlate into the same finding")
 	}
 
-	vx1 := env.verifyExec(&fakeVerifier{result: confirmedResult(verification.SignalPageError)}, openScope(), ExecutorConfig{})
-	job1 := buildVerifyJob(t, env.scanID, target, cand1, f1.ID, tc1.ID)
-	if err := vx1.Handle(context.Background(), job1); err != nil {
-		t.Fatal(err)
-	}
+	env.correlate(f1, cand1, tc1, confirmedResult(verification.SignalPageError))
 	afterFirst, _ := env.st.Findings().Get(context.Background(), f1.ID)
 	if afterFirst.Verdict != domain.VerdictConfirmed {
 		t.Fatalf("setup: expected confirmed after the first verification, got %s", afterFirst.Verdict)
 	}
 	evidenceAfterFirst := len(afterFirst.EvidenceIDs)
 
-	vx2 := env.verifyExec(&fakeVerifier{result: rejectedResult()}, openScope(), ExecutorConfig{})
-	job2 := buildVerifyJob(t, env.scanID, target, cand2, f1.ID, tc2.ID)
-	if err := vx2.Handle(context.Background(), job2); err != nil {
-		t.Fatal(err)
-	}
+	env.correlate(f1, cand2, tc2, rejectedResult())
 
 	final, _ := env.st.Findings().Get(context.Background(), f1.ID)
 	if final.Verdict != domain.VerdictConfirmed {
@@ -562,8 +552,6 @@ func TestCorrelateVerificationPreservesEveryAttemptResult(t *testing.T) {
 	ep := env.endpoint(srv, domain.MethodGET)
 	focus := env.param(ep, "q", domain.LocationQuery, "hi")
 	ip := env.injection(ep, focus)
-	target := domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}
-
 	cand1 := candAt(detection.CatHTMLText, detection.CtxHTMLText, "<svg onload=m>")
 	cand2 := candAt(detection.CatHTMLText, detection.CtxHTMLText, "<mx>")
 	req1, req2 := env.evidenceRow(domain.EvidenceRequest), env.evidenceRow(domain.EvidenceRequest)
@@ -574,14 +562,8 @@ func TestCorrelateVerificationPreservesEveryAttemptResult(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	vx1 := env.verifyExec(&fakeVerifier{result: confirmedResult(verification.SignalPageError)}, openScope(), ExecutorConfig{})
-	if err := vx1.Handle(context.Background(), buildVerifyJob(t, env.scanID, target, cand1, f.ID, tc1.ID)); err != nil {
-		t.Fatal(err)
-	}
-	vx2 := env.verifyExec(&fakeVerifier{result: rejectedResult()}, openScope(), ExecutorConfig{})
-	if err := vx2.Handle(context.Background(), buildVerifyJob(t, env.scanID, target, cand2, f.ID, tc2.ID)); err != nil {
-		t.Fatal(err)
-	}
+	env.correlate(f, cand1, tc1, confirmedResult(verification.SignalPageError))
+	env.correlate(f, cand2, tc2, rejectedResult())
 
 	got, _ := env.st.Findings().Get(context.Background(), f.ID)
 	if got.Verdict != domain.VerdictConfirmed {

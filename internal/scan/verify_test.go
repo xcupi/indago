@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -95,7 +96,7 @@ func newScanEnv(t *testing.T) *scanEnv {
 }
 
 func (e *scanEnv) verifyExec(v verification.Verifier, scope domain.Scope, cfg ExecutorConfig) *verifyExecutor {
-	return newVerifyExecutor(e.st, nil, v, e.ev, scope, cfg, execLog(), nil, nil, nil, nil)
+	return newVerifyExecutor(e.st, nil, v, e.ev, nil, scope, cfg, execLog(), nil, nil, nil, nil)
 }
 
 func (e *scanEnv) verifyJobFor(target domain.JobTarget, cand detection.Candidate, findingID domain.ID) *domain.TestJob {
@@ -682,5 +683,113 @@ func TestVerifyHandleBadPayload(t *testing.T) {
 	}
 	if fv.callCount() != 0 {
 		t.Fatal("the verifier must not be called for a malformed job")
+	}
+}
+
+// --- early stop: a settled parameter stops costing requests and browsers ---
+
+// A verification that starts AFTER the parameter's verdict landed must not
+// launch a browser: verification jobs are enqueued in a fan-out, so the
+// confirmation often arrives while siblings are still queued.
+func TestVerifySkipsWhenParameterAlreadyConfirmed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "ok") }))
+	defer srv.Close()
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/s", domain.MethodGET)
+	focus := env.param(ep, "q", domain.LocationQuery, "hi")
+	ip := env.injection(ep, focus)
+	f := env.pendingFinding(ep, ip)
+	f.ParameterID = focus.ID
+	f.Verdict, f.Confidence = domain.VerdictConfirmed, domain.ConfidenceHigh
+	if err := env.st.Findings().Update(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+
+	fv := &fakeVerifier{result: confirmedResult(verification.SignalPageError)}
+	vx := env.verifyExec(fv, openScope(), ExecutorConfig{})
+	job := env.verifyJobFor(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, basicCandidate(), f.ID)
+	if err := vx.Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if fv.callCount() != 0 {
+		t.Fatalf("verifier called %d times, want 0 (the parameter is already confirmed)", fv.callCount())
+	}
+	tc := env.only()
+	if tc.Status != domain.TestCaseSkipped {
+		t.Fatalf("test case status = %s, want skipped", tc.Status)
+	}
+	if !strings.Contains(tc.Note, "already has a confirmed XSS finding") {
+		t.Fatalf("note does not explain the skip: %q", tc.Note)
+	}
+}
+
+// When a verification does confirm, the work still queued for that injection
+// point is cancelled — but nothing belonging to another parameter, and nothing
+// that is not XSS work, is touched.
+func TestVerifyConfirmedCancelsQueuedSiblings(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "ok") }))
+	defer srv.Close()
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/s", domain.MethodGET)
+	focus := env.param(ep, "q", domain.LocationQuery, "hi")
+	ip := env.injection(ep, focus)
+	other := env.param(ep, "r", domain.LocationQuery, "x")
+	otherIP := env.injection(ep, other)
+	f := env.pendingFinding(ep, ip)
+
+	q := queue.NewMemory()
+	enqueue := func(tp domain.JobType, target domain.JobTarget, payload []byte) *domain.TestJob {
+		t.Helper()
+		j := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: tp, State: domain.JobQueued,
+			Target: target, Payload: payload, MaxAttempts: 3, AvailableAt: time.Now(), CreatedAt: time.Now(), UpdatedAt: time.Now()}
+		if err := q.Enqueue(context.Background(), j); err != nil {
+			t.Fatal(err)
+		}
+		return j
+	}
+	verifyPayload, err := json.Marshal(verifyJob{Candidate: basicCandidate(), Marker: "mk", FindingID: f.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candPayload, err := json.Marshal(candidateJob{Candidate: basicCandidate()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sameTarget := domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}
+	otherTarget := domain.JobTarget{EndpointID: ep.ID, InjectionPointID: otherIP.ID}
+	siblingVerify := enqueue(domain.JobVerify, sameTarget, verifyPayload)
+	siblingVerify2 := enqueue(domain.JobVerify, sameTarget, verifyPayload)
+	siblingCandidate := enqueue(domain.JobTest, sameTarget, candPayload)
+	otherVerify := enqueue(domain.JobVerify, otherTarget, verifyPayload)
+	otherCandidate := enqueue(domain.JobTest, otherTarget, candPayload)
+
+	fv := &fakeVerifier{result: confirmedResult(verification.SignalPageError)}
+	vx := newVerifyExecutor(env.st, nil, fv, env.ev, q, openScope(), ExecutorConfig{}, execLog(), nil, nil, nil, nil)
+	job := env.verifyJobFor(sameTarget, basicCandidate(), f.ID)
+	if err := vx.Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if fv.callCount() != 1 {
+		t.Fatalf("verifier called %d times, want 1", fv.callCount())
+	}
+
+	states := map[domain.ID]domain.JobState{}
+	jobs, err := q.Jobs(context.Background(), env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range jobs {
+		states[j.ID] = j.State
+	}
+	for name, id := range map[string]domain.ID{"sibling verify": siblingVerify.ID, "second sibling verify": siblingVerify2.ID, "sibling candidate": siblingCandidate.ID} {
+		if states[id] != domain.JobCanceled {
+			t.Fatalf("%s state = %s, want canceled", name, states[id])
+		}
+	}
+	for name, id := range map[string]domain.ID{"other-parameter verify": otherVerify.ID, "other-parameter candidate": otherCandidate.ID} {
+		if states[id] != domain.JobQueued {
+			t.Fatalf("%s state = %s, want queued (different parameter must not be touched)", name, states[id])
+		}
 	}
 }

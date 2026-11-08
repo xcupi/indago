@@ -30,7 +30,17 @@ const (
 // a dead/failed job, failing when no job has finished for stall, and failing at
 // max regardless. It never treats a slow-but-advancing scan as stuck, and never
 // treats a stalled one as slow.
-func waitCompletedWhileProgressing(t testing.TB, status func() (*scan.Status, error), max, stall time.Duration) *scan.Status {
+// waitOpts tunes what the wait policy treats as acceptable. The default is
+// strict: any dead, failed or canceled job means some planned work never ran.
+type waitOpts struct {
+	// explainCanceled returns how many of the scan's canceled jobs are the
+	// deliberate outcome of the XSS early stop — redundant candidate/verify
+	// work dropped for a parameter that already carries a Confirmed finding.
+	// Every cancellation beyond that count is still a coverage gap.
+	explainCanceled func() int
+}
+
+func waitCompletedWhileProgressing(t testing.TB, status func() (*scan.Status, error), max, stall time.Duration, opts ...waitOpts) *scan.Status {
 	t.Helper()
 	start := time.Now()
 	lastProgress := start
@@ -43,8 +53,19 @@ func waitCompletedWhileProgressing(t testing.TB, status func() (*scan.Status, er
 			// Job failures are checked BEFORE completion: a scan can reach
 			// "completed" with dead/failed/canceled jobs, and that is not
 			// successful coverage (a canceled job never ran its test).
-			if st.Jobs.Dead > 0 || st.Jobs.Failed > 0 || st.Jobs.Canceled > 0 {
-				t.Fatalf("dead/failed/canceled job after %s; scan=%s jobs=%+v", time.Since(start).Round(time.Second), st.Scan.State, st.Jobs)
+			unexplained := st.Jobs.Canceled
+			if unexplained > 0 {
+				for _, o := range opts {
+					if o.explainCanceled == nil {
+						continue
+					}
+					if n := o.explainCanceled(); n > 0 {
+						unexplained -= min(n, unexplained)
+					}
+				}
+			}
+			if st.Jobs.Dead > 0 || st.Jobs.Failed > 0 || unexplained > 0 {
+				t.Fatalf("dead/failed/canceled job after %s; scan=%s jobs=%+v (unexplained cancels=%d)", time.Since(start).Round(time.Second), st.Scan.State, st.Jobs, unexplained)
 			}
 			if st.Scan.State == domain.ScanCanceled || st.Scan.State == domain.ScanFailed {
 				t.Fatalf("scan ended %s after %s; jobs=%+v", st.Scan.State, time.Since(start).Round(time.Second), st.Jobs)
@@ -82,7 +103,7 @@ func (r *recordingTB) Fatalf(format string, args ...any) {
 
 var errFatal = errors.New("fatal")
 
-func runWait(t *testing.T, status func() (*scan.Status, error), max, stall time.Duration) (failed string, st *scan.Status) {
+func runWait(t *testing.T, status func() (*scan.Status, error), max, stall time.Duration, opts ...waitOpts) (failed string, st *scan.Status) {
 	t.Helper()
 	rec := &recordingTB{TB: t}
 	defer func() {
@@ -91,7 +112,7 @@ func runWait(t *testing.T, status func() (*scan.Status, error), max, stall time.
 		}
 		failed = rec.failed
 	}()
-	st = waitCompletedWhileProgressing(rec, status, max, stall)
+	st = waitCompletedWhileProgressing(rec, status, max, stall, opts...)
 	return "", st
 }
 
@@ -183,6 +204,30 @@ func TestWaitCompletedWhileProgressingDiscriminatesSlowFromStuck(t *testing.T) {
 		}
 		if failed, _ := runWait(t, status, 200*time.Millisecond, time.Second); !strings.Contains(failed, "still progressing") {
 			t.Fatalf("the overall cap must still bound the wait, got %q", failed)
+		}
+	})
+}
+
+// The XSS early stop cancels redundant work on purpose, so the wait policy must
+// stop treating those cancellations as a coverage gap — but only the ones it can
+// account for.
+func TestWaitCompletedWhileProgressingExplainsEarlyStopCancels(t *testing.T) {
+	status := func() (*scan.Status, error) {
+		return jobsStatus(domain.ScanCompleted, queue.Stats{Succeeded: 10, Canceled: 2}), nil
+	}
+	t.Run("explained cancels pass", func(t *testing.T) {
+		if failed, st := runWait(t, status, 2*time.Second, time.Second, waitOpts{explainCanceled: func() int { return 2 }}); failed != "" || st == nil {
+			t.Fatalf("cancellations explained by the early stop must not fail the wait: %q", failed)
+		}
+	})
+	t.Run("partly explained cancels fail", func(t *testing.T) {
+		if failed, _ := runWait(t, status, 2*time.Second, time.Second, waitOpts{explainCanceled: func() int { return 1 }}); failed == "" {
+			t.Fatal("a cancellation the early stop cannot explain is a coverage gap and must fail the wait")
+		}
+	})
+	t.Run("no explanation fails", func(t *testing.T) {
+		if failed, _ := runWait(t, status, 2*time.Second, time.Second); failed == "" {
+			t.Fatal("without an explanation, any cancellation must fail the wait")
 		}
 	})
 }

@@ -34,6 +34,7 @@ import (
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/ratelimit"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/verification"
@@ -181,9 +182,12 @@ type verifyExecutor struct {
 	engine   httpengine.Engine // scope-enforcing; used only to refresh a dynamic anti-CSRF token right before replaying the candidate — see refreshDynamicParams
 	verifier verification.Verifier
 	evidence evidence.Store // nil: outcomes are recorded without evidence blobs
-	scope    domain.Scope
-	cfg      ExecutorConfig // reuses AllowStateChanging + RequestTimeout semantics
-	log      *slog.Logger
+	// queue lets a settled parameter drop its queued siblings (see
+	// suppressQueued). nil in unit tests: suppression is then a no-op.
+	queue queue.Queue
+	scope domain.Scope
+	cfg   ExecutorConfig // reuses AllowStateChanging + RequestTimeout semantics
+	log   *slog.Logger
 	// findingsMu — see newExecutor's doc comment. MUST be the same mutex given
 	// to this scan's executor for correlation to be race-free.
 	findingsMu *sync.Mutex
@@ -202,7 +206,7 @@ type verifyExecutor struct {
 	proxyNext atomic.Uint64
 }
 
-func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Verifier, ev evidence.Store, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, tokenMu *sync.Mutex, proxyPool []string, limiter *ratelimit.Limiter) *verifyExecutor {
+func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Verifier, ev evidence.Store, q queue.Queue, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, tokenMu *sync.Mutex, proxyPool []string, limiter *ratelimit.Limiter) *verifyExecutor {
 	if v == nil {
 		v = verification.Stub{}
 	}
@@ -212,7 +216,7 @@ func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Ver
 	if tokenMu == nil {
 		tokenMu = &sync.Mutex{}
 	}
-	return &verifyExecutor{store: st, engine: eng, verifier: v, evidence: ev, scope: scope, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu, tokenMu: tokenMu, proxyPool: proxyPool, limiter: limiter}
+	return &verifyExecutor{store: st, engine: eng, verifier: v, evidence: ev, queue: q, scope: scope, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu, tokenMu: tokenMu, proxyPool: proxyPool, limiter: limiter}
 }
 
 // nextProxy round-robins through proxyPool ("" when empty: direct connection,
@@ -293,6 +297,14 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 		return verifyResult{outcome: domain.OutcomeError, permanent: true, err: errors.New("verify job has no injection point")}
 	}
 	tc.Method, tc.URL = string(ep.Method), ep.URL
+
+	// One proven payload is enough. Verification runs after a fan-out of
+	// candidates for the same parameter, so the verdict often lands while this
+	// job is already queued — checking only in the candidate job would let every
+	// already-enqueued payload launch a browser anyway.
+	if parameterConfirmed(ctx, e.store, job.ScanID, focus.ID) {
+		return verifyResult{skipped: true, note: fmt.Sprintf("browser verification skipped: parameter %s (%s) already has a confirmed XSS finding", focus.Name, focus.Location)}
+	}
 
 	note := fmt.Sprintf("browser verification; candidate %s/%s; parameter %s (%s)", vj.Candidate.Source, vj.Candidate.Category, focus.Name, focus.Location)
 	if vj.Candidate.Combined {
@@ -431,6 +443,52 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 	return verifyResult{outcome: domain.OutcomeSuccess, note: note, result: vres}
 }
 
+// suppressQueued cancels the still-queued XSS work for an injection point whose
+// verdict is settled (a Confirmed finding): the remaining candidate payloads do
+// not need to be sent and the remaining verifications do not need a browser.
+//
+// Only QUEUED jobs are touched — a leased/running job belongs to a worker that
+// will finish on its own (its own pre-flight check makes it a no-op). JobVerify
+// is XSS-only by construction; a JobTest is only cancelled when its payload is a
+// non-combined candidate for this injection point, so IDOR, access-control,
+// disclosure and DOM-XSS work is never collateral. Returns the number cancelled.
+func (e *verifyExecutor) suppressQueued(ctx context.Context, scanID, paramID domain.ID) int {
+	if e.queue == nil || paramID.Empty() {
+		return 0
+	}
+	jobs, err := e.queue.Jobs(ctx, scanID)
+	if err != nil {
+		e.log.Warn("xss early stop: list jobs", "scan", scanID, "err", err)
+		return 0
+	}
+	cancelled := 0
+	for _, j := range jobs {
+		if j.State != domain.JobQueued || j.Target.InjectionPointID != paramID {
+			continue
+		}
+		switch j.Type {
+		case domain.JobVerify:
+		case domain.JobTest:
+			cand, ok, perr := parseCandidateJob(j)
+			if perr != nil || !ok || cand.Combined {
+				continue
+			}
+		default:
+			continue
+		}
+		if err := e.queue.Cancel(ctx, j.ID); err != nil {
+			e.log.Warn("xss early stop: cancel queued job", "job", j.ID, "err", err)
+			continue
+		}
+		cancelled++
+	}
+	if cancelled > 0 {
+		e.log.Info("xss early stop: cancelled queued work for a confirmed parameter",
+			"scan", scanID, "injection_point", paramID, "jobs", cancelled)
+	}
+	return cancelled
+}
+
 func isNetTimeout(err error) bool {
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()
@@ -482,6 +540,12 @@ func (e *verifyExecutor) finish(ctx context.Context, job *domain.TestJob, tc *do
 
 	if !vj.FindingID.Empty() && r.result != nil {
 		e.correlateVerification(ctx, vj.FindingID, vj.Candidate, vj.CandidateTestCaseID, r.result, tc.ID, evidenceIDs, tc.URL)
+	}
+	if r.result != nil && r.result.Verdict == domain.VerdictConfirmed {
+		// The parameter's verdict is settled: nothing queued for this injection
+		// point can change it, and every remaining verification would cost a
+		// browser launch. Drop that work now instead of letting it start.
+		e.suppressQueued(ctx, job.ScanID, job.Target.InjectionPointID)
 	}
 }
 
