@@ -528,6 +528,7 @@ func (c *cli) scanCreate(args []string) error {
 	enableRoleWrite := fs.Bool("role-write", false, "opt in to the access-control engine's role-field slice (case 21): send the caller's OWN profile update with a client-supplied role field and confirm ONLY when a privileged surface denied before the write is reachable after it; requires an authenticated session and the server's -allow-state-changing — OFF by default (see docs/access-control.md)")
 	enableAdminStep := fs.Bool("admin-step-probe", false, "opt in to the cases 35/36 admin-action probes: call the role-change endpoint with a NON-EXISTENT username, once with confirmed=true and once with the administrative Referer, and confirm ONLY when the caller is refused on the ordinary request while the variant reaches the handler and the anonymous control is refused; requires an authenticated session, cannot change any role — OFF by default (see docs/access-control.md)")
 	enableObjectFamily := fs.Bool("object-family-probe", false, "opt in to the case 34 object-family slice: read the page's own scripts for the endpoint that CREATES an object and the field that carries it, submit this scan's own marker, read the object the server names, and probe the two neighbouring ids; confirmed ONLY when a sibling differs from the caller's own document and discloses a credential; requires an authenticated session and POSTs a document the scan authored — OFF by default (see docs/idor.md)")
+	enableXSSLibrary := fs.Bool("xss-library", false, "opt in to the cheat-sheet library families (media source errors, autofocus handlers, details ontoggle, srcdoc, form javascript: actions) planned ON TOP OF the canonical candidates; still capped by the candidate profile and still confirmed only by a browser execution signal — OFF by default (see internal/detection/library.go)")
 	var proxyPool stringList
 	fs.Var(&proxyPool, "proxy", "proxy to route this scan's traffic through — raw HTTP and browser verification alike (repeatable, round-robin; http://host:port, https://host:port, or socks5://host:port, optionally with embedded user:pass@ creds); operator-supplied infrastructure only, off by default (see AGENTS.md §2.3)")
 	randomizeTLS := fs.Bool("randomize-tls-fingerprint", false, "randomize the raw HTTP engine's TLS ClientHello (JA3) via uTLS instead of Go's own default — OFF by default (see AGENTS.md §2.3); MUTUALLY EXCLUSIVE with -proxy (Go's transport never consults a custom TLS dialer for a proxied connection); has no effect on browser verification, which already uses a real browser's own TLS stack")
@@ -564,6 +565,9 @@ func (c *cli) scanCreate(args []string) error {
 	}
 	if *enableObjectFamily {
 		req["enable_object_family_probe"] = true
+	}
+	if *enableXSSLibrary {
+		req["enable_xss_library"] = true
 	}
 	if *enableIDOREnum {
 		req["idor_enumerate"] = true

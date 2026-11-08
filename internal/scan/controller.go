@@ -340,6 +340,8 @@ type CreateScanParams struct {
 	EnableAdminStepProbe bool
 	// EnableObjectFamilyProbe opts into the case 34 object-family slice.
 	EnableObjectFamilyProbe bool
+	// EnableXSSLibrary opts into the cheat-sheet library families.
+	EnableXSSLibrary bool
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -484,6 +486,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.EnableRoleWrite = p.EnableRoleWrite
 	cfg.EnableAdminStepProbe = p.EnableAdminStepProbe
 	cfg.EnableObjectFamilyProbe = p.EnableObjectFamilyProbe
+	cfg.EnableXSSLibrary = p.EnableXSSLibrary
 
 	statePath, err := c.resolveAuth(ctx, mode, p, scope)
 	if err != nil {

@@ -331,6 +331,13 @@ type ScanConfig struct {
 	// an authenticated session. A finding needs a sibling that differs from the
 	// caller's own document AND discloses a credential.
 	EnableObjectFamilyProbe bool `json:"enable_object_family_probe,omitempty"`
+
+	// EnableXSSLibrary opts this scan into the cheat-sheet library families
+	// (see internal/detection/library.go): MathML-adjacent tags, media source
+	// errors, autofocus handlers, srcdoc, form javascript: actions. They are
+	// planned ON TOP OF the canonical candidates and still capped by the
+	// candidate profile, and a finding still needs a browser execution signal.
+	EnableXSSLibrary bool `json:"enable_xss_library,omitempty"`
 }
 
 // StopMode controls when a scan stops relative to confirmed findings.
