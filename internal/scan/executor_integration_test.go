@@ -50,11 +50,15 @@ func TestScanExecutesEveryJobAndPersistsResults(t *testing.T) {
 	// Split them out before applying the pre-existing, Reflected-XSS-only
 	// assertions below, and cross-check their count independently against
 	// the endpoint registry.
-	var domXSSCases, accessCases, otherCases []*domain.TestCase
+	var domXSSCases, accessCases, disclosureCases, otherCases []*domain.TestCase
 	for _, tc := range cases {
 		switch tc.VulnClass {
 		case domain.VulnDOMXSS:
 			domXSSCases = append(domXSSCases, tc)
+		case domain.VulnInfoDisclosure:
+			// The passive disclosure pass adds one case per candidate endpoint;
+			// it is covered by its own tests.
+			disclosureCases = append(disclosureCases, tc)
 		case domain.VulnAccessControl:
 			// The bounded access-control bypass pass adds one case per
 			// privileged path per origin; it is covered by its own tests.
@@ -64,6 +68,7 @@ func TestScanExecutesEveryJobAndPersistsResults(t *testing.T) {
 		}
 	}
 	_ = accessCases
+	_ = disclosureCases
 	eps, _ := st.Endpoints().ListByScan(ctx, sc.ID)
 	wantDOMXSS := countDistinctNavigableURLs(eps)
 	if len(domXSSCases) != wantDOMXSS {
@@ -139,7 +144,7 @@ func TestScanExecutesEveryJobAndPersistsResults(t *testing.T) {
 	// evidence reference resolves.
 	// The bounded access-control bypass pass adds one success per privileged
 	// path per origin; those cases are split out above but counted here.
-	if done.Tests.Success != success+len(accessCases) || done.Tests.Skipped != skipped+wantDOMXSS || done.Tests.Error+done.Tests.Timeout+done.Tests.Cancelled+done.Tests.Running != 0 {
+	if done.Tests.Success != success+len(accessCases)+len(disclosureCases) || done.Tests.Skipped != skipped+wantDOMXSS || done.Tests.Error+done.Tests.Timeout+done.Tests.Cancelled+done.Tests.Running != 0 {
 		t.Fatalf("status tests = %+v (want success=%d skipped=%d+%d dom-xss)", done.Tests, success, skipped, wantDOMXSS)
 	}
 	// Every evidence reference held by a test case must resolve to a readable blob.

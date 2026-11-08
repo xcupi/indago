@@ -223,6 +223,14 @@ func recordingHandlers() (map[domain.JobType]worker.Handler, func() []string) {
 			mu.Unlock()
 			return nil
 		}),
+		// The information-disclosure pass queues one passive GET per candidate
+		// endpoint; a real worker handles them, so this double must too.
+		domain.JobDisclosure: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
+			mu.Lock()
+			urls = append(urls, j.Target.URL)
+			mu.Unlock()
+			return nil
+		}),
 		// The access-control bypass pass queues bounded per-path jobs; a real
 		// worker handles them, so this double must too.
 		domain.JobAccessControl: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
@@ -347,6 +355,7 @@ func TestScanCompletesAfterDiscoveryAndJobs(t *testing.T) {
 	// Plus the access-control bypass pass: one job per bounded privileged path
 	// per origin (see accesscontrol_bypass.go).
 	total += accessBypassJobCount(eps)
+	total += disclosureJobCount(eps)
 	if done.Jobs.Total() != total || done.Jobs.Succeeded != total {
 		t.Fatalf("jobs=%+v, want %d succeeded", done.Jobs, total)
 	}

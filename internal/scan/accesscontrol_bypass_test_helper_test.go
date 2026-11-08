@@ -21,3 +21,23 @@ func accessBypassJobCount(eps []*domain.Endpoint) int {
 	}
 	return len(seen) * len(accesscontrol.BypassPaths)
 }
+
+// disclosureJobCount is how many endpoints the passive disclosure pass queues:
+// every GET endpoint without a query, capped at the pass's own bound.
+func disclosureJobCount(eps []*domain.Endpoint) int {
+	n := 0
+	for _, ep := range eps {
+		if ep.Method != domain.MethodGET {
+			continue
+		}
+		u, err := url.Parse(ep.URL)
+		if err != nil || u.RawQuery != "" {
+			continue
+		}
+		n++
+	}
+	if n > 40 {
+		n = 40
+	}
+	return n
+}
