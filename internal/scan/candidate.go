@@ -57,6 +57,26 @@ func parseCandidateJob(job *domain.TestJob) (detection.Candidate, bool, error) {
 // Children keep the parent's target (same endpoint + injection point) and are
 // given the candidate's priority, so the queue leases higher-priority candidates
 // first — the plan's deterministic order. A nil queue (unit tests) is a no-op.
+// parameterConfirmed reports whether this parameter already carries a Confirmed
+// reflected-XSS finding. It is the early-stop rule: one proven payload per
+// parameter is enough, so the remaining planned candidates are skipped instead
+// of being sent.
+func (e *executor) parameterConfirmed(ctx context.Context, scanID, paramID domain.ID) bool {
+	if paramID.Empty() || e.store == nil {
+		return false
+	}
+	findings, err := e.store.Findings().ListByScan(ctx, scanID)
+	if err != nil {
+		return false
+	}
+	for _, f := range findings {
+		if f.VulnClass == domain.VulnReflectedXSS && f.Verdict == domain.VerdictConfirmed && f.ParameterID == paramID {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *executor) enqueueCandidates(ctx context.Context, parent *domain.TestJob, plan *detection.CandidatePlan) {
 	if e.queue == nil || plan == nil || len(plan.Candidates) == 0 {
 		return

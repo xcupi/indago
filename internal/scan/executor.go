@@ -230,6 +230,14 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		if focus == nil {
 			return result{outcome: domain.OutcomeError, permanent: true, err: errors.New("candidate job has no injection point"), vulnClass: domain.VulnReflectedXSS}
 		}
+		// One confirmed payload is enough: a parameter that already carries a
+		// Confirmed XSS finding does not need its remaining candidates sent.
+		// Verification runs after the candidate, so this stops the rest of the
+		// plan as soon as the browser proof lands - no request is spent looking
+		// for a second way into the same parameter.
+		if e.parameterConfirmed(ctx, job.ScanID, focus.ID) {
+			return result{skipped: true, note: kind + " skipped: this parameter already has a confirmed XSS finding"}
+		}
 		res := e.runCandidate(ctx, tc, ep, params, focus, cand)
 		// A candidate that reflected is always correlated into a PENDING finding
 		// — confirmed or rejected only by real browser verification, never by
