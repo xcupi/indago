@@ -61,3 +61,26 @@ func TestBypassPathsAreBoundedAndAdminOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestHandlerRan(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		baseStatus, varSt int
+		baseBody, varBody string
+		want              bool
+	}{
+		{"denied then app message", 401, 400, `"Unauthorized"`, "Could not change user role", true},
+		{"denied then 2xx", 401, 302, `"Unauthorized"`, "", false},
+		{"denied then bare 400", 401, 400, `"Unauthorized"`, "Bad Request", false},
+		{"denied then denial", 401, 403, `"Unauthorized"`, "Forbidden", false},
+		{"no denial at baseline", 200, 400, "ok", "Could not change user role", false},
+		{"identical bodies", 401, 400, "Unauthorized", "Unauthorized", false},
+		{"server error", 401, 500, `"Unauthorized"`, "boom", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := accesscontrol.HandlerRan(tc.baseStatus, tc.varSt, tc.baseBody, tc.varBody); got != tc.want {
+				t.Fatalf("HandlerRan(%d,%d,%q,%q) = %v, want %v", tc.baseStatus, tc.varSt, tc.baseBody, tc.varBody, got, tc.want)
+			}
+		})
+	}
+}

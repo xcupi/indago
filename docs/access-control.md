@@ -132,3 +132,32 @@ bounded entries (`/admin`, `/admin-roles`, `/administration`), never a wordlist.
 Measured live: PortSwigger case 28 (`Access control: header path override reaches
 /admin`) and case 29 (`Access control: method-based bypass at GET /admin-roles`),
 both confirmed; a fixture that denies both records Rejected and creates no finding.
+
+## Cases 35/36: the admin ACTION step (opt-in, non-mutating)
+
+Both labs change a role through a request the caller should not be able to make.
+The probe names a username that **does not exist** (`indago-probe-nonexistent-user`),
+so whatever the server answers, no role can change. It is opt-in
+(`-admin-step-probe` / `enable_admin_step_probe`) and requires an authenticated
+session.
+
+    baseline   POST <origin>/admin-roles  action=upgrade&username=<probe>   → refused (401/403)
+    confirm    + confirmed=true                                           → case 35
+    referer    + Referer: <origin>/admin                                  → case 36
+    anonymous  the confirmed request without the session                   → must ALSO be refused
+
+A finding needs three things: the baseline refused, at least one variant reaching
+the **application handler**, and the anonymous control refused. The handler-ran
+signal is `accesscontrol.HandlerRan`: a non-denial, non-bare-status body that
+differs from the denial's. Because the named user never exists, the handler's own
+lookup fails ("Could not change user role") — and that failure is precisely the
+proof that the authorization check did not run.
+
+Without the anonymous control a public endpoint would look identical, so that
+control is mandatory, not advisory.
+
+Measured live: case 35 confirmed (`confirmation-step bypass`, scan f31e784b) and
+case 36 confirmed (`referer-based bypass`, scan 8949d2af), both with the
+anonymous control at 401. On case 36 a *manual* request with the real Referer
+upgraded wiener to admin (portal "Solved"); it was downgraded again before the
+scanner test so the instance stayed honest.

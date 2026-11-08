@@ -270,6 +270,9 @@ type createScanReq struct {
 	// (case 21). Off by default; the server rejects it for an anonymous scan
 	// or when it was not started with -allow-state-changing.
 	EnableRoleWrite bool `json:"enable_role_write"`
+	// EnableAdminStepProbe opts into the cases 35/36 admin-action probes (a
+	// non-existent username, so no role can change). Requires a session.
+	EnableAdminStepProbe bool `json:"enable_admin_step_probe"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -350,6 +353,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		EnableRoleParam:           req.EnableRoleParam,
 		EnableAccessControlPages:  req.EnableAccessControlPages,
 		EnableRoleWrite:           req.EnableRoleWrite,
+		EnableAdminStepProbe:      req.EnableAdminStepProbe,
 	})
 	if err != nil {
 		s.writeScanError(w, err)

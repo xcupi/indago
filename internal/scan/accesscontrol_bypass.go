@@ -31,6 +31,11 @@ import (
 
 const accessModeBypass = "bypass"
 
+// accessModeMutation is cases 35/36: the admin ACTION step is probed with a
+// request the caller should not be able to complete, targeting a user that does
+// not exist so no role can change whatever the answer is.
+const accessModeMutation = "mutation_step"
+
 // maxBypassRequestsPerPath bounds one path's probes: GET baseline, POST
 // baseline, and two header overrides.
 const maxBypassRequestsPerPath = 4
@@ -167,5 +172,170 @@ func (c *Controller) enqueueAccessBypassProbes(ctx context.Context, scanID domai
 	}
 	if n > 0 {
 		c.log.Info("access bypass: enqueued", "scan", scanID, "jobs", n)
+	}
+}
+
+// probeRoleUsername is the username every mutation probe names. It does not
+// exist, so the action can never apply to anybody: whatever the server answers,
+// no role changes. It is a fixed literal, not a wordlist.
+const probeRoleUsername = "indago-probe-nonexistent-user"
+
+// runMutationProbe proves cases 35 and 36 without changing state.
+//
+//	step 1 (baseline): POST <origin>/admin-roles action=upgrade&username=<probe>
+//	                   → the caller is refused (401/403)
+//	step 2 (confirm):  the same request plus confirmed=true
+//	step 2 (referer):  the same request plus Referer: <origin>/admin
+//	anonymous:         the confirmed request without the session
+//
+// A finding needs all three: the baseline refused, at least one variant reaching
+// the application handler, and the anonymous variant refused (so the gap is the
+// caller's missing authorization, not a public endpoint). Because the username
+// never exists, the handler's own lookup fails — which is exactly the proof that
+// the handler ran.
+func (e *accessControlExecutor) runMutationProbe(ctx context.Context, job *domain.TestJob, tc *domain.TestCase) (accessControlDetail, domain.TestOutcome, error, bool, bool) {
+	d := accessControlDetail{Engine: accessControlEngine, Kind: accessModeMutation, URL: job.Target.URL}
+	tc.Method, tc.URL = "POST", job.Target.URL
+
+	u, err := url.Parse(strings.TrimSpace(job.Target.URL))
+	if err != nil || u.Host == "" {
+		d.Skipped, d.SkipReason = true, "mutation job has no usable privileged URL"
+		return d, domain.OutcomeSuccess, nil, false, true
+	}
+	origin := u.Scheme + "://" + u.Host
+	path := u.Path
+	if path == "" {
+		path = "/admin-roles"
+	}
+	d.Origin, d.PrivilegedPath = origin, path
+
+	form := url.Values{"action": {"upgrade"}, "username": {probeRoleUsername}}.Encode()
+	denied := httpengine.NewRequest("POST", job.Target.URL)
+	denied.Headers = map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	denied.Body = []byte(form)
+	baseResp, outcome, _ := e.do(ctx, denied)
+	if outcome != domain.OutcomeSuccess {
+		d.Skipped, d.SkipReason = true, "the admin action step could not be fetched"
+		return d, domain.OutcomeSuccess, nil, false, true
+	}
+	d.StepBaseline = baseResp.Status
+
+	// Anonymous control: the same confirmed request without the caller's session.
+	// This is what separates a missing authorization check from a public endpoint.
+	anonReq := httpengine.NewRequest("POST", job.Target.URL)
+	anonReq.NoCookies = true
+	anonReq.Headers = map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	anonReq.Body = []byte(url.Values{"action": {"upgrade"}, "username": {probeRoleUsername}, "confirmed": {"true"}}.Encode())
+	if anonResp, anonOut, _ := e.do(ctx, anonReq); anonOut == domain.OutcomeSuccess {
+		d.StepAnonymous = anonResp.Status
+	}
+
+	if !accesscontrol.IsDenialStatus(d.StepBaseline) {
+		d.Verdict = domain.VerdictRejected
+		d.Reason = fmt.Sprintf("the admin action step refused nothing (HTTP %d without the extra step): no missing authorization to prove", d.StepBaseline)
+		return d, domain.OutcomeSuccess, nil, false, false
+	}
+
+	type variant struct {
+		name   string
+		header map[string]string
+		body   url.Values
+		status *int
+	}
+	variants := []variant{
+		{name: "confirmation", header: map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+			body: url.Values{"action": {"upgrade"}, "username": {probeRoleUsername}, "confirmed": {"true"}}, status: &d.StepConfirm},
+		{name: "referer", header: map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Referer": origin + "/admin"},
+			body: url.Values{"action": {"upgrade"}, "username": {probeRoleUsername}}, status: &d.StepReferer},
+	}
+	for _, v := range variants {
+		if ctx.Err() != nil {
+			return d, domain.OutcomeCancelled, ctx.Err(), false, false
+		}
+		req := httpengine.NewRequest("POST", job.Target.URL)
+		req.Headers = v.header
+		req.Body = []byte(v.body.Encode())
+		resp, out, _ := e.do(ctx, req)
+		if out != domain.OutcomeSuccess {
+			continue
+		}
+		*v.status = resp.Status
+		if !accesscontrol.HandlerRan(d.StepBaseline, resp.Status, string(baseResp.Body), string(resp.Body)) {
+			continue
+		}
+		if accesscontrol.IsDenialStatus(d.StepAnonymous) || d.StepAnonymous == 0 {
+			// The anonymous control must refuse, otherwise this is not an
+			// authorization gap at all.
+			d.Verdict = domain.VerdictConfirmed
+			d.Bypass = v.name
+			d.Reason = fmt.Sprintf("the admin action step refused the caller (HTTP %d) but the same request with %s reached the application handler (HTTP %d, %q) while the anonymous control was refused (HTTP %d) — the authorization check covers one step, not the action",
+				d.StepBaseline, variantLabel(v.name), resp.Status, truncate(strings.TrimSpace(string(resp.Body)), 60), d.StepAnonymous)
+			e.correlate(ctx, job.ScanID, accessControlFinding{
+				Key:        accessControlPathDedupKey(job.Target.URL) + "\x00mutation\x00" + v.name,
+				Title:      fmt.Sprintf("Access control: %s bypass of the admin action at %s", variantLabel(v.name), path),
+				Summary:    d.Reason,
+				Severity:   domain.SeverityHigh,
+				EndpointID: job.Target.EndpointID,
+				Detail:     findingDetailFrom(d, nil, nil),
+			}, tc.ID)
+			return d, domain.OutcomeSuccess, nil, false, false
+		}
+	}
+
+	d.Verdict = domain.VerdictRejected
+	d.Reason = fmt.Sprintf("the admin action step refused the caller (HTTP %d) and neither the confirmation nor the referer variant reached the handler (confirmed=%d referer=%d)", d.StepBaseline, d.StepConfirm, d.StepReferer)
+	return d, domain.OutcomeSuccess, nil, false, false
+}
+
+func variantLabel(name string) string {
+	switch name {
+	case "confirmation":
+		return "confirmation-step"
+	case "referer":
+		return "referer-based"
+	}
+	return name
+}
+
+// enqueueMutationProbes queues ONE admin-action probe per origin when the scan
+// opted in. It is bounded (a single path per origin) and non-mutating by
+// construction: the username it names never exists.
+func (c *Controller) enqueueMutationProbes(ctx context.Context, scanID domain.ID) {
+	sc, err := c.store.Scans().Get(ctx, scanID)
+	if err != nil || !sc.Config.EnableAdminStepProbe {
+		return
+	}
+	endpoints, err := c.store.Endpoints().ListByScan(ctx, scanID)
+	if err != nil {
+		c.log.Warn("admin step probe: list endpoints", "scan", scanID, "err", err)
+		return
+	}
+	now := time.Now()
+	seen := map[string]struct{}{}
+	n := 0
+	for _, ep := range endpoints {
+		u, err := url.Parse(strings.TrimSpace(ep.URL))
+		if err != nil || u.Host == "" {
+			continue
+		}
+		origin := u.Scheme + "://" + u.Host
+		if _, dup := seen[origin]; dup {
+			continue
+		}
+		seen[origin] = struct{}{}
+		job := &domain.TestJob{
+			ID: domain.NewID(), ScanID: scanID, Type: domain.JobAccessControl, State: domain.JobQueued,
+			Priority: 24, Target: domain.JobTarget{URL: origin + "/admin-roles"},
+			Payload:     accessControlModePayload(accessModeMutation),
+			MaxAttempts: 2, AvailableAt: now, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := c.queue.Enqueue(ctx, job); err != nil {
+			c.log.Warn("admin step probe: enqueue", "scan", scanID, "err", err)
+			continue
+		}
+		n++
+	}
+	if n > 0 {
+		c.log.Info("admin step probe: enqueued", "scan", scanID, "jobs", n)
 	}
 }

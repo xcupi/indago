@@ -313,6 +313,15 @@ type ScanConfig struct {
 	// refused at scan creation, never enabled implicitly. It never targets
 	// another principal's profile.
 	EnableRoleWrite bool `json:"enable_role_write,omitempty"`
+
+	// EnableAdminStepProbe opts this scan into the admin-action step probes
+	// (cases 35 and 36): the role-change endpoint is called with a username
+	// that does NOT exist, once with the confirmation flag and once with the
+	// administrative Referer, and a finding needs the caller to be refused on
+	// the ordinary request while the variant reaches the application handler
+	// and the anonymous control is refused too. Nothing can change: the named
+	// user never exists. Off by default; requires an authenticated session.
+	EnableAdminStepProbe bool `json:"enable_admin_step_probe,omitempty"`
 }
 
 // StopMode controls when a scan stops relative to confirmed findings.
