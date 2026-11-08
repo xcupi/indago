@@ -107,6 +107,7 @@ required = {
     # Angular; the byte-identical control without Angular must not plan it.
     "TestAngularCSPBypassIsPlannedOnlyForCSPWithoutUnsafeInlineAndAngular",
     "TestVendoredAngularEvaluatesNGFocusUnderCSPWithoutReferenceError",
+    "TestCSPReportURIParamInjectionConfirmsOnlyWhenThePolicyIsInjectable",
 }
 if not shutil.which("node"):
     raise SystemExit("required Node.js unavailable")

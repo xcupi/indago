@@ -668,7 +668,19 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 	if hasRawQuery {
 		u.RawQuery = rawQuery
 	} else {
-		u.RawQuery = q.Encode()
+		if inj != nil && inj.extraQuery != "" {
+			// A surface that is not a discovered parameter (the CSP
+			// report-uri's own query): appended AFTER q.Encode() so its bytes
+			// reach the server exactly as the candidate recorded them, without
+			// being re-encoded.
+			if base := q.Encode(); base != "" {
+				u.RawQuery = base + "&" + inj.extraQuery
+			} else {
+				u.RawQuery = inj.extraQuery
+			}
+		} else {
+			u.RawQuery = q.Encode()
+		}
 	}
 
 	req := &httpengine.Request{Method: string(ep.Method), URL: u.String()}

@@ -28,6 +28,15 @@ type injection struct {
 
 	paramB *domain.Parameter
 	valueB string
+
+	// extraQuery, when non-empty, is appended to the URL's query after the
+	// named parameters are resolved: entries are "name=value" with value
+	// already URL-encoded. It exists for an injection surface that is NOT a
+	// discovered parameter — a query parameter the response names inside its
+	// own CSP report-uri (see detection.CSPReportURIParams), which is what a
+	// CSP directive-injection attack needs in the same request as the body
+	// payload. Bounded: at most one entry per candidate today.
+	extraQuery string
 }
 
 // maxBaselineBodyKeep caps the baseline body retained for the token-absence
@@ -134,6 +143,10 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 		// The mutated response is the one the candidate will be sent to, so
 		// its policy — not the baseline's — decides.
 		AngularCSPBypass: detection.AngularCSPBypassEligible(resp.Headers.Get("Content-Security-Policy"), resp.Body),
+		// A parameter the policy names inside its own report-uri is a header
+		// injection surface; the planner pairs it with a body <script> so the
+		// browser can prove the directive injection actually executes.
+		CSPReportParam: firstCSPReportParam(resp.Headers.Get("Content-Security-Policy")),
 	})
 
 	// See runCandidate: the status signal is independent of reflection, and
@@ -360,4 +373,17 @@ func capBody(b []byte, max int) []byte {
 	out := make([]byte, max)
 	copy(out, b[:max])
 	return out
+}
+
+// firstCSPReportParam returns the first query-parameter name the response's
+// Content-Security-Policy names inside a report-uri/report-to URL, or "" when
+// there is none. The probe is bounded to ONE parameter: the planner only needs
+// a single header surface to pair with the body payload, and sending more
+// would multiply requests against a policy that most targets do not even have.
+func firstCSPReportParam(cspHeader string) string {
+	params := detection.CSPReportURIParams(cspHeader)
+	if len(params) == 0 {
+		return ""
+	}
+	return params[0]
 }

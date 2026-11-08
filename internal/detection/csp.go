@@ -20,7 +20,10 @@ package detection
 //     never as a substring, so a host such as https://unsafe-inline.example
 //     cannot turn the gate off.
 
-import "bytes"
+import (
+	"bytes"
+	"strings"
+)
 
 // AngularCSPBypassEligible reports whether the official AngularJS CSP bypass
 // should be planned for a response: the response carries a CSP that forbids
@@ -69,6 +72,119 @@ func AngularCSPExpressionValue(marker string) string {
 // evaluates to. The verifier searches the rendered page for it.
 func AngularCSPExpressionResult(marker string) string {
 	return marker + "x"
+}
+
+// CSPReportURIParams returns the query-parameter NAMES carried by the policy's
+// report-uri (or report-to fallback) URIs, in order and de-duplicated.
+//
+// Why this matters: a report-uri is a URL inside a response HEADER, so its
+// query is a second, easily-missed injection surface. A server that copies the
+// request's query into that URI without encoding lets an attacker append
+// directives to the policy itself (";script-src-elem 'unsafe-inline'"), which
+// relaxes the very policy that was supposed to stop the XSS in the body. The
+// helper is deliberately conservative: only report-uri/report-to are inspected,
+// only parameters with a name are returned, and the result is capped.
+func CSPReportURIParams(cspHeader string) []string {
+	return cspReportURIParams(cspHeader, cspMaxReportURIParams)
+}
+
+const cspMaxReportURIParams = 4
+
+func cspReportURIParams(cspHeader string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, raw := range bytes.Split([]byte(cspHeader), []byte(",")) {
+		policy := bytes.TrimSpace(raw)
+		if len(policy) == 0 {
+			continue
+		}
+		dirs := cspDirectives(policy)
+		for _, name := range []string{"report-uri", "report-to"} {
+			for _, uri := range dirs[name] {
+				q := uriQuery(uri)
+				if q == "" {
+					continue
+				}
+				for _, pair := range bytes.Split([]byte(q), []byte("&")) {
+					kv := bytes.SplitN(pair, []byte("="), 2)
+					key := string(bytes.TrimSpace(kv[0]))
+					if key == "" || seen[key] {
+						continue
+					}
+					seen[key] = true
+					out = append(out, key)
+					if len(out) >= limit {
+						return out
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// uriQuery returns the raw query of a URI as it appears in a header value,
+// without the leading '?'. Empty when the URI carries no query.
+func uriQuery(uri string) string {
+	i := strings.IndexByte(uri, '?')
+	if i < 0 || i == len(uri)-1 {
+		return ""
+	}
+	return uri[i+1:]
+}
+
+// CSPDirectiveInjectionTechnique tags the candidate that proves a header-level
+// CSP bypass: a query parameter named inside the policy's own report-uri is
+// reflected into the header, so the injected directive relaxes the policy that
+// then governs the reflected <script> in the same request.
+const CSPDirectiveInjectionTechnique = "csp_directive_injection"
+
+// CSPDirectiveInjectionValue is the value this scanner sends into a
+// report-uri parameter to prove the policy is injectable: it closes the URI's
+// query and adds a directive that permits inline script ELEMENTS. Angular-free
+// and eval-free on purpose — script-src-elem with 'unsafe-inline' is exactly
+// what a reflected <script> needs, and nothing broader.
+func CSPDirectiveInjectionValue() string {
+	return ";script-src-elem 'unsafe-inline'"
+}
+
+// CSPDirectiveInjectionQuery builds the ExtraQuery fragment for a candidate:
+// "<param>=<percent-encoded directive>". The planner stays pure (no net/url),
+// so the encoding is done here with the RFC 3986 unreserved set; every byte of
+// the directive that matters (';', quotes, spaces) is escaped, which is exactly
+// what the server decodes back into policy bytes.
+func CSPDirectiveInjectionQuery(param string) string {
+	return cspPercentEncode(param) + "=" + cspPercentEncode(CSPDirectiveInjectionValue())
+}
+
+func cspPercentEncode(s string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '-', c == '.', c == '_', c == '~':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('%')
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&0x0f])
+		}
+	}
+	return b.String()
+}
+
+// CSPInjectionMarker reports whether cspHeader carries marker (the scan's
+// canary) verbatim, i.e. the parameter that carried it reached the header
+// unencoded. This is the deterministic, server-side half of the CSP-injection
+// proof; the browser half is the script actually running under the relaxed
+// policy.
+func CSPInjectionMarker(cspHeader, marker string) bool {
+	return marker != "" && strings.Contains(cspHeader, marker)
 }
 
 // cspForbidsInlineScript reports whether the header's policy (or, for a
