@@ -28,6 +28,7 @@ import (
 	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/report"
 	"github.com/indago/indago/internal/scan"
+	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/store/memory"
 )
 
@@ -216,6 +217,43 @@ func addJSONEndpoint(t *testing.T, st *memory.Store, q queue.Queue, scanID domai
 	}
 }
 
+// earlyStopCancels counts the canceled jobs that are the XSS early stop's
+// deliberate outcome: candidate/verify work for an injection point that already
+// carries a Confirmed reflected-XSS finding. Those jobs are dropped on purpose
+// (one proven payload per parameter), so their cancellation is not a coverage
+// gap — any other cancellation still is (see waitCompletedWhileProgressing).
+func earlyStopCancels(ctx context.Context, st store.Store, q queue.Queue, scanID domain.ID) int {
+	jobs, err := q.Jobs(ctx, scanID)
+	if err != nil {
+		return 0
+	}
+	findings, err := st.Findings().ListByScan(ctx, scanID)
+	if err != nil {
+		return 0
+	}
+	confirmed := map[domain.ID]bool{}
+	for _, f := range findings {
+		if f.VulnClass == domain.VulnReflectedXSS && f.Verdict == domain.VerdictConfirmed && !f.ParameterID.Empty() {
+			confirmed[f.ParameterID] = true
+		}
+	}
+	explained := 0
+	for _, j := range jobs {
+		if j.State != domain.JobCanceled || j.Target.InjectionPointID.Empty() {
+			continue
+		}
+		if j.Type != domain.JobTest && j.Type != domain.JobVerify {
+			continue
+		}
+		ip, err := st.InjectionPoints().Get(ctx, j.Target.InjectionPointID)
+		if err != nil || ip == nil || !confirmed[ip.ParameterID] {
+			continue
+		}
+		explained++
+	}
+	return explained
+}
+
 // --- the main end-to-end test ---
 
 func TestE2E_FullPipelineAgainstCorpus(t *testing.T) {
@@ -255,7 +293,8 @@ func TestE2E_FullPipelineAgainstCorpus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	done := waitCompletedWhileProgressing(t, func() (*scan.Status, error) { return ctrl.Status(ctx, sc.ID) }, corpusScanMaxDuration, corpusScanStallWindow)
+	done := waitCompletedWhileProgressing(t, func() (*scan.Status, error) { return ctrl.Status(ctx, sc.ID) }, corpusScanMaxDuration, corpusScanStallWindow,
+		waitOpts{explainCanceled: func() int { return earlyStopCancels(ctx, st, q, sc.ID) }})
 
 	// --- scope enforcement: the out-of-scope resource was never requested ---
 	if c.hitCount("/outside/secret") != 0 {
@@ -409,7 +448,8 @@ func TestE2E_StateChangingAllowedSendsPostCandidates(t *testing.T) {
 	if err := ctrl.Start(ctx, sc.ID); err != nil {
 		t.Fatal(err)
 	}
-	done := waitCompletedWhileProgressing(t, func() (*scan.Status, error) { return ctrl.Status(ctx, sc.ID) }, corpusScanMaxDuration, corpusScanStallWindow)
+	done := waitCompletedWhileProgressing(t, func() (*scan.Status, error) { return ctrl.Status(ctx, sc.ID) }, corpusScanMaxDuration, corpusScanStallWindow,
+		waitOpts{explainCanceled: func() int { return earlyStopCancels(ctx, st, q, sc.ID) }})
 	t.Logf("findings: breakdown=%+v", done.Findings)
 
 	findings, err := st.Findings().ListByScan(ctx, sc.ID)
@@ -508,7 +548,8 @@ func TestE2E_AuthenticatedScanFlow(t *testing.T) {
 	if err := ctrl.Start(ctx, sc.ID); err != nil {
 		t.Fatal(err)
 	}
-	done := waitCompletedWhileProgressing(t, func() (*scan.Status, error) { return ctrl.Status(ctx, sc.ID) }, corpusScanMaxDuration, corpusScanStallWindow)
+	done := waitCompletedWhileProgressing(t, func() (*scan.Status, error) { return ctrl.Status(ctx, sc.ID) }, corpusScanMaxDuration, corpusScanStallWindow,
+		waitOpts{explainCanceled: func() int { return earlyStopCancels(ctx, st, q, sc.ID) }})
 
 	if c.authedHits.Load() == 0 {
 		t.Fatal("the HTTP-level executor never presented the session cookie to /auth")
