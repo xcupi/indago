@@ -561,6 +561,7 @@ export default function Scans() {
                   <TableHead>Endpoints</TableHead>
                   <TableHead>Confirmed</TableHead>
                   <TableHead>Created</TableHead>
+                  <TableHead />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -581,6 +582,26 @@ export default function Scans() {
                       <TableCell className="tabular-nums">{s.stats?.endpoints_discovered ?? 0}</TableCell>
                       <TableCell className="tabular-nums">{s.stats?.findings_confirmed ?? 0}</TableCell>
                       <TableCell className="text-xs text-muted-foreground">{formatTime(s.created_at)}</TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-red-600 dark:text-red-400"
+                          disabled={s.state === "running" || s.state === "canceling"}
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            if (!confirm(`Delete scan ${shortId(s.id)}? Its evidence and reports are removed too.`)) return;
+                            try {
+                              await api(`/api/scans/${s.id}`, { method: "DELETE" });
+                              refreshAll();
+                            } catch (err) {
+                              alert((err as Error).message);
+                            }
+                          }}
+                        >
+                          delete
+                        </Button>
+                      </TableCell>
                     </TableRow>
                   ))}
               </TableBody>

@@ -169,6 +169,7 @@ func (r testCaseRepo) ListByScan(_ context.Context, sid domain.ID) ([]*domain.Te
 	return r.t.list(func(tc *domain.TestCase) bool { return tc.ScanID == sid }), nil
 }
 func (r testCaseRepo) Update(_ context.Context, tc *domain.TestCase) error { return r.t.update(tc) }
+func (r testCaseRepo) Delete(_ context.Context, id domain.ID) error        { return r.t.remove(id) }
 
 // --- Finding ---
 
@@ -242,3 +243,4 @@ func (r aiTaskRepo) ListByScan(_ context.Context, sid domain.ID) ([]*domain.AITa
 	return r.t.list(func(t *domain.AITask) bool { return t.ScanID == sid }), nil
 }
 func (r aiTaskRepo) Update(_ context.Context, t *domain.AITask) error { return r.t.update(t) }
+func (r aiTaskRepo) Delete(_ context.Context, id domain.ID) error     { return r.t.remove(id) }

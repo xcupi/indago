@@ -133,6 +133,7 @@ type TestCaseRepo interface {
 	Get(ctx context.Context, id domain.ID) (*domain.TestCase, error)
 	ListByScan(ctx context.Context, scanID domain.ID) ([]*domain.TestCase, error)
 	Update(ctx context.Context, tc *domain.TestCase) error
+	Delete(ctx context.Context, id domain.ID) error
 }
 
 // FindingRepo persists findings.
@@ -177,4 +178,5 @@ type AITaskRepo interface {
 	Get(ctx context.Context, id domain.ID) (*domain.AITask, error)
 	ListByScan(ctx context.Context, scanID domain.ID) ([]*domain.AITask, error)
 	Update(ctx context.Context, t *domain.AITask) error
+	Delete(ctx context.Context, id domain.ID) error
 }

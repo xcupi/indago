@@ -53,8 +53,8 @@ export default function Dashboard() {
         />
       </div>
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
+      <div className="mt-4 grid min-w-0 gap-4 lg:grid-cols-3">
+        <Card className="min-w-0 lg:col-span-2">
           <CardHeader className="flex-row items-center justify-between">
             <CardTitle className="flex items-center gap-2">
               <ScanLine className="size-4 text-emerald-700 dark:text-emerald-400" /> Recent scans

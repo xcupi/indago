@@ -100,6 +100,7 @@ type Client struct {
 
 type cacheEntry struct {
 	programs  []Program
+	total     int
 	fetchedAt time.Time
 }
 
@@ -119,7 +120,7 @@ func NewClient(base string, token func() string) *Client {
 // ListPrograms returns the program list. refresh=false serves a cached result
 // for up to 10 minutes: the UI has an explicit "Load" button, and a page that
 // re-renders must not hammer the platform.
-func (c *Client) ListPrograms(ctx context.Context, q Query, refresh bool) ([]Program, bool, error) {
+func (c *Client) ListPrograms(ctx context.Context, q Query, refresh bool) ([]Program, int, bool, error) {
 	if q.Page <= 0 {
 		q.Page = 1
 	}
@@ -138,7 +139,7 @@ func (c *Client) ListPrograms(ctx context.Context, q Query, refresh bool) ([]Pro
 		e, ok := c.cache[key]
 		c.mu.Unlock()
 		if ok && time.Since(e.fetchedAt) < c.ttl {
-			return e.programs, true, nil
+			return e.programs, e.total, true, nil
 		}
 	}
 
@@ -156,15 +157,18 @@ func (c *Client) ListPrograms(ctx context.Context, q Query, refresh bool) ([]Pro
 	}
 
 	var out struct {
-		Items []Program `json:"items"`
+		Items      []Program `json:"items"`
+		Pagination struct {
+			NbResults int `json:"nb_results"`
+		} `json:"pagination"`
 	}
 	if err := c.get(ctx, "/programs?"+params.Encode(), &out); err != nil {
-		return nil, false, err
+		return nil, 0, false, err
 	}
 	c.mu.Lock()
-	c.cache[key] = cacheEntry{programs: out.Items, fetchedAt: time.Now()}
+	c.cache[key] = cacheEntry{programs: out.Items, total: out.Pagination.NbResults, fetchedAt: time.Now()}
 	c.mu.Unlock()
-	return out.Items, false, nil
+	return out.Items, out.Pagination.NbResults, false, nil
 }
 
 // Detail returns one program, including its rules text.

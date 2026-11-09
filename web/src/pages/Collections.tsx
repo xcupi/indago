@@ -74,10 +74,10 @@ function FilterBar({
   return (
     <Card className="mb-4">
       <CardContent className="flex flex-wrap items-center gap-3 p-3">
-        <label className="flex items-center gap-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+        <label className="flex min-w-0 max-w-full items-center gap-2 text-[11px] uppercase tracking-wide text-muted-foreground">
           Project
           <select
-            className="h-8 rounded-md border border-border bg-background px-2 text-xs normal-case"
+            className="h-8 max-w-full rounded-md border border-border bg-background px-2 text-xs normal-case"
             value={project}
             onChange={(e) => {
               setProject(e.target.value);
@@ -92,10 +92,10 @@ function FilterBar({
             ))}
           </select>
         </label>
-        <label className="flex items-center gap-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+        <label className="flex min-w-0 max-w-full items-center gap-2 text-[11px] uppercase tracking-wide text-muted-foreground">
           Scan
           <select
-            className="h-8 min-w-[16rem] rounded-md border border-border bg-background px-2 text-xs normal-case"
+            className="h-8 w-full max-w-full rounded-md border border-border bg-background px-2 text-xs normal-case"
             value={scan}
             onChange={(e) => setScan(e.target.value)}
           >

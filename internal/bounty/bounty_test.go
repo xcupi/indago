@@ -26,8 +26,8 @@ func TestListProgramsFiltersAndCaches(t *testing.T) {
 
 	c := NewClient(srv.URL, func() string { return "" })
 	q := Query{Search: "acme"}
-	items, cached, err := c.ListPrograms(context.Background(), q, false)
-	if err != nil || len(items) != 1 || cached {
+	items, total, cached, err := c.ListPrograms(context.Background(), q, false)
+	if err != nil || len(items) != 1 || cached || total != 1 {
 		t.Fatalf("first call: items=%v cached=%v err=%v", items, cached, err)
 	}
 	for _, want := range []string{"filter%5Btype%5D%5B%5D=bug-bounty", "filter%5BscopeType%5D%5B%5D=web-application", "filter%5Bsearch%5D=acme"} {
@@ -35,13 +35,13 @@ func TestListProgramsFiltersAndCaches(t *testing.T) {
 			t.Fatalf("query %q missing %q", gotURL, want)
 		}
 	}
-	if _, cached, _ = c.ListPrograms(context.Background(), q, false); !cached {
+	if _, _, cached, _ = c.ListPrograms(context.Background(), q, false); !cached {
 		t.Fatal("second call should hit the cache")
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("server calls = %d, want 1", calls.Load())
 	}
-	if _, cached, _ = c.ListPrograms(context.Background(), q, true); cached {
+	if _, _, cached, _ = c.ListPrograms(context.Background(), q, true); cached {
 		t.Fatal("refresh must bypass the cache")
 	}
 	if calls.Load() != 2 {

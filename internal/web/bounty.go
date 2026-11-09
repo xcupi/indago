@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,15 +133,18 @@ func (s *Server) handleBountyPrograms(w http.ResponseWriter, r *http.Request) {
 		Search:     strings.TrimSpace(r.URL.Query().Get("search")),
 		ScopeTypes: splitCSV(r.URL.Query().Get("scope_type")),
 		Types:      splitCSV(r.URL.Query().Get("type")),
+		Page:       atoiDefault(r.URL.Query().Get("page"), 1),
 	}
 	refresh := r.URL.Query().Get("refresh") == "1"
-	items, cached, err := s.bountyClient.ListPrograms(r.Context(), q, refresh)
+	items, total, cached, err := s.bountyClient.ListPrograms(r.Context(), q, refresh)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "listing programs failed: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"provider": "yeswehack", "items": items, "cached": cached, "count": len(items),
+		"total": total, "page": q.Page, "per_page": 50,
+		"has_more":   q.Page*50 < total,
 		"fetched_at": time.Now().Format(time.RFC3339),
 	})
 }
@@ -378,4 +382,11 @@ func splitCSV(v string) []string {
 		}
 	}
 	return out
+}
+
+func atoiDefault(v string, def int) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+		return n
+	}
+	return def
 }

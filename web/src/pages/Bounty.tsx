@@ -59,7 +59,11 @@ export default function Bounty() {
 
   const [search, setSearch] = useState("");
   const [programs, setPrograms] = useState<Program[] | null>(null);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [cached, setCached] = useState(false);
+  const [showToken, setShowToken] = useState(false);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
@@ -94,17 +98,22 @@ export default function Bounty() {
     }
   }
 
-  async function load(refresh: boolean) {
+  async function load(refresh: boolean, nextPage = page) {
     setLoading(true);
     setErr("");
     setImported(null);
     try {
-      const q = new URLSearchParams({ type: "bug-bounty", scope_type: "web-application" });
+      const q = new URLSearchParams({ type: "bug-bounty", scope_type: "web-application", page: String(nextPage) });
       if (search.trim()) q.set("search", search.trim());
       if (refresh) q.set("refresh", "1");
-      const res = await api<{ items: Program[]; cached: boolean }>(`/api/bounty/programs?${q.toString()}`);
+      const res = await api<{ items: Program[]; cached: boolean; total: number; has_more: boolean; page: number }>(
+        `/api/bounty/programs?${q.toString()}`,
+      );
       setPrograms(res.items);
       setCached(res.cached);
+      setTotal(res.total);
+      setHasMore(res.has_more);
+      setPage(res.page);
     } catch (e) {
       setErr((e as Error).message);
       setPrograms([]);
@@ -171,6 +180,17 @@ export default function Bounty() {
                   ? `Connected with a ${ywh?.credential === "session" ? "hunter session token" : "personal access token"}${ywh?.expires_at ? `, valid until ${ywh.expires_at}` : ""}. Scopes, report templates and drafts are read from the API.`
                   : "Import works without connecting (scopes come from the public program page). To use the API as a hunter, log in to yeswehack.com, then copy the session token: DevTools console → copy(localStorage.access_token) → paste below. Managers can paste a personal access token instead."}
               </p>
+              {configured && !showToken ? (
+                <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                  <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                    connected · {ywh?.credential === "session" ? "hunter session" : "personal access token"}
+                    {ywh?.expires_at ? ` · expires ${ywh.expires_at}` : ""}
+                  </span>
+                  <Button size="sm" variant="outline" onClick={() => setShowToken(true)}>
+                    Replace credential
+                  </Button>
+                </div>
+              ) : (
               <div className="flex flex-wrap items-end gap-2">
                 <Field label="Session token or personal access token" className="min-w-[280px] flex-1">
                   <Input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="paste token" />
@@ -179,6 +199,7 @@ export default function Bounty() {
                   {saving ? <Loader2 className="size-3.5 animate-spin" /> : null} Connect
                 </Button>
               </div>
+              )}
               {tokenMsg ? <p className="text-[11px] text-emerald-700 dark:text-emerald-400">{tokenMsg}</p> : null}
             </>
           )}
@@ -204,7 +225,8 @@ export default function Bounty() {
             </Button>
           </div>
           <p className="text-[11px] text-muted-foreground">
-            Bounty programs filtered to <span className="mono">web-application</span> scope ({programs === null ? "not loaded yet" : `${programs.length} shown${cached ? ", cached" : ""}`}).
+            Bounty programs filtered to <span className="mono">web-application</span> scope (
+            {programs === null ? "not loaded yet" : `page ${page}, ${programs.length} of ${total || programs.length}${cached ? ", cached" : ""}`}).
             Nothing is fetched until you press Load.
           </p>
 
@@ -261,6 +283,17 @@ export default function Bounty() {
             </div>
           )}
 
+          {programs !== null ? (
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="outline" disabled={loading || page <= 1} onClick={() => load(false, page - 1)}>
+                Previous
+              </Button>
+              <Button size="sm" variant="outline" disabled={loading || !hasMore} onClick={() => load(false, page + 1)}>
+                Next
+              </Button>
+            </div>
+          ) : null}
+
           <div className="flex flex-wrap items-center gap-2">
             <Button onClick={runImport} disabled={importing || pickedCount === 0}>
               {importing ? <Loader2 className="size-3.5 animate-spin" /> : null} Import {pickedCount || ""} selected
@@ -292,7 +325,7 @@ export default function Bounty() {
               {detail.rules ? (
                 <details>
                   <summary className="cursor-pointer text-muted-foreground">Rules (from the program)</summary>
-                  <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap text-[10px] text-muted-foreground">{detail.rules.slice(0, 4000)}</pre>
+                  <pre className="mt-1 max-h-72 overflow-y-auto whitespace-pre-wrap text-[10px] text-muted-foreground">{detail.rules}</pre>
                 </details>
               ) : null}
               <p className="text-muted-foreground">Import creates a project whose include list is the web-application assets above.</p>

@@ -117,3 +117,21 @@ design, not gaps): `idor_candidates`, `idor_enumerate(_n)`,
 
 Operational endpoints with no screen by design: `GET /healthz`, `GET /metrics`
 (Prometheus scrape, not an operator screen).
+
+## UX pass (2026-11)
+
+- Scope is manual-first: every project has an editable scope (hosts, path
+  prefixes, subdomains) on its page. Importing a platform program fills the
+  same fields; it is a shortcut, not a requirement.
+- Scan dialog shows the selected project's scope and warns when the target host
+  falls outside it, with a link to edit the scope.
+- Bug bounty: explicit Load, ten-minute cache, pagination (Previous/Next with
+  `page`/`total`/`has_more`), scope+rules preview per program without a
+  credential, connected-state badge with Replace credential, duplicate imports
+  skipped, path-scoped assets honoured.
+- Destructive actions: delete scan (cascades findings, evidence rows and blobs,
+  reports and files, AI tasks, test cases, jobs, injection points, parameters,
+  endpoints), delete target, delete project (only when no scans remain), edit
+  target. Running scans refuse deletion.
+- Mobile: tables scroll inside their card, filter selects no longer force the
+  page wider than the viewport; the sidebar collapses below `md`.

@@ -111,6 +111,21 @@ export default function ProjectDetail({ id }: { id: string }) {
             >
               Open scans
             </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={async () => {
+                if (!confirm("Delete this project? Its scans must be deleted first.")) return;
+                try {
+                  await api(`/api/projects/${id}`, { method: "DELETE" });
+                  navigate("/projects");
+                } catch (e) {
+                  alert((e as Error).message);
+                }
+              }}
+            >
+              Delete project
+            </Button>
           </div>
         }
       />
@@ -158,13 +173,48 @@ export default function ProjectDetail({ id }: { id: string }) {
                       <TableCell className="text-foreground">{t.name}</TableCell>
                       <TableCell className="mono text-[11px] text-muted-foreground">{t.base_url}</TableCell>
                       <TableCell className="text-right">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => navigate(`/scans?target=${t.id}`)}
-                        >
-                          Scan →
-                        </Button>
+                        <div className="flex justify-end gap-1">
+                          <Button size="sm" variant="ghost" onClick={() => navigate(`/scans?target=${t.id}`)}>
+                            Scan →
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={async () => {
+                              const name = prompt("Target name", t.name);
+                              if (name === null) return;
+                              const base = prompt("Base URL", t.base_url);
+                              if (base === null) return;
+                              try {
+                                await api(`/api/projects/${id}/targets/${t.id}`, {
+                                  method: "PUT",
+                                  body: { name, base_url: base },
+                                });
+                                refreshAll();
+                              } catch (e) {
+                                alert((e as Error).message);
+                              }
+                            }}
+                          >
+                            edit
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-red-600 dark:text-red-400"
+                            onClick={async () => {
+                              if (!confirm(`Delete target ${t.name}?`)) return;
+                              try {
+                                await api(`/api/projects/${id}/targets/${t.id}`, { method: "DELETE" });
+                                refreshAll();
+                              } catch (e) {
+                                alert((e as Error).message);
+                              }
+                            }}
+                          >
+                            delete
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}

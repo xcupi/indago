@@ -44,7 +44,7 @@ func TestClaudeIsAListedProvider(t *testing.T) {
 	if !ok {
 		t.Fatal("claude is not a known provider")
 	}
-	if def.Label != "Claude (Anthropic)" || !def.RequiresKey || def.DefaultBaseURL == "" {
+	if def.Label != "Claude (Anthropic)" || def.RequiresKey || def.DefaultBaseURL == "" {
 		t.Fatalf("definition = %+v", def)
 	}
 }

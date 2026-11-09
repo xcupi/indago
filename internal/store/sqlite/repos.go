@@ -966,6 +966,16 @@ func (r *aiTaskRepo) Update(ctx context.Context, t *domain.AITask) error {
 	return affected(res, err)
 }
 
+func (r aiTaskRepo) Delete(ctx context.Context, id domain.ID) error {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM ai_tasks WHERE id=?`, id)
+	return affected(res, err)
+}
+
+func (r testCaseRepo) Delete(ctx context.Context, id domain.ID) error {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM test_cases WHERE id=?`, id)
+	return affected(res, err)
+}
+
 // affected maps an Exec result to ErrNotFound when no rows changed.
 func affected(res sql.Result, err error) error {
 	if err != nil {

@@ -88,7 +88,9 @@ var providerList = []Provider{
 		ID:             ProviderClaude,
 		Label:          "Claude (Anthropic)",
 		DefaultBaseURL: "https://api.anthropic.com/v1",
-		RequiresKey:    true,
+		// An OAuth session is a valid credential, so a key is not required to
+		// save the provider; the gateway falls back to it.
+		RequiresKey: false,
 	},
 	{
 		ID:             ProviderOpenAI,
