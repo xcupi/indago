@@ -51,6 +51,7 @@ export default function Scans() {
     maxCandidates: 0,
     candidateProfile: "standard",
     evasion: false,
+    library: false,
     rawQuery: "off",
     recon: "off",
     proxyPool: "",
@@ -97,6 +98,7 @@ export default function Scans() {
         max_endpoints: form.maxEndpoints,
         candidate_profile: form.candidateProfile,
         enable_evasion: form.evasion,
+        enable_xss_library: form.library,
         raw_query_injection: form.rawQuery,
         recon_level: form.recon,
       };
@@ -374,6 +376,14 @@ export default function Scans() {
                   <Switch checked={form.evasion} onCheckedChange={(v) => setForm({ ...form, evasion: v })} />
                   Eager evasion pack
                 </label>
+                <label className="flex items-center gap-2 text-xs text-foreground">
+                  <Switch checked={form.library} onCheckedChange={(v) => setForm({ ...form, library: v })} />
+                  XSS payload library (PortSwigger families)
+                </label>
+                <p className="text-[10px] text-muted-foreground">
+                  Adds the cheat-sheet families the canonical planner does not carry. Only vectors whose context and
+                  required characters match the reflection are sent; the profile still caps the total.
+                </p>
                 <Field label="Max candidates" hint="0 = profile cap.">
                   <Input
                     type="number"

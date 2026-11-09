@@ -179,6 +179,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/llm/test", s.handleTestLLM)
 	mux.HandleFunc("POST /api/llm/models", s.handleListLLMModels)
 	mux.HandleFunc("GET /api/llm/providers", s.handleListLLMProviders)
+	mux.HandleFunc("GET /api/payload-library", s.handleListPayloadLibrary)
 	mux.HandleFunc("GET /api/llm/chatgpt/session", s.handleChatGPTStatus)
 	mux.HandleFunc("POST /api/llm/chatgpt/login", s.handleChatGPTLoginStart)
 	mux.HandleFunc("POST /api/llm/chatgpt/login/poll", s.handleChatGPTLoginPoll)

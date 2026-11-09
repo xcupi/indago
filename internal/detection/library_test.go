@@ -30,27 +30,78 @@ func TestLibraryVectorsAreBenignMarkers(t *testing.T) {
 }
 
 func TestLibraryTemplatesRespectContext(t *testing.T) {
-	// details/ontoggle is an element-content vector: it must not be planned at
-	// a JS-string or comment site.
-	js := libraryTemplatesFor(ContextAnalysis{Context: CtxJSString}, "M")
-	if len(js) != 0 {
-		t.Fatalf("library planned %d vectors at a JS string site, want 0", len(js))
+	// A vector must only be planned at a context it declares. An element-content
+	// family at a JS-string site wastes a request on bytes that cannot parse.
+	for _, want := range []Context{CtxHTMLText, CtxHTMLAttrValue, CtxJSString, CtxJSCode, CtxURL, CtxHTMLComment} {
+		var declared int
+		for _, v := range Library {
+			if vectorFitsContext(v, want) {
+				declared++
+			}
+		}
+		got := libraryTemplatesFor(ContextAnalysis{Context: want}, "M")
+		if len(got) != declared {
+			t.Fatalf("context %s planned %d vectors, want %d", want, len(got), declared)
+		}
+		for _, tpl := range got {
+			if tpl.trigger != TriggerLoad && tpl.trigger != TriggerInteraction {
+				t.Fatalf("template %q has trigger %q", tpl.value, tpl.trigger)
+			}
+		}
 	}
-	text := libraryTemplatesFor(ContextAnalysis{Context: CtxHTMLText}, "M")
-	if len(text) != len(Library) {
-		t.Fatalf("library planned %d vectors at element content, want all %d", len(text), len(Library))
+
+	// A context no family declares must produce nothing (never a blind send).
+	if got := libraryTemplatesFor(ContextAnalysis{Context: CtxCSS}, "M"); len(got) != 0 {
+		t.Fatalf("CSS site planned %d vectors, want 0", len(got))
 	}
+	// Element content is where most families live; the video/source family in
+	// particular must still be reachable there.
 	found := false
-	for _, tpl := range text {
+	for _, tpl := range libraryTemplatesFor(ContextAnalysis{Context: CtxHTMLText}, "M") {
 		if strings.Contains(tpl.value, "<video><source onerror=M>") {
 			found = true
-		}
-		if tpl.trigger != TriggerLoad && tpl.trigger != TriggerInteraction {
-			t.Fatalf("template %q has trigger %q", tpl.value, tpl.trigger)
 		}
 	}
 	if !found {
 		t.Fatal("the video/source family was not planned at element content")
+	}
+	// JS-string sites get string breakouts and the script-element breakout,
+	// not the element families.
+	for _, tpl := range libraryTemplatesFor(ContextAnalysis{Context: CtxJSString}, "M") {
+		if strings.Contains(tpl.value, "<video") || strings.Contains(tpl.value, "<object") {
+			t.Fatalf("element family planned at a JS string site: %q", tpl.value)
+		}
+	}
+}
+
+// Needs must be honest: a family that claims a character it does not use is
+// dropped for no reason, and one that uses a character it does not claim is
+// sent even after the target proves it encodes that character.
+func TestLibraryNeedsMatchThePayload(t *testing.T) {
+	for _, v := range Library {
+		payload := v.Build("MARKER123")
+		for _, ch := range v.Needs {
+			if !strings.ContainsRune(payload, ch) {
+				t.Fatalf("%s: needs %q but payload %q never uses it", v.ID, string(ch), payload)
+			}
+		}
+	}
+}
+
+// The library is a detection probe set, not a weapon: no callbacks, no cookie
+// theft, no dialog functions.
+func TestLibraryVectorsAreNotWeaponised(t *testing.T) {
+	for _, v := range Library {
+		payload := strings.ToLower(v.Build("MARKER123"))
+		for _, bad := range []string{"http://", "https://", "//", "document.cookie", "fetch(", "xmlhttprequest", "sendbeacon", "eval("} {
+			// "//" is allowed only as the comment terminator of a JS breakout.
+			if bad == "//" && strings.HasSuffix(payload, "//") && strings.Count(payload, "//") == 1 {
+				continue
+			}
+			if strings.Contains(payload, bad) {
+				t.Fatalf("%s: payload looks weaponised, found %q in %q", v.ID, bad, payload)
+			}
+		}
 	}
 }
 
