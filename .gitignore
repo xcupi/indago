@@ -35,3 +35,4 @@ __pycache__/
 # SPA tooling (dependencies are installed with `make ui-install`)
 /web/node_modules/
 /web/dist/
+*.tsbuildinfo

@@ -607,9 +607,16 @@ export function IDORPanel({ scanId }: { scanId: string }) {
 
 /* Tests ------------------------------------------------------------------- */
 
+interface TestsResponse {
+  total: number;
+  limit: number;
+  offset: number;
+  items: TestRow[];
+}
+
 export function TestsPanel({ scanId }: { scanId: string }) {
-  const tests = useApi<TestRow[]>(`/api/scans/${scanId}/tests`, [], 5000);
-  const rows = tests.data ?? [];
+  const tests = useApi<TestsResponse>(`/api/scans/${scanId}/tests?limit=100`, [], 5000);
+  const rows = tests.data?.items ?? [];
   const [filter, setFilter] = useState("");
   const visible = useMemo(() => rows.filter((t) => !filter || t.vuln_class === filter), [rows, filter]);
   const classes = useMemo(() => Array.from(new Set(rows.map((t) => t.vuln_class))).sort(), [rows]);
@@ -618,11 +625,11 @@ export function TestsPanel({ scanId }: { scanId: string }) {
   if (!rows.length) return <Empty>No test cases recorded yet.</Empty>;
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
         <button
           onClick={() => setFilter("")}
           className={`rounded-md border px-2.5 py-1 text-[11px] ${
-            filter === "" ? "border-emerald-200 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400" : "border-border text-muted-foreground"
+            filter === "" ? "border-emerald-700 bg-emerald-950/50 text-emerald-300" : "border-zinc-800 text-zinc-400"
           }`}
         >
           all ({rows.length})
@@ -632,12 +639,17 @@ export function TestsPanel({ scanId }: { scanId: string }) {
             key={c}
             onClick={() => setFilter(c)}
             className={`rounded-md border px-2.5 py-1 text-[11px] ${
-              filter === c ? "border-emerald-200 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400" : "border-border text-muted-foreground"
+              filter === c ? "border-emerald-700 bg-emerald-950/50 text-emerald-300" : "border-zinc-800 text-zinc-400"
             }`}
           >
             {c} ({rows.filter((t) => t.vuln_class === c).length})
           </button>
         ))}
+        {tests.data && tests.data.total > rows.length ? (
+          <span className="text-[11px] text-zinc-500">
+            showing {rows.length} of {tests.data.total}
+          </span>
+        ) : null}
       </div>
       <Card>
         <CardContent className="p-0">

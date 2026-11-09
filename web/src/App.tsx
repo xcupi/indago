@@ -1,5 +1,6 @@
 import { TooltipProvider } from "@/components/ui/controls";
 import Layout from "@/components/Layout";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import Dashboard from "@/pages/Dashboard";
 import Projects from "@/pages/Projects";
 import ProjectDetail from "@/pages/ProjectDetail";
@@ -40,7 +41,9 @@ export default function App() {
 
   return (
     <TooltipProvider>
-      <Layout route={route}>{page}</Layout>
+      <Layout route={route}>
+        <ErrorBoundary key={route.join("/")}>{page}</ErrorBoundary>
+      </Layout>
     </TooltipProvider>
   );
 }
