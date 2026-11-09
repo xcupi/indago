@@ -47,6 +47,8 @@ claude, anthropic, openrouter, ollama, vllm, openai, custom, chatgpt.
 The subscription route is stricter than the API-key route, and the details are
 not optional:
 
+- The OAuth callback is `https://platform.claude.com/oauth/code/callback`
+  (the old console.anthropic.com path is rejected at authorize time).
 - Token refresh goes to `https://platform.claude.com/v1/oauth/token` (the
   console host is a fallback) with `User-Agent: axios/1.7.9`. Browser-like and
   `claude-code/` user agents are rejected at this endpoint.

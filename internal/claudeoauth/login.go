@@ -37,8 +37,11 @@ const (
 	// a fallback. Both reject requests whose User-Agent looks like a browser
 	// or like claude-code, so the exchange sends the bare axios UA the real
 	// CLI uses.
-	TokenURL    = "https://platform.claude.com/v1/oauth/token"
-	RedirectURI = "https://console.anthropic.com/oauth/code/callback"
+	TokenURL = "https://platform.claude.com/v1/oauth/token"
+	// Anthropic registers the callback on platform.claude.com. The old
+	// console.anthropic.com path is rejected at authorize time with
+	// "Authorization failed — Redirect URI is not supported by client".
+	RedirectURI = "https://platform.claude.com/oauth/code/callback"
 	Scope       = "org:create_api_key user:profile user:inference"
 	// Beta headers Claude Code sends with an OAuth token.
 	BetaHeader = "oauth-2025-04-20,claude-code-20250219"
