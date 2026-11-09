@@ -145,6 +145,16 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	endpoints, err := s.store.Endpoints().ListByScan(r.Context(), scanID)
+	if err != nil {
+		s.writeInternalError(w, "list endpoints", err)
+		return
+	}
+	endpointURLs := make(map[domain.ID]string, len(endpoints))
+	for _, e := range endpoints {
+		endpointURLs[e.ID] = e.URL
+	}
+
 	now := time.Now()
 	var aiSummary string
 	if req.AISummary {
@@ -163,6 +173,7 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		Completeness: coverage,
 		AISummary:    aiSummary,
 		Template:     tmpl,
+		Endpoints:    endpointURLs,
 	}
 	if format == domain.ReportPDF {
 		// Render the chosen template as HTML, then print it. The HTML is

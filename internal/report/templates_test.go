@@ -114,14 +114,38 @@ func TestDeliverableHTMLIsPrintReadyAndEscaped(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := b.String()
-	if !strings.Contains(out, "@page { size: A4") {
-		t.Fatal("HTML should carry print page rules for the PDF renderer")
+	for _, want := range []string{
+		"@page {", "size: A4", `class="cover"`, `class="kpis"`,
+		`class="contents"`, "counter(page)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("HTML missing %q (print layout)", want)
+		}
 	}
 	if strings.Contains(out, "<script>alert(1)</script>") {
 		t.Fatal("project name must be escaped")
 	}
 	if !strings.Contains(out, "&lt;script&gt;alert(1)&lt;/script&gt;") {
 		t.Fatal("escaped project name missing")
+	}
+}
+
+// Severity and verdict cells become pills, but a sentence that merely contains
+// the word must not: only a cell whose whole value is the rating is styled.
+func TestSeverityCellsBecomePillsOnlyWhenExact(t *testing.T) {
+	for _, tc := range []struct {
+		cell string
+		want string
+	}{
+		{"HIGH", "pill sev-high"},
+		{"critical", "pill sev-critical"},
+		{"Confirmed", "pill verdict-confirmed"},
+		{"high risk, needs follow-up", ""},
+		{"", ""},
+	} {
+		if got := pillClass(tc.cell); got != tc.want {
+			t.Fatalf("pillClass(%q) = %q, want %q", tc.cell, got, tc.want)
+		}
 	}
 }
 

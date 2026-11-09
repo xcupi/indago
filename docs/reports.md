@@ -14,7 +14,23 @@ never read as "the target is clean".
 | `html` | the selected template as one self-contained page | viewing in a browser |
 | `pdf` | the `html` page printed by headless Chromium | client delivery, bounty submissions |
 
-## Templates
+## Layout
+
+`pentest` and `bug_bounty` share one print stylesheet (inline, no remote
+assets) and render the same way in the browser and in the PDF:
+
+- a cover with the report kind, the subject, four KPI cards (confirmed count,
+  high/critical count, coverage, in-scope seeds) and the metadata grid;
+- a numbered contents page;
+- numbered sections with a single accent colour, severity/verdict cells as
+  coloured pills, evidence as small tables, monospace only for identifiers and
+  URLs;
+- A4 page rules with a running footer (`INDAGO · CONFIDENTIAL`, page N / total);
+  only the appendices start a new page, and short tables are kept whole so no
+  page ends up with a single stranded row.
+
+Page numbers in the contents list are deliberately absent: the print engine
+has no `target-counter()`, and a wrong number is worse than none.
 
 Set `template` on `POST /api/scans/{id}/reports`. JSON ignores it; markdown,
 html and pdf honour it.

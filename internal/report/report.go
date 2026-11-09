@@ -19,6 +19,10 @@ type Data struct {
 	Findings    []*domain.Finding
 	GeneratedAt time.Time
 	ToolVersion string
+	// Endpoints maps an endpoint id to its URL, so a deliverable can name the
+	// exact endpoint a finding belongs to (the verified request usually carries
+	// the injected query string, which is the same on every row).
+	Endpoints map[domain.ID]string
 	// Evidence is the metadata (never content) of the evidence the findings
 	// reference. Optional: without it a report lists evidence IDs only and
 	// cannot label roles or the verified candidate's artifacts.

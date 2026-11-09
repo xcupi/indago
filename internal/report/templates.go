@@ -5,6 +5,7 @@ package report
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -197,11 +198,18 @@ func buildPentestDoc(data Data) doc {
 	coverage := coverageFor(data)
 	view := NewFindingView
 	counts := severityCounts(findings)
+	seedLabel := seedLabelFor(len(scopeSeeds(data)))
 
 	d := doc{
 		Title:    fmt.Sprintf("Penetration Test Report — %s", nonEmpty(data.Project.Name, string(data.Project.ID))),
 		Subtitle: nonEmpty(data.Scan.Name, string(data.Scan.ID)),
 		Meta:     docPreamble(data),
+		Highlights: [][2]string{
+			{"Confirmed findings", fmt.Sprintf("%d", len(confirmedOnly(findings)))},
+			{"High / critical", fmt.Sprintf("%d", counts["high"]+counts["critical"])},
+			{"Coverage", coverageShort(coverage)},
+			{seedLabel, fmt.Sprintf("%d", len(scopeSeeds(data)))},
+		},
 	}
 
 	d.Sections = append(d.Sections, section("Statement of Confidentiality",
@@ -228,17 +236,16 @@ func buildPentestDoc(data Data) doc {
 	}
 	d.Sections = append(d.Sections, section("Engagement & Scope", list(scope...)))
 
-	exec := []string{
-		fmt.Sprintf("%d confirmed finding(s): %s.", len(confirmedOnly(findings)), severityLine(counts)),
-	}
-	if len(findings) > 0 {
-		for _, f := range findings {
-			if f.Verdict != domain.VerdictConfirmed {
-				continue
-			}
-			exec = append(exec, fmt.Sprintf("%s — %s (%s)", f.Title, strings.ToUpper(string(f.Severity)), intelFor(f.VulnClass).CWE))
+	execHeadline := fmt.Sprintf("%d confirmed finding(s): %s.", len(confirmedOnly(findings)), severityLine(counts))
+	var execFindings []string
+	for _, f := range findings {
+		if f.Verdict != domain.VerdictConfirmed {
+			continue
 		}
-	} else {
+		execFindings = append(execFindings, fmt.Sprintf("%s — %s (%s)", f.Title, strings.ToUpper(string(f.Severity)), intelFor(f.VulnClass).CWE))
+	}
+	exec := execFindings
+	if len(exec) == 0 {
 		exec = append(exec, "No confirmed findings were recorded in the selected set.")
 	}
 	if diagnostics > 0 {
@@ -247,10 +254,13 @@ func buildPentestDoc(data Data) doc {
 	execBlocks := []docBlock{
 		para(fmt.Sprintf("%s was assessed with indago. %s", nonEmpty(data.Project.Name, "The target"), coverageSentence(coverage))),
 	}
+	execBlocks = append(execBlocks, para(execHeadline))
 	if strings.TrimSpace(data.AISummary) != "" {
 		execBlocks = append(execBlocks, para("AI-assisted draft (unverified, advisory only — the findings below are the authoritative record): "+data.AISummary))
 	}
-	execBlocks = append(execBlocks, list(exec...))
+	if len(exec) > 0 {
+		execBlocks = append(execBlocks, list(exec...))
+	}
 	d.Sections = append(d.Sections, section("Executive Summary", execBlocks...))
 
 	approach := []string{
@@ -269,14 +279,19 @@ func buildPentestDoc(data Data) doc {
 			strings.ToUpper(string(f.Severity)),
 			intelFor(f.VulnClass).Name,
 			f.Title,
-			findingAsset(f, view(f, idx)),
+			endpointLabel(f, view(f, idx), data.Endpoints[f.EndpointID]),
 		})
 	}
 	if len(summaryRows) == 0 {
 		summaryRows = append(summaryRows, []string{"—", "—", "—", "No findings in this selection", "—"})
 	}
+	targetLine := "Target: " + strings.Join(uniqueHosts(findings, view, idx), ", ")
 	d.Sections = append(d.Sections, section("Summary of Findings",
-		table([]string{"#", "Severity", "Class", "Finding", "Asset"}, summaryRows),
+		para(targetLine),
+		sizedTable(
+			[]string{"#", "Severity", "Class", "Finding", "Endpoint"},
+			[]string{"5%", "11%", "17%", "50%", "17%"},
+			summaryRows),
 	))
 
 	tech := []docBlock{}
@@ -300,7 +315,11 @@ func buildPentestDoc(data Data) doc {
 		if v.Verified != nil && v.Verified.CandidateValue != "" {
 			tech = append(tech, para("Verified request / payload:"), code(candidateProof(v)))
 		}
-		tech = append(tech, para("Evidence: "+findingEvidenceText(f, idx)))
+		if len(f.EvidenceIDs) > 0 {
+			tech = append(tech, sub("Evidence"), evidenceTable(f, idx))
+		} else {
+			tech = append(tech, para("Evidence: no stored artifacts for this finding."))
+		}
 	}
 	if len(tech) == 0 {
 		tech = append(tech, para("No confirmed or reviewable findings in this selection."))
@@ -308,30 +327,27 @@ func buildPentestDoc(data Data) doc {
 	d.Sections = append(d.Sections, section("Technical Findings Details", tech...))
 
 	short, medium, long := []string{}, []string{}, []string{}
+	shortM, mediumM, longM := map[string]*roadmapItem{}, map[string]*roadmapItem{}, map[string]*roadmapItem{}
 	for _, f := range findings {
-		line := fmt.Sprintf("%s — %s (%s)", f.Title, intelFor(f.VulnClass).Remediation, intelFor(f.VulnClass).CWE)
+		in := intelFor(f.VulnClass)
 		switch f.Severity {
 		case domain.SeverityCritical, domain.SeverityHigh:
-			short = append(short, line)
+			addRoadmap(shortM, in, f.Title)
 		case domain.SeverityMedium:
-			medium = append(medium, line)
+			addRoadmap(mediumM, in, f.Title)
 		default:
-			long = append(long, line)
+			addRoadmap(longM, in, f.Title)
 		}
 	}
-	if len(short) == 0 {
-		short = append(short, "No critical/high findings in this selection.")
-	}
-	if len(medium) == 0 {
-		medium = append(medium, "No medium findings in this selection.")
-	}
-	if len(long) == 0 {
-		long = append(long, "No low/informational findings in this selection.")
+	short, medium, long = roadmapLines(shortM), roadmapLines(mediumM), roadmapLines(longM)
+	roadmap := [][]string{
+		{"Immediate", "0-7 days", joinOr(short, "None in this selection.")},
+		{"Planned", "30 days", joinOr(medium, "None in this selection.")},
+		{"Backlog", "90 days", joinOr(long, "None in this selection.")},
 	}
 	d.Sections = append(d.Sections, section("Remediation Summary",
-		sub("Short term (critical / high)"), list(short...),
-		sub("Medium term (medium)"), list(medium...),
-		sub("Long term (low / informational)"), list(long...),
+		para("Ordered by the severity of the finding each item fixes. Timeframes are the usual triage windows, not a commitment made by this report."),
+		sizedTable([]string{"Priority", "Timeframe", "Action"}, []string{"16%", "13%", "71%"}, roadmap),
 	))
 
 	d.Sections = append(d.Sections, section("Appendix A — Finding Severities",
@@ -359,7 +375,7 @@ func buildPentestDoc(data Data) doc {
 		evRows = append(evRows, []string{"—", "No evidence referenced by this selection", "—", "—"})
 	}
 	d.Sections = append(d.Sections, section("Appendix B — Evidence Inventory",
-		table([]string{"Evidence", "Finding", "Kind", "Size"}, evRows),
+		sizedTable([]string{"Evidence", "Finding", "Kind", "Size"}, []string{"38%", "34%", "16%", "12%"}, evRows),
 	))
 
 	d.Sections = append(d.Sections, section("Appendix C — Coverage",
@@ -375,11 +391,18 @@ func buildBugBountyDoc(data Data) doc {
 	findings, diagnostics := deliverableFindings(data)
 	idx := EvidenceIndex(data.Evidence)
 	view := NewFindingView
+	seedLabel := seedLabelFor(len(scopeSeeds(data)))
 
 	d := doc{
 		Title:    fmt.Sprintf("Bug Bounty Report — %s", nonEmpty(data.Project.Name, string(data.Project.ID))),
 		Subtitle: "Submission-ready findings from one authorized scan",
 		Meta:     docPreamble(data),
+		Highlights: [][2]string{
+			{"Findings", fmt.Sprintf("%d", len(findings))},
+			{"Confirmed", fmt.Sprintf("%d", len(confirmedOnly(findings)))},
+			{"Highest severity", highestSeverity(findings)},
+			{seedLabel, fmt.Sprintf("%d", len(scopeSeeds(data)))},
+		},
 	}
 
 	assetList := []string{}
@@ -411,7 +434,7 @@ func buildBugBountyDoc(data Data) doc {
 				"Vulnerability class: "+string(f.VulnClass),
 			),
 			sub("Description"),
-			para(nonEmpty(f.Summary, f.Title)),
+			para(sentenceCase(nonEmpty(f.Summary, f.Title))),
 		}
 		body = append(body, sub("Steps to reproduce"))
 		steps := []string{
@@ -425,7 +448,7 @@ func buildBugBountyDoc(data Data) doc {
 		} else {
 			steps = append(steps, "Use the candidate recorded in the evidence bundle.")
 		}
-		steps = append(steps, "Observe the engine's recorded signal: "+verificationSignal(v))
+		steps = append(steps, "Observe the browser signal recorded in the result block below.")
 		body = append(body, list(steps...))
 		if v.Verified != nil && v.Verified.CandidateValue != "" {
 			body = append(body, code(candidateProof(v)))
@@ -439,7 +462,12 @@ func buildBugBountyDoc(data Data) doc {
 		if len(in.References) > 0 {
 			body = append(body, sub("References"), list(in.References...))
 		}
-		body = append(body, sub("Evidence"), para(findingEvidenceText(f, idx)))
+		body = append(body, sub("Evidence"))
+		if len(f.EvidenceIDs) > 0 {
+			body = append(body, evidenceTable(f, idx))
+		} else {
+			body = append(body, para("No stored artifacts for this finding."))
+		}
 
 		heading := fmt.Sprintf("Finding %d — %s", i+1, f.Title)
 		d.Sections = append(d.Sections, section(heading, body...))
@@ -465,6 +493,220 @@ func prefixed(prefix string, items []string) []string {
 	for _, s := range items {
 		out = append(out, prefix+s)
 	}
+	return out
+}
+
+// roadmapItem groups the findings that share one fix, so a table cell does not
+// repeat the same remediation paragraph once per finding.
+type roadmapItem struct {
+	fix    string
+	cwe    string
+	titles []string
+}
+
+func addRoadmap(m map[string]*roadmapItem, in classIntel, title string) {
+	key := in.CWE + "|" + in.Remediation
+	it := m[key]
+	if it == nil {
+		it = &roadmapItem{fix: in.Remediation, cwe: in.CWE}
+		m[key] = it
+	}
+	it.titles = append(it.titles, title)
+}
+
+// roadmapLines renders one line per distinct fix, sorted so the report stays
+// byte-identical between runs (map iteration order is not stable).
+func roadmapLines(m map[string]*roadmapItem) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		it := m[k]
+		out = append(out, fmt.Sprintf("%s — %s (%s)", strings.Join(it.titles, "; "), it.fix, it.cwe))
+	}
+	return out
+}
+
+// joinOr renders a roadmap cell: the items separated by "; ", or the fallback
+// when the bucket is empty.
+func joinOr(items []string, fallback string) string {
+	if len(items) == 0 {
+		return fallback
+	}
+	return strings.Join(items, "; ")
+}
+
+// seedLabel keeps the KPI label grammatical for one seed.
+func seedLabelFor(n int) string {
+	if n == 1 {
+		return "In-scope seed"
+	}
+	return "In-scope seeds"
+}
+
+// coverageShort is the cover's one-word coverage state.
+func coverageShort(c Completeness) string {
+	switch {
+	case c.Complete():
+		return "Complete"
+	case c.State == "":
+		return "Unknown"
+	default:
+		return "Incomplete"
+	}
+}
+
+// highestSeverity is the worst severity among the reported findings, for the
+// bounty cover. It never derives a new rating: it is the max of stored values.
+func highestSeverity(findings []*domain.Finding) string {
+	rank := map[domain.Severity]int{
+		domain.SeverityCritical: 5, domain.SeverityHigh: 4,
+		domain.SeverityMedium: 3, domain.SeverityLow: 2, domain.SeverityInfo: 1,
+	}
+	best := domain.SeverityInfo
+	bestRank := 0
+	for _, f := range findings {
+		if r := rank[f.Severity]; r > bestRank {
+			best, bestRank = f.Severity, r
+		}
+	}
+	if bestRank == 0 {
+		return "—"
+	}
+	return strings.ToUpper(string(best))
+}
+
+// evidenceTable renders one finding's artifacts as rows, instead of the dense
+// semicolon-separated paragraph the same data produces in the appendix note.
+func evidenceTable(f *domain.Finding, idx map[domain.ID]*domain.Evidence) docBlock {
+	rows := make([][]string, 0, len(f.EvidenceIDs))
+	for _, id := range f.EvidenceIDs {
+		kind, size := "artifact", ""
+		if ev := idx[id]; ev != nil {
+			kind = string(ev.Kind)
+			size = humanBytes(ev.Size)
+		}
+		typ := kind
+		if size != "" {
+			typ = kind + " · " + size
+		}
+		rows = append(rows, []string{string(id), typ})
+	}
+	return sizedTable([]string{"Artifact", "Type"}, []string{"58%", "42%"}, rows)
+}
+
+// humanBytes keeps the size column short enough that an artefact table does
+// not push a following section onto its own page.
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.0f KB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// sentenceCase capitalises the first letter of an engine note used as a
+// sentence ("the browser reported…" reads like a typo in a report body).
+func sentenceCase(s string) string {
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	if r[0] >= 'a' && r[0] <= 'z' {
+		r[0] = r[0] - 'a' + 'A'
+	}
+	return string(r)
+}
+
+// endpointLabel is the summary table's Endpoint cell: method plus path, with
+// the query dropped (the injected value there is huge and differs per row
+// only by the marker, so it hides which endpoint is which).
+func endpointLabel(f *domain.Finding, v FindingView, endpointURL string) string {
+	method := strings.TrimSpace(v.Method)
+	u := endpointURL
+	if u == "" {
+		u = verifiedURL(v)
+	}
+	if u != "" {
+		path := "/"
+		if parsed, err := url.Parse(u); err == nil {
+			if parsed.Path != "" {
+				path = parsed.Path
+			}
+			// Keep the query KEYS (they say which parameter is exercised) but
+			// drop the values, which are the injected payload.
+			if keys := queryKeys(parsed.RawQuery); keys != "" {
+				path += "?" + keys
+			}
+		}
+		if method == "" {
+			return path
+		}
+		return method + " " + path
+	}
+	if method != "" && v.ParamName != "" {
+		return method + " · " + v.ParamName
+	}
+	return "—"
+}
+
+// queryKeys lists the parameter names in a raw query, without their values.
+func queryKeys(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		return ""
+	}
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) > 2 {
+		keys = keys[:2]
+	}
+	return strings.Join(keys, "&")
+}
+
+// verifiedURL is the exact request the verifier replayed, when there is one.
+func verifiedURL(v FindingView) string {
+	if v.Verified != nil {
+		return v.Verified.URL
+	}
+	return ""
+}
+
+// uniqueHosts lists the distinct hosts the reported findings touch, so the
+// summary table can be read without a (truncated) URL in every row.
+func uniqueHosts(findings []*domain.Finding, view func(*domain.Finding, map[domain.ID]*domain.Evidence) FindingView, idx map[domain.ID]*domain.Evidence) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range findings {
+		u := verifiedURL(view(f, idx))
+		if u == "" {
+			continue
+		}
+		parsed, err := url.Parse(u)
+		if err != nil || parsed.Host == "" {
+			continue
+		}
+		if !seen[parsed.Host] {
+			seen[parsed.Host] = true
+			out = append(out, parsed.Host)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"see scope"}
+	}
+	sort.Strings(out)
 	return out
 }
 
