@@ -75,6 +75,14 @@ func (s *Server) aiGatewayFor(provider, model string) (ai.Gateway, error) {
 		}
 		return nil, err
 	}
+	// A saved Claude/Anthropic provider may have no API key at all: the
+	// credential is the OAuth session. Resolve succeeds in that case, so the
+	// fallback has to happen here, not only on ErrNoCredential.
+	if !cred.HasKey() && (strings.EqualFold(cred.Provider, "claude") || strings.EqualFold(cred.Provider, "anthropic")) {
+		if gw, ok := s.claudeOAuthGateway(cred.Provider, model); ok {
+			return gw, nil
+		}
+	}
 	return ai.New(ai.Settings{
 		Enabled: true, Provider: cred.Provider, Model: cred.Model,
 		BaseURL: cred.BaseURL, APIKey: cred.APIKey(),
@@ -295,6 +303,19 @@ func (s *Server) claudeOAuthGateway(provider, model string) (ai.Gateway, bool) {
 		if s.llm != nil {
 			if c, err := s.llm.Load(); err == nil && c.Provider == "claude" {
 				m = c.Model
+			}
+		}
+	}
+	if m == "" {
+		if models, err := s.claudeLogin.ListModels(context.Background()); err == nil {
+			for _, id := range models {
+				if strings.Contains(id, "sonnet") {
+					m = id
+					break
+				}
+			}
+			if m == "" && len(models) > 0 {
+				m = models[0]
 			}
 		}
 	}

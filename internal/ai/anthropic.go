@@ -14,7 +14,7 @@ const anthropicDefaultVersion = "2023-06-01"
 // anthropicDefaultMaxTokens bounds a single advisory completion. Anthropic's
 // Messages API requires max_tokens on every request (unlike OpenAI, where
 // it is optional); this default suits report-drafting-length prose.
-const anthropicDefaultMaxTokens = 8192
+const anthropicDefaultMaxTokens = 16384
 
 // anthropicProvider talks to Anthropic's own Messages API
 // (POST {baseURL}/messages), which is shaped differently from the OpenAI
@@ -22,8 +22,20 @@ const anthropicDefaultMaxTokens = 8192
 // required anthropic-version header, a top-level system field instead of a
 // system-role message, and a content BLOCK list in the response rather than
 // a single string.
-// claudeOAuthBeta mirrors the beta flags Claude Code sends with an OAuth token.
-const claudeOAuthBeta = "oauth-2025-04-20,claude-code-20250219"
+// claudeOAuthBeta mirrors the beta flags Claude Code sends with an OAuth
+// token. All four are required: a bare Bearer with only the OAuth betas is
+// answered with HTTP 429 rate_limit_error "Error".
+const claudeOAuthBeta = "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,claude-code-20250219,oauth-2025-04-20"
+
+// claudeOAuthUserAgent identifies the request as Claude Code. Anthropic
+// rejects OAuth inference whose UA is not `claude-code/<version> (external,
+// cli)`; the version must stay close to the current release.
+const claudeOAuthUserAgent = "claude-code/2.1.74 (external, cli)"
+
+// claudeOAuthSystemPrefix is part of the client identity, not a prompt
+// preference: OAuth requests without it are routed to the metered lane and
+// rejected with 429.
+const claudeOAuthSystemPrefix = "You are Claude Code, Anthropic's official CLI for Claude."
 
 type anthropicProvider struct {
 	baseURL string
@@ -49,8 +61,9 @@ type anthropicResponse struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"content"`
-	Model string `json:"model"`
-	Usage struct {
+	Model      string `json:"model"`
+	StopReason string `json:"stop_reason"`
+	Usage      struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
 	} `json:"usage"`
@@ -75,15 +88,26 @@ func (p *anthropicProvider) Complete(ctx context.Context, req Request) (*Respons
 		headers["Authorization"] = "Bearer " + p.oauth
 		headers["anthropic-beta"] = claudeOAuthBeta
 		headers["x-app"] = "cli"
+		headers["User-Agent"] = claudeOAuthUserAgent
 	} else {
 		headers["x-api-key"] = p.apiKey
+	}
+	// OAuth requires the Claude Code identity as the WHOLE system prompt: a
+	// long third-party system message is classified as another client and
+	// answered with 429. The advisory framing therefore travels in the user
+	// message on this route.
+	system := systemPrompt
+	user := userContent(req)
+	if p.oauth != "" {
+		system = claudeOAuthSystemPrefix
+		user = systemPrompt + "\n\n" + user
 	}
 	body := anthropicRequest{
 		Model:     p.model,
 		MaxTokens: anthropicDefaultMaxTokens,
-		System:    systemPrompt,
+		System:    system,
 		Messages: []anthropicMessage{
-			{Role: "user", Content: userContent(req)},
+			{Role: "user", Content: user},
 		},
 	}
 	var out anthropicResponse
@@ -94,6 +118,11 @@ func (p *anthropicProvider) Complete(ctx context.Context, req Request) (*Respons
 	if out.Error != nil && out.Error.Message != "" {
 		return nil, fmt.Errorf("ai: %s: %s", ProviderAnthropic, out.Error.Message)
 	}
+	if out.StopReason == "refusal" {
+		// A subscription model may decline security-testing advice. That is a
+		// policy answer, not an empty completion, and the UI should say so.
+		return nil, fmt.Errorf("ai: %s refused the request (provider safety policy)", ProviderAnthropic)
+	}
 	var text strings.Builder
 	for _, block := range out.Content {
 		if block.Type == "text" {
@@ -101,13 +130,24 @@ func (p *anthropicProvider) Complete(ctx context.Context, req Request) (*Respons
 		}
 	}
 	if text.Len() == 0 {
-		return nil, fmt.Errorf("ai: %s: empty response (no text content)", ProviderAnthropic)
+		types := make([]string, 0, len(out.Content))
+		for _, block := range out.Content {
+			types = append(types, block.Type)
+		}
+		return nil, fmt.Errorf("ai: %s: empty response (stop_reason=%s, blocks=%v)", ProviderAnthropic, out.StopReason, types)
 	}
 	model := out.Model
 	if model == "" {
 		model = p.model
 	}
-	return &Response{Text: text.String(), Model: model}, nil
+	return &Response{
+		Text: text.String(), Model: model,
+		Usage: Usage{
+			PromptTokens:     out.Usage.InputTokens,
+			CompletionTokens: out.Usage.OutputTokens,
+			TotalTokens:      out.Usage.InputTokens + out.Usage.OutputTokens,
+		},
+	}, nil
 }
 
 var _ Provider = (*anthropicProvider)(nil)

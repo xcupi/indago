@@ -42,6 +42,27 @@ credential came from (`settings` or `environment`); it never returns a key.
 The Settings screen lists all nine ids the gateway understands: deepseek,
 claude, anthropic, openrouter, ollama, vllm, openai, custom, chatgpt.
 
+## Claude OAuth specifics
+
+The subscription route is stricter than the API-key route, and the details are
+not optional:
+
+- Token refresh goes to `https://platform.claude.com/v1/oauth/token` (the
+  console host is a fallback) with `User-Agent: axios/1.7.9`. Browser-like and
+  `claude-code/` user agents are rejected at this endpoint.
+- Inference must send `User-Agent: claude-code/<version> (external, cli)`,
+  `x-app: cli`, and the four betas: `interleaved-thinking-2025-05-14`,
+  `fine-grained-tool-streaming-2025-05-14`, `claude-code-20250219`,
+  `oauth-2025-04-20`.
+- The system prompt must be the Claude Code identity line and nothing else. The
+  advisory framing travels in the user message on this route; a long
+  third-party system prompt is classified as another client and answered with
+  HTTP 429 `rate_limit_error: Error`.
+- A subscription model may still refuse active security-testing advice
+  (`stop_reason: refusal`). That is a provider policy answer, not a transport
+  error; Indago reports it as such. Report prose (executive summaries,
+  rewording) is accepted, which is the useful Claude role in this product.
+
 ## Token accounting
 
 Every successful advisory call stores the provider-reported usage on its

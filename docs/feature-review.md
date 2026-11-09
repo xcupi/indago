@@ -171,8 +171,13 @@ is detected, header/comment/backup exposure is reported.
 2. **Settings now exposes all 9 provider ids.** `anthropic`, `openrouter`,
    `ollama`, and `vllm` were added to the settings registry, so each can be
    selected, probed and given a model without editing environment variables.
-3. **Claude OAuth is implemented but has never run live.** No session is
-   stored, so the exchange, refresh, and `/models` path are unit-tested only.
+3. **Claude OAuth now runs live.** Refresh moved to
+   `platform.claude.com` with the axios user agent, inference sends the full
+   Claude Code identity (UA, betas, system line), and report summarisation
+   completes with provider-reported usage. Active offensive advisory
+   (`prioritize`, `triage`, `next_steps`, payload diagnosis) is refused by the
+   subscription model's safety policy; Indago surfaces that as a policy
+   refusal, not an empty answer.
 4. **Bounty and LLM tests drifted from the code** (provider count 4 vs 5,
    pagination fixture without `nb_results`). Fixed; `go test ./internal/web`
    and `./internal/bounty` are green.

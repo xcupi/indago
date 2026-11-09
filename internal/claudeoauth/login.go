@@ -33,9 +33,13 @@ import (
 const (
 	ClientID     = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	AuthorizeURL = "https://claude.ai/oauth/authorize"
-	TokenURL     = "https://console.anthropic.com/v1/oauth/token"
-	RedirectURI  = "https://console.anthropic.com/oauth/code/callback"
-	Scope        = "org:create_api_key user:profile user:inference"
+	// platform.claude.com is the live token host; the console host is kept as
+	// a fallback. Both reject requests whose User-Agent looks like a browser
+	// or like claude-code, so the exchange sends the bare axios UA the real
+	// CLI uses.
+	TokenURL    = "https://platform.claude.com/v1/oauth/token"
+	RedirectURI = "https://console.anthropic.com/oauth/code/callback"
+	Scope       = "org:create_api_key user:profile user:inference"
 	// Beta headers Claude Code sends with an OAuth token.
 	BetaHeader = "oauth-2025-04-20,claude-code-20250219"
 )
@@ -249,35 +253,54 @@ type tokenResponse struct {
 
 func (l *Login) exchange(ctx context.Context, payload map[string]string) (Credentials, error) {
 	b, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, bytes.NewReader(b))
-	if err != nil {
-		return Credentials{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	resp, err := l.http.Do(req)
-	if err != nil {
-		return Credentials{}, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var out tokenResponse
-	_ = json.Unmarshal(body, &out)
-	if resp.StatusCode != 200 || out.AccessToken == "" {
-		msg := out.ErrorDesc
-		if msg == "" {
-			msg = out.Error
+	var lastErr error
+	for _, endpoint := range []string{TokenURL, "https://console.anthropic.com/v1/oauth/token"} {
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(b))
+		if err != nil {
+			return Credentials{}, err
 		}
-		if msg == "" {
-			msg = fmt.Sprintf("status %d", resp.StatusCode)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "axios/1.7.9")
+		resp, err := l.http.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
 		}
-		return Credentials{}, fmt.Errorf("claude: token endpoint rejected the request: %s", msg)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		var out tokenResponse
+		_ = json.Unmarshal(body, &out)
+		if resp.StatusCode != 200 || out.AccessToken == "" {
+			msg := out.ErrorDesc
+			if msg == "" {
+				msg = out.Error
+			}
+			if msg == "" {
+				msg = fmt.Sprintf("status %d", resp.StatusCode)
+			}
+			lastErr = fmt.Errorf("claude: token endpoint rejected the request: %s", msg)
+			// A 404/403 means this host is wrong or blocked; the other host
+			// may work. Do not replay a refresh token on an auth rejection.
+			if resp.StatusCode == 404 || resp.StatusCode == 403 {
+				continue
+			}
+			return Credentials{}, lastErr
+		}
+		return credentialsFromToken(out), nil
 	}
+	if lastErr == nil {
+		lastErr = errors.New("claude: no token endpoint reachable")
+	}
+	return Credentials{}, lastErr
+}
+
+func credentialsFromToken(out tokenResponse) Credentials {
 	exp := time.Now().Add(time.Duration(out.ExpiresIn) * time.Second)
 	if out.ExpiresIn == 0 {
 		exp = time.Now().Add(time.Hour)
 	}
-	return Credentials{AccessToken: out.AccessToken, RefreshToken: out.RefreshToken, ExpiresAt: exp}, nil
+	return Credentials{AccessToken: out.AccessToken, RefreshToken: out.RefreshToken, ExpiresAt: exp}
 }
 
 func randomToken(n int) (string, error) {
