@@ -94,7 +94,13 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unknown format "+req.Format)
 		return
 	}
-	tmpl := report.Template(strings.TrimSpace(req.Template))
+	rawTemplate := strings.TrimSpace(req.Template)
+	// The UI names the technical layout "technical"; internally it is the
+	// empty template (the historical default). Accept both spellings.
+	if strings.EqualFold(rawTemplate, "technical") {
+		rawTemplate = ""
+	}
+	tmpl := report.Template(rawTemplate)
 	if !tmpl.IsValid() {
 		writeError(w, http.StatusBadRequest, "unknown template "+req.Template)
 		return
@@ -206,7 +212,9 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 	if format == domain.ReportJSON {
 		storedTemplate = ""
 	} else if storedTemplate == "" {
-		storedTemplate = string(report.TemplateTechnical)
+		// Persist the UI's spelling so the reports table can say which
+		// template produced the file instead of showing a dash.
+		storedTemplate = "technical"
 	}
 	rpt := &domain.Report{
 		ID:        domain.NewID(),

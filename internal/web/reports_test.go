@@ -321,3 +321,18 @@ func TestReportSelectionDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// The control plane names the technical layout "technical"; the backend uses
+// the empty template internally. Both spellings must create a report.
+func TestTechnicalTemplateSpellingFromUI(t *testing.T) {
+	a := newAPI(t, nil)
+	scanID := createTestScan(t, a)
+	seedFinding(t, a, scanID)
+	var rpt domain.Report
+	rec := a.do("POST", "/api/scans/"+string(scanID)+"/reports",
+		map[string]any{"format": "markdown", "template": "technical"})
+	a.mustJSON(rec, http.StatusCreated, &rpt)
+	if rpt.Template != "technical" {
+		t.Fatalf("stored template = %q, want technical", rpt.Template)
+	}
+}

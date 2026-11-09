@@ -226,8 +226,7 @@ export default function Bounty() {
           </div>
           <p className="text-[11px] text-muted-foreground">
             Bounty programs filtered to <span className="mono">web-application</span> scope (
-            {programs === null ? "not loaded yet" : `page ${page}, ${programs.length} of ${total || programs.length}${cached ? ", cached" : ""}`}).
-            Nothing is fetched until you press Load.
+            {programs === null ? "not loaded yet — press Load" : `page ${page}, ${programs.length} of ${total || programs.length}${cached ? ", cached" : ""}`}).
           </p>
 
           {programs === null ? (
