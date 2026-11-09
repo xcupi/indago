@@ -37,8 +37,9 @@ const accessModeBypass = "bypass"
 const accessModeMutation = "mutation_step"
 
 // maxBypassRequestsPerPath bounds one path's probes: GET baseline, POST
-// baseline, and two header overrides.
-const maxBypassRequestsPerPath = 4
+// baseline, two header overrides, one TRACE echo, and up to three disclosed
+// client-IP header spoofs.
+const maxBypassRequestsPerPath = 7
 
 func (e *accessControlExecutor) runBypass(ctx context.Context, job *domain.TestJob, tc *domain.TestCase) (accessControlDetail, domain.TestOutcome, error, bool, bool) {
 	d := accessControlDetail{Engine: accessControlEngine, Kind: accessModeBypass, URL: job.Target.URL}
@@ -117,6 +118,45 @@ func (e *accessControlExecutor) runBypass(ctx context.Context, job *domain.TestJ
 				e.correlate(ctx, job.ScanID, accessControlFinding{
 					Key:        accessControlPathDedupKey(job.Target.URL) + "\x00header",
 					Title:      fmt.Sprintf("Access control: header path override reaches %s", path),
+					Summary:    d.Reason,
+					Severity:   domain.SeverityHigh,
+					EndpointID: job.Target.EndpointID,
+					Detail:     findingDetailFrom(d, nil, nil),
+				}, tc.ID)
+				return d, domain.OutcomeSuccess, nil, false, false
+			}
+		}
+	}
+
+	// 5. Client-IP header disclosed by the server's own TRACE echo (the
+	// authentication-bypass-via-information-disclosure case). The header name
+	// is READ from the echo, never guessed: the lab's name is
+	// application-specific. The trusted value is the loopback literal, and the
+	// same denial/admin-marker rule decides.
+	if traceResp, outcome, _ := e.do(ctx, httpengine.NewRequest("TRACE", origin+"/")); outcome == domain.OutcomeSuccess {
+		for _, header := range accesscontrol.DisclosedIPHeaders(string(traceResp.Body)) {
+			if ctx.Err() != nil {
+				return d, domain.OutcomeCancelled, ctx.Err(), false, false
+			}
+			req := httpengine.GET(job.Target.URL)
+			req.Headers = map[string]string{header: accesscontrol.LoopbackSpoofValue}
+			resp, outcome, _ := e.do(ctx, req)
+			if outcome != domain.OutcomeSuccess {
+				continue
+			}
+			body := string(resp.Body)
+			reached := accesscontrol.HeaderOverrideReached(d.GetStatus, resp.Status, body)
+			d.HeaderProbes = append(d.HeaderProbes, accessControlHeaderProbe{
+				Header: header, Path: path, Status: resp.Status, Reached: reached,
+			})
+			if reached {
+				d.Verdict = domain.VerdictConfirmed
+				d.Bypass = string(accesscontrol.BypassHeaderClientIP)
+				d.Reason = fmt.Sprintf("the path is denied directly (%d) but answered %d when the server-disclosed header %s was set to %s — the edge trusts a client-supplied IP header it prints in its own TRACE echo",
+					d.GetStatus, resp.Status, header, accesscontrol.LoopbackSpoofValue)
+				e.correlate(ctx, job.ScanID, accessControlFinding{
+					Key:        accessControlPathDedupKey(job.Target.URL) + "\x00clientip",
+					Title:      fmt.Sprintf("Access control: client-IP header bypass reaches %s", path),
 					Summary:    d.Reason,
 					Severity:   domain.SeverityHigh,
 					EndpointID: job.Target.EndpointID,

@@ -68,7 +68,10 @@ func (e *disclosureExecutor) Handle(ctx context.Context, job *domain.TestJob) er
 
 	target := job.Target.URL
 	probeParam := ""
-	if mode, param := disclosurePayload(job); mode == disclosureModeErrorProbe {
+	if mode, param := disclosurePayload(job); mode == disclosureModeGitProbe {
+		tc.FinishedAt, tc.UpdatedAt = &started, started
+		return e.runGitProbe(ctx, job, tc)
+	} else if mode == disclosureModeErrorProbe {
 		probeParam = param
 		if rewritten := wrongTypedURL(target, param); rewritten != "" {
 			target = rewritten
@@ -279,6 +282,8 @@ func titleForDisclosure(k disclosure.Kind) string {
 		return "Information disclosure: backup file serves source code"
 	case disclosure.KindErrorDisclosure:
 		return "Information disclosure: error message discloses a stack trace and framework version"
+	case disclosure.KindGitHistory:
+		return "Information disclosure: version control history is served (.git)"
 	}
 	return "Information disclosure"
 }
@@ -330,6 +335,9 @@ func (c *Controller) enqueueDisclosureProbes(ctx context.Context, scanID domain.
 	if queued > 0 {
 		c.log.Info("disclosure probes: enqueued", "scan", scanID, "jobs", queued)
 	}
+	// The exposed-repository class has its own bounded probe per origin: the
+	// passive table cannot see it, because the leak is the metadata itself.
+	c.enqueueGitProbes(ctx, scanID)
 }
 
 // disclosurePayload reads the job's mode and parameter.

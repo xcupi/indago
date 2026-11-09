@@ -30,6 +30,7 @@ const (
 	KindNone         Kind = ""
 	KindDebugPage    Kind = "debug_page"
 	KindBackupSource Kind = "backup_source"
+	KindGitHistory   Kind = "git_history"
 )
 
 // Verdict is one classification result.

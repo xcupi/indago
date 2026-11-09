@@ -69,3 +69,21 @@ func errorProbeJobCount(eps []*domain.Endpoint) int {
 	}
 	return n
 }
+
+// gitProbeJobCount is how many origins the exposed-.git pass probes: one job per
+// distinct origin, capped at 3 (see internal/scan/disclosure_git.go).
+func gitProbeJobCount(eps []*domain.Endpoint) int {
+	seen := map[string]struct{}{}
+	for _, ep := range eps {
+		u, err := url.Parse(ep.URL)
+		if err != nil || u.Host == "" {
+			continue
+		}
+		seen[u.Scheme+"://"+u.Host] = struct{}{}
+	}
+	n := len(seen)
+	if n > 3 {
+		n = 3
+	}
+	return n
+}

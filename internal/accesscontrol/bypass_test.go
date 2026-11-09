@@ -6,6 +6,45 @@ import (
 	"github.com/indago/indago/internal/accesscontrol"
 )
 
+func TestDisclosedIPHeaders(t *testing.T) {
+	trace := "TRACE / HTTP/1.1\r\n" +
+		"Host: lab.example\r\n" +
+		"User-Agent: indago\r\n" +
+		"Accept: */*\r\n" +
+		"X-Custom-IP-Authorization: 10.0.0.7\r\n" +
+		"X-Forwarded-For: 10.0.0.7\r\n" +
+		"Cookie: session=secret\r\n"
+	got := accesscontrol.DisclosedIPHeaders(trace)
+	want := []string{"x-custom-ip-authorization", "x-forwarded-for"}
+	if len(got) != len(want) {
+		t.Fatalf("DisclosedIPHeaders = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("DisclosedIPHeaders = %v, want %v", got, want)
+		}
+	}
+	for _, name := range got {
+		switch name {
+		case "host", "user-agent", "accept", "cookie":
+			t.Fatalf("ordinary echoed header %q must never become a probe candidate", name)
+		}
+	}
+	if got := accesscontrol.DisclosedIPHeaders("<html>no trace</html>"); len(got) != 0 {
+		t.Fatalf("a non-echo body must contribute nothing: %v", got)
+	}
+	if accesscontrol.LoopbackSpoofValue != "127.0.0.1" {
+		t.Fatalf("loopback spoof value = %q", accesscontrol.LoopbackSpoofValue)
+	}
+}
+
+func TestDisclosedIPHeadersAreCapped(t *testing.T) {
+	trace := "X-Real-IP: 1\r\nX-Client-IP: 1\r\nCF-Connecting-IP: 1\r\nTrue-Client-IP: 1\r\nForwarded: for=1\r\n"
+	if got := accesscontrol.DisclosedIPHeaders(trace); len(got) > accesscontrol.MaxDisclosedIPHeaders {
+		t.Fatalf("cap exceeded: %v", got)
+	}
+}
+
 func TestHeaderOverrideReached(t *testing.T) {
 	for _, tc := range []struct {
 		name              string

@@ -30,7 +30,52 @@ const (
 	BypassNone      BypassKind = ""
 	BypassHeaderURL BypassKind = "header_url_override" // X-Original-URL / X-Rewrite-URL
 	BypassMethod    BypassKind = "method_bypass"       // GET reaches a POST-gated action
+	// BypassHeaderClientIP is the authentication-bypass-via-information-
+	// disclosure case: a TRACE echo names the client-IP header the edge trusts,
+	// and the same denied surface answers a request carrying that header set to
+	// the loopback address.
+	BypassHeaderClientIP BypassKind = "header_client_ip_spoof"
 )
+
+// disclosedIPHeaderRE reads a header NAME from a TRACE echo. It is deliberately
+// narrow: only names that look like a client-IP / forwarding header are read, so
+// ordinary echoed headers (Host, User-Agent, Accept, Cookie) never become probe
+// candidates. The name must be followed by a colon, exactly as an echoed request
+// line prints it.
+var disclosedIPHeaderRE = regexp.MustCompile(`(?i)\b(x-[a-z0-9-]*(?:ip|forwarded|client)[a-z0-9-]*|forwarded|true-client-ip|cf-connecting-ip)\s*:`)
+
+// MaxDisclosedIPHeaders bounds how many header names one TRACE echo may
+// contribute.
+const MaxDisclosedIPHeaders = 3
+
+// DisclosedIPHeaders returns the client-IP-shaped header names a TRACE echo
+// actually printed, lower-cased, de-duplicated, in first-seen order and capped.
+// The list is read from the response — never a wordlist — because the lab's
+// header name is application-specific ("X-Custom-IP-Authorization").
+func DisclosedIPHeaders(trace string) []string {
+	out := make([]string, 0, MaxDisclosedIPHeaders)
+	seen := map[string]struct{}{}
+	for _, m := range disclosedIPHeaderRE.FindAllStringSubmatch(trace, -1) {
+		name := strings.ToLower(strings.TrimSpace(m[1]))
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+		if len(out) >= MaxDisclosedIPHeaders {
+			break
+		}
+	}
+	return out
+}
+
+// LoopbackSpoofValue is the value every disclosed client-IP header is set to:
+// the address an edge treats as "this machine". It is a fixed literal, never a
+// guess.
+const LoopbackSpoofValue = "127.0.0.1"
 
 // IsDenialStatus reports whether a status is an authorization denial. Only these
 // make a bypass meaningful: a 404 means the surface does not exist, not that it

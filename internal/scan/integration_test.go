@@ -357,6 +357,7 @@ func TestScanCompletesAfterDiscoveryAndJobs(t *testing.T) {
 	total += accessBypassJobCount(eps)
 	total += disclosureJobCount(eps)
 	total += errorProbeJobCount(eps)
+	total += gitProbeJobCount(eps)
 	if explained := earlyStopCancels(ctx, st, q, done.Scan.ID); done.Jobs.Total() != total || done.Jobs.Succeeded+explained != total {
 		t.Fatalf("jobs=%+v, want %d succeeded", done.Jobs, total)
 	}
