@@ -154,13 +154,19 @@ const (
 	// SourceScriptLiteral: a parameter name a page's own inline script reads
 	// as a string literal (see discovery.ExtractScriptParamNames).
 	SourceScriptLiteral DiscoverySource = "script_literal"
+	// SourceWellKnown: an endpoint named inside a self-describing document
+	// (security.txt, OpenID configuration, OpenAPI/Swagger) the site publishes.
+	SourceWellKnown DiscoverySource = "well_known"
+	// SourceArchive: a historical URL from the Wayback Machine CDX index.
+	SourceArchive DiscoverySource = "archive"
 )
 
 // IsValid reports whether the source is a known value.
 func (d DiscoverySource) IsValid() bool {
 	switch d {
 	case SourceUserProvided, SourceCrawler, SourceForm, SourceBrowserNetwork,
-		SourceSitemap, SourceRobots, SourceContentDiscovery, SourceParamDiscovery, SourceScriptLiteral:
+		SourceSitemap, SourceRobots, SourceContentDiscovery, SourceParamDiscovery, SourceScriptLiteral,
+		SourceWellKnown, SourceArchive:
 		return true
 	default:
 		return false

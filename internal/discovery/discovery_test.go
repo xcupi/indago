@@ -15,19 +15,20 @@ import (
 func TestRealRegistrySources(t *testing.T) {
 	eng := httpengine.NewDefault()
 
-	// Without a browser: seed, crawl, sitemap, robots, content = 5.
+	// Without a browser: seed, crawl, sitemap, robots, content, well-known,
+	// archive = 7.
 	r := discovery.NewRealRegistry(eng, nil, discovery.DefaultConfig())
-	if len(r.Names()) != 5 {
-		t.Fatalf("expected 5 sources without browser, got %d: %v", len(r.Names()), r.Names())
+	if len(r.Names()) != 7 {
+		t.Fatalf("expected 7 sources without browser, got %d: %v", len(r.Names()), r.Names())
 	}
 	if _, ok := r.Get(domain.SourceCrawler); !ok {
 		t.Fatal("crawler source missing")
 	}
 
-	// With a browser: + network = 6.
+	// With a browser: + network = 8.
 	rb := discovery.NewRealRegistry(eng, browser.Stub{}, discovery.DefaultConfig())
-	if len(rb.Names()) != 6 {
-		t.Fatalf("expected 6 sources with browser, got %d", len(rb.Names()))
+	if len(rb.Names()) != 8 {
+		t.Fatalf("expected 8 sources with browser, got %d", len(rb.Names()))
 	}
 	if _, ok := rb.Get(domain.SourceBrowserNetwork); !ok {
 		t.Fatal("network source missing")

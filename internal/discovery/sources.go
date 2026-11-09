@@ -25,6 +25,8 @@ func NewRealRegistry(engine httpengine.Engine, b browser.Browser, cfg Config) *R
 	r.Register(NewSitemapSource(engine, cfg))
 	r.Register(NewRobotsSource(engine, cfg))
 	r.Register(NewContentSource(engine, cfg))
+	r.Register(NewWellKnownSource(engine, cfg))
+	r.Register(NewArchiveSource(cfg))
 	if b != nil {
 		r.Register(NewNetworkSource(b, cfg))
 	}

@@ -189,6 +189,9 @@ type Config struct {
 	//	standard   + parameter mining + file-extension probes
 	//	aggressive + extended path list + one level of directory recursion
 	ReconLevel ReconLevel
+	// ArchiveEndpoint overrides the Wayback CDX endpoint (tests, or a mirror).
+	// Empty means DefaultArchiveCDX.
+	ArchiveEndpoint string
 	// MaxReconRequests is the hard per-scan ceiling on recon HTTP requests
 	// (calibration + every probe + every mining request). 0 means
 	// DefaultMaxReconRequests.

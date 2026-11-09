@@ -334,7 +334,10 @@ export default function Scans() {
                     ))}
                   </select>
                 </Field>
-                <Field label="Recon level">
+                <Field
+                  label="Recon level"
+                  hint="standard reads security.txt / OpenID / OpenAPI documents; aggressive also queries the Wayback index (the target host is sent to archive.org)."
+                >
                   <select
                     className="h-9 rounded-md border border-border bg-card px-2 text-sm"
                     value={form.recon}
