@@ -67,7 +67,10 @@ the operator asks for it, not one per page view.
 - one **seed target** per host root (`https://host/`).
 
 Assets of other scope types (api, mobile, …) are listed in `skipped`, not turned
-into targets. No scan is created: the operator checks the targets they want in
+into targets. An asset that is a **path**, not a host root (for example
+`https://target.test/challenge/one`), becomes a seed on that path and adds
+`include_path_prefixes: ["/challenge/one"]`, so the crawler cannot leave the
+program's authorized area. No scan is created: the operator checks the targets they want in
 the project and starts scans with the normal form, so rate/profile controls and
 the scope enforcement stay where they already are. Out-of-scope hosts never run
 because the scan's scope rejects them — not because the importer remembered to
@@ -179,3 +182,18 @@ Known gaps:
   rules prose is not parsed into `exclude_hosts`.
 - **Rules display**: the program page links to YesWeHack; the rules text is not
   rendered inside Indago.
+
+## Scope is not platform-only
+
+A project's scope is edited by hand on the project page (include/exclude hosts,
+path prefixes, subdomains) whether or not any platform is connected. Import is
+only a shortcut that fills the same fields from the program:
+
+- **manual**: Projects → project → Scope → type hosts/paths → Save scope.
+- **from YesWeHack**: Bug bounty → Load → **scope** (preview the program's
+  assets and rules without importing) → Import selected. The project is created
+  with those assets as `include_hosts` / `include_path_prefixes` and one seed
+  target per asset.
+
+The scan form shows the selected project's scope and warns when the chosen
+target host is outside it; the server enforces the same scope fail-closed.

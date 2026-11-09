@@ -162,12 +162,18 @@ func (s *Server) handleBountyProgram(w http.ResponseWriter, r *http.Request) {
 	if s.bountyStore != nil && s.bountyStore.Configured() {
 		if scopes, err := s.bountyClient.Scopes(r.Context(), slug); err == nil {
 			resp["scopes"] = scopes
+		} else if scopes, err := s.bountyClient.PublicScopes(r.Context(), slug); err == nil {
+			resp["scopes"] = scopes
 		} else {
 			resp["scopes_error"] = err.Error()
 		}
 		if tpl, err := s.bountyClient.ReportTemplates(r.Context(), slug); err == nil {
 			resp["templates"] = tpl
 		}
+	} else if scopes, err := s.bountyClient.PublicScopes(r.Context(), slug); err == nil {
+		// Without a credential, the program page still lists the scope table —
+		// enough for a preview before importing.
+		resp["scopes"] = scopes
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -230,7 +236,7 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 				return
 			}
 		}
-		hosts, targets, skipped := webScopeTargets(scopes)
+		hosts, targets, prefixes, skipped := webScopeTargets(scopes)
 		if len(hosts) == 0 {
 			out = append(out, importedProgram{Slug: slug, Title: detail.Title, Skipped: []string{"no web-application scope asset"}})
 			continue
@@ -243,8 +249,9 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 		}
 		sc := &domain.Scope{
 			ID: domain.NewID(), ProjectID: p.ID,
-			IncludeHosts: hosts, AllowSubdomains: true,
-			CreatedAt: now, UpdatedAt: now,
+			IncludeHosts: hosts, IncludePathPrefixes: prefixes,
+			AllowSubdomains: true,
+			CreatedAt:       now, UpdatedAt: now,
 		}
 		if err := s.store.Scopes().Create(r.Context(), sc); err != nil {
 			s.writeInternalError(w, "create scope", err)
@@ -266,9 +273,10 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 // webScopeTargets converts platform scopes into (hosts, seed targets, skipped).
 // Only web-application assets become targets: an API host or a wildcard is a
 // scope entry, not a seed URL the crawler can start from.
-func webScopeTargets(scopes []bounty.Scope) (hosts, targets, skipped []string) {
+func webScopeTargets(scopes []bounty.Scope) (hosts, targets, prefixes, skipped []string) {
 	hostSeen := map[string]bool{}
 	targetSeen := map[string]bool{}
+	prefixSeen := map[string]bool{}
 	for _, sc := range scopes {
 		if sc.ScopeType != "web-application" {
 			skipped = append(skipped, sc.ScopeType+":"+sc.Scope)
@@ -308,8 +316,17 @@ func webScopeTargets(scopes []bounty.Scope) (hosts, targets, skipped []string) {
 			hostSeen[host] = true
 			hosts = append(hosts, host)
 		}
-		// One seed per host root: the crawler discovers the rest.
-		seed := u.Scheme + "://" + u.Host + "/"
+		// A scope can be a specific path (…/challenge-of-the-month/dojo-56),
+		// not just a host. Seed the asset itself and restrict the scope to its
+		// path, otherwise the crawler would start at / and happily leave the
+		// program's authorized area.
+		seed := u.Scheme + "://" + u.Host + u.Path
+		if u.Path == "" || u.Path == "/" {
+			seed = u.Scheme + "://" + u.Host + "/"
+		} else if !prefixSeen[u.Path] {
+			prefixSeen[u.Path] = true
+			prefixes = append(prefixes, u.Path)
+		}
 		if !targetSeen[seed] {
 			targetSeen[seed] = true
 			targets = append(targets, seed)
@@ -317,7 +334,8 @@ func webScopeTargets(scopes []bounty.Scope) (hosts, targets, skipped []string) {
 	}
 	sort.Strings(hosts)
 	sort.Strings(targets)
-	return hosts, targets, skipped
+	sort.Strings(prefixes)
+	return hosts, targets, prefixes, skipped
 }
 
 // looksLikeHost rejects the severity words that occupy asset_value on the

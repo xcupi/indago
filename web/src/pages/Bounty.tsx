@@ -29,6 +29,13 @@ interface ProvidersResponse {
   }[];
 }
 
+interface ScopeRow {
+  scope: string;
+  scope_type: string;
+  scope_type_name?: string;
+  asset_value?: string;
+}
+
 interface Imported {
   slug: string;
   title: string;
@@ -59,6 +66,14 @@ export default function Bounty() {
   const [picked, setPicked] = useState<Record<string, boolean>>({});
   const [importing, setImporting] = useState(false);
   const [imported, setImported] = useState<Imported[] | null>(null);
+  const [detail, setDetail] = useState<{
+    slug: string;
+    title: string;
+    rules?: string;
+    scopes?: ScopeRow[];
+    scopes_error?: string;
+  } | null>(null);
+  const [detailBusy, setDetailBusy] = useState("");
 
   const ywh = providers.data?.providers.find((p) => p.id === "yeswehack");
   const configured = Boolean(ywh?.configured);
@@ -111,6 +126,21 @@ export default function Bounty() {
       setErr((e as Error).message);
     } finally {
       setImporting(false);
+    }
+  }
+
+  async function preview(slug: string) {
+    setDetailBusy(slug);
+    setErr("");
+    try {
+      const res = await api<{ program: { title: string; rules?: string }; scopes?: ScopeRow[]; scopes_error?: string }>(
+        `/api/bounty/programs/${slug}`,
+      );
+      setDetail({ slug, title: res.program.title, rules: res.program.rules, scopes: res.scopes, scopes_error: res.scopes_error });
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setDetailBusy("");
     }
   }
 
@@ -207,6 +237,16 @@ export default function Bounty() {
                       ) : null}
                     </span>
                   </span>
+                  <button
+                    className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      preview(p.slug);
+                    }}
+                    title="Preview scope and rules"
+                  >
+                    {detailBusy === p.slug ? "…" : "scope"}
+                  </button>
                   <a
                     href={`https://yeswehack.com/programs/${p.slug}`}
                     target="_blank"
@@ -229,6 +269,35 @@ export default function Bounty() {
               Import reads the program's scope table and creates a project with that scope — it does not start a scan.
             </span>
           </div>
+
+          {detail ? (
+            <div className="space-y-2 rounded-md border border-border p-2.5 text-[11px]">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-foreground">{detail.title}</span>
+                <button className="text-muted-foreground hover:text-foreground" onClick={() => setDetail(null)}>
+                  close
+                </button>
+              </div>
+              <div>
+                <span className="text-muted-foreground">Scopes ({detail.scopes?.length ?? 0})</span>
+                <div className="mono mt-1 max-h-32 space-y-0.5 overflow-y-auto">
+                  {(detail.scopes ?? []).slice(0, 40).map((sc, i) => (
+                    <div key={i}>
+                      <span className="text-muted-foreground">{sc.scope_type}</span> {sc.scope}
+                    </div>
+                  ))}
+                  {detail.scopes_error ? <div className="text-amber-700 dark:text-amber-400">{detail.scopes_error}</div> : null}
+                </div>
+              </div>
+              {detail.rules ? (
+                <details>
+                  <summary className="cursor-pointer text-muted-foreground">Rules (from the program)</summary>
+                  <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap text-[10px] text-muted-foreground">{detail.rules.slice(0, 4000)}</pre>
+                </details>
+              ) : null}
+              <p className="text-muted-foreground">Import creates a project whose include list is the web-application assets above.</p>
+            </div>
+          ) : null}
 
           {imported ? (
             <div className="space-y-2 rounded-md border border-border p-2.5">

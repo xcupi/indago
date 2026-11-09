@@ -175,3 +175,53 @@ func TestImportUsesPublicScopesWithoutToken(t *testing.T) {
 		t.Fatalf("skipped = %v", got.Skipped)
 	}
 }
+
+// A program asset can be a path, not just a host. The imported scope must
+// restrict to that path and the seed target must be the asset itself.
+func TestImportKeepsPathScopedAsset(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/programs/pathprog", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"slug": "pathprog", "title": "Path Program", "type": "bug-bounty"})
+	})
+	ywh := httptest.NewServer(mux)
+	defer ywh.Close()
+	webStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<script>state={"scopes":[{"scope":"https://target.test/challenge/one","scope_type":"web-application","asset_value":"MEDIUM"}]}</script>`))
+	}))
+	defer webStub.Close()
+	t.Setenv("INDAGO_YESWEHACK_API", ywh.URL)
+	t.Setenv("INDAGO_YESWEHACK_WEB", webStub.URL)
+
+	st := memory.New()
+	srv := web.NewServer(st, nil, "test", slog.New(slog.NewTextHandler(io.Discard, nil)), nil, t.TempDir())
+	srv.SetBountyStore(bounty.NewStore(t.TempDir()))
+	a := api{t: t, h: srv.Handler(), st: st}
+
+	var resp struct {
+		Imported []struct {
+			ProjectID string   `json:"project_id"`
+			Targets   []string `json:"targets"`
+		} `json:"imported"`
+	}
+	a.mustJSON(a.do("POST", "/api/bounty/import", map[string]any{"slugs": []string{"pathprog"}}), http.StatusOK, &resp)
+	if len(resp.Imported) != 1 {
+		t.Fatalf("imported = %+v", resp.Imported)
+	}
+	got := resp.Imported[0]
+	if len(got.Targets) != 1 || got.Targets[0] != "https://target.test/challenge/one" {
+		t.Fatalf("targets = %v", got.Targets)
+	}
+	sc, err := st.Scopes().GetByProject(context.Background(), domain.ID(got.ProjectID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sc.IncludePathPrefixes) != 1 || sc.IncludePathPrefixes[0] != "/challenge/one" {
+		t.Fatalf("include paths = %v", sc.IncludePathPrefixes)
+	}
+	if d := sc.Permits("https://target.test/challenge/one/page"); !d.Allowed {
+		t.Fatalf("asset path denied: %+v", d)
+	}
+	if d := sc.Permits("https://target.test/other"); d.Allowed {
+		t.Fatal("scope allowed a path outside the program asset")
+	}
+}

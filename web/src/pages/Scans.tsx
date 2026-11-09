@@ -11,7 +11,7 @@ import { StateBadge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Alert, Empty, Loading, Stat } from "@/components/ui/misc";
 import { api, refreshAll, useApi } from "@/lib/api";
-import type { Project, Scan, Target } from "@/lib/types";
+import type { Project, Scan, Scope, Target } from "@/lib/types";
 import { navigate } from "@/lib/router";
 import { formatTime, shortId } from "@/lib/utils";
 import { selectedProject } from "@/components/Layout";
@@ -63,6 +63,7 @@ export default function Scans() {
     cfgRate: 0,
   });
   const [error, setError] = useState("");
+  const [projectScope, setProjectScope] = useState<Scope | null>(null);
   const [busy, setBusy] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginNote, setLoginNote] = useState("");
@@ -71,6 +72,36 @@ export default function Scans() {
     const list = scans.data ?? [];
     return projectId ? list.filter((s) => s.project_id === projectId) : list;
   }, [scans.data, projectId]);
+
+  useEffect(() => {
+    let alive = true;
+    if (!projectId) {
+      setProjectScope(null);
+      return;
+    }
+    api<Scope>(`/api/projects/${projectId}/scope`)
+      .then((sc) => alive && setProjectScope(sc))
+      .catch(() => alive && setProjectScope(null));
+    return () => {
+      alive = false;
+    };
+  }, [projectId]);
+
+  const selectedTarget = (targets.data ?? []).find((t) => t.id === form.target_id);
+  const targetHost = (() => {
+    if (!selectedTarget) return "";
+    try {
+      return new URL(selectedTarget.base_url).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+  })();
+  const scopeCoversTarget = Boolean(
+    targetHost &&
+      projectScope?.include_hosts?.some(
+        (h) => targetHost === h.toLowerCase() || (projectScope.allow_subdomains && targetHost.endsWith("." + h.toLowerCase())),
+      ),
+  );
 
   const running = filtered.filter((s) => s.state === "running").length;
   const confirmed = filtered.reduce((n, s) => n + (s.stats?.findings_confirmed ?? 0), 0);
@@ -227,6 +258,26 @@ export default function Scans() {
                     ))}
                   </select>
                 </Field>
+                {projectId ? (
+                  <div className="sm:col-span-2 rounded-md border border-border bg-muted/30 p-2 text-[11px]">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-muted-foreground">
+                        Scope:{" "}
+                        {projectScope?.include_hosts?.length
+                          ? `${projectScope.include_hosts.join(", ")}${projectScope.allow_subdomains ? " (+ subdomains)" : ""}`
+                          : "no include hosts — this scan would match nothing"}
+                      </span>
+                      <button className="text-emerald-700 underline dark:text-emerald-400" onClick={() => navigate(`/projects/${projectId}`)}>
+                        edit scope
+                      </button>
+                    </div>
+                    {selectedTarget && !scopeCoversTarget ? (
+                      <p className="mt-1 text-amber-700 dark:text-amber-400">
+                        {targetHost} is not inside this project scope; the scan will refuse every request to it.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
                 <Field label="Name" hint="Optional label shown in lists.">
                   <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
                 </Field>
