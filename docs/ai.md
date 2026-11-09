@@ -223,3 +223,39 @@ submission layout.
 A lab host (for example a `web-security-academy.net` instance) is correctly
 reported as out of scope by this pass. That is the intended behaviour: the
 reviewer checks the host against the program, not against the scan.
+
+## Claude OAuth (no API key)
+
+Claude can be connected exactly like ChatGPT, with Indago's own credential
+store instead of an API key: `POST /api/llm/claude/login/start` returns the
+authorization URL (PKCE S256, Claude Code client id), the user approves in
+their browser, and `POST /api/llm/claude/login/finish {"code":"…"}` exchanges
+the pasted code. Tokens live in `<data>/claude/credentials.json` (0600) and are
+refreshed automatically; `GET/DELETE /api/llm/claude/session` reports or clears
+the session. Settings → **Claude OAuth session** drives the flow.
+
+When the provider is `claude` and no API key exists, the gateway uses this
+session: requests carry `Authorization: Bearer`, `anthropic-beta:
+oauth-2025-04-20,claude-code-20250219` and `x-app: cli`, which is what
+Anthropic requires for subscription tokens (x-api-key would be rejected).
+`INDAGO_LLM_MODEL_CLAUDE` selects the model; the default is
+`claude-sonnet-4-5`.
+
+## Audit: what is covered, what is not
+
+Covered: provider settings (DeepSeek, Claude API key, Claude OAuth, OpenAI,
+custom/OpenAI-compatible gateways, ChatGPT OAuth), a master on/off switch, a
+per-parameter attempt budget, payload diagnosis over stored evidence, report
+narration, triager review over the rendered YesWeHack template, redaction of
+cookies/keys before any evidence leaves the process, prompt-injection fencing of
+target-derived text, and advisory-only output stored as `AITask`.
+
+Known gaps, stated rather than hidden:
+
+- **No automatic draft submission.** Indago renders the submission and reviews
+  it; writing the draft into the platform (`PUT /programs/{slug}/reports/draft`)
+  and spending submission credits is deliberately left to the hunter.
+- **No cost/token accounting.** Calls are bounded by timeouts and output
+  ceilings, not by a monetary budget per scan.
+- **No per-review budget.** The per-parameter budget covers payload diagnosis;
+  report review is a one-off action the operator triggers.

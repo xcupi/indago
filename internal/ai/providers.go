@@ -84,8 +84,8 @@ func requiresAPIKey(name string) bool {
 // call deep inside a scan.
 func NewProvider(s Settings) (Provider, error) {
 	name := strings.ToLower(strings.TrimSpace(s.Provider))
-	if requiresAPIKey(name) && strings.TrimSpace(s.APIKey) == "" {
-		return nil, fmt.Errorf("ai: provider %q requires an API key", name)
+	if requiresAPIKey(name) && strings.TrimSpace(s.APIKey) == "" && strings.TrimSpace(s.OAuthToken) == "" {
+		return nil, fmt.Errorf("ai: provider %q requires an API key or an OAuth session", name)
 	}
 	baseURL := strings.TrimSpace(s.BaseURL)
 	if baseURL == "" {
@@ -96,7 +96,7 @@ func NewProvider(s Settings) (Provider, error) {
 	case ProviderOpenAI, ProviderOpenRouter, ProviderOllama, ProviderVLLM, ProviderDeepSeek, ProviderCustom:
 		return &openAICompatProvider{name: name, baseURL: baseURL, apiKey: s.APIKey, model: model}, nil
 	case ProviderAnthropic, ProviderClaude:
-		return &anthropicProvider{baseURL: baseURL, apiKey: s.APIKey, model: model}, nil
+		return &anthropicProvider{baseURL: baseURL, apiKey: strings.TrimSpace(s.APIKey), oauth: strings.TrimSpace(s.OAuthToken), model: model}, nil
 	case ProviderChatGPT:
 		// No API key: the OAuth session is read from Indago's store, falling
 		// back to the borrowed Hermes session.

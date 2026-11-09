@@ -172,7 +172,12 @@ func (s *Server) handleListLLMModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	models, err := llm.NewProber(0).Models(r.Context(), cfg)
+	var models []string
+	if (cfg.Provider == "claude" || cfg.Provider == "anthropic") && !cfg.HasKey() && s.claudeLogin != nil {
+		models, err = s.claudeLogin.ListModels(r.Context())
+	} else {
+		models, err = llm.NewProber(0).Models(r.Context(), cfg)
+	}
 	if err != nil {
 		msg := cfg.Redact(err.Error())
 		s.log.Info("LLM model list unavailable", "provider", cfg.Provider, "err", msg)

@@ -37,7 +37,12 @@ export default function Settings() {
   const cg = useApi<{ logged_in: boolean; source: string; account?: string; plan?: string; expires_at?: string }>(
     "/api/llm/chatgpt/session",
   );
+  const claude = useApi<{ connected: boolean; expires_at?: string }>("/api/llm/claude/session");
   const [cgLogin, setCgLogin] = useState<{ device_auth_id: string; user_code: string; url: string; interval_seconds: number } | null>(null);
+  const [claudeUrl, setClaudeUrl] = useState("");
+  const [claudeState, setClaudeState] = useState("");
+  const [claudeCode, setClaudeCode] = useState("");
+  const [claudeMsg, setClaudeMsg] = useState("");
   const [cgMsg, setCgMsg] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
@@ -324,6 +329,94 @@ export default function Settings() {
             )}
             {err ? <Alert>{err}</Alert> : null}
             {msg ? <p className="text-[11px] text-emerald-700 dark:text-emerald-400">{msg}</p> : null}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <KeyRound className="size-4 text-emerald-700 dark:text-emerald-400" /> Claude OAuth session
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 text-[11px]">
+            {claude.data?.connected ? (
+              <p className="text-foreground">
+                connected{claude.data.expires_at ? ` · expires ${formatTime(claude.data.expires_at)}` : ""} · token refreshed automatically
+              </p>
+            ) : (
+              <p className="text-muted-foreground">
+                No session yet. Connect your Claude account without an API key (PKCE, same flow Claude Code uses).
+              </p>
+            )}
+            {claudeUrl ? (
+              <div className="space-y-1 rounded-md border border-border bg-muted/30 p-2">
+                <p>
+                  Open{" "}
+                  <a className="break-all text-emerald-700 underline dark:text-emerald-400" href={claudeUrl} target="_blank" rel="noreferrer">
+                    the authorization page
+                  </a>{" "}
+                  and approve. Copy the code it shows, paste it below.
+                </p>
+                <div className="flex gap-2">
+                  <Input value={claudeCode} onChange={(e) => setClaudeCode(e.target.value)} placeholder="code (or code#state)" />
+                  <Button
+                    size="sm"
+                    onClick={async () => {
+                      setClaudeMsg("");
+                      try {
+                        await api("/api/llm/claude/login/finish", {
+                          method: "POST",
+                          body: { code: claudeCode, state: claudeState },
+                        });
+                        setClaudeMsg("Claude connected.");
+                        setClaudeCode("");
+                        setClaudeUrl("");
+                        refreshAll();
+                      } catch (e) {
+                        setClaudeMsg((e as Error).message);
+                      }
+                    }}
+                  >
+                    Finish
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+            {claudeMsg ? <p className="text-muted-foreground">{claudeMsg}</p> : null}
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                onClick={async () => {
+                  setClaudeMsg("");
+                  try {
+                    const d = await api<{ url: string; state: string }>("/api/llm/claude/login/start", { method: "POST", body: {} });
+                    setClaudeUrl(d.url);
+                    setClaudeState(d.state);
+                  } catch (e) {
+                    setClaudeMsg((e as Error).message);
+                  }
+                }}
+              >
+                Connect Claude
+              </Button>
+              {claude.data?.connected ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={async () => {
+                    try {
+                      await api("/api/llm/claude/session", { method: "DELETE" });
+                      setClaudeMsg("Disconnected.");
+                      refreshAll();
+                    } catch (e) {
+                      setClaudeMsg((e as Error).message);
+                    }
+                  }}
+                >
+                  Disconnect
+                </Button>
+              ) : null}
+            </div>
           </CardContent>
         </Card>
 

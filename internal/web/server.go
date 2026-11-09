@@ -23,6 +23,7 @@ import (
 
 	"github.com/indago/indago/internal/ai"
 	"github.com/indago/indago/internal/bounty"
+	"github.com/indago/indago/internal/claudeoauth"
 	"github.com/indago/indago/internal/config"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
@@ -74,6 +75,11 @@ type Server struct {
 	// configured; it never blocks the scanner.
 	bountyStore  *bounty.Store
 	bountyClient *bounty.Client
+
+	// claudeStore/claudeLogin hold Indago's own Claude OAuth session (PKCE),
+	// independent of any API key or another tool's credential store.
+	claudeStore *claudeoauth.Store
+	claudeLogin *claudeoauth.Login
 
 	// llm is the LLM provider configuration store behind /api/llm/* (see
 	// internal/llm). Nil leaves those endpoints reporting that configuration
@@ -128,6 +134,12 @@ func (s *Server) SetLoginFunc(fn LoginFunc) { s.login = fn }
 // SetPDFRenderer wires the HTML-to-PDF converter behind report format "pdf".
 // Not calling it (or passing nil) reports PDF export as unavailable.
 func (s *Server) SetPDFRenderer(r PDFRenderer) { s.pdf = r }
+
+// SetClaudeOAuthStore wires Indago's own Claude OAuth store (PKCE login).
+func (s *Server) SetClaudeOAuthStore(dir string) {
+	s.claudeStore = claudeoauth.NewStore(dir)
+	s.claudeLogin = claudeoauth.NewLogin(s.claudeStore)
+}
 
 // SetChatGPTCredDir wires Indago's own ChatGPT OAuth store (the device-code
 // login below writes here). Unset keeps login endpoints unavailable.
@@ -203,6 +215,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/scans/{id}/ai/assist", s.handleScanAIAssist)
 	mux.HandleFunc("POST /api/scans/{id}/ai/diagnose", s.handleDiagnosePayload)
 	mux.HandleFunc("POST /api/scans/{id}/ai/report-review", s.handleReportReview)
+	mux.HandleFunc("POST /api/llm/claude/login/start", s.handleClaudeLoginStart)
+	mux.HandleFunc("POST /api/llm/claude/login/finish", s.handleClaudeLoginFinish)
+	mux.HandleFunc("GET /api/llm/claude/session", s.handleClaudeSession)
+	mux.HandleFunc("DELETE /api/llm/claude/session", s.handleClaudeLogout)
 
 	mux.HandleFunc("GET /api/projects", s.handleListProjects)
 	mux.HandleFunc("POST /api/projects", s.handleCreateProject)

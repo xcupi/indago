@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -64,6 +65,14 @@ func (s *Server) aiGatewayFor(provider, model string) (ai.Gateway, error) {
 	}
 	cred, err := s.llmRegistry.Resolve(provider, model)
 	if err != nil {
+		// Claude can authenticate with Indago's own OAuth session instead of an
+		// API key. Resolve reports "no credential" when no key exists anywhere,
+		// so this is the point to fall back to the stored PKCE token.
+		if errors.Is(err, llm.ErrNoCredential) {
+			if gw, ok := s.claudeOAuthGateway(provider, model); ok {
+				return gw, nil
+			}
+		}
 		return nil, err
 	}
 	return ai.New(ai.Settings{
@@ -251,4 +260,53 @@ func (s *Server) scanAssistContext(ctx context.Context, scanID domain.ID, sc *do
 		"findings_by_state": byVerdict,
 		"confirmed_titles":  confirmed,
 	}, nil
+}
+
+// claudeOAuthGateway builds a Claude gateway from Indago's PKCE session when
+// the provider is Claude and no API key is configured.
+func (s *Server) claudeOAuthGateway(provider, model string) (ai.Gateway, bool) {
+	if s.claudeLogin == nil {
+		return nil, false
+	}
+	prov := strings.ToLower(strings.TrimSpace(provider))
+	if prov == "" {
+		if s.llm != nil {
+			if c, err := s.llm.Load(); err == nil {
+				prov = strings.ToLower(c.Provider)
+			}
+		}
+		if prov == "" {
+			prov = "deepseek" // the default provider; not Claude
+		}
+	}
+	if prov != "claude" && prov != "anthropic" {
+		return nil, false
+	}
+	tok, err := s.claudeLogin.Token(context.Background())
+	if err != nil || tok == "" {
+		return nil, false
+	}
+	m := strings.TrimSpace(model)
+	if m == "" {
+		m = strings.TrimSpace(os.Getenv("INDAGO_LLM_MODEL_CLAUDE"))
+	}
+	if m == "" {
+		if s.llm != nil {
+			if c, err := s.llm.Load(); err == nil && c.Provider == "claude" {
+				m = c.Model
+			}
+		}
+	}
+	if m == "" {
+		m = "claude-sonnet-4-5"
+	}
+	base := strings.TrimSpace(os.Getenv("INDAGO_LLM_BASE_URL_CLAUDE"))
+	if base == "" {
+		base = "https://api.anthropic.com/v1"
+	}
+	gw, err := ai.New(ai.Settings{Enabled: true, Provider: "claude", Model: m, BaseURL: base, OAuthToken: tok})
+	if err != nil {
+		return nil, false
+	}
+	return gw, true
 }

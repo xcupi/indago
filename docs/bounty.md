@@ -157,3 +157,25 @@ automatically).
    Markdown from step 3.
 5. Fix what it flags, regenerate, then submit on the platform. The review is
    advisory; YesWeHack's triage is the decision.
+
+## Audit: what is covered, what is not
+
+Covered: public program browse with `bug-bounty` + `web-application` filters and
+an explicit cached Load, hunter session login (Bearer JWT) or manager PAT,
+scope import from the API or the public page, one project + scope + seed target
+per program, the YesWeHack Markdown template, and a triager review over the
+exact submission bytes.
+
+Known gaps:
+
+- **Draft auto-fill**: the form fields are mapped and printed, but Indago does
+  not write the platform draft or submit (credits). That needs a stored
+  credential and a live test against `reports/draft`.
+- **Per-program report templates** (`/programs/{slug}/report-templates`) are
+  readable with a credential but not yet surfaced in the UI; the platform's
+  standard five-section skeleton is what the renderer emits.
+- **Scope exclusions**: the importer builds the include list from
+  `web-application` assets; a program that also publishes explicit exclusions in
+  rules prose is not parsed into `exclude_hosts`.
+- **Rules display**: the program page links to YesWeHack; the rules text is not
+  rendered inside Indago.

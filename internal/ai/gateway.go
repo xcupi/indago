@@ -107,6 +107,9 @@ type Settings struct {
 	Model    string
 	BaseURL  string
 	APIKey   string
+	// OAuthToken is a Claude subscription access token (PKCE flow). When set,
+	// Anthropic is called with Bearer + beta headers instead of x-api-key.
+	OAuthToken string
 	// CredentialsDir is where the chatgpt provider keeps Indago's own OAuth
 	// session (<data>/chatgpt). Empty falls back to the borrowed Hermes
 	// session only.

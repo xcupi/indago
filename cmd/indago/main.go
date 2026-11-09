@@ -355,6 +355,8 @@ func cmdServe(args []string) error {
 	srv.SetLLMStore(llm.NewStore(filepath.Join(cfg.DataDir, "llm")))
 	// Bug-bounty platform tokens live under the same data directory, 0600.
 	srv.SetBountyStore(bounty.NewStore(filepath.Join(cfg.DataDir, "bounty")))
+	// Claude OAuth (PKCE) is Indago-owned, like the ChatGPT session.
+	srv.SetClaudeOAuthStore(filepath.Join(cfg.DataDir, "claude"))
 	srv.SetLoginFunc(loginFn) // nil unless -browser: endpoint then reports unavailable
 	// PDF export prints the HTML report through the same Chromium the browser
 	// engine uses; absent an executable the endpoint reports unavailability

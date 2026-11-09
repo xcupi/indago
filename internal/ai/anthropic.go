@@ -14,7 +14,7 @@ const anthropicDefaultVersion = "2023-06-01"
 // anthropicDefaultMaxTokens bounds a single advisory completion. Anthropic's
 // Messages API requires max_tokens on every request (unlike OpenAI, where
 // it is optional); this default suits report-drafting-length prose.
-const anthropicDefaultMaxTokens = 1024
+const anthropicDefaultMaxTokens = 8192
 
 // anthropicProvider talks to Anthropic's own Messages API
 // (POST {baseURL}/messages), which is shaped differently from the OpenAI
@@ -22,9 +22,13 @@ const anthropicDefaultMaxTokens = 1024
 // required anthropic-version header, a top-level system field instead of a
 // system-role message, and a content BLOCK list in the response rather than
 // a single string.
+// claudeOAuthBeta mirrors the beta flags Claude Code sends with an OAuth token.
+const claudeOAuthBeta = "oauth-2025-04-20,claude-code-20250219"
+
 type anthropicProvider struct {
 	baseURL string
 	apiKey  string
+	oauth   string
 	model   string
 }
 
@@ -57,12 +61,18 @@ func (p *anthropicProvider) Complete(ctx context.Context, req Request) (*Respons
 	if p.model == "" {
 		return nil, fmt.Errorf("ai: %s: no model configured", ProviderAnthropic)
 	}
-	if p.apiKey == "" {
-		return nil, fmt.Errorf("ai: %s: no API key configured", ProviderAnthropic)
+	if p.apiKey == "" && p.oauth == "" {
+		return nil, fmt.Errorf("ai: %s: no API key or OAuth session configured", ProviderAnthropic)
 	}
-	headers := map[string]string{
-		"x-api-key":         p.apiKey,
-		"anthropic-version": anthropicDefaultVersion,
+	headers := map[string]string{"anthropic-version": anthropicDefaultVersion}
+	if p.oauth != "" {
+		// Claude subscription tokens are Bearer tokens that also require the
+		// OAuth beta flags; sending x-api-key instead is rejected.
+		headers["Authorization"] = "Bearer " + p.oauth
+		headers["anthropic-beta"] = claudeOAuthBeta
+		headers["x-app"] = "cli"
+	} else {
+		headers["x-api-key"] = p.apiKey
 	}
 	body := anthropicRequest{
 		Model:     p.model,
