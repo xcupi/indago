@@ -9,8 +9,8 @@ PortSwigger catalogue; the confirmed column is mixed-revision and says so.
 | Area | Result |
 | --- | --- |
 | PortSwigger labs catalogued | 55 (XSS 30, access control 13, information disclosure 5, DOM 7) |
-| Confirmed by the engine itself | **42** (XSS 23, AC 13, ID 5, DOM 1) |
-| Gaps | **13** (4 stored XSS, 3 exploit chains, 6 DOM sink capabilities) |
+| Confirmed by the engine itself | **48** (XSS 23, AC 13, ID 5, DOM 7) |
+| Gaps | **7** (4 stored XSS, 3 exploit chains) |
 | Payload families | 137 (24 curated + 113 generated from the XSS cheat sheet) |
 | Report formats / templates | 4 / 4 |
 | LLM provider ids / selectable in Settings | 9 / 5 |
@@ -159,8 +159,8 @@ is detected, header/comment/backup exposure is reported.
 | 3 | Web messages + `JSON.parse` to `src` | **confirmed** (scan e078f718, child-frame execution) |
 | 4 | DOM-based open redirection | **confirmed** (scan 735ed816) |
 | 5 | DOM-based cookie manipulation | **confirmed** (scan b78570e2) |
-| 6 | DOM clobbering to enable XSS | needs comment-form submission + sanitizer payload |
-| 7 | Clobbering DOM attributes to bypass filters | same |
+| 6 | DOM clobbering to enable XSS | **confirmed** (scan 8ed23385) |
+| 7 | Clobbering DOM attributes to bypass filters | **confirmed** (scan e8111129) |
 
 ## Findings from the review
 

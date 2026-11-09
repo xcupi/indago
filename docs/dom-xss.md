@@ -1411,3 +1411,15 @@ Three sinks were added after the lab audit:
 - `document.cookie` — reachability is recorded, but no payload is planned:
   a cookie write is not script execution until the page reads it into a code
   or HTML sink.
+
+## Comment-persisted clobbering
+
+Two labs require a payload that survives a sanitizer and executes after a
+reload. The probe detects a comment renderer that loads comments and sanitises
+with DOMPurify or HTMLJanitor, submits the clobbering payload through the page's
+own form (CSRF included), posts one harmless follower comment, reloads the post
+and verifies marker execution. The follower matters: the clobbered global only
+exists once the payload comment is attached, so the renderer must read it while
+building a later comment. The clobbering marker is distinct from the DOM
+probes' marker, otherwise the persisted comment would make every source probe
+look confirmed.
