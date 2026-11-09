@@ -87,9 +87,14 @@ type Client struct {
 	HTTP    *http.Client
 	Token   func() string
 
-	mu    sync.Mutex
-	cache map[string]cacheEntry
-	ttl   time.Duration
+	// WebBase hosts the public program pages, used when no token is available
+	// (hunter accounts cannot create personal access tokens).
+	WebBase string
+
+	mu          sync.Mutex
+	cache       map[string]cacheEntry
+	publicCache map[string]publicScopesCache
+	ttl         time.Duration
 }
 
 type cacheEntry struct {
@@ -105,7 +110,9 @@ func NewClient(base string, token func() string) *Client {
 	if token == nil {
 		token = func() string { return "" }
 	}
-	return &Client{BaseURL: strings.TrimRight(base, "/"), HTTP: &http.Client{Timeout: 25 * time.Second}, Token: token, cache: map[string]cacheEntry{}, ttl: 10 * time.Minute}
+	return &Client{BaseURL: strings.TrimRight(base, "/"), WebBase: DefaultWebBase,
+		HTTP: &http.Client{Timeout: 25 * time.Second}, Token: token,
+		cache: map[string]cacheEntry{}, publicCache: map[string]publicScopesCache{}, ttl: 10 * time.Minute}
 }
 
 // ListPrograms returns the program list. refresh=false serves a cached result

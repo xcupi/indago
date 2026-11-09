@@ -125,3 +125,53 @@ func TestBountyProgramsAreNotFetchedImplicitly(t *testing.T) {
 		t.Fatalf("programs endpoint calls = %d, want 1", calls)
 	}
 }
+
+// Hunter accounts cannot create a token; import must work from the public
+// program page, where asset_value is the severity and scope is the asset.
+func TestImportUsesPublicScopesWithoutToken(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/programs/acme", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"slug": "acme", "title": "ACME Program", "type": "bug-bounty"})
+	})
+	ywh := httptest.NewServer(mux)
+	defer ywh.Close()
+
+	webStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/programs/acme" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`<script>state = {"scopes":[{"scope":"https://shop.acme.test","scope_type":"web-application","asset_value":"MEDIUM"},{"scope":"api.acme.test","scope_type":"api","asset_value":"HIGH"}]}</script>`))
+	}))
+	defer webStub.Close()
+	t.Setenv("INDAGO_YESWEHACK_API", ywh.URL)
+	t.Setenv("INDAGO_YESWEHACK_WEB", webStub.URL)
+
+	st := memory.New()
+	srv := web.NewServer(st, nil, "test", slog.New(slog.NewTextHandler(io.Discard, nil)), nil, t.TempDir())
+	srv.SetBountyStore(bounty.NewStore(t.TempDir())) // no token
+	a := api{t: t, h: srv.Handler(), st: st}
+
+	var resp struct {
+		Imported []struct {
+			ProjectID string   `json:"project_id"`
+			Hosts     []string `json:"hosts"`
+			Targets   []string `json:"targets"`
+			Skipped   []string `json:"skipped"`
+		} `json:"imported"`
+	}
+	a.mustJSON(a.do("POST", "/api/bounty/import", map[string]any{"slugs": []string{"acme"}}), http.StatusOK, &resp)
+	if len(resp.Imported) != 1 {
+		t.Fatalf("imported = %+v", resp.Imported)
+	}
+	got := resp.Imported[0]
+	if len(got.Hosts) != 1 || got.Hosts[0] != "shop.acme.test" {
+		t.Fatalf("hosts = %v (severity must never become a host)", got.Hosts)
+	}
+	if len(got.Targets) != 1 || got.Targets[0] != "https://shop.acme.test/" {
+		t.Fatalf("targets = %v", got.Targets)
+	}
+	if len(got.Skipped) != 1 {
+		t.Fatalf("skipped = %v", got.Skipped)
+	}
+}

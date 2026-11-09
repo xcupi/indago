@@ -93,3 +93,17 @@ func TestTokenStoreRoundTripAndPermissions(t *testing.T) {
 		t.Fatal("token survived Clear")
 	}
 }
+
+func TestExtractPublicScopesHandlesSeverityBlob(t *testing.T) {
+	page := []byte(`<html>... "scopes":[{"scope":"https://www.jbl.com","scope_type":"web-application","scope_type_name":"Web application","asset_value":"MEDIUM","report_count":null},{"scope":"api.example.com","scope_type":"api","scope_type_name":"API","asset_value":"HIGH","report_count":null}], "x":1 ...</html>`)
+	scopes, err := extractPublicScopes(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scopes) != 2 || scopes[0].Scope != "https://www.jbl.com" || scopes[0].ScopeType != "web-application" {
+		t.Fatalf("scopes = %+v", scopes)
+	}
+	if scopes[0].AssetValue != "MEDIUM" {
+		t.Fatalf("asset_value should be preserved as-is: %+v", scopes[0])
+	}
+}

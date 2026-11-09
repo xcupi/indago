@@ -6,14 +6,28 @@ implemented and waits for a personal access token.
 ## Authentication: token, not password
 
 YesWeHack's API authenticates with a **personal access token** sent as
-`X-AUTH-TOKEN`. Indago never stores or accepts a platform password. Create the
-token on yeswehack.com (profile → API tokens), then paste it into the Bug bounty
-page; it is validated against the API before being stored, written `0600` in a
-`0700` directory under the data dir (`<data>/bounty/yeswehack.token`), and the
-API only ever reports `configured: true/false` — never the value.
+`X-AUTH-TOKEN`. Indago never stores or accepts a platform password.
 
-Revoke a leaked token on the platform and clear it here
-(`DELETE /api/bounty/providers/yeswehack/token`).
+Important: according to YesWeHack's help center, **only Business Unit Owner,
+Business Unit Manager and Program Manager roles can create a PAT** ("MyYesWeHack
+tools" → Create Token). A hunter account has no such menu, so the API's
+authenticated endpoints (scopes, report templates, drafts) are out of reach for
+a normal researcher. That is why the hunter path does not depend on a token:
+
+- **Scopes** are read from the program's public page, whose server-rendered
+  transfer state contains the scope table. `PublicScopes` extracts the
+  `"scopes":[...]` array.
+- **Program browsing** uses the public `/programs` endpoint.
+
+A token, when available, is still useful: the importer prefers the API scopes,
+and report templates/drafts become readable. It is validated before storage,
+written `0600` in a `0700` directory (`<data>/bounty/yeswehack.token`), and the
+API only reports `configured: true/false` — never the value. Clear it with
+`DELETE /api/bounty/providers/yeswehack/token`.
+
+One trap in the public page: `asset_value` there is the **severity**
+(`MEDIUM`), while `scope` is the asset. The importer only accepts a value that
+parses as a host and never a severity word.
 
 ## What works without a token
 

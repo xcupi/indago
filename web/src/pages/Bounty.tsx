@@ -130,8 +130,8 @@ export default function Bounty() {
             <>
               <p className="text-xs text-muted-foreground">
                 {configured
-                  ? "A personal access token is stored. Browsing programs and importing scopes are available."
-                  : "Browsing public programs works without a token. Importing a program's scope needs a personal access token (yeswehack.com → profile → API tokens), stored 0600 on this machine and never returned by the API."}
+                  ? "A personal access token is stored. The API now also serves report templates and drafts."
+                  : "No token is needed to browse or import: scopes are read from each program's public page. A token is only useful for report templates/drafts, and YesWeHack only lets Business Unit Owner/Manager or Program Manager roles create one — a hunter account has no such menu."}
               </p>
               <div className="flex flex-wrap items-end gap-2">
                 <Field label="Personal access token" className="min-w-[280px] flex-1">
@@ -214,10 +214,12 @@ export default function Bounty() {
           )}
 
           <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={runImport} disabled={importing || pickedCount === 0 || !configured}>
+            <Button onClick={runImport} disabled={importing || pickedCount === 0}>
               {importing ? <Loader2 className="size-3.5 animate-spin" /> : null} Import {pickedCount || ""} selected
             </Button>
-            {!configured ? <span className="text-[11px] text-muted-foreground">A token is required to import scopes.</span> : null}
+            <span className="text-[11px] text-muted-foreground">
+              Import reads the program's scope table and creates a project with that scope — it does not start a scan.
+            </span>
           </div>
 
           {imported ? (

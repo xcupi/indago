@@ -34,6 +34,9 @@ import (
 func (s *Server) SetBountyStore(st *bounty.Store) {
 	s.bountyStore = st
 	s.bountyClient = bounty.NewClient(os.Getenv("INDAGO_YESWEHACK_API"), st.Token)
+	if web := os.Getenv("INDAGO_YESWEHACK_WEB"); web != "" {
+		s.bountyClient.WebBase = web
+	}
 }
 
 type bountyProvider struct {
@@ -183,10 +186,6 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusServiceUnavailable, "bounty integration is not configured on this server")
 		return
 	}
-	if !s.bountyStore.Configured() {
-		writeError(w, http.StatusBadRequest, "importing needs a YesWeHack personal access token: scopes are only available to authenticated hunters")
-		return
-	}
 	var req importProgramsReq
 	if err := readJSON(r, &req); err != nil {
 		writeJSONBodyError(w, err)
@@ -208,10 +207,20 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusBadGateway, "loading "+slug+" failed: "+err.Error())
 			return
 		}
+		// Authenticated accounts read scopes from the API; hunter accounts
+		// cannot create a token, so they fall back to the public program page,
+		// which ships the same table in its transfer state.
 		scopes, err := s.bountyClient.Scopes(r.Context(), slug)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, "loading scopes for "+slug+" failed: "+err.Error())
-			return
+			if !errors.Is(err, bounty.ErrNoToken) && !errors.Is(err, bounty.ErrUnauthorized) {
+				writeError(w, http.StatusBadGateway, "loading scopes for "+slug+" failed: "+err.Error())
+				return
+			}
+			scopes, err = s.bountyClient.PublicScopes(r.Context(), slug)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "loading public scopes for "+slug+" failed: "+err.Error())
+				return
+			}
 		}
 		hosts, targets, skipped := webScopeTargets(scopes)
 		if len(hosts) == 0 {
@@ -257,11 +266,22 @@ func webScopeTargets(scopes []bounty.Scope) (hosts, targets, skipped []string) {
 			skipped = append(skipped, sc.ScopeType+":"+sc.Scope)
 			continue
 		}
-		raw := strings.TrimSpace(sc.AssetValue)
-		if raw == "" {
-			raw = strings.TrimSpace(sc.Scope)
+		// The API schema puts the asset in asset_value, but the public page's
+		// transfer state puts the severity there and the asset in scope. Pick
+		// the first field that actually looks like a host, and never accept a
+		// severity word.
+		raw := ""
+		// API schema: asset_value is the asset (scope may be a wildcard).
+		// Public page: asset_value is the severity, scope is the asset. Try the
+		// asset field first and fall back to scope when it is not host-like.
+		for _, cand := range []string{sc.AssetValue, sc.Scope} {
+			if looksLikeHost(cand) {
+				raw = strings.TrimSpace(cand)
+				break
+			}
 		}
 		if raw == "" {
+			skipped = append(skipped, "no host in scope:"+sc.Scope)
 			continue
 		}
 		if strings.HasPrefix(raw, "*.") {
@@ -290,6 +310,24 @@ func webScopeTargets(scopes []bounty.Scope) (hosts, targets, skipped []string) {
 	sort.Strings(hosts)
 	sort.Strings(targets)
 	return hosts, targets, skipped
+}
+
+// looksLikeHost rejects the severity words that occupy asset_value on the
+// public page and accepts a URL or a bare domain.
+func looksLikeHost(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" || strings.ContainsAny(v, " \t") {
+		return false
+	}
+	switch strings.ToUpper(v) {
+	case "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "INFORMATIONAL", "NONE":
+		return false
+	}
+	if strings.Contains(v, "://") {
+		u, err := url.Parse(v)
+		return err == nil && u.Hostname() != ""
+	}
+	return strings.Contains(v, ".") && !strings.HasPrefix(v, ".")
 }
 
 func splitCSV(v string) []string {
