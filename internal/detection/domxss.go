@@ -236,6 +236,14 @@ const (
 	// domXSSShapeJavascriptURL is a value written into a navigation or
 	// element-URL sink; only javascript: executes there.
 	domXSSShapeJavascriptURL = "javascript_url"
+	// domXSSShapeJavascriptURLHTTP is the same execution shape with an
+	// http(s): substring, for pages that only navigate when the value looks
+	// like a URL.
+	domXSSShapeJavascriptURLHTTP = "javascript_url_http"
+	// JSON message shapes: a handler that parses event.data before writing a
+	// property needs an object, not a bare URL. Tried after the raw shapes.
+	domXSSShapeJSONURL     = "json_url"
+	domXSSShapeJSONTypeURL = "json_type_url"
 	// domXSSShapeAngularInterpolation is the only shape Angular's text-node
 	// compiler accepts: a double-brace interpolation. The expression has no
 	// side effect at all — it concatenates two string literals into the
@@ -445,7 +453,20 @@ func DOMXSSPayloadsFor(source DOMXSSSource, sink DOMXSSSink, marker string) []Ca
 		// The page writes our exact value into a URL-bearing position. A
 		// javascript: URL is the shape that can execute; a redirect target
 		// cannot be proven from this engine, so it is not claimed as XSS.
-		return []Candidate{domXSSPayloadCandidate(source, sink, domXSSShapeJavascriptURL, "javascript:"+marker, domXSSNavigationRationale(source, sink))}
+		cands := []Candidate{
+			domXSSPayloadCandidate(source, sink, domXSSShapeJavascriptURL, "javascript:"+marker, domXSSNavigationRationale(source, sink)),
+			domXSSPayloadCandidate(source, sink, domXSSShapeJavascriptURLHTTP, "javascript:"+marker+"//https:", domXSSNavigationRationale(source, sink)),
+		}
+		if source == DOMSourcePostMessage {
+			// A handler may JSON.parse the message first. These two shapes
+			// cover the common {url} and {type,url} contracts; they are only
+			// planned for postMessage, where the page controls the parse.
+			cands = append(cands,
+				domXSSPayloadCandidate(source, sink, domXSSShapeJSONURL, `{"url":"javascript:`+marker+`"}`, domXSSNavigationRationale(source, sink)),
+				domXSSPayloadCandidate(source, sink, domXSSShapeJSONTypeURL, `{"type":"load-channel","url":"javascript:`+marker+`"}`, domXSSNavigationRationale(source, sink)),
+			)
+		}
+		return cands
 	}
 	if sink == DOMSinkCookie {
 		// A cookie write alone is not script execution. Reachability is

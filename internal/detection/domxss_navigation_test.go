@@ -1,6 +1,9 @@
 package detection
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDOMNavigationAndElementSrcSinks(t *testing.T) {
 	cases := []struct {
@@ -53,7 +56,13 @@ func TestCookieSinkPlansNoXSSCandidate(t *testing.T) {
 
 func TestNavigationSinkPlansJavascriptURL(t *testing.T) {
 	cands := DOMXSSPayloadsFor(DOMSourcePostMessage, DOMSinkLocationAssign, "indM123")
-	if len(cands) != 1 || cands[0].Value != "javascript:indM123" {
+	if len(cands) < 1 || cands[0].Value != "javascript:indM123" {
 		t.Fatalf("candidates = %+v", cands)
+	}
+	// A JSON message handler needs an object shape; it is planned after the
+	// raw javascript: URL shapes, never instead of them.
+	last := cands[len(cands)-1].Value
+	if !strings.Contains(last, `"url":"javascript:indM123"`) {
+		t.Fatalf("last candidate = %q", last)
 	}
 }

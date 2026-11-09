@@ -1376,6 +1376,8 @@ func domXSSFindingTitle(ep *domain.Endpoint, source detection.DOMXSSSource, sink
 	switch source {
 	case detection.DOMSourceQuery:
 		return fmt.Sprintf("DOM XSS candidate: %s parameter %q reaches %s at %s %s", source, parameter, sink, ep.Method, endpointLabel(ep.URL))
+	case detection.DOMSourcePostMessage:
+		return fmt.Sprintf("DOM XSS candidate: %s reaches %s at %s %s", source, sink, ep.Method, endpointLabel(ep.URL))
 	case detection.DOMSourceLocalStorage, detection.DOMSourceSessionStorage:
 		return fmt.Sprintf("DOM XSS candidate: %s key %q reaches %s at %s %s", source, parameter, sink, ep.Method, endpointLabel(ep.URL))
 	case detection.DOMSourceHash:
@@ -1626,6 +1628,15 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	// not read the query string.
 	var pageScripts domXSSPageScripts
 	switch source {
+	case detection.DOMSourcePostMessage:
+		// Inline message handlers are invisible to the browser harness when
+		// their sink is location.href (Location's properties cannot be
+		// redefined). The same document load feeds the static pass, which can
+		// see the handler body and name the sink.
+		if ps, scriptErr := e.discoverScriptQueryParams(ctx, bctx, ep.URL); scriptErr == nil {
+			pageScripts = ps
+		}
+		selectors = []domXSSQuerySelector{{}}
 	case detection.DOMSourceQuery:
 		selectors, err = e.queryParamSelectors(ctx, ep.ID)
 		if err != nil {
@@ -2017,6 +2028,8 @@ func domXSSSelectorLabel(source detection.DOMXSSSource, selector string) string 
 	switch source {
 	case detection.DOMSourceQuery:
 		return fmt.Sprintf("%s parameter %q", source, selector)
+	case detection.DOMSourcePostMessage:
+		return string(source)
 	case detection.DOMSourceLocalStorage, detection.DOMSourceSessionStorage:
 		return fmt.Sprintf("%s key %q", source, selector)
 	default:
@@ -2055,6 +2068,15 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 		label += " (name read by the page's own script)"
 	}
 	canary := detection.DOMXSSCanary(marker)
+	if source == detection.DOMSourcePostMessage {
+		// A page that only navigates for http(s)-looking messages will never
+		// hand a plain marker to its sink, so the reachability canary must
+		// look like a URL. Same-origin with a fragment: if the page assigns it
+		// to location, the navigation stays inside scope and does not reload.
+		if u, uerr := url.Parse(ep.URL); uerr == nil && u.Host != "" {
+			canary = u.Scheme + "://" + u.Host + "/#" + canary
+		}
+	}
 
 	// The bounded static pass gets the SAME source and selector the browser is
 	// about to probe, over the page bytes and the same-origin external script
@@ -2122,6 +2144,21 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 	if len(reachable) == 0 && len(textSinks) > 0 {
 		markupProbed = true
 		markupExecuted = e.probeDOMXSSMarkup(ctx, bctx, source, ep, selector, marker)
+	}
+	if len(reachable) == 0 && source == detection.DOMSourcePostMessage && pageScripts.HTML != "" {
+		// A message handler that writes to location/src cannot be observed by
+		// the init-script harness (those properties are not redefinable).
+		// The static pass executes the page's own message handler with a
+		// message-event taint, so a named sink here is a planning hint; the
+		// verdict still comes from the browser executing the payload.
+		static := detection.DOMXSSStaticReachabilityWithScripts(pageScripts.HTML, ep.URL, source, "", pageScripts.Scripts)
+		for _, site := range static.Sites {
+			if site.Sink == detection.DOMSinkLocationAssign || site.Sink == detection.DOMSinkElementSrc || site.Sink == detection.DOMSinkCookie {
+				reachable = append(reachable, site.Sink)
+				staticNote = fmt.Sprintf("static message-handler analysis named sink %s (the runtime harness cannot hook this property)", site.Sink)
+				break
+			}
+		}
 	}
 	if len(reachable) == 0 && !markupExecuted {
 		note := fmt.Sprintf("no implemented DOM-XSS sink reachable from %s (negative result)", label)
@@ -2288,6 +2325,15 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 		}
 	}
 	_, sigText, matched := verification.MatchRuntimeExecution(marker, obs2.Runtime)
+	childFrameExecution := false
+	if !matched && sink == detection.DOMSinkElementSrc && domXSSChildFrameExecution(obs2.Runtime, marker) {
+		// An iframe/javascript: URL runs in the child frame, so the main-frame
+		// exception check can never see it. Accept it only when the main-frame
+		// harness also observed this exact marker being written to an
+		// element.src, which ties the child execution to our payload.
+		matched = true
+		childFrameExecution = true
+	}
 	fragmentNotInserted := sink == detection.DOMSinkCreateContextualFragment && !hasConnectedDOMXSSFragment(harness2, marker)
 	if fragmentNotInserted {
 		matched = false
@@ -2336,6 +2382,9 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 	}
 	if fragmentNotInserted {
 		notes += "; target insertion of the parsed fragment was not observed; detached-fragment runtime errors alone do not confirm this sink"
+	}
+	if childFrameExecution {
+		notes += "; execution was attributed to the child frame this page created from the element.src write (the main-frame harness saw the marker reach element.src); this is a frame execution, not a main-frame one"
 	}
 	if sink != detection.DOMSinkAngularExpression && matched && sigText != "" {
 		notes = notes + " (" + sigText + ")"
@@ -3391,4 +3440,35 @@ func (e *domXSSExecutor) persistDOMXSSEvidence(ctx context.Context, scanID, tcID
 		}
 	}
 	return ids
+}
+
+// domXSSChildFrameExecution accepts a marker execution that happened in a
+// child frame, but only for element.src and only when the main-frame harness
+// observed the same marker being assigned to an element URL. That pairing is
+// what makes the child exception attributable to the payload instead of to a
+// page-authored error.
+func domXSSChildFrameExecution(rt browser.RuntimeObservations, marker string) bool {
+	if !rt.Available || rt.MainFrameID == "" {
+		return false
+	}
+	sawSrcWrite := false
+	for _, report := range rt.Reports {
+		if strings.Contains(report.Text, `"sink":"element.src"`) && strings.Contains(report.Text, marker) {
+			sawSrcWrite = true
+			break
+		}
+	}
+	if !sawSrcWrite {
+		return false
+	}
+	for _, ex := range rt.Exceptions {
+		if !ex.MarkerIdentifier || ex.ClassName != "ReferenceError" ||
+			!strings.HasPrefix(ex.Description, "ReferenceError: "+marker+" is not defined") {
+			continue
+		}
+		if ex.Location.FrameID != "" && ex.Location.FrameID != rt.MainFrameID {
+			return true
+		}
+	}
+	return false
 }
