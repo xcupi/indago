@@ -40,7 +40,7 @@ primitives (Radix + cva, vendored as source under `web/src/components/ui/`).
 | `GET/POST /api/projects/{id}/targets`, `.../{tid}` | Project page → Targets |
 | `GET/PUT /api/projects/{id}/scope` | Project page → Scope editor (hosts, prefixes, subdomains) |
 | `GET/POST /api/scans`, `GET /api/scans/{id}` | Scans list + create/start dialog, scan page |
-| `GET /api/scans/{id}/status`, `.../stats` | Scan header + Overview tab |
+| `GET /api/scans/{id}` (polled) | Scan header + Overview tab (state and stats are read from the scan object; `/status` and `/stats` are not called) |
 | `POST /api/scans/{id}/{start,pause,resume,cancel}` | Scan header actions |
 | `POST /api/scans/{id}/config` | "Tune" dialog (concurrency, rate) |
 | `GET /api/scans/{id}/coverage` | Coverage tab (with every fallback skip reason) |
@@ -92,3 +92,26 @@ not `prefers-color-scheme`, because the operator picks it.
   (e.g. `text-emerald-600 dark:text-emerald-400`); neutral surfaces never do.
 - New components must use the semantic tokens. A raw `zinc-*`/`emerald-*`
   surface in a component is a theming bug, not a style preference.
+
+## Known gaps vs the backend (verified by diffing routes and request fields)
+
+Route coverage is complete for the screens the legacy dashboard had, with these
+exceptions. They are real gaps, not "covered elsewhere":
+
+| Gap | Backend | Evidence |
+| --- | --- | --- |
+| Interactive login (drive a real browser login, get a storage-state path) | `POST /api/auth/login` | no caller in `web/src`; the form only accepts an existing `auth_state_path` |
+| Model discovery in Settings | `POST /api/llm/models` | no caller in `web/src`; legacy `views.js` used it |
+| Finding PoC download | `GET /api/scans/{id}/findings/{fid}/poc` | no `/poc` reference in `web/src`; legacy linked it |
+| Selective report (`finding_ids`) | `POST /api/scans/{id}/reports` | SPA sends `{format, mode}` only |
+| AI summary on reports (`ai_summary`) | `POST /api/scans/{id}/reports` | legacy form had it |
+| Scan-create fields: `proxy_pool`, `stop{mode,confirmed_limit}`, `max_candidates`, `login_*_selector` | `POST /api/scans` | `createScanReq` accepts them; the SPA form does not send them (concurrency is available after the fact via "Tune" → `POST /api/scans/{id}/config`) |
+
+Backend-only options that the legacy UI also never exposed (CLI-only by
+design, so not regressions): `idor_candidates`, `idor_enumerate(_n)`,
+`enable_role_param`, `enable_access_control_pages`, `enable_role_write`,
+`enable_admin_step_probe`, `enable_object_family_probe`, `enable_xss_library`,
+`randomize_tls_fingerprint`.
+
+Operational endpoints with no screen by design: `GET /healthz`, `GET /metrics`
+(Prometheus scrape, not an operator screen).
