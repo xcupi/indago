@@ -236,6 +236,20 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 				return
 			}
 		}
+		// Importing the same program twice would create a second project with
+		// the same scope; skip it and say so.
+		existing, _ := s.store.Projects().List(r.Context())
+		already := false
+		for _, p := range existing {
+			if strings.Contains(p.Notes, "YesWeHack ("+slug+")") {
+				already = true
+				break
+			}
+		}
+		if already {
+			out = append(out, importedProgram{Slug: slug, Title: detail.Title, Skipped: []string{"already imported"}})
+			continue
+		}
 		hosts, targets, prefixes, skipped := webScopeTargets(scopes)
 		if len(hosts) == 0 {
 			out = append(out, importedProgram{Slug: slug, Title: detail.Title, Skipped: []string{"no web-application scope asset"}})
