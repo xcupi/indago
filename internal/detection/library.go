@@ -34,6 +34,12 @@ package detection
 
 import "fmt"
 
+// MaxLibraryCandidatesPerInjectionPoint bounds how many cheat-sheet families a
+// single injection point may send. The table carries every event family the
+// sheet documents; without this cap an opted-in scan would treat one parameter
+// as a fuzzing target.
+const MaxLibraryCandidatesPerInjectionPoint = 12
+
 // LibraryVector is one cheat-sheet family, expressed as a template.
 type LibraryVector struct {
 	// ID names the family (used in rationale text and tests).
@@ -48,6 +54,10 @@ type LibraryVector struct {
 	Build func(marker string) string
 	// Why explains the mechanism in one line.
 	Why string
+	// Rank orders families within a trigger class: lower runs first. Curated
+	// families leave it zero; the generated cheat-sheet table fills it in
+	// sheet order so the load families the sheet lists first are tried first.
+	Rank int
 }
 
 // Library is the cheat-sheet family table. Add entries here, not to the
@@ -201,10 +211,16 @@ func libraryTemplatesFor(a ContextAnalysis, m string) []candTemplate {
 		// its budget on the canonical set first and reaches the library only
 		// when the operator asked for it (typically with -candidate-profile
 		// thorough).
+		// Load families always outrank interaction families: a load vector
+		// needs no verifier action. The rank bonus (max 8) can never cross
+		// that boundary because the bases are 40 and 50.
 		priority := 40
 		if v.Trigger == TriggerInteraction {
-			priority = 45
+			priority = 50
 		}
+		// Sheet order breaks ties inside a class, bounded so it never
+		// outranks the canonical set above 40/45.
+		priority += minInt(v.Rank/12, 8)
 		build := v.Build
 		value := build(m)
 		out = append(out, candTemplate{
@@ -226,4 +242,12 @@ func vectorFitsContext(v LibraryVector, c Context) bool {
 		}
 	}
 	return false
+}
+
+// minInt keeps the rank bonus bounded without importing a package for it.
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

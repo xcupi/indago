@@ -189,6 +189,10 @@ type CandidatePlan struct {
 	// hard per-injection-point cap (MaxVariationCandidatesPerInjectionPoint)
 	// left unsent. Zero when the packs did not run or nothing was capped.
 	VariationCapped int `json:"variation_capped,omitempty"`
+	// LibraryCapped records how many cheat-sheet library candidates the hard
+	// per-injection-point cap (MaxLibraryCandidatesPerInjectionPoint) left
+	// unsent. Zero when the library did not run or nothing was capped.
+	LibraryCapped int `json:"library_capped,omitempty"`
 }
 
 // PlanOptions configures planning.
@@ -391,6 +395,25 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 			if c.Variation != "" {
 				if n >= MaxVariationCandidatesPerInjectionPoint {
 					plan.VariationCapped++
+					continue
+				}
+				n++
+			}
+			kept = append(kept, c)
+		}
+		plan.Candidates = kept
+	}
+	// Hard cap on cheat-sheet library candidates per injection point: the
+	// sheet has hundreds of event families, and an opted-in scan must not turn
+	// one parameter into a request generator. Plan order is highest priority
+	// first, so the load-triggering families win and the tail is dropped.
+	if opts.EnableLibrary {
+		kept := plan.Candidates[:0]
+		n := 0
+		for _, c := range plan.Candidates {
+			if strings.HasPrefix(c.Rationale, "library/") {
+				if n >= MaxLibraryCandidatesPerInjectionPoint {
+					plan.LibraryCapped++
 					continue
 				}
 				n++

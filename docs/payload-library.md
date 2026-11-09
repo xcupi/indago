@@ -1,6 +1,9 @@
 # XSS payload library
 
-Indago's cheat-sheet library is a table of vector **families** derived from
+Indago's cheat-sheet library carries **135 families**: 22 hand-declared ones for
+contexts the planner needed (attribute breakouts, JS-string breakouts, URL
+schemes, comment breakout) and 113 generated from every event-handler family the
+sheet documents, one representative vector each. It is derived from
 PortSwigger's XSS cheat sheet
 (https://portswigger.net/web-security/cross-site-scripting/cheat-sheet, 2026
 edition). It is a top-up for the canonical planner, not a second scanner: the
@@ -20,7 +23,15 @@ cookie access.
   a target needs the wider net.
 
 `GET /api/payload-library` lists the families (`id`, `contexts`, `trigger`,
-`needs`, example with `{{marker}}`, rationale).
+`needs`, example with `{{marker}}`, rationale) — currently 135.
+
+How the generated table was built (`library_cheatsheet.json`): one entry per
+event-handler family from the sheet's two event sections, the sheet's own
+example vector, dialog calls replaced by the marker, and the entries that need
+external assets or network callbacks dropped (a `validvideo.mp4` that never
+loads would never fire its load event). Obfuscation and encoding sections are
+deliberately excluded: those are evasion variants and belong to the separately
+gated evasion pack.
 
 ## How requests are chosen (not one by one)
 
@@ -44,7 +55,9 @@ Four gates decide what is actually sent, in order:
    outrank interaction families (`javascript:` links, form actions, `onmouseover`
    breakouts), because the verifier needs no click to prove them.
 4. **Budget gate.** The candidate profile caps how many candidates a single
-   injection point may send (`minimal` 3, `standard` 8, `thorough` more), and
+   injection point may send (`minimal` 3, `standard` 8, `thorough` more), a hard
+   library cap allows at most 12 library candidates per injection point
+   (`MaxLibraryCandidatesPerInjectionPoint`, recorded as `library_capped`), and
    the library sits *below* every canonical candidate in priority. A capped
    profile therefore spends its budget on the canonical shapes first and only
    reaches the library when the profile allows it. Families left unsent are

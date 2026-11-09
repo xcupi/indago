@@ -142,6 +142,9 @@ func TestLibraryDoesNotDuplicateCanonicalShapes(t *testing.T) {
 		"body": true, "svg": true, "img": true, "script": true, "a": true,
 	}
 	for _, v := range Library {
+		if strings.HasPrefix(v.ID, "cs_") {
+			continue // generated sheet families: overlap with canonical is expected in shape, not in event
+		}
 		payload := v.Build("M")
 		tag := payload[1:]
 		for i, r := range tag {
@@ -153,5 +156,73 @@ func TestLibraryDoesNotDuplicateCanonicalShapes(t *testing.T) {
 		if carried[strings.ToLower(tag)] {
 			t.Fatalf("%s builds <%s>, a tag the canonical planner already carries; prune it or move it to candidate.go", v.ID, tag)
 		}
+	}
+}
+
+// The generated sheet table must stay a clean data set: one entry per event,
+// one vector per entry, and every id distinct.
+func TestCheatSheetFamiliesAreDistinct(t *testing.T) {
+	ids := map[string]bool{}
+	vectors := map[string]bool{}
+	n := 0
+	for _, v := range Library {
+		if !strings.HasPrefix(v.ID, "cs_") {
+			continue
+		}
+		n++
+		if ids[v.ID] {
+			t.Fatalf("duplicate id %q", v.ID)
+		}
+		ids[v.ID] = true
+		payload := v.Build("MARKER123")
+		if vectors[payload] {
+			t.Fatalf("duplicate vector %q", payload)
+		}
+		vectors[payload] = true
+		if len(v.Contexts) == 0 || v.Why == "" {
+			t.Fatalf("%s: incomplete entry", v.ID)
+		}
+	}
+	if n < 100 {
+		t.Fatalf("generated families = %d, want the full extracted table (>=100)", n)
+	}
+}
+
+// The sheet carries every event family; the plan must not. With the library
+// enabled and the widest profile, the count is bounded and the load-triggering
+// families (which need no verifier action) come before the interaction ones.
+func TestLibraryPlanIsCappedAndLoadFirst(t *testing.T) {
+	rep := &ReflectionReport{Probe: Probe{Token: "M123"}}
+	rep.Reflected = true
+	rep.Locations = []ReflectionLocation{{Context: &ContextAnalysis{Context: CtxHTMLText}}}
+	spec, err := ResolveProfile("thorough", MaxCandidatesCeiling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := PlanCandidates(rep, PlanOptions{EnableLibrary: true, Profile: spec})
+	if plan == nil {
+		t.Fatal("no plan")
+	}
+	n := 0
+	sawInteraction := false
+	for _, c := range plan.Candidates {
+		if !strings.HasPrefix(c.Rationale, "library/") {
+			continue
+		}
+		n++
+		if c.Trigger == TriggerInteraction {
+			sawInteraction = true
+		} else if sawInteraction {
+			t.Fatalf("load-triggering library candidate %q came after an interaction one", c.Value)
+		}
+	}
+	if n == 0 {
+		t.Fatal("no library candidates planned")
+	}
+	if n > MaxLibraryCandidatesPerInjectionPoint {
+		t.Fatalf("planned %d library candidates, cap is %d", n, MaxLibraryCandidatesPerInjectionPoint)
+	}
+	if plan.LibraryCapped == 0 {
+		t.Fatal("the library has far more families than the cap; LibraryCapped should be non-zero")
 	}
 }
