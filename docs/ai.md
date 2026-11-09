@@ -11,6 +11,9 @@ three things — and only three things:
    failure (filter, encoding, WAF, wrong sink) and returns new candidates.
 3. **Draft the executive-summary paragraph of a report** (`ai_summary: true` on
    report creation), labeled as an unverified draft.
+4. **Review a submission before it is sent** (`POST /api/scans/{id}/ai/report-review`):
+   a triager pass over the report Indago itself renders, returning
+   `READY` / `NEEDS FIXES` / `DO NOT SUBMIT` with concrete fixes.
 
 Everything else is unchanged by design: the scanner decides what is tested and
 what is confirmed, and the model's answer is stored as an advisory `AITask` —
@@ -46,9 +49,14 @@ ceiling a gateway default can be spent entirely on reasoning and return an
 empty answer. Diagnosis calls are allowed 180 s for the same reason.
 
 Naming: `<PROVIDER>` is the provider id uppercased, non-alphanumerics replaced
-by `_`. Supported: `deepseek`, `openai`, `custom` (any OpenAI-compatible
-endpoint), `chatgpt` (OAuth), plus the gateway's own
+by `_`. Supported: `deepseek`, `claude` (Anthropic Messages API), `openai`, `custom`
+(any OpenAI-compatible endpoint), `chatgpt` (OAuth), plus the gateway's own
 `anthropic`/`openrouter`/`ollama`/`vllm`.
+
+`claude` authenticates with `x-api-key` plus `anthropic-version`, not a Bearer
+token; model discovery works through the same `/models` probe, so
+`INDAGO_LLM_MODEL_CLAUDE` (or Settings) selects the model. No model name is
+hardcoded beyond the provider default: names age fast.
 
 ### ChatGPT via OAuth (`chatgpt`)
 
@@ -184,3 +192,34 @@ it. The model's answer is prose; nothing is executed.
 The UI exposes both policy controls in Settings ("AI advisory" and "Attempts
 per parameter") and the diagnosis itself as **Payload doctor** inside a
 finding's dialog.
+
+## Report review (triager)
+
+Inspired by YesWeHack's Claude Kit (`/ywh:triage`), with one difference: it
+runs on any configured provider, over the report Indago renders locally.
+
+`POST /api/scans/{id}/ai/report-review {"mode":"confirmed","provider":"claude"}`
+renders the YesWeHack template from the stored findings, sends those exact
+submission bytes to the model, and asks for:
+
+```json
+{"verdict":"READY|NEEDS FIXES|DO NOT SUBMIT",
+ "summary":"...",
+ "issues":[{"severity":"blocker|major|minor","issue":"...","fix":"..."}],
+ "missing_evidence":["..."]}
+```
+
+The rubric is the kit's core rule: judge only what the report proves. A
+submission is READY only if a triager could reproduce it from the report alone
+(endpoint, parameter, payload, observable proof). The model is told not to
+invent impact and not to fail the report for the intentionally unscored CVSS
+field, but to list it as a field to fill. Output is advisory and stored as an
+`AITask`; it never edits the report or a finding.
+
+Because the input is the rendered template, every provider reviews the same
+structure: switching from DeepSeek to Claude changes the reviewer, not the
+submission layout.
+
+A lab host (for example a `web-security-academy.net` instance) is correctly
+reported as out of scope by this pass. That is the intended behaviour: the
+reviewer checks the host against the program, not against the scan.

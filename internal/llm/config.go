@@ -38,6 +38,9 @@ const (
 	// ProviderChatGPT is the OAuth (Codex) provider: no API key, the session
 	// comes from the Hermes auth store.
 	ProviderChatGPT = "chatgpt"
+	// ProviderClaude is Anthropic's Claude (Messages API). It is the same
+	// protocol as the anthropic id; the separate name is what users pick.
+	ProviderClaude = "claude"
 
 	// DefaultProvider is the provider a fresh configuration starts from.
 	DefaultProvider = ProviderDeepSeek
@@ -80,6 +83,12 @@ var providerList = []Provider{
 		DefaultModel:   "deepseek-chat",
 		RequiresKey:    true,
 		Default:        true,
+	},
+	{
+		ID:             ProviderClaude,
+		Label:          "Claude (Anthropic)",
+		DefaultBaseURL: "https://api.anthropic.com/v1",
+		RequiresKey:    true,
 	},
 	{
 		ID:             ProviderOpenAI,

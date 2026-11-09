@@ -224,7 +224,14 @@ func setHeaders(req *http.Request, cfg Config) {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", probeUserAgent)
 	if cfg.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+cfg.apiKey)
+		// Anthropic authenticates with x-api-key and requires a version
+		// header; the OpenAI-compatible providers use Bearer.
+		if cfg.Provider == "claude" || cfg.Provider == "anthropic" {
+			req.Header.Set("x-api-key", cfg.apiKey)
+			req.Header.Set("anthropic-version", "2023-06-01")
+		} else {
+			req.Header.Set("Authorization", "Bearer "+cfg.apiKey)
+		}
 	}
 }
 

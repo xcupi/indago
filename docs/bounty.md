@@ -146,3 +146,14 @@ Rejected diagnostics are never included; only confirmed findings are rendered.
 The UI exposes it as Reports → format `markdown` → template
 `YesWeHack submission (markdown)` (choosing the template switches the format
 automatically).
+
+## Workflow with a model
+
+1. Connect (session token) and import the program → project + scope + targets.
+2. Scan inside that scope; findings land as usual.
+3. Generate the submission: `template=yeswehack`, `format=markdown`.
+4. `POST /api/scans/{id}/ai/report-review` (or Reports → **Review with AI**)
+   returns a triager verdict and the fixes. The reviewer reads exactly the
+   Markdown from step 3.
+5. Fix what it flags, regenerate, then submit on the platform. The review is
+   advisory; YesWeHack's triage is the decision.

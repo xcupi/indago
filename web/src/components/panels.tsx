@@ -233,6 +233,15 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
   const aiProviders = (providers.data?.providers ?? []).filter((p) => p.configured);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [review, setReview] = useState<{
+    verdict: string;
+    summary?: string;
+    issues?: { severity?: string; issue: string; fix?: string }[];
+    missing_evidence?: string[];
+    provider?: string;
+    model?: string;
+  } | null>(null);
 
   const confirmed = findings.data ?? [];
   const toggle = (id: string) =>
@@ -259,6 +268,22 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function runReview() {
+    setReviewBusy(true);
+    setError("");
+    setReview(null);
+    try {
+      const body: Record<string, unknown> = { mode };
+      if (aiProvider) body.provider = aiProvider;
+      const out = await api<typeof review>(`/api/scans/${scanId}/ai/report-review`, { method: "POST", body });
+      setReview(out);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setReviewBusy(false);
     }
   }
 
@@ -337,6 +362,9 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
           <Button size="sm" onClick={create} disabled={busy}>
             <Plus className="size-4" /> {busy ? "Generating…" : "Generate report"}
           </Button>
+          <Button size="sm" variant="outline" onClick={runReview} disabled={reviewBusy}>
+            {reviewBusy ? "Reviewing…" : "Review with AI"}
+          </Button>
           <a
             href={`/api/scans/${scanId}/reports/preview?${preview.toString()}`}
             target="_blank"
@@ -346,6 +374,41 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
             preview
           </a>
           {error ? <span className="text-[11px] text-red-700 dark:text-red-400">{error}</span> : null}
+          {review ? (
+            <div className="w-full rounded-md border border-border p-2.5 text-[11px]">
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={`mono rounded px-1.5 py-0.5 text-[10px] ${
+                    review.verdict === "READY"
+                      ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                      : review.verdict === "NEEDS FIXES"
+                        ? "bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300"
+                        : "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300"
+                  }`}
+                >
+                  {review.verdict}
+                </span>
+                <span className="text-muted-foreground">
+                  {review.provider}/{review.model} · advisory, not a platform decision
+                </span>
+              </div>
+              {review.summary ? <p className="mt-1">{review.summary}</p> : null}
+              {review.issues?.length ? (
+                <ul className="mt-1 space-y-1">
+                  {review.issues.map((it, i) => (
+                    <li key={i}>
+                      <span className="mono text-[10px] uppercase text-muted-foreground">{it.severity ?? "issue"}</span>{" "}
+                      {it.issue}
+                      {it.fix ? <span className="text-muted-foreground"> — fix: {it.fix}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {review.missing_evidence?.length ? (
+                <p className="mt-1 text-muted-foreground">missing evidence: {review.missing_evidence.join("; ")}</p>
+              ) : null}
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 

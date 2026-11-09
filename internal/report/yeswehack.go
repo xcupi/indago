@@ -17,6 +17,7 @@ package report
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 
 	"github.com/indago/indago/internal/domain"
@@ -77,7 +78,9 @@ func writeYesWeHackMarkdown(w io.Writer, data Data) error {
 	}
 
 	idx := EvidenceIndex(data.Evidence)
-	for i, f := range confirmed {
+	seen := map[string]bool{}
+	var omitted, n int
+	for _, f := range confirmed {
 		v := NewFindingView(f, idx)
 		endpoint := data.Endpoints[f.EndpointID]
 		if endpoint == "" {
@@ -90,10 +93,20 @@ func writeYesWeHackMarkdown(w io.Writer, data Data) error {
 		if payload == "" && len(v.Candidates) > 0 {
 			payload = v.Candidates[0].Value
 		}
-		if i > 0 {
+		// One submission per distinct finding: two rows for the same
+		// endpoint+parameter+payload are the same bug and a triager closes
+		// the duplicate.
+		dedupKey := dedupEndpoint(endpoint) + "|" + v.ParamName + "|" + payload
+		if seen[dedupKey] {
+			omitted++
+			continue
+		}
+		seen[dedupKey] = true
+		n++
+		if n > 1 {
 			b.WriteString("\n---\n\n")
 		}
-		fmt.Fprintf(&b, "# %d. %s\n\n", i+1, f.Title)
+		fmt.Fprintf(&b, "# %d. %s\n\n", n, f.Title)
 		fmt.Fprintf(&b, "**Bug type:** %s  \n", ywhBugType(f.VulnClass))
 		fmt.Fprintf(&b, "**Scope:** %s  \n", endpoint)
 		fmt.Fprintf(&b, "**Endpoint:** %s  \n", endpoint)
@@ -130,10 +143,7 @@ func writeYesWeHackMarkdown(w io.Writer, data Data) error {
 
 		b.WriteString("## PoC\n\n")
 		b.WriteString("```http\n")
-		fmt.Fprintf(&b, "%s %s\n", nonEmpty(v.Method, "GET"), endpoint)
-		if payload != "" && v.ParamName != "" {
-			fmt.Fprintf(&b, "# %s=%s\n", v.ParamName, payload)
-		}
+		fmt.Fprintf(&b, "%s %s\n", nonEmpty(v.Method, "GET"), pocURL(endpoint, v, payload))
 		b.WriteString("```\n\n")
 		if len(v.Evidence) > 0 {
 			b.WriteString("Evidence captured by the scanner:\n\n")
@@ -149,6 +159,9 @@ func writeYesWeHackMarkdown(w io.Writer, data Data) error {
 
 		b.WriteString("## Remediation\n\n")
 		fmt.Fprintf(&b, "%s\n", ywhRemediation(f.VulnClass))
+	}
+	if omitted > 0 {
+		fmt.Fprintf(&b, "\n_%d duplicate finding(s) for the same endpoint/parameter/payload were omitted._\n", omitted)
 	}
 	_, err := io.WriteString(w, b.String())
 	return err
@@ -176,4 +189,34 @@ func titleCase(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// pocURL is the request line a triager can replay. It prefers the URL the
+// verifier actually navigated to (the candidate already substituted), and
+// otherwise substitutes the payload into the query string for a GET.
+func pocURL(endpoint string, v FindingView, payload string) string {
+	if v.Verified != nil && v.Verified.URL != "" {
+		return v.Verified.URL
+	}
+	if payload == "" || v.ParamName == "" {
+		return endpoint
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	q := u.Query()
+	q.Set(v.ParamName, payload)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// dedupEndpoint drops the query string: two findings that differ only in the
+// test value are the same vulnerability on the same endpoint.
+func dedupEndpoint(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	return u.Scheme + "://" + u.Host + u.Path
 }

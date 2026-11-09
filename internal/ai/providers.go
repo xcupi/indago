@@ -22,11 +22,15 @@ const (
 	// ProviderChatGPT uses the ChatGPT/Codex OAuth session (no API key) and
 	// the Responses API at chatgpt.com/backend-api/codex.
 	ProviderChatGPT = "chatgpt"
+	// ProviderClaude is Anthropic's Claude through the Messages API. It is the
+	// same wire protocol as ProviderAnthropic; the separate id exists because
+	// users pick "Claude", and the model names are the claude-* family.
+	ProviderClaude = "claude"
 )
 
 // Providers lists the recognized provider identifiers.
 func Providers() []string {
-	return []string{ProviderOpenAI, ProviderAnthropic, ProviderOpenRouter, ProviderOllama, ProviderVLLM, ProviderDeepSeek, ProviderCustom, ProviderChatGPT}
+	return []string{ProviderOpenAI, ProviderAnthropic, ProviderClaude, ProviderOpenRouter, ProviderOllama, ProviderVLLM, ProviderDeepSeek, ProviderCustom, ProviderChatGPT}
 }
 
 // defaultBaseURL returns the conventional base URL for a provider when the
@@ -38,7 +42,7 @@ func defaultBaseURL(name string) string {
 	switch name {
 	case ProviderOpenAI:
 		return "https://api.openai.com/v1"
-	case ProviderAnthropic:
+	case ProviderAnthropic, ProviderClaude:
 		return "https://api.anthropic.com/v1"
 	case ProviderOpenRouter:
 		return "https://openrouter.ai/api/v1"
@@ -64,7 +68,7 @@ func defaultBaseURL(name string) string {
 // for those would make the common local-dev case impossible to configure.
 func requiresAPIKey(name string) bool {
 	switch name {
-	case ProviderOpenAI, ProviderAnthropic, ProviderOpenRouter, ProviderDeepSeek:
+	case ProviderOpenAI, ProviderAnthropic, ProviderClaude, ProviderOpenRouter, ProviderDeepSeek:
 		return true
 	default:
 		return false
@@ -91,7 +95,7 @@ func NewProvider(s Settings) (Provider, error) {
 	switch name {
 	case ProviderOpenAI, ProviderOpenRouter, ProviderOllama, ProviderVLLM, ProviderDeepSeek, ProviderCustom:
 		return &openAICompatProvider{name: name, baseURL: baseURL, apiKey: s.APIKey, model: model}, nil
-	case ProviderAnthropic:
+	case ProviderAnthropic, ProviderClaude:
 		return &anthropicProvider{baseURL: baseURL, apiKey: s.APIKey, model: model}, nil
 	case ProviderChatGPT:
 		// No API key: the OAuth session is read from Indago's store, falling
