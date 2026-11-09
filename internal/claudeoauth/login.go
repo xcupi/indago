@@ -32,10 +32,10 @@ import (
 
 const (
 	ClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-	// Claude Code v2.1.84 moved the claude.ai authorization endpoint from
-	// claude.ai/oauth/authorize to claude.com/cai/oauth/authorize. The old
-	// host still renders the consent page but the authorize step fails.
-	AuthorizeURL = "https://claude.com/cai/oauth/authorize"
+	// Claude Code's binary also carries claude.com/cai/oauth/authorize, but
+	// current builds open claude.ai/oauth/authorize directly; the claude.com
+	// hop is a 307 and has been observed to fail validation after consent.
+	AuthorizeURL = "https://claude.ai/oauth/authorize"
 	// platform.claude.com is the live token host; the console host is kept as
 	// a fallback. Both reject requests whose User-Agent looks like a browser
 	// or like claude-code, so the exchange sends the bare axios UA the real
@@ -49,7 +49,11 @@ const (
 	// also requests org:create_api_key, but the claude.ai subscription
 	// authorize endpoint rejects that scope (Invalid OAuth Request / Missing
 	// scope); the platform code flow uses this set instead.
-	Scope = "user:profile user:inference user:sessions:claude_code user:mcp_servers"
+	// Current Claude Code requests all of these for a subscription login.
+	// A partial set (for example without org:create_api_key / file_upload /
+	// plugins) is rejected by the authorize endpoint as "Invalid request
+	// format" before the consent screen completes.
+	Scope = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins"
 	// Beta headers Claude Code sends with an OAuth token.
 	BetaHeader = "oauth-2025-04-20,claude-code-20250219"
 )
@@ -158,7 +162,7 @@ func (l *Login) Start() (authURL, state string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-	state, err = randomToken(16)
+	state, err = randomToken(32)
 	if err != nil {
 		return "", "", err
 	}

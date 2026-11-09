@@ -19,7 +19,7 @@ func TestStartBuildsPKCEAuthorizationURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	q := u.Query()
-	if u.Host != "claude.com" || u.Path != "/cai/oauth/authorize" || q.Get("client_id") != ClientID {
+	if u.Host != "claude.ai" || u.Path != "/oauth/authorize" || q.Get("client_id") != ClientID {
 		t.Fatalf("url = %s", raw)
 	}
 	if q.Get("code_challenge_method") != "S256" || q.Get("code_challenge") == "" {
@@ -35,11 +35,10 @@ func TestStartBuildsPKCEAuthorizationURL(t *testing.T) {
 		t.Fatalf("redirect_uri = %q", q.Get("redirect_uri"))
 	}
 	scope := q.Get("scope")
-	if !strings.Contains(scope, "user:inference") || !strings.Contains(scope, "user:sessions:claude_code") {
-		t.Fatalf("scope = %q", scope)
-	}
-	if strings.Contains(scope, "org:create_api_key") {
-		t.Fatalf("subscription flow must not request org:create_api_key: %q", scope)
+	for _, want := range []string{"org:create_api_key", "user:profile", "user:inference", "user:sessions:claude_code", "user:mcp_servers", "user:file_upload", "user:plugins"} {
+		if !strings.Contains(scope, want) {
+			t.Fatalf("scope %q is missing %q", scope, want)
+		}
 	}
 }
 
