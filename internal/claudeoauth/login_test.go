@@ -28,8 +28,18 @@ func TestStartBuildsPKCEAuthorizationURL(t *testing.T) {
 	if q.Get("state") != state || q.Get("redirect_uri") != RedirectURI {
 		t.Fatalf("state/redirect mismatch: %s", raw)
 	}
-	if !strings.Contains(q.Get("scope"), "user:inference") {
-		t.Fatalf("scope = %q", q.Get("scope"))
+	if q.Get("code") != "true" {
+		t.Fatalf("manual code flow marker missing: %s", raw)
+	}
+	if q.Get("redirect_uri") != "https://platform.claude.com/oauth/code/callback" {
+		t.Fatalf("redirect_uri = %q", q.Get("redirect_uri"))
+	}
+	scope := q.Get("scope")
+	if !strings.Contains(scope, "user:inference") || !strings.Contains(scope, "user:sessions:claude_code") {
+		t.Fatalf("scope = %q", scope)
+	}
+	if strings.Contains(scope, "org:create_api_key") {
+		t.Fatalf("subscription flow must not request org:create_api_key: %q", scope)
 	}
 }
 

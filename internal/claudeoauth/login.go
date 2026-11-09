@@ -42,7 +42,11 @@ const (
 	// console.anthropic.com path is rejected at authorize time with
 	// "Authorization failed — Redirect URI is not supported by client".
 	RedirectURI = "https://platform.claude.com/oauth/code/callback"
-	Scope       = "org:create_api_key user:profile user:inference"
+	// Scope for the headless/platform code flow. The CLI's localhost flow
+	// also requests org:create_api_key, but the claude.ai subscription
+	// authorize endpoint rejects that scope (Invalid OAuth Request / Missing
+	// scope); the platform code flow uses this set instead.
+	Scope = "user:profile user:inference user:sessions:claude_code user:mcp_servers"
 	// Beta headers Claude Code sends with an OAuth token.
 	BetaHeader = "oauth-2025-04-20,claude-code-20250219"
 )
