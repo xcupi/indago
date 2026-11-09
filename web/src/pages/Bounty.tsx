@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ExternalLink, KeyRound, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
+import { ArrowRight, ExternalLink, KeyRound, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -159,8 +159,20 @@ export default function Bounty() {
     <div className="space-y-4">
       <PageTitle
         title="Bug bounty"
-        subtitle="Pull in-scope web applications from a platform, then scan them inside the scope it defines."
+        subtitle="Program intake: import the program's scope, then scan it as a project. Submission stays manual."
       />
+
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+        <span className="font-medium text-foreground">1. Find a program</span>
+        <ArrowRight className="size-3" />
+        <span className="font-medium text-foreground">2. Import scope → project</span>
+        <ArrowRight className="size-3" />
+        <span className="font-medium text-foreground">3. Scan targets</span>
+        <ArrowRight className="size-3" />
+        <span className="font-medium text-foreground">4. YesWeHack report</span>
+        <ArrowRight className="size-3" />
+        <span className="font-medium text-foreground">5. Submit manually</span>
+      </div>
 
       {err ? <Alert className="border-red-200 text-red-700 dark:border-red-900 dark:text-red-400">{err}</Alert> : null}
 
