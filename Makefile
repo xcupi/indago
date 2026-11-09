@@ -10,7 +10,7 @@ COMMIT      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 DATE        := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS     := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(DATE)
 
-.PHONY: all build run test vet fmt fmt-check check tidy clean cover help
+.PHONY: all build ui ui-install run test vet fmt fmt-check check tidy clean cover help
 
 all: check build ## Run checks then build
 
@@ -18,6 +18,13 @@ build: ## Build the indago binary into ./bin
 	@mkdir -p $(BIN_DIR)
 	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) $(MAIN)
 	@echo "built $(BIN_DIR)/$(BINARY) ($(VERSION))"
+
+ui-install: ## Install the SPA's npm dependencies (web/)
+	cd web && npm install
+
+ui: ## Build the SPA into internal/web/assets (embedded by the Go server)
+	cd web && npm run build
+	@echo "built SPA into internal/web/assets"
 
 run: build ## Build and run `indago serve`
 	$(BIN_DIR)/$(BINARY) serve

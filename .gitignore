@@ -31,3 +31,7 @@ coverage.html
 *.swp
 .DS_Store
 __pycache__/
+
+# SPA tooling (dependencies are installed with `make ui-install`)
+/web/node_modules/
+/web/dist/

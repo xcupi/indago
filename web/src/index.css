@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+/* Indago control plane — dark, dense, evidence-first. */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #09090b;
+  color: #e4e4e7;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(16, 185, 129, 0.35);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 999px;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.grid-lines {
+  background-image:
+    linear-gradient(to right, rgba(63, 63, 70, 0.18) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(63, 63, 70, 0.18) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
