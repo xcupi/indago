@@ -1,6 +1,6 @@
 # Feature review and PortSwigger coverage
 
-Reviewed 2026-11-09 against `main` at `c4c10da` (binary `26ca9d5-dirty`).
+Reviewed 2026-11-10 against the current branch (binary `b6b3cd2`).
 The lab numbers come from `indago_lab/LABS.md`, which was rebuilt from the live
 PortSwigger catalogue; the confirmed column is mixed-revision and says so.
 
@@ -13,7 +13,7 @@ PortSwigger catalogue; the confirmed column is mixed-revision and says so.
 | Gaps | **7** (4 stored XSS, 3 exploit chains) |
 | Payload families | 137 (24 curated + 113 generated from the XSS cheat sheet) |
 | Report formats / templates | 4 / 4 |
-| LLM provider ids / selectable in Settings | 9 / 5 |
+| LLM provider ids / selectable in Settings | 9 / 9 |
 | API routes | 60+ (see `internal/web/server.go`) |
 
 "Confirmed" means the scanner produced the finding and its own execution
@@ -150,7 +150,7 @@ URL/method bypass, and role changes through cookie/profile.
 1-5 all confirmed; `.git` history is walked for secrets, TRACE IP-header leak
 is detected, header/comment/backup exposure is reported.
 
-### DOM-based (7) - 1 confirmed
+### DOM-based (7) - 7 confirmed
 
 | # | Lab | Gap |
 | --- | --- | --- |

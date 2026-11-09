@@ -144,3 +144,18 @@ Operational endpoints with no screen by design: `GET /healthz`, `GET /metrics`
   in a dialog iframe; Markdown and JSON are fetched and shown as source. The
   download link keeps `?download`, so the file is still saved with its
   filename.
+
+## Settings layout
+
+Settings is grouped into three collapsible sections, not one long card wall:
+
+- **Providers** — the default AI gateway form plus a scrollable list of every
+  provider, with a `ready/total` count and a per-provider test button. The list
+  is height-capped so ten providers do not push the form off screen.
+- **Sessions** — Claude OAuth and ChatGPT OAuth side by side, with connection
+  state, expiry, and connect/disconnect actions.
+- **Workspace** — the browser control-plane token and the running server build;
+  closed by default because it is rarely changed.
+
+Providers and Sessions default open; each section can be collapsed
+independently. The header badge summarises state without expanding the section.

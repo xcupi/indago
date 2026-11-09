@@ -19,6 +19,15 @@
 .env.*
 *.local.yaml
 *.local.json
+**/credentials.json
+**/*.token
+**/cookies.txt
+**/storage-state*.json
+
+# Local lab / agent state
+indago_lab/
+.claude/
+.hermes/
 
 # Go tooling
 /vendor/
