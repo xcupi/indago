@@ -280,7 +280,7 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
                 value={template}
                 onChange={(e) => setTemplate(e.target.value)}
               >
-                <option value="pentest">pentest (HTB-style)</option>
+                <option value="pentest">pentest</option>
                 <option value="bug_bounty">bug bounty</option>
                 <option value="technical">technical</option>
               </select>
@@ -358,6 +358,7 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
               <TableHeader>
                 <TableRow>
                   <TableHead>Format</TableHead>
+                  <TableHead>Template</TableHead>
                   <TableHead>ID</TableHead>
                   <TableHead>Created</TableHead>
                   <TableHead />
@@ -371,6 +372,7 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
                         <FileText className="size-3" /> {r.format}
                       </Badge>
                     </TableCell>
+                    <TableCell className="text-[11px] text-muted-foreground">{r.template || "—"}</TableCell>
                     <TableCell className="mono text-[11px] text-muted-foreground">{shortId(r.id)}</TableCell>
                     <TableCell className="text-[11px] text-muted-foreground">{formatTime(r.created_at)}</TableCell>
                     <TableCell className="text-right">

@@ -188,7 +188,7 @@ func scopeSeeds(data Data) []string {
 	return []string{string(data.Scan.ID) + " (target base URL)"}
 }
 
-// buildPentestDoc is the HTB-style deliverable: confidentiality, engagement,
+// buildPentestDoc is the client-deliverable layout: confidentiality, engagement,
 // executive summary, approach, summary table, technical findings, remediation
 // roadmap, appendices.
 func buildPentestDoc(data Data) doc {

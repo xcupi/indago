@@ -70,6 +70,11 @@ type Report struct {
 	ScanID    ID            `json:"scan_id"`
 	ProjectID ID            `json:"project_id"`
 	Format    ReportFormat  `json:"format"`
+	// Template records which deliverable layout produced the file ("",
+	// "pentest", "bug_bounty") so a report list can state it instead of
+	// leaving the reader to guess from the content. Empty is the technical
+	// layout and also the value for reports created before the field existed.
+	Template  string        `json:"template,omitempty"`
 	Path      string        `json:"path"`
 	Summary   ReportSummary `json:"summary"`
 	CreatedAt time.Time     `json:"created_at"`

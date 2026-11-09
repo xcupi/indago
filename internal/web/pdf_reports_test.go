@@ -72,6 +72,9 @@ func TestCreatePDFReportRendersTemplate(t *testing.T) {
 	if rpt.Format != domain.ReportPDF {
 		t.Fatalf("format = %q", rpt.Format)
 	}
+	if rpt.Template != "bug_bounty" {
+		t.Fatalf("template = %q, want bug_bounty (the list must state the layout)", rpt.Template)
+	}
 	if !strings.HasSuffix(rpt.Path, ".pdf") {
 		t.Fatalf("stored path = %q, want .pdf", rpt.Path)
 	}
@@ -105,6 +108,11 @@ func TestPDFDefaultsToPentestTemplate(t *testing.T) {
 	rec := a.do("POST", "/api/scans/"+string(scanID)+"/reports", map[string]any{"format": "pdf"})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var rpt domain.Report
+	a.mustJSON(rec, http.StatusCreated, &rpt)
+	if rpt.Template != "pentest" {
+		t.Fatalf("template = %q, want pentest for a default pdf", rpt.Template)
 	}
 	doc := string(a.stub.doc)
 	if !strings.Contains(doc, "Penetration Test Report") || !strings.Contains(doc, "Statement of Confidentiality") {

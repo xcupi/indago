@@ -103,6 +103,7 @@ export interface Report {
   scan_id: ID;
   project_id?: ID;
   format: string;
+  template?: string;
   path?: string;
   summary?: Record<string, unknown>;
   created_at: string;

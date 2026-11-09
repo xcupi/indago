@@ -861,20 +861,20 @@ func (r *sessionRepo) Delete(ctx context.Context, id domain.ID) error {
 
 type reportRepo struct{ db *sql.DB }
 
-const reportCols = `id, scan_id, project_id, format, path, summary, created_at`
+const reportCols = `id, scan_id, project_id, format, template, path, summary, created_at`
 
 func (r *reportRepo) Create(ctx context.Context, rep *domain.Report) error {
 	sum, _ := jsonEncode(rep.Summary)
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO reports (`+reportCols+`) VALUES (?,?,?,?,?,?,?)`,
-		rep.ID, rep.ScanID, rep.ProjectID, rep.Format, rep.Path, sum, ts(rep.CreatedAt))
+		`INSERT INTO reports (`+reportCols+`) VALUES (?,?,?,?,?,?,?,?)`,
+		rep.ID, rep.ScanID, rep.ProjectID, rep.Format, rep.Template, rep.Path, sum, ts(rep.CreatedAt))
 	return err
 }
 
 func scanReport(sc scanner) (*domain.Report, error) {
 	var rep domain.Report
 	var sum, created string
-	if err := sc.Scan(&rep.ID, &rep.ScanID, &rep.ProjectID, &rep.Format, &rep.Path, &sum, &created); err != nil {
+	if err := sc.Scan(&rep.ID, &rep.ScanID, &rep.ProjectID, &rep.Format, &rep.Template, &rep.Path, &sum, &created); err != nil {
 		return nil, err
 	}
 	_ = jsonDecode(sum, &rep.Summary)

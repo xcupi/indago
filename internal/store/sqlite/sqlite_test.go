@@ -55,13 +55,13 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	}
 
 	// schema_migrations should contain exactly the embedded migrations once each
-	// (0001_init … 0006_parameter_examples).
+	// (0001_init … 0007_report_template).
 	var count int
 	if err := db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 6 {
-		t.Fatalf("expected 6 applied migrations, got %d", count)
+	if count != 7 {
+		t.Fatalf("expected 7 applied migrations, got %d", count)
 	}
 }
 
@@ -135,5 +135,35 @@ func TestMigrationUpgradesExistingScans(t *testing.T) {
 	}
 	if got.Discovery != domain.DiscoveryPending || len(got.SeedURLs) != 0 {
 		t.Fatalf("legacy defaults wrong: discovery=%q seeds=%v", got.Discovery, got.SeedURLs)
+	}
+}
+
+// TestReportTemplateRoundTrip pins the 0007 column: the layout that produced a
+// report must survive a write/read so report lists can state it.
+func TestReportTemplateRoundTrip(t *testing.T) {
+	st, closeDB := newDB(t)
+	defer closeDB()
+	ctx := context.Background()
+	rep := &domain.Report{
+		ID: domain.NewID(), ScanID: "s1", ProjectID: "p1",
+		Format: domain.ReportPDF, Template: "bug_bounty",
+		Path: "s1/x.pdf", CreatedAt: time.Now().UTC().Truncate(time.Millisecond),
+	}
+	if err := st.Reports().Create(ctx, rep); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Reports().Get(ctx, rep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Template != "bug_bounty" {
+		t.Fatalf("template = %q, want bug_bounty", got.Template)
+	}
+	list, err := st.Reports().ListByScan(ctx, "s1")
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list = %v, err = %v", list, err)
+	}
+	if list[0].Template != "bug_bounty" {
+		t.Fatalf("list template = %q", list[0].Template)
 	}
 }

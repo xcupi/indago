@@ -22,8 +22,8 @@ html and pdf honour it.
 - `technical` (default when the field is empty) — the evidence-first layout the
   engine has always produced: summary, verdict/severity/class breakdown, then
   confirmed / needs-review / diagnostics sections with candidates and evidence.
-- `pentest` — the client deliverable, modelled on the usual pentest report
-  structure (HTB's sample is a good reference): statement of confidentiality,
+- `pentest` — the client deliverable, following the conventional penetration
+  test report structure: statement of confidentiality,
   engagement & scope, executive summary, approach & methodology, summary of
   findings, technical findings (CWE, impact, remediation, references, verified
   request, evidence), a short/medium/long remediation roadmap, and appendices
@@ -36,6 +36,12 @@ html and pdf honour it.
 `pdf` defaults to `pentest` when no template is given. Rejected diagnostics are
 excluded from `pentest` and `bug_bounty` bodies and counted instead — they are
 not vulnerabilities.
+
+The layout that produced a file is stored on the report row (`template` in the
+API response) and shown in the UI's report table, so a list of reports states
+which template each one used instead of leaving it to be guessed from the
+content. Reports created before this field existed show "—" (unknown); `json`
+reports are machine format and carry no template.
 
 Class context (CWE, impact wording, remediation, references) is a fixed mapping
 per vulnerability class in `internal/report/templates.go`. The finding's own

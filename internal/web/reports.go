@@ -178,11 +178,21 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Persist the layout that actually produced the file. JSON is a machine
+	// format with no layout, and an empty non-JSON template means the
+	// technical layout (the pre-template default).
+	storedTemplate := string(tmpl)
+	if format == domain.ReportJSON {
+		storedTemplate = ""
+	} else if storedTemplate == "" {
+		storedTemplate = string(report.TemplateTechnical)
+	}
 	rpt := &domain.Report{
 		ID:        domain.NewID(),
 		ScanID:    scanID,
 		ProjectID: sc.ProjectID,
 		Format:    format,
+		Template:  storedTemplate,
 		Summary:   selectionSummary(scanID, findings, mode, len(all)),
 		CreatedAt: now,
 	}
