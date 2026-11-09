@@ -21,6 +21,9 @@ const (
 	// from the response content an anonymous request receives, never from an
 	// LLM. See docs/access-control.md.
 	VulnAccessControl VulnClass = "access_control"
+	// VulnOpenRedirect is a client-side or server-side redirect whose target
+	// is attacker-controlled, so a trusted link can send the user elsewhere.
+	VulnOpenRedirect VulnClass = "open_redirect"
 	// VulnInfoDisclosure is information disclosure: a reachable surface hands
 	// the caller the runtime's own configuration (a debug page) or source code
 	// (a backup artefact). Decided from response bytes only, never by an LLM.
@@ -31,7 +34,7 @@ const (
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect:
 		return true
 	default:
 		return false

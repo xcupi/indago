@@ -35,6 +35,8 @@ func ywhBugType(c domain.VulnClass) string {
 		return "Broken Access Control (BAC)"
 	case domain.VulnInfoDisclosure:
 		return "Information Disclosure"
+	case domain.VulnOpenRedirect:
+		return "Open Redirect"
 	default:
 		return string(c)
 	}
@@ -50,6 +52,8 @@ func ywhRemediation(c domain.VulnClass) string {
 		return "Authorize every object access against the authenticated principal on the server, not by hiding identifiers. Use unguessable identifiers only as defence in depth, never as the authorization control."
 	case domain.VulnAccessControl:
 		return "Enforce the authorization check on the server for every administrative function and deny by default; do not rely on the route being unlinked or on client-side checks."
+	case domain.VulnOpenRedirect:
+		return "Redirect only to an allow-listed destination or a relative path, and validate the target's origin on the server. Do not accept a full URL from a request parameter as the redirect destination."
 	case domain.VulnInfoDisclosure:
 		return "Remove the exposed artefact from the web root, deny access to version-control and backup paths at the server, and rotate any credential the artefact contained."
 	default:

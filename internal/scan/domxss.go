@@ -1664,6 +1664,12 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 			tc := e.newTestCase(ctx, job, ep.URL)
 			e.finishTestCase(ctx, tc, nil, pageScripts.Note)
 		}
+		if domXSSHasRedirectLink(pageScripts.HTML) {
+			e.probeClientOpenRedirect(ctx, bctx, job, ep, marker)
+		}
+		if domXSSCookieWritePattern(pageScripts.HTML) {
+			e.probeCookieReflection(ctx, bctx, job, ep, marker)
+		}
 		selectors = mergeDOMXSSQuerySelectors(selectors, pageScripts.Params)
 		if len(selectors) == 0 {
 			tc := e.newTestCase(ctx, job, ep.URL)
@@ -3471,4 +3477,189 @@ func domXSSChildFrameExecution(rt browser.RuntimeObservations, marker string) bo
 		}
 	}
 	return false
+}
+
+// domXSSHasRedirectLink is a narrow, static gate for the client-side redirect
+// probe: a link whose onclick both reads a url= value and writes location.
+func domXSSHasRedirectLink(html string) bool {
+	low := strings.ToLower(html)
+	return strings.Contains(low, "onclick") && strings.Contains(low, "url=") && strings.Contains(low, "location")
+}
+
+// probeClientOpenRedirect executes the page's own onclick handler with a fake
+// location object, so the handler's real regex/assignment runs without a
+// navigation. A destination containing the marker on a foreign origin is
+// execution of attacker-controlled redirect logic, not a text match.
+func (e *domXSSExecutor) probeClientOpenRedirect(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, marker string) {
+	canary := "https://example.com/indago-redirect-" + marker
+	sep := "?"
+	if strings.Contains(ep.URL, "?") {
+		sep = "&"
+	}
+	navURL := ep.URL + sep + "url=" + canary
+	tc := e.newTestCase(ctx, job, navURL)
+	page, err := bctx.NewPage(ctx)
+	if err != nil {
+		e.finishTestCase(ctx, tc, err, "open-redirect probe: new page")
+		return
+	}
+	defer page.Close()
+	if _, err := page.Navigate(ctx, navURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
+		e.finishTestCase(ctx, tc, err, "open-redirect probe: navigate")
+		return
+	}
+	script := `(() => {
+  const link = [...document.querySelectorAll('a[onclick]')].find(a => /url=/.test(a.getAttribute('onclick') || ''));
+  if (!link) return {found: false};
+  const fake = {href: location.href, toString() { return this.href; }};
+  try {
+    new Function('location', link.getAttribute('onclick')).call(window, fake);
+  } catch (err) {
+    return {found: true, error: String(err), target: fake.href};
+  }
+  return {found: true, target: fake.href};
+})()`
+	raw, err := page.Evaluate(ctx, script)
+	if err != nil {
+		e.finishTestCase(ctx, tc, err, "open-redirect probe: evaluate")
+		return
+	}
+	res, _ := raw.(map[string]any)
+	found, _ := res["found"].(bool)
+	target, _ := res["target"].(string)
+	if !found || !strings.Contains(target, "indago-redirect-"+marker) {
+		e.finishTestCase(ctx, tc, nil, "open-redirect probe: the page's handlers did not assign the supplied external target")
+		return
+	}
+	html, _ := page.Content(ctx)
+	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
+	evIDs := e.persistDOMXSSEvidence(ctx, job.ScanID, tc.ID, shot, html, []string{"open redirect target: " + target})
+	detail, _ := json.Marshal(map[string]any{
+		"source": "dom_link_onclick", "target": target, "canary": canary,
+		"test_case_ids": []domain.ID{tc.ID},
+	})
+	f := &domain.Finding{
+		ID: domain.NewID(), ScanID: job.ScanID, ProjectID: e.projectIDFor(ctx, job.ScanID),
+		VulnClass: domain.VulnOpenRedirect, Verdict: domain.VerdictConfirmed,
+		Severity: domain.SeverityMedium, Confidence: domain.ConfidenceHigh,
+		Title:      "Open redirect: a link on the page sends the user to an attacker-controlled URL",
+		Summary:    "The page's own click handler took the url parameter and assigned it to location, so a trusted link can redirect to " + target + ".",
+		EndpointID: ep.ID, EvidenceIDs: evIDs,
+		Provenance: domain.Provenance{Engine: "dom-open-redirect", DiscoverySource: ep.Source, DetectedAt: time.Now(), VerifiedAt: ptrTime(time.Now())},
+		Detail:     detail, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	tc.Status = domain.TestCaseCompleted
+	if err := e.store.Findings().Create(ctx, f); err != nil {
+		e.finishTestCase(ctx, tc, err, "open-redirect probe: create finding")
+		return
+	}
+	e.finishTestCase(ctx, tc, nil, "confirmed: the page's onclick assigned the supplied external target to location: "+target)
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
+
+func (e *domXSSExecutor) projectIDFor(ctx context.Context, scanID domain.ID) domain.ID {
+	sc, err := e.store.Scans().Get(ctx, scanID)
+	if err != nil {
+		return ""
+	}
+	return sc.ProjectID
+}
+
+// domXSSCookieWritePattern detects a page that stores its own URL (or a
+// source-derived value) in document.cookie. The separate read side is the
+// server: a cookie echoed into HTML can execute on the next page load.
+func domXSSCookieWritePattern(html string) bool {
+	low := strings.ToLower(html)
+	return strings.Contains(low, "document.cookie") && strings.Contains(low, "window.location")
+}
+
+// probeCookieReflection poisons the page's own cookie with an encoded script
+// payload, then loads the origin with that cookie. The server URL-decodes the
+// cookie and reflects it into an attribute, so the marker's execution is the
+// proof; nothing is navigated outside the target origin.
+func (e *domXSSExecutor) probeCookieReflection(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, marker string) {
+	payload := "'><script>" + marker + "</script>"
+	sep := "?"
+	if strings.Contains(ep.URL, "?") {
+		sep = "&"
+	}
+	poisonURL := ep.URL + sep + "x=" + payload
+	tc := e.newTestCase(ctx, job, poisonURL)
+	page, err := bctx.NewPage(ctx)
+	if err != nil {
+		e.finishTestCase(ctx, tc, err, "cookie probe: new page")
+		return
+	}
+	if _, err := page.Navigate(ctx, poisonURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
+		page.Close()
+		e.finishTestCase(ctx, tc, err, "cookie probe: poison navigation")
+		return
+	}
+	cookies, err := bctx.Cookies(ctx)
+	page.Close()
+	if err != nil {
+		e.finishTestCase(ctx, tc, err, "cookie probe: read cookies")
+		return
+	}
+	var poisoned string
+	for _, c := range cookies {
+		if strings.Contains(c.Value, marker) {
+			poisoned = c.Name + "=" + c.Value
+			break
+		}
+	}
+	if poisoned == "" {
+		e.finishTestCase(ctx, tc, nil, "cookie probe: the page did not persist the marker in a cookie")
+		return
+	}
+	// The poisoned cookie is already in this context. Load the origin root;
+	// the server decodes the cookie and reflects it into the page.
+	obsPage, err := e.openObservedPage(ctx, bctx, marker)
+	if err != nil {
+		e.finishTestCase(ctx, tc, err, "cookie probe: open observed page")
+		return
+	}
+	defer obsPage.Close()
+	root := ep.URL
+	if u, uerr := url.Parse(ep.URL); uerr == nil {
+		root = u.Scheme + "://" + u.Host + "/"
+	}
+	if _, err := obsPage.Navigate(ctx, root, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
+		e.finishTestCase(ctx, tc, err, "cookie probe: load poisoned page")
+		return
+	}
+	obs, err := observePage(ctx, obsPage, 300*time.Millisecond)
+	if err != nil {
+		e.finishTestCase(ctx, tc, err, "cookie probe: observe")
+		return
+	}
+	_, _, matched := verification.MatchRuntimeExecution(marker, obs.Runtime)
+	if !matched {
+		e.finishTestCase(ctx, tc, nil, "cookie probe: the reflected cookie did not execute the marker")
+		return
+	}
+	html, _ := obsPage.Content(ctx)
+	shot, _ := obsPage.Screenshot(ctx, browser.ScreenshotOptions{})
+	evIDs := e.persistDOMXSSEvidence(ctx, job.ScanID, tc.ID, shot, html, []string{"poisoned cookie: " + poisoned})
+	detail, _ := json.Marshal(map[string]any{
+		"source": "cookie", "sink": "html_attribute", "cookie": poisoned,
+		"test_case_ids": []domain.ID{tc.ID},
+	})
+	f := &domain.Finding{
+		ID: domain.NewID(), ScanID: job.ScanID, ProjectID: e.projectIDFor(ctx, job.ScanID),
+		VulnClass: domain.VulnDOMXSS, Verdict: domain.VerdictConfirmed,
+		Severity: domain.SeverityHigh, Confidence: domain.ConfidenceHigh,
+		Title:      "DOM XSS: a cookie written from the URL executes when the page reflects it",
+		Summary:    "The page stored a URL containing markup in a cookie; the next page load reflected that cookie into HTML and the marker executed.",
+		EndpointID: ep.ID, EvidenceIDs: evIDs,
+		Provenance: domain.Provenance{Engine: "dom-cookie", DiscoverySource: ep.Source, DetectedAt: time.Now(), VerifiedAt: ptrTime(time.Now())},
+		Detail:     detail, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	tc.Status = domain.TestCaseCompleted
+	if err := e.store.Findings().Create(ctx, f); err != nil {
+		e.finishTestCase(ctx, tc, err, "cookie probe: create finding")
+		return
+	}
+	e.finishTestCase(ctx, tc, nil, "confirmed: the page's cookie was poisoned and the server reflected it into executing HTML")
 }

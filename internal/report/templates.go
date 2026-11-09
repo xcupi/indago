@@ -117,6 +117,15 @@ var classIntelByClass = map[domain.VulnClass]classIntel{
 			"not trust client-supplied path/method/header overrides for the decision.",
 		References: []string{"https://cwe.mitre.org/data/definitions/284.html", "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/05-Authorization_Testing/"},
 	},
+	domain.VulnOpenRedirect: {
+		CWE:  "CWE-601",
+		Name: "Open redirect",
+		Impact: "A link on the trusted origin sends the user to an attacker-chosen destination, which " +
+			"enables phishing under the real brand and can bypass link filters that trust this host.",
+		Remediation: "Redirect only to an allow-listed destination or to a relative path; never take the " +
+			"whole target from a request parameter without validating its origin.",
+		References: []string{"https://cwe.mitre.org/data/definitions/601.html", "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards"},
+	},
 	domain.VulnInfoDisclosure: {
 		CWE:  "CWE-200",
 		Name: "Information disclosure",

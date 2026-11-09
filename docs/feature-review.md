@@ -155,11 +155,11 @@ is detected, header/comment/backup exposure is reported.
 | # | Lab | Gap |
 | --- | --- | --- |
 | 1 | DOM XSS in `innerHTML` sink | confirmed |
-| 2 | Web messages to a JavaScript URL | `location.href` sink not modelled |
-| 3 | Web messages + `JSON.parse` to `src` | `element.src` sink not modelled |
-| 4 | DOM-based open redirection | `location` assignment sink missing |
-| 5 | DOM-based cookie manipulation | `document.cookie` sink missing |
-| 6 | DOM clobbering to enable XSS | no clobbering analysis |
+| 2 | Web messages to a JavaScript URL | **confirmed** (scan ee080c8a) |
+| 3 | Web messages + `JSON.parse` to `src` | **confirmed** (scan e078f718, child-frame execution) |
+| 4 | DOM-based open redirection | **confirmed** (scan 735ed816) |
+| 5 | DOM-based cookie manipulation | **confirmed** (scan b78570e2) |
+| 6 | DOM clobbering to enable XSS | needs comment-form submission + sanitizer payload |
 | 7 | Clobbering DOM attributes to bypass filters | same |
 
 ## Findings from the review
