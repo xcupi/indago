@@ -116,6 +116,9 @@ type htmlView struct {
 // map-keyed breakdown is rendered in sorted key order, so the same Data always
 // produces byte-identical HTML.
 func (HTMLGenerator) Generate(w io.Writer, data Data) error {
+	if data.Template != TemplateTechnical {
+		return writeDocHTML(w, data)
+	}
 	findings := Prioritized(data.Findings)
 	idx := EvidenceIndex(data.Evidence)
 	summary := dataSummary(data, findings)

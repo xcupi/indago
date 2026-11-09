@@ -40,6 +40,10 @@ type createReportReq struct {
 	// contract: "selected" when FindingIDs is non-empty, otherwise "all".
 	Mode       string   `json:"mode,omitempty"`
 	FindingIDs []string `json:"finding_ids,omitempty"`
+	// Template selects the deliverable layout for markdown/html/pdf:
+	// "pentest" (default for pdf), "bug_bounty", or "technical" (the default
+	// evidence-first layout). JSON ignores it.
+	Template string `json:"template,omitempty"`
 	// AISummary requests an advisory executive-summary paragraph from the
 	// AI Gateway, prepended to the report and clearly labeled as such (see
 	// report.Data.AISummary). Ignored (no error) when AI is disabled or
@@ -84,10 +88,28 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unknown format "+req.Format)
 		return
 	}
-	gen, err := report.For(format)
-	if err != nil {
-		s.writeInternalError(w, "report generator", err)
+	tmpl := report.Template(strings.TrimSpace(req.Template))
+	if !tmpl.IsValid() {
+		writeError(w, http.StatusBadRequest, "unknown template "+req.Template)
 		return
+	}
+	// A PDF is a print deliverable, so it defaults to the pentest layout; the
+	// technical evidence dump remains available explicitly as template
+	// "technical" but is not what "give me a PDF" should mean by default.
+	if format == domain.ReportPDF && tmpl == report.TemplateTechnical {
+		tmpl = report.TemplatePentest
+	}
+	if format == domain.ReportPDF && s.pdf == nil {
+		writeError(w, http.StatusServiceUnavailable, "pdf export requires Chromium: start the server with -chromium PATH or INDAGO_CHROMIUM_PATH")
+		return
+	}
+	var gen report.Generator
+	if format != domain.ReportPDF {
+		gen, err = report.For(format)
+		if err != nil {
+			s.writeInternalError(w, "report generator", err)
+			return
+		}
 	}
 
 	all, err := s.store.Findings().ListByScan(r.Context(), scanID)
@@ -134,8 +156,24 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		ScanFindings: len(all),
 		Completeness: coverage,
 		AISummary:    aiSummary,
+		Template:     tmpl,
 	}
-	if err := gen.Generate(&buf, data); err != nil {
+	if format == domain.ReportPDF {
+		// Render the chosen template as HTML, then print it. The HTML is
+		// never persisted: only the PDF is the report artifact.
+		var htmlBuf bytes.Buffer
+		if err := (report.HTMLGenerator{}).Generate(&htmlBuf, data); err != nil {
+			s.writeInternalError(w, "generate report", err)
+			return
+		}
+		pdfBytes, err := s.pdf.Render(r.Context(), htmlBuf.Bytes())
+		if err != nil {
+			s.log.Error("pdf export failed", "scan", scanID, "err", err)
+			writeError(w, http.StatusBadGateway, "pdf export failed: "+err.Error())
+			return
+		}
+		buf.Write(pdfBytes)
+	} else if err := gen.Generate(&buf, data); err != nil {
 		s.writeInternalError(w, "generate report", err)
 		return
 	}
@@ -391,6 +429,8 @@ func reportExt(format domain.ReportFormat) string {
 		return ".md"
 	case domain.ReportHTML:
 		return ".html"
+	case domain.ReportPDF:
+		return ".pdf"
 	default:
 		return ".json"
 	}
@@ -402,6 +442,8 @@ func reportContentType(format domain.ReportFormat) string {
 		return "text/markdown; charset=utf-8"
 	case domain.ReportHTML:
 		return "text/html; charset=utf-8"
+	case domain.ReportPDF:
+		return "application/pdf"
 	default:
 		return "application/json; charset=utf-8"
 	}

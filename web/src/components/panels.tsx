@@ -220,7 +220,8 @@ export function EvidencePanel({ scanId }: { scanId: string }) {
 export function ReportsPanel({ scanId }: { scanId: string }) {
   const reports = useApi<Report[]>(`/api/scans/${scanId}/reports`);
   const findings = useApi<Finding[]>(`/api/scans/${scanId}/findings?verdict=confirmed`);
-  const [format, setFormat] = useState("html");
+  const [format, setFormat] = useState("pdf");
+  const [template, setTemplate] = useState("pentest");
   const [mode, setMode] = useState("all");
   const [picked, setPicked] = useState<string[]>([]);
   const [ai, setAi] = useState(false);
@@ -240,6 +241,7 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
     setBusy(true);
     try {
       const body: Record<string, unknown> = { format, mode };
+      if (format !== "json") body.template = template;
       if (mode === "selected") body.finding_ids = picked;
       if (ai) body.ai_summary = true;
       await api(`/api/scans/${scanId}/reports`, { method: "POST", body });
@@ -265,11 +267,25 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
               value={format}
               onChange={(e) => setFormat(e.target.value)}
             >
-              {["html", "markdown", "json"].map((f) => (
+              {["pdf", "html", "markdown", "json"].map((f) => (
                 <option key={f}>{f}</option>
               ))}
             </select>
           </div>
+          {format !== "json" ? (
+            <div className="flex flex-col gap-1">
+              <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Template</span>
+              <select
+                className="h-8 rounded-md border border-border bg-background px-2 text-xs"
+                value={template}
+                onChange={(e) => setTemplate(e.target.value)}
+              >
+                <option value="pentest">pentest (HTB-style)</option>
+                <option value="bug_bounty">bug bounty</option>
+                <option value="technical">technical</option>
+              </select>
+            </div>
+          ) : null}
           <div className="flex flex-col gap-1">
             <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Findings</span>
             <select

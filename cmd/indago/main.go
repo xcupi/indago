@@ -353,6 +353,12 @@ func cmdServe(args []string) error {
 	// never return the key. Configuration-only: nothing here calls a provider.
 	srv.SetLLMStore(llm.NewStore(filepath.Join(cfg.DataDir, "llm")))
 	srv.SetLoginFunc(loginFn) // nil unless -browser: endpoint then reports unavailable
+	// PDF export prints the HTML report through the same Chromium the browser
+	// engine uses; absent an executable the endpoint reports unavailability
+	// and every other report format keeps working.
+	if p := web.ChromiumForPDF(*chromium); p != "" {
+		srv.SetPDFRenderer(web.NewChromiumPDFRenderer(p, *browserNoSandbox))
+	}
 	srv.SetCapabilities(web.Capabilities{
 		BrowserEnabled:       *useBrowser,
 		BrowserSandbox:       *useBrowser && !*browserNoSandbox,

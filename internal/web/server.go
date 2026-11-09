@@ -45,6 +45,12 @@ type Server struct {
 	// generation (listing/reading already-generated reports still works).
 	reportsDir string
 
+	// pdf converts a rendered HTML report into PDF bytes (format "pdf"). Nil
+	// leaves PDF export unavailable with a 503 stating why; every other
+	// format keeps working. Wired by cmd/indago from -chromium /
+	// INDAGO_CHROMIUM_PATH.
+	pdf PDFRenderer
+
 	// allowedHosts, when non-nil, is the set of acceptable Host header values
 	// (DNS-rebinding protection). ListenAndServe sets it from the bind address.
 	allowedHosts map[string]bool
@@ -100,6 +106,10 @@ type LoginParams struct {
 // SetLoginFunc installs the interactive-login implementation. A nil fn (the
 // default) leaves the endpoint reporting the feature unavailable.
 func (s *Server) SetLoginFunc(fn LoginFunc) { s.login = fn }
+
+// SetPDFRenderer wires the HTML-to-PDF converter behind report format "pdf".
+// Not calling it (or passing nil) reports PDF export as unavailable.
+func (s *Server) SetPDFRenderer(r PDFRenderer) { s.pdf = r }
 
 // SetAIGateway wires the advisory AI Gateway. Not calling this (or passing
 // nil) leaves AI disabled — aiGateway() below falls back to ai.Disabled{}.

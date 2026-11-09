@@ -10,12 +10,17 @@ const (
 	ReportJSON     ReportFormat = "json"
 	ReportMarkdown ReportFormat = "markdown"
 	ReportHTML     ReportFormat = "html"
+	// ReportPDF is the print deliverable: the HTML template is rendered to a
+	// PDF by the server's Chromium renderer. It exists so a scan can hand a
+	// report straight to a client or a bug-bounty program without a manual
+	// "open the HTML and print" step.
+	ReportPDF ReportFormat = "pdf"
 )
 
 // IsValid reports whether the report format is a known value.
 func (f ReportFormat) IsValid() bool {
 	switch f {
-	case ReportJSON, ReportMarkdown, ReportHTML:
+	case ReportJSON, ReportMarkdown, ReportHTML, ReportPDF:
 		return true
 	default:
 		return false

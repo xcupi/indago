@@ -35,6 +35,11 @@ type Data struct {
 	// coverage as "no findings". It is pure data supplied by the caller: the
 	// generators render it and make no security decision from it.
 	Completeness Completeness
+	// Template selects the deliverable layout: empty is the technical
+	// evidence-first report; pentest and bug_bounty reshape the same data for
+	// a client or a bounty program. Only the Markdown/HTML/PDF generators act
+	// on it (JSON stays the machine format).
+	Template Template
 	// AISummary, when non-empty, is an advisory executive summary drafted
 	// by the AI Gateway (domain.AIDraftReport) — rendered prominently
 	// labeled as AI-generated and unverified, NEVER as part of the
