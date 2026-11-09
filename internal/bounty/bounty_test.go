@@ -20,7 +20,7 @@ func TestListProgramsFiltersAndCaches(t *testing.T) {
 			t.Errorf("public listing must not send a token")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"items":[{"slug":"acme","title":"ACME","type":"bug-bounty","bounty":true}]}`))
+		w.Write([]byte(`{"items":[{"slug":"acme","title":"ACME","type":"bug-bounty","bounty":true}],"pagination":{"nb_results":1}}`))
 	}))
 	defer srv.Close()
 
