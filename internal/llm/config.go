@@ -32,9 +32,13 @@ import (
 
 // Recognized provider identifiers.
 const (
-	ProviderDeepSeek = "deepseek"
-	ProviderOpenAI   = "openai"
-	ProviderCustom   = "custom"
+	ProviderDeepSeek   = "deepseek"
+	ProviderOpenAI     = "openai"
+	ProviderAnthropic  = "anthropic"
+	ProviderOpenRouter = "openrouter"
+	ProviderOllama     = "ollama"
+	ProviderVLLM       = "vllm"
+	ProviderCustom     = "custom"
 	// ProviderChatGPT is the OAuth (Codex) provider: no API key, the session
 	// comes from the Hermes auth store.
 	ProviderChatGPT = "chatgpt"
@@ -91,6 +95,32 @@ var providerList = []Provider{
 		// An OAuth session is a valid credential, so a key is not required to
 		// save the provider; the gateway falls back to it.
 		RequiresKey: false,
+	},
+	{
+		// Same Messages API as Claude; the id stays separate because the
+		// gateway has always accepted "anthropic" for direct API keys.
+		ID:             ProviderAnthropic,
+		Label:          "Anthropic (Messages API)",
+		DefaultBaseURL: "https://api.anthropic.com/v1",
+		RequiresKey:    true,
+	},
+	{
+		ID:             ProviderOpenRouter,
+		Label:          "OpenRouter",
+		DefaultBaseURL: "https://openrouter.ai/api/v1",
+		RequiresKey:    true,
+	},
+	{
+		ID:             ProviderOllama,
+		Label:          "Ollama (local)",
+		DefaultBaseURL: "http://127.0.0.1:11434/v1",
+		RequiresKey:    false,
+	},
+	{
+		ID:             ProviderVLLM,
+		Label:          "vLLM (local)",
+		DefaultBaseURL: "http://127.0.0.1:8000/v1",
+		RequiresKey:    false,
 	},
 	{
 		ID:             ProviderOpenAI,

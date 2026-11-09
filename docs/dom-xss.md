@@ -1397,3 +1397,17 @@ benign bare-marker probe, never `alert(`/`document.cookie`/`fetch(`),
 every navigation goes through the SAME scope-enforcing `browser.Manager`
 the rest of the product uses, and evidence (screenshot, rendered DOM,
 browser log) is always captured and never fabricated.
+
+## Navigation and element-URL sinks
+
+Three sinks were added after the lab audit:
+
+- `location.assign` — `location.href`, `location.assign/replace`, or an
+  assignment to the location object. Only a `javascript:` value is planned;
+  an external redirect is not claimed as XSS.
+- `element.src` — `iframe/img/script.src`, including a value obtained through
+  `JSON.parse`. The harness observes the write; only browser-attributed
+  execution confirms it.
+- `document.cookie` — reachability is recorded, but no payload is planned:
+  a cookie write is not script execution until the page reads it into a code
+  or HTML sink.

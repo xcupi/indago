@@ -40,7 +40,7 @@ func TestScanAIAssistUsesSelectedProvider(t *testing.T) {
 		b, _ := io.ReadAll(r.Body)
 		gotPrompt = string(b)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"1. Test GET /login first"}}],"model":"test-model"}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"1. Test GET /login first"}}],"model":"test-model","usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150}}`))
 	}))
 	defer model.Close()
 	t.Setenv("INDAGO_LLM_KEY_OPENAI", "test-key")
@@ -67,6 +67,16 @@ func TestScanAIAssistUsesSelectedProvider(t *testing.T) {
 	}
 	if !strings.Contains(gotPrompt, "advisory only") && !strings.Contains(gotPrompt, "Advisory only") {
 		t.Fatalf("prompt lost the advisory framing: %.200s", gotPrompt)
+	}
+
+	var usage struct {
+		Calls        int `json:"calls"`
+		TotalTokens  int `json:"total_tokens"`
+		PromptTokens int `json:"prompt_tokens"`
+	}
+	a.mustJSON(a.do("GET", "/api/scans/"+string(scanID)+"/ai/usage", nil), http.StatusOK, &usage)
+	if usage.Calls != 1 || usage.TotalTokens != 150 || usage.PromptTokens != 120 {
+		t.Fatalf("usage = %+v", usage)
 	}
 }
 

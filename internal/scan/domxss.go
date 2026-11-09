@@ -850,6 +850,76 @@ const domXSSHarnessTemplate = `(() => {
       }
     });
   } catch (_) {}
+  // URL sinks: an iframe/image/script src write. Only a frame executes a
+  // javascript: URL; the other elements are observed so the engine can say
+  // where the value landed instead of guessing.
+  function hookURLProp(proto, prop, label) {
+    try {
+      var desc = Object.getOwnPropertyDescriptor(proto, prop);
+      if (!desc || !desc.set) return;
+      var origSet = desc.set;
+      Object.defineProperty(proto, prop, {
+        configurable: true,
+        enumerable: desc.enumerable,
+        get: desc.get,
+        set: function (v) {
+          report(label, v);
+          return origSet.call(this, v);
+        }
+      });
+    } catch (e) {}
+  }
+  if (typeof HTMLIFrameElement === 'function') hookURLProp(HTMLIFrameElement.prototype, 'src', 'element.src');
+  if (typeof HTMLImageElement === 'function') hookURLProp(HTMLImageElement.prototype, 'src', 'element.src');
+  if (typeof HTMLScriptElement === 'function') hookURLProp(HTMLScriptElement.prototype, 'src', 'element.src');
+  // Cookie write: reachability only, never an execution claim on its own.
+  try {
+    var cookieDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
+    if (cookieDesc && cookieDesc.set) {
+      var origCookieSet = cookieDesc.set;
+      Object.defineProperty(Document.prototype, 'cookie', {
+        configurable: true,
+        enumerable: cookieDesc.enumerable,
+        get: cookieDesc.get,
+        set: function (v) {
+          report('document.cookie', v);
+          return origCookieSet.call(this, v);
+        }
+      });
+    }
+  } catch (e) {}
+  // Navigation assignments. Location's own properties are exotic; the
+  // method hooks are the portable half, and href is attempted separately.
+  try {
+    var hrefDesc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
+    if (hrefDesc && hrefDesc.set) {
+      var origHrefSet = hrefDesc.set;
+      Object.defineProperty(Location.prototype, 'href', {
+        configurable: true,
+        enumerable: hrefDesc.enumerable,
+        get: hrefDesc.get,
+        set: function (v) {
+          report('location.assign', v);
+          return origHrefSet.call(this, v);
+        }
+      });
+    }
+  } catch (e) {}
+  for (const m of ['assign', 'replace']) {
+    try {
+      var mDesc = Object.getOwnPropertyDescriptor(Location.prototype, m);
+      if (!mDesc || typeof mDesc.value !== 'function') continue;
+      var nativeM = mDesc.value;
+      Object.defineProperty(Location.prototype, m, {
+        ...mDesc,
+        value: function (v) {
+          report('location.assign', v);
+          return nativeM.apply(this, arguments);
+        }
+      });
+    } catch (e) {}
+  }
+
   try {
     const desc = Object.getOwnPropertyDescriptor(Range.prototype, 'createContextualFragment');
     const native = desc.value;

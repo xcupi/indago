@@ -44,6 +44,11 @@ type openAIChatResponse struct {
 		Message openAIChatMessage `json:"message"`
 	} `json:"choices"`
 	Model string `json:"model"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
@@ -87,7 +92,14 @@ func (p *openAICompatProvider) Complete(ctx context.Context, req Request) (*Resp
 	if model == "" {
 		model = p.model
 	}
-	return &Response{Text: out.Choices[0].Message.Content, Model: model}, nil
+	return &Response{
+		Text: out.Choices[0].Message.Content, Model: model,
+		Usage: Usage{
+			PromptTokens:     out.Usage.PromptTokens,
+			CompletionTokens: out.Usage.CompletionTokens,
+			TotalTokens:      out.Usage.TotalTokens,
+		},
+	}, nil
 }
 
 var _ Provider = (*openAICompatProvider)(nil)

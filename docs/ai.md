@@ -39,6 +39,16 @@ INDAGO_LLM_KEY_CUSTOM=...               INDAGO_LLM_BASE_URL_CUSTOM=https://gatew
 
 `GET /api/llm/providers` reports which providers are usable and where the
 credential came from (`settings` or `environment`); it never returns a key.
+The Settings screen lists all nine ids the gateway understands: deepseek,
+claude, anthropic, openrouter, ollama, vllm, openai, custom, chatgpt.
+
+## Token accounting
+
+Every successful advisory call stores the provider-reported usage on its
+`AITask` (`prompt_tokens`, `completion_tokens`, `total_tokens`). A provider
+that reports nothing leaves zeros; Indago never estimates. `GET
+/api/scans/{id}/ai/usage` returns the per-scan totals plus the last 50 calls,
+and the AI panel prints them.
 
 The gateway deployment used for Indago runs the **custom** provider with
 `ds/deepseek-v4.1-flash` and does not fall back to `deepseek-chat`: every

@@ -113,8 +113,8 @@ func TestLLMConfigKeyIsNeverReturned(t *testing.T) {
 	if want := "****" + llmTestKey[len(llmTestKey)-4:]; st.KeyHint != want {
 		t.Fatalf("key hint = %q, want %q", st.KeyHint, want)
 	}
-	if len(st.Providers) != 5 {
-		t.Fatalf("%d provider definitions returned, want 5", len(st.Providers))
+	if len(st.Providers) != 9 {
+		t.Fatalf("%d provider definitions returned, want 9", len(st.Providers))
 	}
 
 	rec = llmRequest(t, h, "GET", "/api/llm/config", nil)
@@ -386,7 +386,7 @@ func TestLLMConfigNotConfiguredState(t *testing.T) {
 	if st.Configured || st.KeySet || st.Provider != "" || st.Model != "" || st.BaseURL != "" || st.KeyHint != "" {
 		t.Fatalf("fresh status = %+v, want an explicit not-configured state", st)
 	}
-	if len(st.Providers) != 5 {
+	if len(st.Providers) != 9 {
 		t.Fatalf("providers = %+v", st.Providers)
 	}
 }

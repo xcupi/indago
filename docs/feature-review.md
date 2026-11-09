@@ -168,32 +168,36 @@ is detected, header/comment/backup exposure is reported.
    `-allow-state-changing`.** `/api/capabilities` correctly reported
    `browser_enabled: false`, so DOM XSS and browser crawl were unavailable in
    that session. Restarted with both flags; capabilities now report all true.
-2. **Settings exposes 5 of the 9 provider ids.** `anthropic`, `openrouter`,
-   `ollama`, and `vllm` exist in the gateway but cannot be selected from the
-   UI; they only work through environment variables or a custom base URL.
+2. **Settings now exposes all 9 provider ids.** `anthropic`, `openrouter`,
+   `ollama`, and `vllm` were added to the settings registry, so each can be
+   selected, probed and given a model without editing environment variables.
 3. **Claude OAuth is implemented but has never run live.** No session is
    stored, so the exchange, refresh, and `/models` path are unit-tested only.
 4. **Bounty and LLM tests drifted from the code** (provider count 4 vs 5,
    pagination fixture without `nb_results`). Fixed; `go test ./internal/web`
    and `./internal/bounty` are green.
 5. **TOC has no page numbers** (Chromium `target-counter()` limitation).
-6. **No token or cost accounting.** The budget counts attempts, not spend; a
-   reasoning model that exhausts `max_tokens` still costs the call.
+6. **Token accounting exists; cost does not.** Provider-reported prompt,
+   completion and total tokens are stored per task and summed at
+   `GET /api/scans/{id}/ai/usage`. No price table is applied, so the UI shows
+   tokens rather than a guessed money figure.
 7. **YesWeHack draft auto-fill is absent.** Rendering and review exist; writing
    the platform draft would need a stored credential and a live test. Submit is
    deliberately manual.
-8. **Six DOM failures are capability gaps, not bugs.** They need new sink
-   models (`location` assignment, `element.src`, cookie, clobbering) rather
-   than more payloads.
+8. **Four DOM failures remain capability gaps.** Navigation assignment
+   (`location.href`/`assign`), `element.src` (including `JSON.parse`) and
+   `document.cookie` reachability are now modelled. Open redirect and DOM
+   clobbering still need a dedicated engine; a redirect leaves the authorized
+   scope by definition, so it is not followed.
 
 ## Recommended next steps
 
 | Priority | Work | Why |
 | --- | --- | --- |
-| P1 | DOM sink models: JS URL, `JSON.parse` to `src`, open redirect, cookie, clobbering | closes 6 of 13 gaps without touching stored XSS policy |
-| P1 | Expose all 9 providers in Settings, with per-provider model discovery | the gateway already supports them; the UI hides them |
+| P1 | Finish DOM open-redirect and clobbering models | the other sink models are in; these two need an engine that does not follow a redirect out of scope |
+| P1 | ~~Expose all 9 providers in Settings~~ | done |
+| P2 | ~~Token accounting~~ | done (tokens, not cost) |
 | P1 | Live Claude OAuth test | proves the second OAuth path end to end |
-| P2 | Token/cost accounting per AI task | makes the budget meaningful |
 | P2 | TOC page numbers via a two-pass render, or drop the page column | polish |
 | P2 | YesWeHack draft auto-fill (no submit) | saves typing without spending credits |
 | P3 | Stored XSS and exploit chains | explicitly out of scope unless the product decision changes |

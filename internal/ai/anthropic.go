@@ -50,6 +50,10 @@ type anthropicResponse struct {
 		Text string `json:"text"`
 	} `json:"content"`
 	Model string `json:"model"`
+	Usage struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`

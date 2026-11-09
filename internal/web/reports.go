@@ -320,6 +320,7 @@ func (s *Server) draftAISummary(ctx context.Context, scanID domain.ID, proj *dom
 	task.State = domain.AISucceeded
 	task.Provider = resp.Provider
 	task.Model = resp.Model
+	recordAIUsage(task, resp)
 	task.Response = []byte(resp.Text)
 	if err := s.store.AITasks().Update(ctx, task); err != nil {
 		s.log.Warn("ai: record task result", "err", err)

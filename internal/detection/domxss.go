@@ -157,6 +157,19 @@ const (
 	// performs one deterministic click on the exact element the harness
 	// tagged. Only the href attribute of a real element is observed.
 	DOMSinkJQueryAttr DOMXSSSink = "jQuery.attr"
+	// DOMSinkLocationAssign is a navigation assignment (location.href,
+	// location.assign/replace, or assigning the location object). A
+	// javascript: value executes in the page; any other absolute value is an
+	// open redirect, which this engine only reports as XSS when it executes.
+	DOMSinkLocationAssign DOMXSSSink = "location.assign"
+	// DOMSinkElementSrc is an element URL write (iframe/img/script .src). A
+	// javascript: URL executes when the element is a frame; an image or script
+	// will not, so verification still decides.
+	DOMSinkElementSrc DOMXSSSink = "element.src"
+	// DOMSinkCookie is a document.cookie write. It is recorded as
+	// reachability, but no XSS payload is planned for it: a cookie value only
+	// becomes script if the page later reads it into a code or HTML sink.
+	DOMSinkCookie DOMXSSSink = "document.cookie"
 	// DOMSinkJQuerySelector is a value handed to jQuery's factory/selector
 	// call (jQuery(...)/$(...)). jQuery decides between a CSS selector and
 	// HTML; a value that turns the call into markup is parsed and created.
@@ -168,7 +181,7 @@ const (
 // IsValid reports whether sink is one of this engine's implemented sinks.
 func (s DOMXSSSink) IsValid() bool {
 	switch s {
-	case DOMSinkEval, DOMSinkFunction, DOMSinkInnerHTML, DOMSinkOuterHTML, DOMSinkDocumentWrite, DOMSinkInsertAdjacentHTML, DOMSinkCreateContextualFragment, DOMSinkSetTimeout, DOMSinkSetInterval, DOMSinkJQueryAttr, DOMSinkJQuerySelector, DOMSinkAngularExpression:
+	case DOMSinkEval, DOMSinkFunction, DOMSinkInnerHTML, DOMSinkOuterHTML, DOMSinkDocumentWrite, DOMSinkInsertAdjacentHTML, DOMSinkCreateContextualFragment, DOMSinkSetTimeout, DOMSinkSetInterval, DOMSinkJQueryAttr, DOMSinkJQuerySelector, DOMSinkAngularExpression, DOMSinkLocationAssign, DOMSinkElementSrc, DOMSinkCookie:
 		return true
 	default:
 		return false
@@ -220,6 +233,9 @@ const (
 	// marker identifier. It is inert until the link is activated, so the
 	// engine performs exactly one click on the element it located.
 	domXSSShapeJQueryJavascriptURL = "jquery_javascript_url"
+	// domXSSShapeJavascriptURL is a value written into a navigation or
+	// element-URL sink; only javascript: executes there.
+	domXSSShapeJavascriptURL = "javascript_url"
 	// domXSSShapeAngularInterpolation is the only shape Angular's text-node
 	// compiler accepts: a double-brace interpolation. The expression has no
 	// side effect at all — it concatenates two string literals into the
@@ -424,6 +440,17 @@ func DOMXSSPayloadsFor(source DOMXSSSource, sink DOMXSSSink, marker string) []Ca
 	if sink == DOMSinkSetTimeout || sink == DOMSinkSetInterval {
 		// A timer evaluates JavaScript, not HTML.
 		return []Candidate{domXSSPayloadCandidate(source, sink, domXSSShapeTimerExpression, marker, domXSSRationale(source, sink))}
+	}
+	if sink == DOMSinkLocationAssign || sink == DOMSinkElementSrc {
+		// The page writes our exact value into a URL-bearing position. A
+		// javascript: URL is the shape that can execute; a redirect target
+		// cannot be proven from this engine, so it is not claimed as XSS.
+		return []Candidate{domXSSPayloadCandidate(source, sink, domXSSShapeJavascriptURL, "javascript:"+marker, domXSSNavigationRationale(source, sink))}
+	}
+	if sink == DOMSinkCookie {
+		// A cookie write alone is not script execution. Reachability is
+		// recorded, but no candidate is planned without the later read.
+		return nil
 	}
 	if sink == DOMSinkJQueryAttr {
 		// An href write only executes a javascript: URL, and only when the
@@ -2422,6 +2449,9 @@ const (
 	// stays false (the object itself is not a string), so only a tainted
 	// property read is followed.
 	dxsTaintObject
+	// dxsTaintParsed is the result of JSON.parse on a tainted string: every
+	// property read is tainted, because the parsed shape is the page's own.
+	dxsTaintParsed
 )
 
 type dxsTaint struct {
@@ -2799,6 +2829,18 @@ func (in *dxsInterp) evalAssign(e *dxsExpr) dxsTaint {
 		if sink, isSink := dxsSinkForAssignment(name); isSink && val.on {
 			in.recordSite(sink, val, e.line)
 		}
+		if val.on {
+			if path, ok := dxsStaticPath(target); ok {
+				switch {
+				case path == "document.cookie" || path == "window.document.cookie":
+					in.recordSite(DOMSinkCookie, val, e.line)
+				case dxsIsLocationMember(path, "href") || path == "location" || path == "window.location" || path == "document.location":
+					in.recordSite(DOMSinkLocationAssign, val, e.line)
+				case strings.HasSuffix(path, ".src"):
+					in.recordSite(DOMSinkElementSrc, val, e.line)
+				}
+			}
+		}
 		if (name == "onmessage" || name == "onmessageerror") && len(e.kids) > 1 && e.kids[1] != nil && e.kids[1].kind == dxsExprFunc {
 			in.callFunc(e.kids[1].fn, []dxsTaint{dxsMessageEventTaint()}, "onmessage")
 		}
@@ -2830,6 +2872,9 @@ func (in *dxsInterp) evalMember(e *dxsExpr) dxsTaint {
 	}
 	if recv.kind == dxsTaintObject {
 		return recv.props[name]
+	}
+	if recv.on && recv.kind == dxsTaintParsed {
+		return dxsTaint{on: true, hops: recv.hops, chain: recv.chain}.with("JSON.parse(...)." + name)
 	}
 	if recv.on && recv.kind == dxsTaintMessageEvent && name == "data" {
 		return dxsTaint{on: true, hops: recv.hops, chain: recv.chain}.with("event.data")
@@ -2912,6 +2957,16 @@ func (in *dxsInterp) evalCall(e *dxsExpr) dxsTaint {
 		return dxsTaint{}
 	case "URLSearchParams", "window.URLSearchParams":
 		return in.searchParamsTaint(args)
+	case "location.assign", "location.replace", "window.location.assign", "window.location.replace", "document.location.assign", "document.location.replace":
+		if tainted.on {
+			in.recordSite(DOMSinkLocationAssign, tainted, e.line)
+		}
+		return dxsTaint{}
+	case "JSON.parse":
+		if tainted.on {
+			return dxsTaint{on: true, hops: tainted.hops, kind: dxsTaintParsed, chain: tainted.chain}.with("JSON.parse")
+		}
+		return dxsTaint{}
 	}
 
 	if nameOK {
@@ -3277,4 +3332,8 @@ func domXSSAngularSandboxRationale(source DOMXSSSource, sink DOMXSSSink) string 
 	how, storageCaveat := domXSSSourceRoute(source)
 	return how + " is handed to AngularJS's $parse as the expression NAME, and the expression ESCAPES the AngularJS sandbox: toString() produces a string without a quote, its constructor property reaches the String prototype, and overwriting charAt blinds the sandbox's guard so the orderBy filter argument is evaluated as code. fromCharCode then assembles x=alert('<marker>') out of character codes, so no quote, bracket or keyword appears as a literal in the candidate. " +
 		"Confirmation requires the resulting JavaScript DIALOG to carry this scan's marker: a dialog can only exist if the code actually RAN, and the page cannot produce one by echoing text. This is the shape that proves execution on a page whose sandbox blocks compilation-only payloads; compilation alone is claimed by the interpolation and parse-expression shapes." + storageCaveat
+}
+
+func domXSSNavigationRationale(source DOMXSSSource, sink DOMXSSSink) string {
+	return fmt.Sprintf("%s reaches a navigation/URL sink (%s); only browser-attributed execution of the unresolved marker identifier through a javascript: URL confirms it", source, sink)
 }

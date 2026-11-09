@@ -58,6 +58,11 @@ type AITask struct {
 	Provider string      `json:"provider,omitempty"`
 	Model    string      `json:"model,omitempty"`
 	Advisory bool        `json:"advisory"` // invariant: always true
+	// Token usage reported by the provider for this call. Zero means the
+	// provider did not report it; it is never estimated locally.
+	PromptTokens     int `json:"prompt_tokens,omitempty"`
+	CompletionTokens int `json:"completion_tokens,omitempty"`
+	TotalTokens      int `json:"total_tokens,omitempty"`
 
 	Request  []byte `json:"request,omitempty"`  // opaque prompt/input
 	Response []byte `json:"response,omitempty"` // opaque model output

@@ -200,6 +200,7 @@ func (s *Server) handleReportReview(w http.ResponseWriter, r *http.Request) {
 	task.State = domain.AISucceeded
 	task.Provider = answer.Provider
 	task.Model = answer.Model
+	recordAIUsage(task, answer)
 	if b, e := json.Marshal(out); e == nil {
 		task.Response = b
 	}

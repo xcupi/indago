@@ -193,6 +193,7 @@ func (s *Server) handleScanAIAssist(w http.ResponseWriter, r *http.Request) {
 	task.State = domain.AISucceeded
 	task.Provider = resp.Provider
 	task.Model = resp.Model
+	recordAIUsage(task, resp)
 	task.Response = []byte(resp.Text)
 	if err := s.store.AITasks().Update(r.Context(), task); err != nil {
 		s.log.Warn("ai: record task result", "err", err)
@@ -309,4 +310,65 @@ func (s *Server) claudeOAuthGateway(provider, model string) (ai.Gateway, bool) {
 		return nil, false
 	}
 	return gw, true
+}
+
+// recordAIUsage copies the provider-reported token counts onto the task. It
+// never estimates: a provider that does not report usage leaves zeros.
+func recordAIUsage(task *domain.AITask, resp *ai.Response) {
+	if task == nil || resp == nil {
+		return
+	}
+	task.PromptTokens = resp.Usage.PromptTokens
+	task.CompletionTokens = resp.Usage.CompletionTokens
+	task.TotalTokens = resp.Usage.TotalTokens
+}
+
+// handleScanAIUsage reports the token counts providers returned for this
+// scan's advisory calls. Tokens, not money: Indago has no price table, and a
+// guessed cost would be worse than none.
+func (s *Server) handleScanAIUsage(w http.ResponseWriter, r *http.Request) {
+	scanID := domain.ID(r.PathValue("id"))
+	if _, err := s.store.Scans().Get(r.Context(), scanID); err != nil {
+		s.writeLookupError(w, err)
+		return
+	}
+	tasks, err := s.store.AITasks().ListByScan(r.Context(), scanID)
+	if err != nil {
+		s.writeInternalError(w, "list ai tasks", err)
+		return
+	}
+	type call struct {
+		ID               domain.ID `json:"id"`
+		Kind             string    `json:"kind"`
+		Provider         string    `json:"provider,omitempty"`
+		Model            string    `json:"model,omitempty"`
+		PromptTokens     int       `json:"prompt_tokens"`
+		CompletionTokens int       `json:"completion_tokens"`
+		TotalTokens      int       `json:"total_tokens"`
+		CreatedAt        string    `json:"created_at"`
+	}
+	out := struct {
+		Calls            int    `json:"calls"`
+		PromptTokens     int    `json:"prompt_tokens"`
+		CompletionTokens int    `json:"completion_tokens"`
+		TotalTokens      int    `json:"total_tokens"`
+		Items            []call `json:"items"`
+	}{}
+	for _, t := range tasks {
+		if t.State != domain.AISucceeded {
+			continue
+		}
+		out.Calls++
+		out.PromptTokens += t.PromptTokens
+		out.CompletionTokens += t.CompletionTokens
+		out.TotalTokens += t.TotalTokens
+		if len(out.Items) < 50 {
+			out.Items = append(out.Items, call{
+				ID: t.ID, Kind: string(t.Kind), Provider: t.Provider, Model: t.Model,
+				PromptTokens: t.PromptTokens, CompletionTokens: t.CompletionTokens,
+				TotalTokens: t.TotalTokens, CreatedAt: t.CreatedAt.Format(time.RFC3339),
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }

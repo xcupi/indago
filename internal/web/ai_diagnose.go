@@ -311,6 +311,7 @@ func (s *Server) handleDiagnosePayload(w http.ResponseWriter, r *http.Request) {
 	task.State = domain.AISucceeded
 	task.Provider = resp.Provider
 	task.Model = resp.Model
+	recordAIUsage(task, resp)
 	if b, err := json.Marshal(out); err == nil {
 		task.Response = b
 	}

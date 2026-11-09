@@ -45,6 +45,16 @@ type Response struct {
 	Model    string
 	Provider string
 	Advisory bool
+	// Usage is the provider-reported token count, when the response carries
+	// one. Zero means "not reported"; it is never estimated.
+	Usage Usage
+}
+
+// Usage is the token accounting a provider reports for one call.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 // Provider is a concrete LLM backend.

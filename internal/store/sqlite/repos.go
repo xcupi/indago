@@ -914,12 +914,12 @@ func (r *reportRepo) Delete(ctx context.Context, id domain.ID) error {
 
 type aiTaskRepo struct{ db *sql.DB }
 
-const aiTaskCols = `id, scan_id, kind, state, provider, model, advisory, request, response, error, created_at, updated_at`
+const aiTaskCols = `id, scan_id, kind, state, provider, model, advisory, prompt_tokens, completion_tokens, total_tokens, request, response, error, created_at, updated_at`
 
 func (r *aiTaskRepo) Create(ctx context.Context, t *domain.AITask) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO ai_tasks (`+aiTaskCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-		t.ID, t.ScanID, t.Kind, t.State, t.Provider, t.Model, boolToInt(t.Advisory), t.Request, t.Response, t.Error, ts(t.CreatedAt), ts(t.UpdatedAt))
+		`INSERT INTO ai_tasks (`+aiTaskCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.ScanID, t.Kind, t.State, t.Provider, t.Model, boolToInt(t.Advisory), t.PromptTokens, t.CompletionTokens, t.TotalTokens, t.Request, t.Response, t.Error, ts(t.CreatedAt), ts(t.UpdatedAt))
 	return err
 }
 
@@ -927,7 +927,7 @@ func scanAITask(sc scanner) (*domain.AITask, error) {
 	var t domain.AITask
 	var advisory int
 	var created, updated string
-	if err := sc.Scan(&t.ID, &t.ScanID, &t.Kind, &t.State, &t.Provider, &t.Model, &advisory, &t.Request, &t.Response, &t.Error, &created, &updated); err != nil {
+	if err := sc.Scan(&t.ID, &t.ScanID, &t.Kind, &t.State, &t.Provider, &t.Model, &advisory, &t.PromptTokens, &t.CompletionTokens, &t.TotalTokens, &t.Request, &t.Response, &t.Error, &created, &updated); err != nil {
 		return nil, err
 	}
 	t.Advisory = advisory != 0
@@ -961,8 +961,8 @@ func (r *aiTaskRepo) ListByScan(ctx context.Context, scanID domain.ID) ([]*domai
 
 func (r *aiTaskRepo) Update(ctx context.Context, t *domain.AITask) error {
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE ai_tasks SET kind=?, state=?, provider=?, model=?, advisory=?, request=?, response=?, error=?, updated_at=? WHERE id=?`,
-		t.Kind, t.State, t.Provider, t.Model, boolToInt(t.Advisory), t.Request, t.Response, t.Error, ts(t.UpdatedAt), t.ID)
+		`UPDATE ai_tasks SET kind=?, state=?, provider=?, model=?, advisory=?, prompt_tokens=?, completion_tokens=?, total_tokens=?, request=?, response=?, error=?, updated_at=? WHERE id=?`,
+		t.Kind, t.State, t.Provider, t.Model, boolToInt(t.Advisory), t.PromptTokens, t.CompletionTokens, t.TotalTokens, t.Request, t.Response, t.Error, ts(t.UpdatedAt), t.ID)
 	return affected(res, err)
 }
 

@@ -213,6 +213,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/llm/chatgpt/login/poll", s.handleChatGPTLoginPoll)
 	mux.HandleFunc("DELETE /api/llm/chatgpt/session", s.handleChatGPTLogout)
 	mux.HandleFunc("POST /api/scans/{id}/ai/assist", s.handleScanAIAssist)
+	mux.HandleFunc("GET /api/scans/{id}/ai/usage", s.handleScanAIUsage)
 	mux.HandleFunc("POST /api/scans/{id}/ai/diagnose", s.handleDiagnosePayload)
 	mux.HandleFunc("POST /api/scans/{id}/ai/report-review", s.handleReportReview)
 	mux.HandleFunc("POST /api/llm/claude/login/start", s.handleClaudeLoginStart)

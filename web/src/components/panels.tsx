@@ -815,10 +815,18 @@ interface ProvidersResponse {
   default?: string;
 }
 
+interface AIUsageResponse {
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
 /** Ask the selected model for advisory guidance about this scan. The result is
  * prose only: it never changes a verdict, an ordering, or the scan itself. */
 export function AIAssistPanel({ scanId }: { scanId: string }) {
   const providers = useApi<ProvidersResponse>("/api/llm/providers");
+  const usage = useApi<AIUsageResponse>(`/api/scans/${scanId}/ai/usage`);
   const [provider, setProvider] = useState("");
   const [kind, setKind] = useState("prioritize");
   const [busy, setBusy] = useState(false);
@@ -896,6 +904,13 @@ export function AIAssistPanel({ scanId }: { scanId: string }) {
           {result ? (
             <span className="text-[11px] text-muted-foreground">
               {result.provider} · {result.model}
+            </span>
+          ) : null}
+          {usage.data && usage.data.calls > 0 ? (
+            <span className="text-[11px] text-muted-foreground">
+              AI usage: {usage.data.total_tokens.toLocaleString()} tokens over {usage.data.calls} call
+              {usage.data.calls === 1 ? "" : "s"} ({usage.data.prompt_tokens.toLocaleString()} prompt /{" "}
+              {usage.data.completion_tokens.toLocaleString()} completion)
             </span>
           ) : null}
         </div>
