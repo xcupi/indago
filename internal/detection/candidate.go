@@ -1062,10 +1062,21 @@ func urlTemplates(a ContextAnalysis, m string) []candTemplate {
 // confirmation still requires the marker-specific signal. An unsupported or
 // absent element stays rejected but is still reported for manual review.
 func linkAttributeTemplates(a ContextAnalysis, m string) []candTemplate {
+	// The TAB sibling is planned here too, not only for the raw-query branch:
+	// the canonical-link lab encodes the reflected SPACE as a literal %20
+	// (gluing "accesskey=x onclick=…" into one attribute value) while the TAB
+	// arrives as a real separator byte, so a named `?search=` injection point
+	// needs that sibling to reach the same element. Both keep the accesskey
+	// VALUE bare (`accesskey=x`), so every reader — an entity-decoding HTML
+	// parser or the verifier's own declared-key lookup — sees the key x.
+	out := make([]candTemplate, 0, 2)
 	if tpl, ok := linkAccesskeyShape(a, m, sepSpace); ok {
-		return []candTemplate{tpl}
+		out = append(out, tpl)
 	}
-	return nil
+	if tpl, ok := linkAccesskeyShape(a, m, sepTab); ok {
+		out = append(out, tpl)
+	}
+	return out
 }
 
 // linkAttributeTabTemplates is the TAB-separated sibling of

@@ -82,8 +82,8 @@ func TestGeneratedAccessKeyValuesAreBareCharacters(t *testing.T) {
 		wantBreakouts  int // href breakout variants (Candidate.Delimiter != "")
 		wantAccessKeys int // every candidate in the plan declaring an accesskey
 	}{
-		{"named parameter, single-quoted link", hrefFixture("link", sq, false, urlAttrProbe.Value()), domain.LocationQuery, 0, 1},
-		{"named parameter, double-quoted link", hrefFixture("link", dq, false, urlAttrProbe.Value()), domain.LocationQuery, 0, 1},
+		{"named parameter, single-quoted link", hrefFixture("link", sq, false, urlAttrProbe.Value()), domain.LocationQuery, 0, 2},
+		{"named parameter, double-quoted link", hrefFixture("link", dq, false, urlAttrProbe.Value()), domain.LocationQuery, 0, 2},
 		// The raw-query plan also carries the TAB-separated sibling of every
 		// accesskey-bearing shape (href and link), so each of those candidates
 		// is inspected too: 2 href + 2 link.

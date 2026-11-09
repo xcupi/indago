@@ -263,6 +263,10 @@ func TestURLAttributeBreakoutDefaultCandidateSetUnchanged(t *testing.T) {
 	want := frozen{
 		named: []string{
 			`url|" accesskey=x onclick=` + m + ` y="|60|interaction`,
+			// The link-element TAB sibling now belongs to the named plan too:
+			// the canonical-link lab encodes the reflected space, so the TAB
+			// is the shape that actually separates attributes there.
+			`url|"` + "	" + `accesskey=x` + "	" + `onclick=` + m + "	" + `y="|59|interaction`,
 		},
 		// The canonical (space-separated) shapes, each followed by its
 		// TAB-separated sibling one priority point lower. The siblings are
@@ -300,8 +304,10 @@ func TestURLAttributeBreakoutDefaultCandidateSetUnchanged(t *testing.T) {
 	}
 
 	_, raw := urlAttrPlan(t, body, domain.LocationRawQuery)
-	if raw.Generated != len(raw.Candidates) {
-		t.Fatalf("raw-query plan generated %d candidates but kept %d", raw.Generated, len(raw.Candidates))
+	// Eleven shapes are built for the raw-query link position; the named-link
+	// TAB sibling is byte-identical to the raw-query one, so dedup keeps ten.
+	if raw.Generated != 11 || len(raw.Candidates) != 10 {
+		t.Fatalf("raw-query plan generated %d candidates but kept %d, want 11/10", raw.Generated, len(raw.Candidates))
 	}
 	if got := render(raw); strings.Join(got, "\n") != strings.Join(want.rawQuery, "\n") {
 		t.Fatalf("raw-query candidate set is not the frozen set + one shape:\n got:\n%s\nwant:\n%s",

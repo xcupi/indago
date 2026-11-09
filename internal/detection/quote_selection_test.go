@@ -219,7 +219,10 @@ func TestUnprovenDelimiterKeepsDefaultPlanUnchanged(t *testing.T) {
 	for _, c := range named.Candidates {
 		rendered = append(rendered, string(c.Category)+"|"+c.Value)
 	}
-	want := []string{"url|" + dq + " accesskey=x onclick=" + m + " y=" + dq}
+	want := []string{
+		"url|" + dq + " accesskey=x onclick=" + m + " y=" + dq,
+		"url|" + dq + "	accesskey=x	onclick=" + m + "	y=" + dq,
+	}
 	if strings.Join(rendered, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("default plan changed:\n got: %v\nwant: %v", rendered, want)
 	}

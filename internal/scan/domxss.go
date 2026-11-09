@@ -573,6 +573,47 @@ func (e *domXSSExecutor) applyDOMXSSActivation(ctx context.Context, page *browse
 	}
 }
 
+// domXSSExecutionSignalBudget bounds the post-activation wait for the
+// marker-specific execution signal. It exists because a fixed settle is a
+// network-latency race: markup that jQuery parses out of a fragment creates an
+// image whose error (and the marker's ReferenceError) only arrives after the
+// browser's request round trip, and on a real host that lands just past a
+// 250 ms window (measured live at ~262 ms). Polling ends as soon as the signal
+// is present; the budget is the ceiling, never a retry.
+const (
+	domXSSExecutionSignalBudget = 1500 * time.Millisecond
+	domXSSExecutionSignalPoll   = 50 * time.Millisecond
+)
+
+// awaitDOMXSSExecutionSignal polls the page's own execution-provenance
+// observations until the marker-specific signal (an uncaught ReferenceError
+// naming the marker) appears, or the budget expires. It returns whether the
+// signal was seen. Cancellation wins unchanged.
+func awaitDOMXSSExecutionSignal(ctx context.Context, page *browser.Page, marker string, budget time.Duration) (bool, error) {
+	if marker == "" {
+		return false, nil
+	}
+	if budget <= 0 {
+		budget = domXSSExecutionSignalBudget
+	}
+	deadline := time.Now().Add(budget)
+	for {
+		if _, _, matched := verification.MatchRuntimeExecution(marker, page.RuntimeObservations()); matched {
+			return true, nil
+		}
+		if !time.Now().Before(deadline) {
+			return false, nil
+		}
+		timer := time.NewTimer(domXSSExecutionSignalPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 // waitDOMXSSActivationWindow lets the activated page finish its own work
 // before observations are read back. It uses the scan context, so
 // cancellation still wins.
@@ -600,6 +641,13 @@ func (e *domXSSExecutor) finishSourceNavigation(ctx context.Context, page *brows
 		return err
 	}
 	if ok {
+		matched, err := awaitDOMXSSExecutionSignal(ctx, page, marker, 0)
+		if err != nil {
+			return err
+		}
+		if matched {
+			return nil
+		}
 		return waitDOMXSSActivationWindow(ctx)
 	}
 	return nil
@@ -2684,6 +2732,14 @@ func (e *domXSSExecutor) navigate(ctx context.Context, bctx *browser.Context, na
 	}
 	if !applied {
 		return obs, false, nil
+	}
+	// A dispatched hash-change activation is followed by the page's own
+	// handler: jQuery parses the fragment into markup, and the element it
+	// creates only errors after its request round trip. Wait for the marker's
+	// own execution signal (bounded) before the post-activation observation,
+	// so a slow-but-successful execution is not read as a negative.
+	if _, err := awaitDOMXSSExecutionSignal(ctx, page, marker, 0); err != nil {
+		return domXSSObservation{}, false, err
 	}
 	post, err := observePage(ctx, page, domXSSURLSourceObservationDelay(navURL))
 	if err != nil {

@@ -130,9 +130,10 @@ func TestRawQueryPlansTabSeparatedAttributeVariants(t *testing.T) {
 	}
 
 	// The plan is additive and dedup-free for this fixture: the six frozen
-	// shapes plus four TAB siblings.
-	if plan.Generated != len(plan.Candidates) || len(plan.Candidates) != 10 {
-		t.Fatalf("raw-query plan = %d generated / %d kept, want 10/10", plan.Generated, len(plan.Candidates))
+	// shapes plus four TAB siblings. (The named-link TAB sibling dedupes
+	// against the raw-query one, so it adds no eleventh candidate.)
+	if plan.Generated != 11 || len(plan.Candidates) != 10 {
+		t.Fatalf("raw-query plan = %d generated / %d kept, want 11/10", plan.Generated, len(plan.Candidates))
 	}
 }
 
@@ -225,15 +226,19 @@ func TestRawQueryTabVariantsCoverTheUnquotedPosition(t *testing.T) {
 }
 
 // TestNamedParameterPlanHasNoTabVariants is the default-plan guard at the
-// planner layer: the TAB family is reachable only from the raw-query branch, so
-// a named parameter plans none of it (the byte-for-byte golden lives in
-// urlattr_plan_test.go).
+// planner layer: the in-tag/href TAB family is reachable only from the
+// raw-query branch. The ONE exception is the link-element accesskey sibling,
+// which the canonical-link position needs on a named parameter too (the lab
+// reflects the space percent-encoded but passes a raw TAB through).
 func TestNamedParameterPlanHasNoTabVariants(t *testing.T) {
 	for _, loc := range []domain.ParamLocation{domain.LocationQuery, domain.LocationForm} {
 		_, plan := urlAttrPlan(t, hrefFixture("link", dq, false, urlAttrProbe.Value()), loc)
 		for _, c := range plan.Candidates {
-			if strings.Contains(c.Value, "	") {
-				t.Fatalf("%s plan gained a TAB-separated variant: %+v", loc, c)
+			if !strings.Contains(c.Value, "	") {
+				continue
+			}
+			if hrefAccesskeyBreakout(c) || !strings.Contains(c.Value, "accesskey=x	") {
+				t.Fatalf("%s plan gained a non-link TAB-separated variant: %+v", loc, c)
 			}
 		}
 	}

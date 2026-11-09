@@ -66,7 +66,11 @@ func TestCanonicalLinkPlansAttributeOnlyVector(t *testing.T) {
 		t.Fatalf("no attribute-only candidate planned for the canonical link: %+v", plan.Candidates)
 	}
 	got := attributeOnly[0]
-	if !strings.Contains(got.Value, "accesskey=") || !strings.Contains(got.Value, "onclick="+marker) {
+	// The quote-separated shape terminates the value with the delimiter it
+	// opens, so onclick= is followed by the quote before the marker.
+	onclickCarries := strings.Contains(got.Value, "onclick="+marker) ||
+		strings.Contains(got.Value, "onclick='"+marker) || strings.Contains(got.Value, `onclick="`+marker)
+	if !strings.Contains(got.Value, "accesskey=") || !onclickCarries {
 		t.Fatalf("the link vector must add accesskey + onclick attributes (the reported lab vector), got %q", got.Value)
 	}
 	if !strings.HasPrefix(got.Value, `'`) {
@@ -84,6 +88,37 @@ func TestCanonicalLinkPlansAttributeOnlyVector(t *testing.T) {
 				t.Fatalf("duplicate dedup key in plan: %q", plan.Candidates[i].DedupKey)
 			}
 		}
+	}
+}
+
+// TestCanonicalLinkPlansTabSiblingForNamedParameter pins the sibling that
+// survives a server reflecting the search term with spaces percent-encoded:
+// the TAB-separated accesskey pair, still with a bare `accesskey=x` value. The
+// space-separated canonical shape stays planned in front of it.
+func TestCanonicalLinkPlansTabSiblingForNamedParameter(t *testing.T) {
+	p := detection.NewProbe(domain.ID("link-attr-test"), domain.ID("ip"))
+	body := canonicalLinkBody("", "link", p.Value())
+	rep, plan := planFor(t, body)
+	marker := rep.Probe.Token
+	if plan == nil || len(plan.Candidates) < 2 {
+		t.Fatalf("canonical link must plan the space shape and its TAB sibling, got %+v", plan)
+	}
+	first, second := plan.Candidates[0], plan.Candidates[1]
+	if want := "' accesskey=x onclick=" + marker + " y='"; first.Value != want {
+		t.Fatalf("canonical space shape = %q, want %q", first.Value, want)
+	}
+	if want := "'	accesskey=x	onclick=" + marker + "	y='"; second.Value != want {
+		t.Fatalf("TAB sibling = %q, want %q", second.Value, want)
+	}
+	if strings.Contains(second.Value, " ") {
+		t.Fatalf("TAB sibling must not separate its attributes with a space: %q", second.Value)
+	}
+	if !strings.Contains(second.Value, "accesskey=x	") {
+		t.Fatalf("TAB sibling must keep the accesskey value bare: %q", second.Value)
+	}
+	if second.Trigger != detection.TriggerInteraction || !strings.Contains(second.Rationale, "TAB") {
+		t.Fatalf("TAB sibling must stay an interaction candidate and name its separator: trigger=%q rationale=%q",
+			second.Trigger, second.Rationale)
 	}
 }
 
