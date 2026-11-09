@@ -159,6 +159,7 @@ export default function ScanDetail({ id }: { id: string }) {
             ["evidence", "Evidence"],
             ["reports", "Reports"],
             ["idor", "IDOR"],
+            ["ai", "AI advisory"],
           ].map(([value, label]) => (
             <TabsTrigger key={value} value={value}>
               {label}
@@ -203,9 +204,6 @@ export default function ScanDetail({ id }: { id: string }) {
               </CardContent>
             </Card>
           </div>
-          <div className="mt-4">
-            <AIAssistPanel scanId={id} />
-          </div>
         </TabsContent>
 
         <TabsContent value="findings">
@@ -231,6 +229,9 @@ export default function ScanDetail({ id }: { id: string }) {
         </TabsContent>
         <TabsContent value="idor">
           <IDORPanel scanId={id} />
+        </TabsContent>
+        <TabsContent value="ai">
+          <AIAssistPanel scanId={id} />
         </TabsContent>
       </Tabs>
 

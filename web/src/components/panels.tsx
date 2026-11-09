@@ -226,6 +226,9 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
   const [mode, setMode] = useState("all");
   const [picked, setPicked] = useState<string[]>([]);
   const [ai, setAi] = useState(false);
+  const [previewReport, setPreviewReport] = useState<Report | null>(null);
+  const [previewText, setPreviewText] = useState("");
+  const [previewError, setPreviewError] = useState("");
   const [aiProvider, setAiProvider] = useState("");
   const providers = useApi<{ providers: { provider: string; label: string; configured: boolean; model?: string }[]; default?: string }>(
     "/api/llm/providers",
@@ -472,14 +475,34 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
                     <TableCell className="mono text-[11px] text-muted-foreground">{shortId(r.id)}</TableCell>
                     <TableCell className="text-[11px] text-muted-foreground">{formatTime(r.created_at)}</TableCell>
                     <TableCell className="text-right">
-                      <a
-                        href={`/api/reports/${r.id}/content`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-[11px] text-emerald-700 dark:text-emerald-400 hover:underline"
-                      >
-                        open
-                      </a>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          className="text-[11px] text-emerald-700 hover:underline dark:text-emerald-400"
+                          onClick={async () => {
+                            setPreviewReport(r);
+                            setPreviewText("");
+                            setPreviewError("");
+                            if (r.format === "markdown" || r.format === "json") {
+                              try {
+                                const res = await fetch(`/api/reports/${r.id}/content`);
+                                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                                setPreviewText(await res.text());
+                              } catch (e) {
+                                setPreviewError((e as Error).message);
+                              }
+                            }
+                          }}
+                        >
+                          preview
+                        </button>
+                        <a
+                          href={`/api/reports/${r.id}/content?download`}
+                          className="text-[11px] text-muted-foreground hover:underline"
+                        >
+                          download
+                        </a>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -488,6 +511,44 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
           </CardContent>
         </Card>
       )}
+
+      <Dialog open={Boolean(previewReport)} onOpenChange={(v) => !v && setPreviewReport(null)}>
+        {previewReport ? (
+          <DialogContent
+            title={`Report ${shortId(previewReport.id)}`}
+            description={`${previewReport.format} · ${previewReport.template || "—"}`}
+            className="max-w-5xl"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] text-muted-foreground">
+                {previewReport.format === "pdf" || previewReport.format === "html"
+                  ? "rendered inline"
+                  : previewReport.format === "markdown"
+                    ? "markdown source"
+                    : "JSON source"}
+              </span>
+              <a
+                href={`/api/reports/${previewReport.id}/content?download`}
+                className="inline-flex items-center gap-1 text-[11px] text-emerald-700 hover:underline dark:text-emerald-400"
+              >
+                <Download className="size-3" /> download
+              </a>
+            </div>
+            {previewError ? <p className="text-[11px] text-red-700 dark:text-red-400">{previewError}</p> : null}
+            {previewReport.format === "pdf" || previewReport.format === "html" ? (
+              <iframe
+                title={`report ${previewReport.id}`}
+                src={`/api/reports/${previewReport.id}/content`}
+                className="h-[65vh] w-full rounded-md border border-border bg-white"
+              />
+            ) : (
+              <pre className="max-h-[65vh] overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted p-3 text-[11px]">
+                {previewText || "loading…"}
+              </pre>
+            )}
+          </DialogContent>
+        ) : null}
+      </Dialog>
     </div>
   );
 }

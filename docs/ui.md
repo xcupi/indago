@@ -135,3 +135,12 @@ Operational endpoints with no screen by design: `GET /healthz`, `GET /metrics`
   target. Running scans refuse deletion.
 - Mobile: tables scroll inside their card, filter selects no longer force the
   page wider than the viewport; the sidebar collapses below `md`.
+
+## Report and AI polish
+
+- AI advisory is its own scan tab (`AI advisory`) instead of a panel stacked
+  under Overview; the panel, provider picker and token usage are unchanged.
+- Reports rows now offer `preview` and `download`. PDF and HTML preview inline
+  in a dialog iframe; Markdown and JSON are fetched and shown as source. The
+  download link keeps `?download`, so the file is still saved with its
+  filename.
