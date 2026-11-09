@@ -21,6 +21,11 @@ type openAICompatProvider struct {
 	model   string
 }
 
+// openAIResponseTokenCeiling is the output ceiling sent with every
+// OpenAI-compatible call (reasoning tokens included). 8192 is the common
+// maximum for these endpoints; a larger value is rejected by some gateways.
+const openAIResponseTokenCeiling = 8192
+
 type openAIChatRequest struct {
 	Model    string              `json:"model"`
 	Messages []openAIChatMessage `json:"messages"`

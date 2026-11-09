@@ -46,6 +46,8 @@ const (
 	maxEvidenceTotal = 48 << 10
 	// maxPayloads caps the suggestions returned to the UI.
 	maxPayloads = 8
+	// aiDiagnoseTimeout bounds one diagnosis call.
+	aiDiagnoseTimeout = 180 * time.Second
 )
 
 type diagnoseReq struct {
@@ -248,7 +250,10 @@ func (s *Server) handleDiagnosePayload(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("ai: record task", "err", err)
 	}
 
-	callCtx, cancel := context.WithTimeout(r.Context(), aiAssistTimeout)
+	// A reasoning model needs longer than a one-line answer: a diagnosis over
+	// 48 KB of evidence routinely takes 30-60s, and the wall clock must not
+	// turn a slow answer into a failed attempt (which would spend budget).
+	callCtx, cancel := context.WithTimeout(r.Context(), aiDiagnoseTimeout)
 	defer cancel()
 	resp, err := gw.Advise(callCtx, ai.Request{Kind: domain.AISuggestPayloads, Prompt: prompt})
 	task.UpdatedAt = time.Now()

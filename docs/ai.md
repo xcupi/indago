@@ -30,12 +30,20 @@ from environment variables**, one key per provider, read at request time:
 
 ```bash
 INDAGO_LLM_KEY_OPENAI=sk-...            INDAGO_LLM_MODEL_OPENAI=gpt-4o-mini
-INDAGO_LLM_KEY_DEEPSEEK=sk-...          INDAGO_LLM_MODEL_DEEPSEEK=deepseek-chat
+INDAGO_LLM_KEY_DEEPSEEK=sk-...          INDAGO_LLM_MODEL_DEEPSEEK=deepseek-chat   # direct api.deepseek.com only
 INDAGO_LLM_KEY_CUSTOM=...               INDAGO_LLM_BASE_URL_CUSTOM=https://gateway.example/v1
 ```
 
 `GET /api/llm/providers` reports which providers are usable and where the
 credential came from (`settings` or `environment`); it never returns a key.
+
+The gateway deployment used for Indago runs the **custom** provider with
+`ds/deepseek-v4.1-flash` and does not fall back to `deepseek-chat`: every
+advisory call — assist, payload diagnosis, report narration — uses the same
+model. Because it is a reasoning model, its hidden reasoning counts against the
+output ceiling, so OpenAI-compatible calls send `max_tokens: 8192`; without a
+ceiling a gateway default can be spent entirely on reasoning and return an
+empty answer. Diagnosis calls are allowed 180 s for the same reason.
 
 Naming: `<PROVIDER>` is the provider id uppercased, non-alphanumerics replaced
 by `_`. Supported: `deepseek`, `openai`, `custom` (any OpenAI-compatible
