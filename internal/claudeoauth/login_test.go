@@ -2,6 +2,8 @@ package claudeoauth
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -69,5 +71,33 @@ func TestStoreRoundTripAndPermissions(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("mode = %o", perm)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestFinishSendsStateToTokenEndpoint(t *testing.T) {
+	var body string
+	l := NewLogin(NewStore(t.TempDir()))
+	l.http = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		return &http.Response{
+			StatusCode: 200,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"access_token":"a","refresh_token":"r","expires_in":3600}`)),
+		}, nil
+	})}
+	_, state, err := l.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Finish(context.Background(), "code#"+state, state); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, `"state":"`+state+`"`) {
+		t.Fatalf("token request must carry state, got %s", body)
 	}
 }

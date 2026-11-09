@@ -212,6 +212,10 @@ func (l *Login) Finish(ctx context.Context, codeOrPair, state string) (Credentia
 		"redirect_uri":  RedirectURI,
 		"client_id":     ClientID,
 		"code_verifier": verifier,
+		// Claude Code includes the same state in the token request. The
+		// token endpoint rejects the exchange with a bare 400 "Invalid
+		// request format" when it is omitted.
+		"state": state,
 	}
 	cred, err := l.exchange(ctx, body)
 	if err != nil {

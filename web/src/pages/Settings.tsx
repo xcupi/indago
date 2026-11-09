@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { KeyRound, RefreshCw, Save, Server, Trash2, Zap } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { ChevronDown, KeyRound, Layers, RefreshCw, Save, Server, Trash2, Zap } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -34,6 +34,47 @@ function sourceLabel(source?: string): string {
     default:
       return source || "configured";
   }
+}
+
+function CollapsibleSection({
+  title,
+  description,
+  icon,
+  badge,
+  defaultOpen = true,
+  children,
+}: {
+  title: string;
+  description: string;
+  icon: ReactNode;
+  badge?: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-3 border-b border-border py-2 text-left"
+      >
+        <span className="grid size-8 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">{icon}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-semibold text-foreground">{title}</span>
+          <span className="block truncate text-[11px] text-muted-foreground">{description}</span>
+        </span>
+        {badge ? (
+          <span className="hidden shrink-0 rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground sm:inline">
+            {badge}
+          </span>
+        ) : null}
+        <ChevronDown className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open ? <div className="pt-3">{children}</div> : null}
+    </section>
+  );
 }
 
 export default function Settings() {
@@ -182,12 +223,21 @@ export default function Settings() {
   }
 
   const providers = (status.data?.providers ?? []).map((p) => String((p as { id?: string }).id ?? p));
+  const providerList = availability.data?.providers ?? [];
+  const readyProviders = providerList.filter((p) => p.configured).length;
 
   return (
     <div>
       <PageTitle title="Settings" subtitle="AI Gateway, control-plane token, and server build information." />
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="space-y-6">
+        <CollapsibleSection
+          title="Providers"
+          description="Default gateway, credentials, and every LLM Indago can reach."
+          icon={<Layers className="size-4" />}
+          badge={`${readyProviders} of ${providerList.length || 0} ready`}
+          defaultOpen
+        >
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -208,8 +258,10 @@ export default function Settings() {
                     <span className="mono">key {status.data?.key_hint}</span>
                   ) : null}
                 </div>
-                <div className="space-y-1 rounded-md border border-border bg-muted/30 p-2">
-                  <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Usable providers</div>
+                <div className="max-h-72 space-y-1 overflow-auto rounded-md border border-border bg-muted/30 p-2">
+                  <div className="sticky top-0 bg-muted/30 pb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                    Usable providers · {readyProviders}/{providerList.length}
+                  </div>
                   {(availability.data?.providers ?? []).map((p) => (
                     <div key={p.provider} className="flex items-center justify-between gap-2 text-[11px]">
                       <span className="text-foreground">{p.label}</span>
@@ -346,7 +398,16 @@ export default function Settings() {
             {msg ? <p className="text-[11px] text-emerald-700 dark:text-emerald-400">{msg}</p> : null}
           </CardContent>
         </Card>
+        </CollapsibleSection>
 
+        <CollapsibleSection
+          title="Sessions"
+          description="Connect a subscription account directly instead of pasting an API key."
+          icon={<KeyRound className="size-4" />}
+          badge={[claude.data?.connected ? "Claude ready" : null, cg.data?.logged_in ? "ChatGPT ready" : null].filter(Boolean).join(" · ") || "none connected"}
+          defaultOpen
+        >
+        <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -505,8 +566,16 @@ export default function Settings() {
             </div>
           </CardContent>
         </Card>
+        </div>
+        </CollapsibleSection>
 
-        <div className="space-y-4">
+        <CollapsibleSection
+          title="Workspace"
+          description="Browser token and the running server build."
+          icon={<Server className="size-4" />}
+          defaultOpen={false}
+        >
+        <div className="grid gap-4 lg:grid-cols-2">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -576,6 +645,7 @@ export default function Settings() {
             </CardContent>
           </Card>
         </div>
+        </CollapsibleSection>
       </div>
     </div>
   );
