@@ -98,10 +98,10 @@ export default function Projects() {
               <TableBody>
                 {(projects.data ?? []).map((p) => (
                   <TableRow key={p.id} className="cursor-pointer" onClick={() => navigate(`/projects/${p.id}`)}>
-                    <TableCell className="font-medium text-zinc-200">{p.name}</TableCell>
-                    <TableCell className="mono text-[11px] text-zinc-500">{shortId(p.id)}</TableCell>
-                    <TableCell className="text-xs text-zinc-500">{formatTime(p.created_at)}</TableCell>
-                    <TableCell className="text-right text-[11px] text-emerald-400">open →</TableCell>
+                    <TableCell className="font-medium text-foreground">{p.name}</TableCell>
+                    <TableCell className="mono text-[11px] text-muted-foreground">{shortId(p.id)}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{formatTime(p.created_at)}</TableCell>
+                    <TableCell className="text-right text-[11px] text-emerald-700 dark:text-emerald-400">open →</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

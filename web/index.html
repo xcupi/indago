@@ -1,10 +1,21 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="light dark" />
     <title>Indago</title>
+    <script>
+      // Apply the stored theme before the first paint so the page never flashes
+      // the wrong background. Light is the default; "dark" opts in.
+      try {
+        if (localStorage.getItem("indago.theme") === "dark") {
+          document.documentElement.classList.add("dark");
+        }
+      } catch (e) {
+        /* private mode: fall back to the light default */
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

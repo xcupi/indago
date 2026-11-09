@@ -1,6 +1,59 @@
 @import "tailwindcss";
 
-/* Indago control plane — dark, dense, evidence-first. */
+/* Indago control plane — light by default, dark via the `.dark` class.
+   Colours are semantic tokens so both themes read correctly; the toggle in
+   the sidebar swaps the class and remembers the choice in localStorage. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  color-scheme: light;
+  --background: #fafafa;
+  --foreground: #18181b;
+  --card: #ffffff;
+  --card-foreground: #18181b;
+  --muted: #f4f4f5;
+  --muted-foreground: #52525b;
+  --border: #e4e4e7;
+  --border-strong: #d4d4d8;
+  --accent: #059669;
+  --accent-foreground: #ecfdf5;
+  --danger: #dc2626;
+  --warning: #b45309;
+  --info: #0369a1;
+}
+
+.dark {
+  color-scheme: dark;
+  --background: #09090b;
+  --foreground: #e4e4e7;
+  --card: #0c0c0f;
+  --card-foreground: #e4e4e7;
+  --muted: #18181b;
+  --muted-foreground: #a1a1aa;
+  --border: #27272a;
+  --border-strong: #3f3f46;
+  --accent: #34d399;
+  --accent-foreground: #052e1c;
+  --danger: #f87171;
+  --warning: #fbbf24;
+  --info: #38bdf8;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-danger: var(--danger);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+}
 
 html,
 body,
@@ -10,19 +63,19 @@ body,
 
 body {
   margin: 0;
-  background: #09090b;
-  color: #e4e4e7;
+  background: var(--background);
+  color: var(--foreground);
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
 ::selection {
-  background: rgba(16, 185, 129, 0.35);
+  background: color-mix(in oklab, var(--accent) 28%, transparent);
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: #3f3f46 transparent;
+  scrollbar-color: var(--border-strong) transparent;
 }
 
 *::-webkit-scrollbar {
@@ -31,7 +84,7 @@ body {
 }
 
 *::-webkit-scrollbar-thumb {
-  background: #3f3f46;
+  background: var(--border-strong);
   border-radius: 999px;
 }
 
@@ -41,7 +94,7 @@ body {
 
 .grid-lines {
   background-image:
-    linear-gradient(to right, rgba(63, 63, 70, 0.18) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(63, 63, 70, 0.18) 1px, transparent 1px);
+    linear-gradient(to right, color-mix(in oklab, var(--border) 55%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in oklab, var(--border) 55%, transparent) 1px, transparent 1px);
   background-size: 28px 28px;
 }

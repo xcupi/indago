@@ -120,7 +120,7 @@ export default function Scans() {
               <div className="grid max-h-[65vh] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
                 <Field label="Project">
                   <select
-                    className="h-9 rounded-md border border-zinc-700 bg-zinc-950/60 px-2 text-sm"
+                    className="h-9 rounded-md border border-border bg-card px-2 text-sm"
                     value={projectId}
                     onChange={(e) => {
                       setProjectId(e.target.value);
@@ -137,7 +137,7 @@ export default function Scans() {
                 </Field>
                 <Field label="Target">
                   <select
-                    className="h-9 rounded-md border border-zinc-700 bg-zinc-950/60 px-2 text-sm"
+                    className="h-9 rounded-md border border-border bg-card px-2 text-sm"
                     value={form.target_id}
                     onChange={(e) => setForm({ ...form, target_id: e.target.value })}
                   >
@@ -154,7 +154,7 @@ export default function Scans() {
                 </Field>
                 <Field label="Profile">
                   <select
-                    className="h-9 rounded-md border border-zinc-700 bg-zinc-950/60 px-2 text-sm"
+                    className="h-9 rounded-md border border-border bg-card px-2 text-sm"
                     value={form.profile}
                     onChange={(e) => setForm({ ...form, profile: e.target.value })}
                   >
@@ -173,7 +173,7 @@ export default function Scans() {
                 </Field>
                 <Field label="Auth mode">
                   <select
-                    className="h-9 rounded-md border border-zinc-700 bg-zinc-950/60 px-2 text-sm"
+                    className="h-9 rounded-md border border-border bg-card px-2 text-sm"
                     value={form.auth}
                     onChange={(e) => setForm({ ...form, auth: e.target.value })}
                   >
@@ -206,7 +206,7 @@ export default function Scans() {
                 ) : null}
                 <Field label="Candidate profile">
                   <select
-                    className="h-9 rounded-md border border-zinc-700 bg-zinc-950/60 px-2 text-sm"
+                    className="h-9 rounded-md border border-border bg-card px-2 text-sm"
                     value={form.candidateProfile}
                     onChange={(e) => setForm({ ...form, candidateProfile: e.target.value })}
                   >
@@ -217,7 +217,7 @@ export default function Scans() {
                 </Field>
                 <Field label="Raw query injection">
                   <select
-                    className="h-9 rounded-md border border-zinc-700 bg-zinc-950/60 px-2 text-sm"
+                    className="h-9 rounded-md border border-border bg-card px-2 text-sm"
                     value={form.rawQuery}
                     onChange={(e) => setForm({ ...form, rawQuery: e.target.value })}
                   >
@@ -228,7 +228,7 @@ export default function Scans() {
                 </Field>
                 <Field label="Recon level">
                   <select
-                    className="h-9 rounded-md border border-zinc-700 bg-zinc-950/60 px-2 text-sm"
+                    className="h-9 rounded-md border border-border bg-card px-2 text-sm"
                     value={form.recon}
                     onChange={(e) => setForm({ ...form, recon: e.target.value })}
                   >
@@ -260,18 +260,18 @@ export default function Scans() {
                     />
                   </Field>
                 </div>
-                <label className="flex items-center gap-2 text-xs text-zinc-300">
+                <label className="flex items-center gap-2 text-xs text-foreground">
                   <Switch checked={form.quick} onCheckedChange={(v) => setForm({ ...form, quick: v })} />
                   Quick scan (seeds only)
                 </label>
-                <label className="flex items-center gap-2 text-xs text-zinc-300">
+                <label className="flex items-center gap-2 text-xs text-foreground">
                   <Switch checked={form.evasion} onCheckedChange={(v) => setForm({ ...form, evasion: v })} />
                   Eager evasion pack
                 </label>
               </div>
               {error ? <Alert>{error}</Alert> : null}
               <div className="flex items-center justify-between gap-2">
-                <p className="text-[10px] text-zinc-500">
+                <p className="text-[10px] text-muted-foreground">
                   State-changing probes (stored XSS, role writes) require the server's{" "}
                   <span className="mono">-allow-state-changing</span>.
                 </p>
@@ -326,18 +326,18 @@ export default function Scans() {
                   .map((s) => (
                     <TableRow key={s.id} className="cursor-pointer" onClick={() => navigate(`/scans/${s.id}`)}>
                       <TableCell>
-                        <div className="mono text-[11px] text-zinc-500">{shortId(s.id)}</div>
-                        <div className="max-w-[26rem] truncate text-xs text-zinc-300">
+                        <div className="mono text-[11px] text-muted-foreground">{shortId(s.id)}</div>
+                        <div className="max-w-[26rem] truncate text-xs text-foreground">
                           {s.name || s.seed_urls?.[0] || "—"}
                         </div>
                       </TableCell>
                       <TableCell>
                         <StateBadge state={s.state} />
                       </TableCell>
-                      <TableCell className="text-xs text-zinc-400">{s.profile}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{s.profile}</TableCell>
                       <TableCell className="tabular-nums">{s.stats?.endpoints_discovered ?? 0}</TableCell>
                       <TableCell className="tabular-nums">{s.stats?.findings_confirmed ?? 0}</TableCell>
-                      <TableCell className="text-xs text-zinc-500">{formatTime(s.created_at)}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{formatTime(s.created_at)}</TableCell>
                     </TableRow>
                   ))}
               </TableBody>

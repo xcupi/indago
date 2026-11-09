@@ -24,24 +24,24 @@ export function DialogContent({
 }) {
   return (
     <DialogPrimitive.Portal>
-      <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out" />
+      <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/40 dark:bg-black/70 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out" />
       <DialogPrimitive.Content
         className={cn(
-          "fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border border-zinc-800 bg-zinc-950 p-5 shadow-2xl",
+          "fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border border-border bg-background p-5 shadow-2xl",
           className,
         )}
         {...props}
       >
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1">
-            <DialogPrimitive.Title className="text-sm font-semibold text-zinc-100">{title}</DialogPrimitive.Title>
+            <DialogPrimitive.Title className="text-sm font-semibold text-foreground">{title}</DialogPrimitive.Title>
             {description ? (
-              <DialogPrimitive.Description className="text-xs text-zinc-400">
+              <DialogPrimitive.Description className="text-xs text-muted-foreground">
                 {description}
               </DialogPrimitive.Description>
             ) : null}
           </div>
-          <DialogPrimitive.Close className="rounded-md p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+          <DialogPrimitive.Close className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground">
             <X className="size-4" />
             <span className="sr-only">Close</span>
           </DialogPrimitive.Close>
@@ -59,7 +59,7 @@ export const Tabs = TabsPrimitive.Root;
 export function TabsList({ className, ...props }: React.ComponentPropsWithoutRef<typeof TabsPrimitive.List>) {
   return (
     <TabsPrimitive.List
-      className={cn("inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900/50 p-1", className)}
+      className={cn("inline-flex items-center gap-1 rounded-lg border border-border bg-muted p-1", className)}
       {...props}
     />
   );
@@ -69,7 +69,7 @@ export function TabsTrigger({ className, ...props }: React.ComponentPropsWithout
   return (
     <TabsPrimitive.Trigger
       className={cn(
-        "rounded-md px-3 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:text-zinc-200 data-[state=active]:bg-zinc-800 data-[state=active]:text-zinc-100",
+        "rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground data-[state=active]:bg-card data-[state=active]:font-semibold data-[state=active]:text-foreground data-[state=active]:shadow-sm dark:data-[state=active]:bg-border dark:data-[state=active]:text-foreground",
         className,
       )}
       {...props}
@@ -90,19 +90,19 @@ export const Switch = React.forwardRef<
   <SwitchPrimitive.Root
     ref={ref}
     className={cn(
-      "peer inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-zinc-700 transition-colors data-[state=checked]:border-emerald-600 data-[state=checked]:bg-emerald-600 data-[state=unchecked]:bg-zinc-800",
+      "peer inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-border transition-colors data-[state=checked]:border-emerald-600 data-[state=checked]:bg-emerald-600 data-[state=unchecked]:bg-muted",
       className,
     )}
     {...props}
   >
-    <SwitchPrimitive.Thumb className="pointer-events-none block size-3.5 translate-x-0.5 rounded-full bg-zinc-300 transition-transform data-[state=checked]:translate-x-[18px] data-[state=checked]:bg-white" />
+    <SwitchPrimitive.Thumb className="pointer-events-none block size-3.5 translate-x-0.5 rounded-full bg-background transition-transform data-[state=checked]:translate-x-[18px] data-[state=checked]:bg-white" />
   </SwitchPrimitive.Root>
 ));
 
 /* Separator ---------------------------------------------------------------- */
 
 export function Separator({ className, ...props }: React.ComponentPropsWithoutRef<typeof SeparatorPrimitive.Root>) {
-  return <SeparatorPrimitive.Root className={cn("shrink-0 bg-zinc-800", className)} {...props} />;
+  return <SeparatorPrimitive.Root className={cn("shrink-0 bg-muted", className)} {...props} />;
 }
 
 /* Tooltip ------------------------------------------------------------------ */
@@ -118,7 +118,7 @@ export function Tooltip({ label, children }: { label: string; children: React.Re
       <TooltipPrimitive.Portal>
         <TooltipPrimitive.Content
           sideOffset={6}
-          className="z-50 max-w-xs rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-[11px] text-zinc-200 shadow-lg"
+          className="z-50 max-w-xs rounded-md border border-border bg-muted px-2.5 py-1.5 text-[11px] text-foreground shadow-lg"
         >
           {label}
         </TooltipPrimitive.Content>

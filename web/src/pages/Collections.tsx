@@ -20,9 +20,9 @@ function ScanPicker({
   return (
     <Card className="mb-4">
       <CardContent className="flex flex-wrap items-center gap-2 p-3">
-        <span className="text-[11px] uppercase tracking-wide text-zinc-500">Scan</span>
+        <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Scan</span>
         <select
-          className="h-8 min-w-[22rem] rounded-md border border-zinc-700 bg-zinc-950 px-2 text-xs"
+          className="h-8 min-w-[22rem] rounded-md border border-border bg-background px-2 text-xs"
           value={value}
           onChange={(e) => onChange(e.target.value)}
         >
@@ -34,7 +34,7 @@ function ScanPicker({
           ))}
         </select>
         {value ? (
-          <a href={`#/scans/${value}`} className="text-[11px] text-emerald-300 hover:underline">
+          <a href={`#/scans/${value}`} className="text-[11px] text-emerald-700 dark:text-emerald-400 hover:underline">
             open scan →
           </a>
         ) : null}
@@ -90,7 +90,7 @@ export function ReportsPage() {
           {scanId ? (
             <>
               {selected ? (
-                <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
                   <StateBadge state={selected.state} />
                   <span>{selected.stats?.findings_confirmed ?? 0} confirmed</span>
                   <span>·</span>

@@ -49,22 +49,22 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
             onClick={() => setVerdict(value)}
             className={`rounded-md border px-2.5 py-1 text-[11px] ${
               verdict === value
-                ? "border-emerald-700 bg-emerald-950/50 text-emerald-300"
-                : "border-zinc-800 text-zinc-400 hover:bg-zinc-900"
+                ? "border-emerald-200 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400"
+                : "border-border text-muted-foreground hover:bg-muted"
             }`}
           >
             {label}
           </button>
         ))}
-        <span className="mx-1 h-4 w-px bg-zinc-800" />
+        <span className="mx-1 h-4 w-px bg-muted" />
         {["", "critical", "high", "medium", "low"].map((value) => (
           <button
             key={value}
             onClick={() => setSeverity(value)}
             className={`rounded-md border px-2.5 py-1 text-[11px] ${
               severity === value
-                ? "border-zinc-600 bg-zinc-800 text-zinc-100"
-                : "border-zinc-800 text-zinc-400 hover:bg-zinc-900"
+                ? "border-border bg-muted text-foreground"
+                : "border-border text-muted-foreground hover:bg-muted"
             }`}
           >
             {value || "Any severity"}
@@ -99,13 +99,13 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
                       <SeverityBadge severity={f.severity} />
                     </TableCell>
                     <TableCell className="max-w-[34rem]">
-                      <div className="truncate text-xs text-zinc-200">{f.title}</div>
-                      <div className="truncate text-[11px] text-zinc-500">{f.summary}</div>
+                      <div className="truncate text-xs text-foreground">{f.title}</div>
+                      <div className="truncate text-[11px] text-muted-foreground">{f.summary}</div>
                     </TableCell>
                     <TableCell>
                       <Badge tone="violet">{f.vuln_class}</Badge>
                     </TableCell>
-                    <TableCell className="text-[11px] text-zinc-500">{formatTime(f.updated_at ?? f.created_at)}</TableCell>
+                    <TableCell className="text-[11px] text-muted-foreground">{formatTime(f.updated_at ?? f.created_at)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -122,8 +122,8 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
             className="max-w-3xl"
           >
             <div className="max-h-[65vh] space-y-3 overflow-y-auto pr-1">
-              <p className="text-xs leading-relaxed text-zinc-300">{selected.summary}</p>
-              <div className="flex flex-wrap gap-2 text-[11px] text-zinc-500">
+              <p className="text-xs leading-relaxed text-foreground">{selected.summary}</p>
+              <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
                 <span className="mono">id {shortId(selected.id)}</span>
                 <span className="mono">engine {selected.provenance?.engine ?? "—"}</span>
                 <span className="mono">source {selected.provenance?.discovery_source ?? "—"}</span>
@@ -136,7 +136,7 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
                       href={`/api/evidence/${id}/content`}
                       target="_blank"
                       rel="noreferrer"
-                      className="inline-flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-emerald-300 hover:bg-zinc-800"
+                      className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-emerald-700 dark:text-emerald-400 hover:bg-muted"
                     >
                       evidence {shortId(id)} <ExternalLink className="size-3" />
                     </a>
@@ -180,18 +180,18 @@ export function EvidencePanel({ scanId }: { scanId: string }) {
                 <TableCell>
                   <Badge tone="info">{e.kind}</Badge>
                 </TableCell>
-                <TableCell className="max-w-[28rem] truncate text-xs text-zinc-400">{e.note ?? "—"}</TableCell>
-                <TableCell className="mono text-[11px] text-zinc-500">{e.media_type ?? "—"}</TableCell>
-                <TableCell className="tabular-nums text-xs text-zinc-400">
+                <TableCell className="max-w-[28rem] truncate text-xs text-muted-foreground">{e.note ?? "—"}</TableCell>
+                <TableCell className="mono text-[11px] text-muted-foreground">{e.media_type ?? "—"}</TableCell>
+                <TableCell className="tabular-nums text-xs text-muted-foreground">
                   {(e.size / 1024).toFixed(1)} KB
                 </TableCell>
-                <TableCell className="text-[11px] text-zinc-500">{formatTime(e.created_at)}</TableCell>
+                <TableCell className="text-[11px] text-muted-foreground">{formatTime(e.created_at)}</TableCell>
                 <TableCell className="text-right">
                   <a
                     href={`/api/evidence/${e.id}/content`}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-[11px] text-emerald-300 hover:underline"
+                    className="inline-flex items-center gap-1 text-[11px] text-emerald-700 dark:text-emerald-400 hover:underline"
                   >
                     open <ExternalLink className="size-3" />
                   </a>
@@ -235,9 +235,9 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
       <Card>
         <CardContent className="flex flex-wrap items-end gap-2 p-3">
           <div className="flex flex-col gap-1">
-            <span className="text-[11px] uppercase tracking-wide text-zinc-500">Format</span>
+            <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Format</span>
             <select
-              className="h-8 rounded-md border border-zinc-700 bg-zinc-950 px-2 text-xs"
+              className="h-8 rounded-md border border-border bg-background px-2 text-xs"
               value={format}
               onChange={(e) => setFormat(e.target.value)}
             >
@@ -247,9 +247,9 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
             </select>
           </div>
           <div className="flex flex-col gap-1">
-            <span className="text-[11px] uppercase tracking-wide text-zinc-500">Findings</span>
+            <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Findings</span>
             <select
-              className="h-8 rounded-md border border-zinc-700 bg-zinc-950 px-2 text-xs"
+              className="h-8 rounded-md border border-border bg-background px-2 text-xs"
               value={mode}
               onChange={(e) => setMode(e.target.value)}
             >
@@ -264,11 +264,11 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
             href={`/api/scans/${scanId}/reports/preview?format=${format}&mode=${mode}`}
             target="_blank"
             rel="noreferrer"
-            className="text-[11px] text-emerald-300 hover:underline"
+            className="text-[11px] text-emerald-700 dark:text-emerald-400 hover:underline"
           >
             preview
           </a>
-          {error ? <span className="text-[11px] text-red-300">{error}</span> : null}
+          {error ? <span className="text-[11px] text-red-700 dark:text-red-400">{error}</span> : null}
         </CardContent>
       </Card>
 
@@ -296,14 +296,14 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
                         <FileText className="size-3" /> {r.format}
                       </Badge>
                     </TableCell>
-                    <TableCell className="mono text-[11px] text-zinc-500">{shortId(r.id)}</TableCell>
-                    <TableCell className="text-[11px] text-zinc-500">{formatTime(r.created_at)}</TableCell>
+                    <TableCell className="mono text-[11px] text-muted-foreground">{shortId(r.id)}</TableCell>
+                    <TableCell className="text-[11px] text-muted-foreground">{formatTime(r.created_at)}</TableCell>
                     <TableCell className="text-right">
                       <a
                         href={`/api/reports/${r.id}/content`}
                         target="_blank"
                         rel="noreferrer"
-                        className="text-[11px] text-emerald-300 hover:underline"
+                        className="text-[11px] text-emerald-700 dark:text-emerald-400 hover:underline"
                       >
                         open
                       </a>
@@ -330,7 +330,7 @@ export function CoveragePanel({ scanId }: { scanId: string }) {
     <div className="space-y-3">
       <Card>
         <CardContent className="p-3">
-          <p className="text-[11px] leading-relaxed text-zinc-500">
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
             Coverage is what the engine actually exercised, not what it could run. A point skipped for
             CAPTCHA, incomplete evidence, no replayable verifier, an already-recorded bypass attempt, or
             429/503 backpressure is listed with that reason — it is never counted as clean.
@@ -344,9 +344,9 @@ export function CoveragePanel({ scanId }: { scanId: string }) {
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {entries.map(([key, value]) => (
-            <div key={key} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
-              <div className="text-[11px] uppercase tracking-wide text-zinc-500">{key.replaceAll("_", " ")}</div>
-              <div className="mt-1 text-sm text-zinc-200">
+            <div key={key} className="rounded-lg border border-border bg-muted p-3">
+              <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{key.replaceAll("_", " ")}</div>
+              <div className="mt-1 text-sm text-foreground">
                 {typeof value === "object" ? (
                   <Code className="max-h-40">{JSON.stringify(value, null, 2)}</Code>
                 ) : (
@@ -385,11 +385,11 @@ export function EndpointsPanel({ scanId }: { scanId: string }) {
                 <TableCell>
                   <Badge tone="info">{e.method}</Badge>
                 </TableCell>
-                <TableCell className="mono max-w-[36rem] truncate text-[11px] text-zinc-300">{e.url}</TableCell>
-                <TableCell className="text-xs text-zinc-400">
+                <TableCell className="mono max-w-[36rem] truncate text-[11px] text-foreground">{e.url}</TableCell>
+                <TableCell className="text-xs text-muted-foreground">
                   {(e.parameters ?? []).map((p) => p.name).join(", ") || "—"}
                 </TableCell>
-                <TableCell className="mono text-[11px] text-zinc-500">{e.content_type ?? "—"}</TableCell>
+                <TableCell className="mono text-[11px] text-muted-foreground">{e.content_type ?? "—"}</TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -440,10 +440,10 @@ export function ExplorerPanel({ scanId }: { scanId: string }) {
           placeholder="Filter by URL…"
           className="h-8 max-w-xs text-xs"
         />
-        <label className="flex items-center gap-2 text-[11px] text-zinc-400">
+        <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
           <Switch checked={gaps} onCheckedChange={setGaps} /> Only endpoints with gaps
         </label>
-        <span className="text-[11px] text-zinc-500">{explorer.data?.total ?? 0} endpoints</span>
+        <span className="text-[11px] text-muted-foreground">{explorer.data?.total ?? 0} endpoints</span>
       </div>
       {explorer.loading && !explorer.data ? (
         <Loading />
@@ -469,13 +469,13 @@ export function ExplorerPanel({ scanId }: { scanId: string }) {
                     <TableCell>
                       <Badge tone="info">{e.method}</Badge>
                     </TableCell>
-                    <TableCell className="mono max-w-[30rem] truncate text-[11px] text-zinc-300">{e.url}</TableCell>
-                    <TableCell className="text-[11px] text-zinc-400">{e.status}</TableCell>
-                    <TableCell>{e.gap ? <Badge tone="warn">gap</Badge> : <span className="text-[11px] text-zinc-600">—</span>}</TableCell>
-                    <TableCell className="text-[11px] text-zinc-400">
+                    <TableCell className="mono max-w-[30rem] truncate text-[11px] text-foreground">{e.url}</TableCell>
+                    <TableCell className="text-[11px] text-muted-foreground">{e.status}</TableCell>
+                    <TableCell>{e.gap ? <Badge tone="warn">gap</Badge> : <span className="text-[11px] text-muted-foreground">—</span>}</TableCell>
+                    <TableCell className="text-[11px] text-muted-foreground">
                       {(e.parameters ?? []).map((p) => p.name).filter(Boolean).join(", ") || "—"}
                     </TableCell>
-                    <TableCell className="text-[11px] text-zinc-400">
+                    <TableCell className="text-[11px] text-muted-foreground">
                       {(e.dom ?? []).map((d) => d.sink).filter(Boolean).join(", ") || (e.dom_scheduled ? "scheduled" : "—")}
                     </TableCell>
                   </TableRow>
@@ -511,7 +511,7 @@ export function IDORPanel({ scanId }: { scanId: string }) {
   const list = candidates.data?.candidates ?? [];
   return (
     <div className="space-y-3">
-      {candidates.data?.note ? <p className="text-[11px] text-zinc-500">{candidates.data.note}</p> : null}
+      {candidates.data?.note ? <p className="text-[11px] text-muted-foreground">{candidates.data.note}</p> : null}
       {list.length === 0 ? (
         <Empty>No harvested object identifiers for this scan.</Empty>
       ) : (
@@ -529,12 +529,12 @@ export function IDORPanel({ scanId }: { scanId: string }) {
               <TableBody>
                 {list.map((c, i) => (
                   <TableRow key={`${c.value}-${i}`}>
-                    <TableCell className="mono text-[11px] text-zinc-200">{c.value}</TableCell>
-                    <TableCell className="text-[11px] text-zinc-400">{c.shape}</TableCell>
-                    <TableCell className="max-w-[26rem] truncate text-[11px] text-zinc-500">
+                    <TableCell className="mono text-[11px] text-foreground">{c.value}</TableCell>
+                    <TableCell className="text-[11px] text-muted-foreground">{c.shape}</TableCell>
+                    <TableCell className="max-w-[26rem] truncate text-[11px] text-muted-foreground">
                       {typeof c.origin === "string" ? c.origin : c.origin?.url ?? c.origin?.source ?? "—"}
                     </TableCell>
-                    <TableCell className="tabular-nums text-xs text-zinc-400">{c.observed_count ?? 1}</TableCell>
+                    <TableCell className="tabular-nums text-xs text-muted-foreground">{c.observed_count ?? 1}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -563,7 +563,7 @@ export function TestsPanel({ scanId }: { scanId: string }) {
         <button
           onClick={() => setFilter("")}
           className={`rounded-md border px-2.5 py-1 text-[11px] ${
-            filter === "" ? "border-emerald-700 bg-emerald-950/50 text-emerald-300" : "border-zinc-800 text-zinc-400"
+            filter === "" ? "border-emerald-200 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400" : "border-border text-muted-foreground"
           }`}
         >
           all ({rows.length})
@@ -573,7 +573,7 @@ export function TestsPanel({ scanId }: { scanId: string }) {
             key={c}
             onClick={() => setFilter(c)}
             className={`rounded-md border px-2.5 py-1 text-[11px] ${
-              filter === c ? "border-emerald-700 bg-emerald-950/50 text-emerald-300" : "border-zinc-800 text-zinc-400"
+              filter === c ? "border-emerald-200 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400" : "border-border text-muted-foreground"
             }`}
           >
             {c} ({rows.filter((t) => t.vuln_class === c).length})
@@ -598,13 +598,13 @@ export function TestsPanel({ scanId }: { scanId: string }) {
                   <TableCell>
                     <Badge tone="violet">{t.vuln_class}</Badge>
                   </TableCell>
-                  <TableCell className="text-xs text-zinc-300">{t.outcome ?? t.status}</TableCell>
-                  <TableCell className="mono max-w-[26rem] truncate text-[11px] text-zinc-400">
+                  <TableCell className="text-xs text-foreground">{t.outcome ?? t.status}</TableCell>
+                  <TableCell className="mono max-w-[26rem] truncate text-[11px] text-muted-foreground">
                     {t.method ? `${t.method} ` : ""}
                     {t.url ?? "—"}
                   </TableCell>
-                  <TableCell className="max-w-[24rem] truncate text-[11px] text-zinc-500">{t.note ?? "—"}</TableCell>
-                  <TableCell className="text-[11px] text-zinc-500">{formatTime(t.finished_at ?? t.started_at)}</TableCell>
+                  <TableCell className="max-w-[24rem] truncate text-[11px] text-muted-foreground">{t.note ?? "—"}</TableCell>
+                  <TableCell className="text-[11px] text-muted-foreground">{formatTime(t.finished_at ?? t.started_at)}</TableCell>
                 </TableRow>
               ))}
             </TableBody>

@@ -103,7 +103,7 @@ export default function ProjectDetail({ id }: { id: string }) {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Globe2 className="size-4 text-sky-400" /> Targets
+              <Globe2 className="size-4 text-sky-700 dark:text-sky-400" /> Targets
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -139,8 +139,8 @@ export default function ProjectDetail({ id }: { id: string }) {
                 <TableBody>
                   {(targets.data ?? []).map((t) => (
                     <TableRow key={t.id}>
-                      <TableCell className="text-zinc-200">{t.name}</TableCell>
-                      <TableCell className="mono text-[11px] text-zinc-400">{t.base_url}</TableCell>
+                      <TableCell className="text-foreground">{t.name}</TableCell>
+                      <TableCell className="mono text-[11px] text-muted-foreground">{t.base_url}</TableCell>
                       <TableCell className="text-right">
                         <Button
                           size="sm"
@@ -161,7 +161,7 @@ export default function ProjectDetail({ id }: { id: string }) {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <ShieldCheck className="size-4 text-emerald-400" /> Scope
+              <ShieldCheck className="size-4 text-emerald-700 dark:text-emerald-400" /> Scope
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -199,7 +199,7 @@ export default function ProjectDetail({ id }: { id: string }) {
                 />
               </Field>
             </div>
-            <label className="flex items-center gap-2 text-xs text-zinc-300">
+            <label className="flex items-center gap-2 text-xs text-foreground">
               <Switch
                 checked={scopeDraft.subdomains}
                 onCheckedChange={(v) => setScopeDraft({ ...scopeDraft, subdomains: v })}
@@ -207,7 +207,7 @@ export default function ProjectDetail({ id }: { id: string }) {
               Allow subdomains of the included hosts
             </label>
             {scopeErr ? <Alert>{scopeErr}</Alert> : null}
-            {saved ? <p className="text-[11px] text-emerald-400">Scope saved.</p> : null}
+            {saved ? <p className="text-[11px] text-emerald-700 dark:text-emerald-400">Scope saved.</p> : null}
             <div className="flex justify-end">
               <Button size="sm" onClick={saveScope}>
                 <Save className="size-4" /> Save scope
@@ -240,14 +240,14 @@ export default function ProjectDetail({ id }: { id: string }) {
                 {projectScans.map((s) => (
                   <TableRow key={s.id} className="cursor-pointer" onClick={() => navigate(`/scans/${s.id}`)}>
                     <TableCell>
-                      <div className="mono text-[11px] text-zinc-500">{shortId(s.id)}</div>
-                      <div className="truncate text-xs text-zinc-300">{s.name || s.seed_urls?.[0]}</div>
+                      <div className="mono text-[11px] text-muted-foreground">{shortId(s.id)}</div>
+                      <div className="truncate text-xs text-foreground">{s.name || s.seed_urls?.[0]}</div>
                     </TableCell>
                     <TableCell>
                       <StateBadge state={s.state} />
                     </TableCell>
                     <TableCell className="tabular-nums">{s.stats?.findings_confirmed ?? 0}</TableCell>
-                    <TableCell className="text-xs text-zinc-500">{formatTime(s.created_at)}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{formatTime(s.created_at)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

@@ -102,7 +102,7 @@ export default function Settings() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Zap className="size-4 text-amber-400" /> AI Gateway
+              <Zap className="size-4 text-amber-700 dark:text-amber-400" /> AI Gateway
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -110,9 +110,9 @@ export default function Settings() {
               <Loading />
             ) : (
               <>
-                <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
                   <span>status:</span>
-                  <span className={status.data?.configured ? "text-emerald-400" : "text-zinc-400"}>
+                  <span className={status.data?.configured ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>
                     {status.data?.configured ? "configured" : "not configured"}
                   </span>
                   {status.data?.key_set ? (
@@ -122,7 +122,7 @@ export default function Settings() {
                 <div className="grid gap-2 sm:grid-cols-2">
                   <Field label="Provider">
                     <select
-                      className="h-9 rounded-md border border-zinc-700 bg-zinc-950/60 px-2 text-sm"
+                      className="h-9 rounded-md border border-border bg-card px-2 text-sm"
                       value={form.provider}
                       onChange={(e) => setForm({ ...form, provider: e.target.value })}
                     >
@@ -165,7 +165,7 @@ export default function Settings() {
               </>
             )}
             {err ? <Alert>{err}</Alert> : null}
-            {msg ? <p className="text-[11px] text-emerald-400">{msg}</p> : null}
+            {msg ? <p className="text-[11px] text-emerald-700 dark:text-emerald-400">{msg}</p> : null}
           </CardContent>
         </Card>
 
@@ -173,7 +173,7 @@ export default function Settings() {
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <KeyRound className="size-4 text-sky-400" /> Control-plane token
+                <KeyRound className="size-4 text-sky-700 dark:text-sky-400" /> Control-plane token
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2">
@@ -218,20 +218,20 @@ export default function Settings() {
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <Server className="size-4 text-zinc-400" /> Server
+                <Server className="size-4 text-muted-foreground" /> Server
               </CardTitle>
             </CardHeader>
-            <CardContent className="space-y-2 text-xs text-zinc-300">
+            <CardContent className="space-y-2 text-xs text-foreground">
               <div className="flex justify-between">
-                <span className="text-zinc-500">Version</span>
+                <span className="text-muted-foreground">Version</span>
                 <span className="mono">{version.data?.version ?? "—"}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-zinc-500">Now</span>
+                <span className="text-muted-foreground">Now</span>
                 <span>{formatTime(new Date().toISOString())}</span>
               </div>
               <div>
-                <div className="mb-1 text-[11px] uppercase tracking-wide text-zinc-500">Capabilities</div>
+                <div className="mb-1 text-[11px] uppercase tracking-wide text-muted-foreground">Capabilities</div>
                 <Code className="max-h-56">
                   {caps.data ? JSON.stringify(caps.data, null, 2) : "—"}
                 </Code>

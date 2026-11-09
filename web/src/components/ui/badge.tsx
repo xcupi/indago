@@ -7,12 +7,12 @@ const badgeVariants = cva(
   {
     variants: {
       tone: {
-        neutral: "border-zinc-700 bg-zinc-800/60 text-zinc-300",
-        success: "border-emerald-800/60 bg-emerald-950/50 text-emerald-300",
-        danger: "border-red-800/60 bg-red-950/50 text-red-300",
-        warn: "border-amber-800/60 bg-amber-950/50 text-amber-300",
-        info: "border-sky-800/60 bg-sky-950/50 text-sky-300",
-        violet: "border-violet-800/60 bg-violet-950/50 text-violet-300",
+        neutral: "border-border bg-muted text-foreground",
+        success: "border-emerald-200 dark:border-emerald-800/60 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400",
+        danger: "border-red-200 dark:border-red-800/60 bg-red-50 dark:bg-red-950/50 text-red-700 dark:text-red-400",
+        warn: "border-amber-200 dark:border-amber-800/60 bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-400",
+        info: "border-sky-200 dark:border-sky-800/60 bg-sky-50 dark:bg-sky-950/50 text-sky-700 dark:text-sky-400",
+        violet: "border-violet-200 dark:border-violet-800/60 bg-violet-50 dark:bg-violet-950/50 text-violet-700 dark:text-violet-300",
       },
     },
     defaultVariants: { tone: "neutral" },

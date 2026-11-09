@@ -158,7 +158,7 @@ export default function ScanDetail({ id }: { id: string }) {
               <CardHeader>
                 <CardTitle>Configuration</CardTitle>
               </CardHeader>
-              <CardContent className="space-y-2 text-xs text-zinc-300">
+              <CardContent className="space-y-2 text-xs text-foreground">
                 <Row label="Profile" value={<Badge tone="violet">{s.profile}</Badge>} />
                 <Row label="Discovery" value={s.discovery ?? "—"} />
                 <Row
@@ -269,8 +269,8 @@ export default function ScanDetail({ id }: { id: string }) {
 
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="flex items-start justify-between gap-3 border-b border-zinc-800/50 pb-1.5 last:border-0">
-      <span className="text-[11px] uppercase tracking-wide text-zinc-500">{label}</span>
+    <div className="flex items-start justify-between gap-3 border-b border-border pb-1.5 last:border-0">
+      <span className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</span>
       <span className="max-w-[70%] text-right">{value}</span>
     </div>
   );

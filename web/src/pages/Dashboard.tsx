@@ -57,9 +57,9 @@ export default function Dashboard() {
         <Card className="lg:col-span-2">
           <CardHeader className="flex-row items-center justify-between">
             <CardTitle className="flex items-center gap-2">
-              <ScanLine className="size-4 text-emerald-400" /> Recent scans
+              <ScanLine className="size-4 text-emerald-700 dark:text-emerald-400" /> Recent scans
             </CardTitle>
-            <a href="#/scans" className="text-[11px] text-emerald-400 hover:underline">
+            <a href="#/scans" className="text-[11px] text-emerald-700 dark:text-emerald-400 hover:underline">
               all scans <ArrowUpRight className="inline size-3" />
             </a>
           </CardHeader>
@@ -92,8 +92,8 @@ export default function Dashboard() {
                         onClick={() => navigate(`/scans/${s.id}`)}
                       >
                         <TableCell>
-                          <div className="mono text-[11px] text-zinc-400">{shortId(s.id)}</div>
-                          <div className="max-w-[22rem] truncate text-xs text-zinc-300">
+                          <div className="mono text-[11px] text-muted-foreground">{shortId(s.id)}</div>
+                          <div className="max-w-[22rem] truncate text-xs text-foreground">
                             {s.name || s.seed_urls?.[0] || "—"}
                           </div>
                         </TableCell>
@@ -102,7 +102,7 @@ export default function Dashboard() {
                         </TableCell>
                         <TableCell className="tabular-nums">{s.stats?.findings_confirmed ?? 0}</TableCell>
                         <TableCell className="tabular-nums">{s.stats?.endpoints_discovered ?? 0}</TableCell>
-                        <TableCell className="text-xs text-zinc-500">{formatTime(s.created_at)}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{formatTime(s.created_at)}</TableCell>
                       </TableRow>
                     ))}
                 </TableBody>
@@ -114,26 +114,26 @@ export default function Dashboard() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <ShieldAlert className="size-4 text-amber-400" /> Newest findings
+              <ShieldAlert className="size-4 text-amber-700 dark:text-amber-400" /> Newest findings
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
             {findingsByScan.loading ? (
               <Loading />
             ) : (findingsByScan.data ?? []).length === 0 ? (
-              <p className="text-xs text-zinc-500">No findings on the newest scan.</p>
+              <p className="text-xs text-muted-foreground">No findings on the newest scan.</p>
             ) : (
               (findingsByScan.data ?? []).slice(0, 8).map((f) => (
                 <button
                   key={f.id}
                   onClick={() => navigate(`/scans/${f.scan_id}?tab=findings`)}
-                  className="w-full rounded-md border border-zinc-800 bg-zinc-950/40 p-2 text-left hover:border-zinc-700"
+                  className="w-full rounded-md border border-border bg-muted p-2 text-left hover:border-border"
                 >
                   <div className="flex items-center gap-2">
                     <VerdictBadge verdict={f.verdict} />
                     <SeverityBadge severity={f.severity} />
                   </div>
-                  <div className="mt-1 line-clamp-2 text-xs text-zinc-300">{f.title}</div>
+                  <div className="mt-1 line-clamp-2 text-xs text-foreground">{f.title}</div>
                 </button>
               ))
             )}
@@ -145,21 +145,21 @@ export default function Dashboard() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Target className="size-4 text-sky-400" /> Projects
+              <Target className="size-4 text-sky-700 dark:text-sky-400" /> Projects
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-1.5">
             {(projects.data ?? []).length === 0 ? (
-              <p className="text-xs text-zinc-500">No projects yet.</p>
+              <p className="text-xs text-muted-foreground">No projects yet.</p>
             ) : (
               (projects.data ?? []).slice(0, 6).map((p) => (
                 <button
                   key={p.id}
                   onClick={() => navigate(`/projects/${p.id}`)}
-                  className="flex w-full items-center justify-between rounded-md border border-zinc-800 bg-zinc-950/40 px-2.5 py-2 text-left hover:border-zinc-700"
+                  className="flex w-full items-center justify-between rounded-md border border-border bg-muted px-2.5 py-2 text-left hover:border-border"
                 >
-                  <span className="truncate text-xs text-zinc-300">{p.name}</span>
-                  <span className="mono text-[10px] text-zinc-500">{shortId(p.id)}</span>
+                  <span className="truncate text-xs text-foreground">{p.name}</span>
+                  <span className="mono text-[10px] text-muted-foreground">{shortId(p.id)}</span>
                 </button>
               ))
             )}
@@ -169,17 +169,17 @@ export default function Dashboard() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <ShieldCheck className="size-4 text-emerald-400" /> Scan states
+              <ShieldCheck className="size-4 text-emerald-700 dark:text-emerald-400" /> Scan states
             </CardTitle>
           </CardHeader>
           <CardContent className="flex flex-wrap gap-2">
             {["queued", "running", "paused", "completed", "failed", "canceled"].map((s) => (
               <div
                 key={s}
-                className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950/40 px-2.5 py-1.5"
+                className="flex items-center gap-2 rounded-md border border-border bg-muted px-2.5 py-1.5"
               >
                 <StateBadge state={s} />
-                <span className="tabular-nums text-xs text-zinc-300">{states.get(s) ?? 0}</span>
+                <span className="tabular-nums text-xs text-foreground">{states.get(s) ?? 0}</span>
               </div>
             ))}
             {targets.data === null ? null : null}

@@ -73,3 +73,22 @@ covers whichever bundle is embedded.
    `outDir`), delete `app.js`/`scans.js`/`views.js`/`app.css`.
 3. Add the interactive-login modal (`POST /api/auth/login`) and, if wanted, a
    `/api/scans/{id}/stats` card that reads the endpoint instead of the scan object.
+
+## Theming
+
+The SPA is light by default and dark on request. Colours are semantic tokens
+defined in `web/src/index.css` (`--background`, `--card`, `--muted`,
+`--border`, `--accent`, …) and exposed to Tailwind through `@theme inline`;
+components use `bg-background` / `text-muted-foreground` / `border-border`
+rather than palette steps, so one class renders correctly in both themes.
+Dark mode is an explicit class (`@custom-variant dark (&:where(.dark, .dark *))`),
+not `prefers-color-scheme`, because the operator picks it.
+
+- The header has a sun/moon toggle. It flips `.dark` on `<html>` and stores the
+  choice in `localStorage["indago.theme"]`.
+- `web/index.html` applies the stored choice in an inline script before the
+  first paint, so a reload never flashes the wrong background.
+- Accent utilities that need a different step per theme use the `dark:` variant
+  (e.g. `text-emerald-600 dark:text-emerald-400`); neutral surfaces never do.
+- New components must use the semantic tokens. A raw `zinc-*`/`emerald-*`
+  surface in a component is a theming bug, not a style preference.
