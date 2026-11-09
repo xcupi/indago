@@ -371,7 +371,7 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
             rel="noreferrer"
             className="text-[11px] text-emerald-700 dark:text-emerald-400 hover:underline"
           >
-            preview
+            selection summary
           </a>
           {error ? <span className="text-[11px] text-red-700 dark:text-red-400">{error}</span> : null}
           {review ? (
