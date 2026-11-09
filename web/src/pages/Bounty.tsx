@@ -18,7 +18,15 @@ interface Program {
 }
 
 interface ProvidersResponse {
-  providers: { id: string; label: string; configured: boolean; public_browse: boolean; note: string }[];
+  providers: {
+    id: string;
+    label: string;
+    configured: boolean;
+    public_browse: boolean;
+    credential?: string;
+    expires_at?: string;
+    note: string;
+  }[];
 }
 
 interface Imported {
@@ -130,15 +138,15 @@ export default function Bounty() {
             <>
               <p className="text-xs text-muted-foreground">
                 {configured
-                  ? "A personal access token is stored. The API now also serves report templates and drafts."
-                  : "No token is needed to browse or import: scopes are read from each program's public page. A token is only useful for report templates/drafts, and YesWeHack only lets Business Unit Owner/Manager or Program Manager roles create one — a hunter account has no such menu."}
+                  ? `Connected with a ${ywh?.credential === "session" ? "hunter session token" : "personal access token"}${ywh?.expires_at ? `, valid until ${ywh.expires_at}` : ""}. Scopes, report templates and drafts are read from the API.`
+                  : "Import works without connecting (scopes come from the public program page). To use the API as a hunter, log in to yeswehack.com, then copy the session token: DevTools console → copy(localStorage.access_token) → paste below. Managers can paste a personal access token instead."}
               </p>
               <div className="flex flex-wrap items-end gap-2">
-                <Field label="Personal access token" className="min-w-[280px] flex-1">
+                <Field label="Session token or personal access token" className="min-w-[280px] flex-1">
                   <Input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="paste token" />
                 </Field>
                 <Button onClick={saveToken} disabled={saving || !token.trim()}>
-                  {saving ? <Loader2 className="size-3.5 animate-spin" /> : null} Save token
+                  {saving ? <Loader2 className="size-3.5 animate-spin" /> : null} Connect
                 </Button>
               </div>
               {tokenMsg ? <p className="text-[11px] text-emerald-700 dark:text-emerald-400">{tokenMsg}</p> : null}

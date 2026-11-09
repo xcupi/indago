@@ -107,3 +107,37 @@ func TestExtractPublicScopesHandlesSeverityBlob(t *testing.T) {
 		t.Fatalf("asset_value should be preserved as-is: %+v", scopes[0])
 	}
 }
+
+func TestCredentialKindAndExpiry(t *testing.T) {
+	// header.payload.signature with exp=1900000000
+	tok := "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE5MDAwMDAwMDB9.sig"
+	kind, exp := CredentialInfo(tok)
+	if kind != "session" {
+		t.Fatalf("kind = %q", kind)
+	}
+	if exp.Unix() != 1900000000 {
+		t.Fatalf("exp = %v", exp)
+	}
+	if k := CredentialKind("pat-abc"); k != "pat" {
+		t.Fatalf("pat kind = %q", k)
+	}
+}
+
+func TestValidateSendsBearerForSessionToken(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		if r.URL.Path != "/programs/count" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.Write([]byte(`{"count":1}`))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, func() string { return "" })
+	if err := c.Validate(context.Background(), "a.b.c"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, "Bearer ") {
+		t.Fatalf("Authorization = %q", got)
+	}
+}

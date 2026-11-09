@@ -11,6 +11,7 @@ package bounty
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -211,7 +212,15 @@ func (c *Client) get(ctx context.Context, path string, dst any) error {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "indago-bounty/1.0")
 	if tok := c.Token(); tok != "" {
-		req.Header.Set("X-AUTH-TOKEN", tok)
+		// Two credential shapes reach this API: a personal access token
+		// (X-AUTH-TOKEN, manager roles only) and the web session JWT a hunter
+		// gets after logging in (Authorization: Bearer). A JWT has dots; a PAT
+		// does not.
+		if strings.Count(tok, ".") == 2 {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		} else {
+			req.Header.Set("X-AUTH-TOKEN", tok)
+		}
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -234,4 +243,49 @@ func (c *Client) get(ctx context.Context, path string, dst any) error {
 
 func cacheKey(q Query) string {
 	return strings.Join([]string{q.Search, strings.Join(q.Types, ","), strings.Join(q.ScopeTypes, ","), strconv.Itoa(q.Page), strconv.Itoa(q.PerPage)}, "|")
+}
+
+// Validate checks a credential without storing it: /programs/count is readable
+// by both a session JWT and a personal access token, and answers 401 for a bad
+// one.
+func (c *Client) Validate(ctx context.Context, token string) error {
+	probe := NewClient(c.BaseURL, func() string { return strings.TrimSpace(token) })
+	var out map[string]any
+	if err := probe.get(ctx, "/programs/count", &out); err != nil {
+		return err
+	}
+	return nil
+}
+
+// CredentialKind reports "session" for a JWT and "pat" for a personal token.
+func CredentialKind(token string) string {
+	if strings.Count(strings.TrimSpace(token), ".") == 2 {
+		return "session"
+	}
+	return "pat"
+}
+
+// CredentialInfo describes a credential without revealing it: kind and, for a
+// JWT, the expiry the token itself carries.
+func CredentialInfo(token string) (kind string, expires time.Time) {
+	token = strings.TrimSpace(token)
+	kind = CredentialKind(token)
+	if kind != "session" {
+		return kind, time.Time{}
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return kind, time.Time{}
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return kind, time.Time{}
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if json.Unmarshal(raw, &claims) != nil || claims.Exp == 0 {
+		return kind, time.Time{}
+	}
+	return kind, time.Unix(claims.Exp, 0)
 }

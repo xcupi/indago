@@ -19,6 +19,13 @@ a normal researcher. That is why the hunter path does not depend on a token:
   `"scopes":[...]` array.
 - **Program browsing** uses the public `/programs` endpoint.
 
+A hunter can still authenticate: after logging in at yeswehack.com, the web app
+keeps a JWT in `localStorage.access_token`, and the API accepts it as
+`Authorization: Bearer …` (verified against `/programs/{slug}/scopes`, 200).
+Indago treats a credential with two dots as that session JWT and anything else
+as a personal access token, validates it against `/programs/count` (readable by
+both), and decodes the JWT's `exp` so the UI can show when it expires.
+
 A token, when available, is still useful: the importer prefers the API scopes,
 and report templates/drafts become readable. It is validated before storage,
 written `0600` in a `0700` directory (`<data>/bounty/yeswehack.token`), and the
@@ -80,3 +87,35 @@ filter.
   `impact`, …). The YesWeHack template for Indago's report renderer should map
   onto those fields rather than inventing a layout, which is why it is not
   guessed here.
+
+## What a hunter actually needs (audit, 2026-11)
+
+All 48 public programs filtered to `bug-bounty` + `web-application` were
+inspected (public detail/rules + the logged-in submission form):
+
+- **Required custom headers: none found.** Only 4 of 48 rules mention "header",
+  and every mention is policy prose — security headers that must not be
+  reported (`X-Frame-Options`, `X-XSS-Protection`, `X-Content-Type-Options`) or
+  a general "User-Agent, VPN" hunting policy. No program required a
+  `X-Bug-Bounty`-style identifying header. The feature was left out rather than
+  invented.
+- **Report submission form** (HARMAN, representative): bug type, scope,
+  endpoint, vulnerable part, part name, payload, technical environment,
+  application fingerprint, CVE, impact, IPs used, CVSS 3.1 vector
+  (AV/AC/PR/UI/S/C/I/A), title, description (Markdown), attachments, chainable.
+- **Description template** is the platform's standard Markdown skeleton:
+
+  ```markdown
+  ## Description
+  ## Exploitation
+  ## PoC
+  ## Risk
+  ## Remediation
+  ```
+
+  The "YWH Report Template" tab in the editor inserts exactly that skeleton,
+  plus Markdown tips. A report renderer for YesWeHack should therefore emit
+  those five sections, map Indago's finding to the field list above, and use
+  the finding's evidence as the PoC.
+- Scopes on the API and on the public page both put the severity in
+  `asset_value`; the asset lives in `scope`.

@@ -44,14 +44,21 @@ type bountyProvider struct {
 	Label        string `json:"label"`
 	Configured   bool   `json:"configured"`
 	PublicBrowse bool   `json:"public_browse"`
+	Credential   string `json:"credential,omitempty"`
+	ExpiresAt    string `json:"expires_at,omitempty"`
 	Note         string `json:"note"`
 }
 
 func (s *Server) handleListBountyProviders(w http.ResponseWriter, r *http.Request) {
 	configured := s.bountyStore != nil && s.bountyStore.Configured()
+	kind, expires := "", time.Time{}
+	if configured {
+		kind, expires = bounty.CredentialInfo(s.bountyStore.Token())
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"providers": []bountyProvider{{
 			ID: "yeswehack", Label: "YesWeHack", Configured: configured, PublicBrowse: true,
+			Credential: kind, ExpiresAt: expires.Format(time.RFC3339),
 			Note: "Browsing programs works without a token; importing a program's scope needs a personal access token (X-AUTH-TOKEN).",
 		}},
 	})
@@ -78,26 +85,27 @@ func (s *Server) handleSetBountyToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "token is required")
 		return
 	}
-	// Validate: a scopes call is the cheapest endpoint that requires auth.
-	probe := bounty.NewClient(s.bountyClient.BaseURL, func() string { return token })
-	if _, err := probe.Scopes(r.Context(), "nonexistent-program-for-auth-probe"); err != nil {
+	// Validate against an endpoint every credential can read; 401 means the
+	// credential is bad, anything else means it was accepted.
+	if err := s.bountyClient.Validate(r.Context(), token); err != nil {
 		if errors.Is(err, bounty.ErrUnauthorized) {
-			writeError(w, http.StatusBadRequest, "YesWeHack rejected the token (401). Check that it is a personal access token.")
+			writeError(w, http.StatusBadRequest, "YesWeHack rejected this credential (401). Paste the session token from a logged-in yeswehack.com tab, or a personal access token.")
 			return
 		}
-		// A 404 means the token was accepted and the program simply does not
-		// exist — that is a successful authentication.
-		if !strings.Contains(err.Error(), "404") {
-			writeError(w, http.StatusBadGateway, "could not verify the token: "+err.Error())
-			return
-		}
+		writeError(w, http.StatusBadGateway, "could not verify the credential: "+err.Error())
+		return
 	}
 	if err := s.bountyStore.Set(token); err != nil {
 		s.writeInternalError(w, "store bounty token", err)
 		return
 	}
 	s.log.Info("bounty token configured", "provider", "yeswehack")
-	writeJSON(w, http.StatusOK, map[string]any{"configured": true})
+	kind, expires := bounty.CredentialInfo(token)
+	out := map[string]any{"configured": true, "kind": kind}
+	if !expires.IsZero() {
+		out["expires_at"] = expires.UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleClearBountyToken(w http.ResponseWriter, r *http.Request) {
