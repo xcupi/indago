@@ -225,6 +225,11 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
   const [mode, setMode] = useState("all");
   const [picked, setPicked] = useState<string[]>([]);
   const [ai, setAi] = useState(false);
+  const [aiProvider, setAiProvider] = useState("");
+  const providers = useApi<{ providers: { provider: string; label: string; configured: boolean; model?: string }[]; default?: string }>(
+    "/api/llm/providers",
+  );
+  const aiProviders = (providers.data?.providers ?? []).filter((p) => p.configured);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -243,7 +248,10 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
       const body: Record<string, unknown> = { format, mode };
       if (format !== "json") body.template = template;
       if (mode === "selected") body.finding_ids = picked;
-      if (ai) body.ai_summary = true;
+      if (ai) {
+        body.ai_summary = true;
+        if (aiProvider) body.ai_provider = aiProvider;
+      }
       await api(`/api/scans/${scanId}/reports`, { method: "POST", body });
       refreshAll();
     } catch (e) {
@@ -301,6 +309,24 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
           <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
             <Switch checked={ai} onCheckedChange={setAi} /> AI summary
           </label>
+          {ai ? (
+            <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+              Model
+              <select
+                className="h-8 rounded-md border border-border bg-background px-2 text-xs"
+                value={aiProvider || providers.data?.default || aiProviders[0]?.provider || ""}
+                onChange={(e) => setAiProvider(e.target.value)}
+              >
+                {aiProviders.length === 0 ? <option value="">no provider configured</option> : null}
+                {aiProviders.map((p) => (
+                  <option key={p.provider} value={p.provider}>
+                    {p.label}
+                    {p.model ? ` · ${p.model}` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <Button size="sm" onClick={create} disabled={busy}>
             <Plus className="size-4" /> {busy ? "Generating…" : "Generate report"}
           </Button>
@@ -701,5 +727,115 @@ export function TestsPanel({ scanId }: { scanId: string }) {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+/* AI advisory ------------------------------------------------------------- */
+
+interface ProviderAvailability {
+  provider: string;
+  label: string;
+  configured: boolean;
+  model?: string;
+  source?: string;
+}
+
+interface ProvidersResponse {
+  providers: ProviderAvailability[];
+  default?: string;
+}
+
+/** Ask the selected model for advisory guidance about this scan. The result is
+ * prose only: it never changes a verdict, an ordering, or the scan itself. */
+export function AIAssistPanel({ scanId }: { scanId: string }) {
+  const providers = useApi<ProvidersResponse>("/api/llm/providers");
+  const [provider, setProvider] = useState("");
+  const [kind, setKind] = useState("prioritize");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<{ text: string; provider: string; model: string } | null>(null);
+
+  const usable = (providers.data?.providers ?? []).filter((p) => p.configured);
+  const effective = provider || providers.data?.default || usable[0]?.provider || "";
+
+  async function run() {
+    setBusy(true);
+    setError("");
+    try {
+      const res = await api<{ text: string; provider: string; model: string }>(
+        `/api/scans/${scanId}/ai/assist`,
+        { method: "POST", body: { kind, provider: effective } },
+      );
+      setResult(res);
+      refreshAll();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardContent className="space-y-3 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="text-sm font-medium text-foreground">AI advisory</div>
+            <p className="text-[11px] text-muted-foreground">
+              Advisory only — the scanner decides what is tested and what is confirmed. Safe to run while the scan is running.
+            </p>
+          </div>
+          {usable.length === 0 ? (
+            <span className="text-[11px] text-amber-700 dark:text-amber-400">
+              no provider configured — set one in Settings
+            </span>
+          ) : null}
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+            Provider
+            <select
+              className="h-8 rounded-md border border-border bg-background px-2 text-xs"
+              value={effective}
+              onChange={(e) => setProvider(e.target.value)}
+            >
+              {usable.length === 0 ? <option value="">none</option> : null}
+              {usable.map((p) => (
+                <option key={p.provider} value={p.provider}>
+                  {p.label}
+                  {p.model ? ` · ${p.model}` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+            Ask
+            <select
+              className="h-8 rounded-md border border-border bg-background px-2 text-xs"
+              value={kind}
+              onChange={(e) => setKind(e.target.value)}
+            >
+              <option value="prioritize">prioritize endpoints</option>
+              <option value="triage">triage findings</option>
+              <option value="next_steps">next manual checks</option>
+            </select>
+          </label>
+          <Button size="sm" onClick={run} disabled={busy || !effective}>
+            {busy ? "Asking…" : "Ask model"}
+          </Button>
+          {result ? (
+            <span className="text-[11px] text-muted-foreground">
+              {result.provider} · {result.model}
+            </span>
+          ) : null}
+        </div>
+        {error ? <p className="text-[11px] text-red-700 dark:text-red-400">{error}</p> : null}
+        {result ? (
+          <pre className="mono max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/40 p-3 text-[11px] text-foreground">
+            {result.text}
+          </pre>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }

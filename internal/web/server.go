@@ -24,6 +24,7 @@ import (
 	"github.com/indago/indago/internal/config"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
+	"github.com/indago/indago/internal/llm"
 	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/store"
 )
@@ -70,6 +71,10 @@ type Server struct {
 	// internal/llm). Nil leaves those endpoints reporting that configuration
 	// is unavailable; it never blocks the scanner.
 	llm llmStore
+	// llmRegistry resolves the credential for one advisory call from the
+	// stored settings plus per-provider env keys (INDAGO_LLM_KEY_<PROVIDER>),
+	// so a scan or report can name its provider. Nil with no store.
+	llmRegistry *llm.Registry
 
 	// apiTokenDigest is SHA-256 of the configured bearer token (see
 	// SetAPIToken). Nil means the control API is unauthenticated.
@@ -158,6 +163,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/llm/config", s.handleDeleteLLMConfig)
 	mux.HandleFunc("POST /api/llm/test", s.handleTestLLM)
 	mux.HandleFunc("POST /api/llm/models", s.handleListLLMModels)
+	mux.HandleFunc("GET /api/llm/providers", s.handleListLLMProviders)
+	mux.HandleFunc("POST /api/scans/{id}/ai/assist", s.handleScanAIAssist)
 
 	mux.HandleFunc("GET /api/projects", s.handleListProjects)
 	mux.HandleFunc("POST /api/projects", s.handleCreateProject)

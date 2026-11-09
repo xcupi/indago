@@ -20,6 +20,10 @@ interface LLMStatus {
 
 export default function Settings() {
   const status = useApi<LLMStatus>("/api/llm/config");
+  const availability = useApi<{
+    providers: { provider: string; label: string; configured: boolean; model?: string; source?: string }[];
+    default?: string;
+  }>("/api/llm/providers");
   const caps = useApi<Record<string, unknown>>("/api/capabilities");
   const version = useApi<{ version?: string }>("/api/version");
 
@@ -146,6 +150,21 @@ export default function Settings() {
                   {status.data?.key_set ? (
                     <span className="mono">key {status.data?.key_hint}</span>
                   ) : null}
+                </div>
+                <div className="space-y-1 rounded-md border border-border bg-muted/30 p-2">
+                  <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Usable providers</div>
+                  {(availability.data?.providers ?? []).map((p) => (
+                    <div key={p.provider} className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="text-foreground">{p.label}</span>
+                      <span className={p.configured ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>
+                        {p.configured ? `${p.model ?? "model?"} · ${p.source ?? "configured"}` : "no credential"}
+                      </span>
+                    </div>
+                  ))}
+                  <p className="text-[10px] text-muted-foreground">
+                    Add a second provider without moving the stored key: start the server with
+                    INDAGO_LLM_KEY_&lt;PROVIDER&gt; (e.g. INDAGO_LLM_KEY_OPENAI). Scans and reports can then pick either.
+                  </p>
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <Field label="Provider">

@@ -244,10 +244,14 @@ func buildPentestDoc(data Data) doc {
 	if diagnostics > 0 {
 		exec = append(exec, fmt.Sprintf("%d rejected diagnostic attempt(s) are excluded from this body; they are not vulnerabilities.", diagnostics))
 	}
-	d.Sections = append(d.Sections, section("Executive Summary",
+	execBlocks := []docBlock{
 		para(fmt.Sprintf("%s was assessed with indago. %s", nonEmpty(data.Project.Name, "The target"), coverageSentence(coverage))),
-		list(exec...),
-	))
+	}
+	if strings.TrimSpace(data.AISummary) != "" {
+		execBlocks = append(execBlocks, para("AI-assisted draft (unverified, advisory only — the findings below are the authoritative record): "+data.AISummary))
+	}
+	execBlocks = append(execBlocks, list(exec...))
+	d.Sections = append(d.Sections, section("Executive Summary", execBlocks...))
 
 	approach := []string{
 		"Discovery enumerated endpoints and parameters from the in-scope seeds, then classified each response position.",

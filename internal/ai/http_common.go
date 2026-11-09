@@ -27,7 +27,7 @@ func newHTTPClient() *http.Client {
 // invariant, in-band, so a provider that honors system messages reinforces
 // it independently of anything the Go code does: this call is advisory only,
 // never an authoritative security verdict.
-const systemPrompt = "You are an advisory assistant embedded in Indago, a reflected-XSS scanner. " +
+const systemPrompt = "You are an advisory assistant embedded in Indago, a web security scanner. " +
 	"Your output is advisory only: it is never the final authority on scope, vulnerability confirmation, " +
 	"evidence, or any security verdict — a human or the scanner's own deterministic verification decides that. " +
 	"Be concise, factual, and avoid speculation beyond what the given context supports."
@@ -83,8 +83,34 @@ func postJSON(ctx context.Context, url string, headers map[string]string, body a
 	if out == nil {
 		return nil
 	}
-	if err := json.Unmarshal(respBody, out); err != nil {
+	if err := decodeCompatJSON(respBody, out); err != nil {
 		return fmt.Errorf("ai: decode response: %w", err)
 	}
 	return nil
+}
+
+// decodeCompatJSON accepts both a plain JSON body and the two shapes some
+// OpenAI-compatible gateways return when they ignore (or default) streaming:
+// an SSE frame ("data: {...}") and a valid JSON object followed by the SSE
+// terminator ("data: [DONE]"). Plain json.Unmarshal rejects both.
+func decodeCompatJSON(body []byte, out any) error {
+	trimmed := bytes.TrimSpace(body)
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		for _, line := range bytes.Split(trimmed, []byte("\n")) {
+			line = bytes.TrimSpace(line)
+			if !bytes.HasPrefix(line, []byte("data:")) {
+				continue
+			}
+			payload := bytes.TrimSpace(line[len("data:"):])
+			if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+				continue
+			}
+			if err := json.Unmarshal(payload, out); err == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("no JSON payload in event stream")
+	}
+	// Plain JSON, possibly followed by a trailing SSE terminator.
+	return json.NewDecoder(bytes.NewReader(trimmed)).Decode(out)
 }

@@ -24,6 +24,9 @@ type openAICompatProvider struct {
 type openAIChatRequest struct {
 	Model    string              `json:"model"`
 	Messages []openAIChatMessage `json:"messages"`
+	// Stream is explicit: some OpenAI-compatible gateways default to SSE when
+	// the field is absent, and a streamed body is not a chat completion.
+	Stream bool `json:"stream"`
 }
 
 type openAIChatMessage struct {

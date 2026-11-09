@@ -50,6 +50,12 @@ type createReportReq struct {
 	// unconfigured — report creation always succeeds either way; a failed
 	// or skipped advisory call just means no AI section in the output.
 	AISummary bool `json:"ai_summary,omitempty"`
+	// AIProvider / AIModel select the model used for that advisory paragraph.
+	// Empty uses the provider saved in Settings (or INDAGO_LLM_KEY_* env
+	// credentials). A provider with no credential is a 400 naming the env var;
+	// the report itself is never blocked by AI.
+	AIProvider string `json:"ai_provider,omitempty"`
+	AIModel    string `json:"ai_model,omitempty"`
 }
 
 // handleCreateReport renders a report over the selected (or, if none given,
@@ -142,7 +148,7 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	var aiSummary string
 	if req.AISummary {
-		aiSummary = s.draftAISummary(r.Context(), scanID, proj, sc, findings, len(all))
+		aiSummary = s.draftAISummary(r.Context(), scanID, proj, sc, findings, len(all), req.AIProvider, req.AIModel)
 	}
 	var buf bytes.Buffer
 	data := report.Data{
@@ -228,8 +234,12 @@ const draftAISummaryTimeout = 30 * time.Second
 // still produces a complete, correct report; this is best-effort, never a
 // precondition. See AGENTS.md §2.5 and report.Data.AISummary's doc comment:
 // AI output here is prose only, never a finding, verdict, or evidence.
-func (s *Server) draftAISummary(ctx context.Context, scanID domain.ID, proj *domain.Project, sc *domain.Scan, findings []*domain.Finding, totalInScan int) string {
-	gw := s.aiGateway()
+func (s *Server) draftAISummary(ctx context.Context, scanID domain.ID, proj *domain.Project, sc *domain.Scan, findings []*domain.Finding, totalInScan int, provider, model string) string {
+	gw, err := s.aiGatewayFor(provider, model)
+	if err != nil {
+		s.log.Warn("ai: provider unavailable for report summary", "err", err)
+		return ""
+	}
 	if !gw.Enabled() {
 		return ""
 	}
@@ -246,9 +256,10 @@ func (s *Server) draftAISummary(ctx context.Context, scanID domain.ID, proj *dom
 			confirmedTitles = append(confirmedTitles, title)
 		}
 	}
-	prompt := "Draft a short (3-6 sentence) executive summary paragraph for a reflected-XSS scan report. " +
+	prompt := "Draft a short (3-6 sentence) executive summary paragraph for a web security assessment report. " +
 		"Plain prose, no markdown headings, no bullet lists. State the overall posture and call out the " +
-		"confirmed findings by name if there are any; otherwise say none were confirmed."
+		"confirmed findings by name if there are any; otherwise say none were confirmed. " +
+		"Do not invent findings, severities or affected assets beyond those listed. Advisory only."
 	scanName := sc.Name
 	if scanName == "" {
 		scanName = string(sc.ID)

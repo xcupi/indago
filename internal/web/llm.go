@@ -20,7 +20,7 @@ type llmStore interface {
 // SetLLMStore wires the LLM provider settings store. cmd/indago calls it once
 // with a store rooted in the data directory; not calling it leaves the
 // /api/llm/* routes reporting that settings are unavailable.
-func (s *Server) SetLLMStore(st *llm.Store) { s.llm = st }
+func (s *Server) SetLLMStore(st *llm.Store) { s.llm = st; s.llmRegistry = llm.NewRegistry(st) }
 
 // requireLLMStore answers the request itself when no store is configured and
 // reports whether the handler may continue.

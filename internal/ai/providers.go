@@ -12,11 +12,17 @@ const (
 	ProviderOpenRouter = "openrouter"
 	ProviderOllama     = "ollama"
 	ProviderVLLM       = "vllm"
+	// ProviderDeepSeek speaks the OpenAI Chat Completions shape at its own
+	// endpoint (used by the LLM settings screen).
+	ProviderDeepSeek = "deepseek"
+	// ProviderCustom is any OpenAI-compatible endpoint (a gateway, a proxy)
+	// whose base URL the operator supplies.
+	ProviderCustom = "custom"
 )
 
 // Providers lists the recognized provider identifiers.
 func Providers() []string {
-	return []string{ProviderOpenAI, ProviderAnthropic, ProviderOpenRouter, ProviderOllama, ProviderVLLM}
+	return []string{ProviderOpenAI, ProviderAnthropic, ProviderOpenRouter, ProviderOllama, ProviderVLLM, ProviderDeepSeek, ProviderCustom}
 }
 
 // defaultBaseURL returns the conventional base URL for a provider when the
@@ -36,6 +42,11 @@ func defaultBaseURL(name string) string {
 		return "http://127.0.0.1:11434/v1"
 	case ProviderVLLM:
 		return "http://127.0.0.1:8000/v1"
+	case ProviderDeepSeek:
+		return "https://api.deepseek.com"
+	case ProviderCustom:
+		// No default: the operator must say where the gateway is.
+		return ""
 	default:
 		return ""
 	}
@@ -47,7 +58,7 @@ func defaultBaseURL(name string) string {
 // for those would make the common local-dev case impossible to configure.
 func requiresAPIKey(name string) bool {
 	switch name {
-	case ProviderOpenAI, ProviderAnthropic, ProviderOpenRouter:
+	case ProviderOpenAI, ProviderAnthropic, ProviderOpenRouter, ProviderDeepSeek:
 		return true
 	default:
 		return false
@@ -72,7 +83,7 @@ func NewProvider(s Settings) (Provider, error) {
 	}
 	model := strings.TrimSpace(s.Model)
 	switch name {
-	case ProviderOpenAI, ProviderOpenRouter, ProviderOllama, ProviderVLLM:
+	case ProviderOpenAI, ProviderOpenRouter, ProviderOllama, ProviderVLLM, ProviderDeepSeek, ProviderCustom:
 		return &openAICompatProvider{name: name, baseURL: baseURL, apiKey: s.APIKey, model: model}, nil
 	case ProviderAnthropic:
 		return &anthropicProvider{baseURL: baseURL, apiKey: s.APIKey, model: model}, nil

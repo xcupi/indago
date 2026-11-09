@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/controls";
 import { Field, Input } from "@/components/ui/input";
 import { Alert, Code, Loading, Stat } from "@/components/ui/misc";
-import { CoveragePanel, EndpointsPanel, EvidencePanel, ExplorerPanel, FindingsPanel, IDORPanel, ReportsPanel, TestsPanel } from "@/components/panels";
+import { AIAssistPanel, CoveragePanel, EndpointsPanel, EvidencePanel, ExplorerPanel, FindingsPanel, IDORPanel, ReportsPanel, TestsPanel } from "@/components/panels";
 import { api, refreshAll, useApi } from "@/lib/api";
 import type { Scan } from "@/lib/types";
 import { formatTime, pct, shortId } from "@/lib/utils";
@@ -202,6 +202,9 @@ export default function ScanDetail({ id }: { id: string }) {
                 <Code>{JSON.stringify(s, null, 2)}</Code>
               </CardContent>
             </Card>
+          </div>
+          <div className="mt-4">
+            <AIAssistPanel scanId={id} />
           </div>
         </TabsContent>
 
