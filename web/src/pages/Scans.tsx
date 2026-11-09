@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { LogIn, Play, Plus } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,13 @@ const PROFILES = ["conservative", "balanced", "fast"];
 
 export default function Scans() {
   const [projectId, setProjectId] = useState(selectedProject());
+  // The sidebar's project picker is shared context: follow it while this page
+  // is open, instead of only reading it once at mount.
+  useEffect(() => {
+    const sync = () => setProjectId(selectedProject());
+    window.addEventListener("indago:refresh", sync);
+    return () => window.removeEventListener("indago:refresh", sync);
+  }, []);
   const projects = useApi<Project[]>("/api/projects");
   const scans = useApi<Scan[]>("/api/scans", [], 5000);
   const targets = useApi<Target[]>(projectId ? `/api/projects/${projectId}/targets` : null, [projectId]);

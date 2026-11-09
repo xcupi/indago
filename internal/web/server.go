@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/indago/indago/internal/ai"
@@ -192,6 +193,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/projects/{id}/targets/{tid}", s.handleGetTarget)
 	mux.HandleFunc("GET /api/projects/{id}/scope", s.handleGetScope)
 	mux.HandleFunc("PUT /api/projects/{id}/scope", s.handlePutScope)
+	mux.HandleFunc("GET /api/projects/{id}/findings", s.handleListProjectFindings)
+	mux.HandleFunc("GET /api/projects/{id}/reports", s.handleListProjectReports)
+	mux.HandleFunc("GET /api/findings", s.handleListAllFindings)
+	mux.HandleFunc("GET /api/reports", s.handleListAllReports)
 
 	// Interactive login: drives a visible browser to capture a session file an
 	// operator can then use via auth_mode "existing". Available only when the
@@ -293,7 +298,15 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListScans(w http.ResponseWriter, r *http.Request) {
-	scans, err := s.store.Scans().List(r.Context())
+	var (
+		scans []*domain.Scan
+		err   error
+	)
+	if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
+		scans, err = s.store.Scans().ListByProject(r.Context(), domain.ID(pid))
+	} else {
+		scans, err = s.store.Scans().List(r.Context())
+	}
 	if err != nil {
 		s.writeInternalError(w, "list scans", err)
 		return

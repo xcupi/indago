@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Globe2, Plus, Save, ShieldCheck } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
+import { setSelectedProject } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, Input, Textarea } from "@/components/ui/input";
@@ -93,9 +94,24 @@ export default function ProjectDetail({ id }: { id: string }) {
         title={project.data?.name ?? "Project"}
         subtitle={project.data ? `id ${project.data.id} · created ${formatTime(project.data.created_at)}` : undefined}
         actions={
-          <Button size="sm" variant="outline" onClick={() => navigate("/scans")}>
-            Open scans
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={() => navigate(`/findings?project=${id}`)}>
+              Findings
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => navigate(`/reports?project=${id}`)}>
+              Reports
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setSelectedProject(id);
+                navigate("/scans");
+              }}
+            >
+              Open scans
+            </Button>
+          </div>
         }
       />
 
