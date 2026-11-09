@@ -55,6 +55,23 @@ the target hostname is disclosed to archive.org.
 Both sources emit new provenance values (`well_known`, `archive`) so the
 endpoint list shows where a URL came from.
 
+## Why this is the right cut for bug bounty
+
+Bug-bounty platforms (YesWeHack, HackerOne, Bugcrowd, Intigriti) already hand the
+hunter the registry and DNS layer: the program page lists in-scope domains and
+IPs, and WHOIS/DNS/subdomain inventory is either shown by the platform or
+trivially available from it. Re-implementing that inside the scanner duplicates
+data the operator already has, and — worse — an enumeration feature that walks
+DNS is the easiest way to send traffic to a host the program did not authorize.
+
+Indago therefore starts where the platform stops: an in-scope URL (or a short
+seed list), then depth on the web surface the platform does not inventory —
+paths and files, parameters, self-describing documents (security.txt, OpenID,
+OpenAPI), historical URLs from the public archive, and the injection points
+behind them. That is also why the archive source filters to the exact scanned
+host and the well-known source resolves every document URL against the same
+origin: the platform's scope list stays the authority.
+
 ## Deliberately out of scope
 
 DNS, WHOIS, subdomain and vhost enumeration are network-recon capabilities. They
