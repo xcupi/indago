@@ -9,11 +9,15 @@ import (
 // Project is the top-level container for an operator's work against a target
 // application: scope, scans, findings, and reports all hang off a project.
 type Project struct {
-	ID        ID        `json:"id"`
-	Name      string    `json:"name"`
-	Notes     string    `json:"notes,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID    ID     `json:"id"`
+	Name  string `json:"name"`
+	Notes string `json:"notes,omitempty"`
+	// AuthStatePath is the saved Playwright storage state used when a scan
+	// chooses auth_mode "existing". Empty means the project has no saved
+	// login. It is a server-side path, never a credential itself.
+	AuthStatePath string    `json:"auth_state_path,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // Target is a web application (identified by a base URL) belonging to a project.

@@ -18,6 +18,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -224,6 +226,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/projects", s.handleListProjects)
 	mux.HandleFunc("POST /api/projects", s.handleCreateProject)
 	mux.HandleFunc("GET /api/projects/{id}", s.handleGetProject)
+	mux.HandleFunc("PUT /api/projects/{id}", s.handleUpdateProject)
 	mux.HandleFunc("GET /api/projects/{id}/targets", s.handleListTargets)
 	mux.HandleFunc("POST /api/projects/{id}/targets", s.handleCreateTarget)
 	mux.HandleFunc("PUT /api/projects/{id}/targets/{targetID}", s.handleUpdateTarget)
@@ -326,6 +329,60 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, p)
+}
+
+type updateProjectReq struct {
+	Name          *string `json:"name,omitempty"`
+	Notes         *string `json:"notes,omitempty"`
+	AuthStatePath *string `json:"auth_state_path,omitempty"`
+}
+
+// handleUpdateProject stores project metadata, including the saved login
+// session path used by auth_mode "existing". The path is validated as an
+// existing file so a typo cannot silently disable authentication.
+func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
+	p, err := s.store.Projects().Get(r.Context(), domain.ID(r.PathValue("id")))
+	if err != nil {
+		s.writeLookupError(w, err)
+		return
+	}
+	var req updateProjectReq
+	if err := readJSON(r, &req); err != nil {
+		writeJSONBodyError(w, err)
+		return
+	}
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "name cannot be empty")
+			return
+		}
+		p.Name = name
+	}
+	if req.Notes != nil {
+		p.Notes = *req.Notes
+	}
+	if req.AuthStatePath != nil {
+		path := strings.TrimSpace(*req.AuthStatePath)
+		if path != "" {
+			if !filepath.IsAbs(path) {
+				writeError(w, http.StatusBadRequest, "auth_state_path must be an absolute server-side path")
+				return
+			}
+			info, statErr := os.Stat(path)
+			if statErr != nil || info.IsDir() {
+				writeError(w, http.StatusBadRequest, "auth_state_path does not name an existing session file")
+				return
+			}
+		}
+		p.AuthStatePath = path
+	}
+	p.UpdatedAt = time.Now()
+	if err := s.store.Projects().Update(r.Context(), p); err != nil {
+		s.writeInternalError(w, "update project", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
 }
 
 func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {

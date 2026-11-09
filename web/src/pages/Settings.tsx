@@ -21,6 +21,21 @@ interface LLMStatus {
   providers?: Array<Record<string, unknown>>;
 }
 
+function sourceLabel(source?: string): string {
+  switch (source) {
+    case "hermes":
+      return "Hermes session (borrowed)";
+    case "indago":
+      return "Indago session";
+    case "environment":
+      return "environment";
+    case "settings":
+      return "Settings";
+    default:
+      return source || "configured";
+  }
+}
+
 export default function Settings() {
   const status = useApi<LLMStatus>("/api/llm/config");
   const availability = useApi<{
@@ -200,7 +215,7 @@ export default function Settings() {
                       <span className="text-foreground">{p.label}</span>
                       <span className="flex items-center gap-2">
                         <span className={p.configured ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>
-                          {p.configured ? `${p.model || "model: auto"} · ${p.source ?? "configured"}` : "no credential"}
+                          {p.configured ? `${p.model || "model: auto"} · ${sourceLabel(p.source)}` : "no credential"}
                         </span>
                         {p.configured ? (
                           <button
@@ -430,12 +445,18 @@ export default function Settings() {
             {cg.data?.logged_in ? (
               <p className="text-foreground">
                 signed in{cg.data.account ? ` as ${cg.data.account}` : ""}
-                {cg.data.plan ? ` · plan ${cg.data.plan}` : ""} · source {cg.data.source}
+                {cg.data.plan ? ` · plan ${cg.data.plan}` : ""} · {sourceLabel(cg.data.source)}
                 {cg.data.expires_at ? ` · expires ${formatTime(cg.data.expires_at)}` : ""}
               </p>
             ) : (
               <p className="text-muted-foreground">No session yet. Log in with a device code — no API key.</p>
             )}
+            {cg.data?.logged_in && cg.data.source === "hermes" ? (
+              <p className="text-amber-700 dark:text-amber-400">
+                Indago has no ChatGPT session of its own, so it is borrowing the Hermes credential (read-only).
+                Log in here to connect directly to ChatGPT and let Indago own the session.
+              </p>
+            ) : null}
             {cgLogin ? (
               <div className="space-y-1 rounded-md border border-border bg-muted/30 p-2">
                 <p>

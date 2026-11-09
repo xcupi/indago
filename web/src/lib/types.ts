@@ -6,6 +6,8 @@ export type ID = string;
 export interface Project {
   id: ID;
   name: string;
+  notes?: string;
+  auth_state_path?: string;
   created_at: string;
   updated_at?: string;
 }

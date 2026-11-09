@@ -79,9 +79,21 @@ export default function Scans() {
       setProjectScope(null);
       return;
     }
-    api<Scope>(`/api/projects/${projectId}/scope`)
-      .then((sc) => alive && setProjectScope(sc))
-      .catch(() => alive && setProjectScope(null));
+    Promise.all([
+      api<Scope>(`/api/projects/${projectId}/scope`).catch(() => null),
+      api<Project>(`/api/projects/${projectId}`).catch(() => null),
+    ]).then(([sc, project]) => {
+      if (!alive) return;
+      setProjectScope(sc);
+      if (project?.auth_state_path) {
+        setForm((f) =>
+          f.auth === "anonymous"
+            ? { ...f, auth: "existing", authState: project.auth_state_path as string }
+            : f,
+        );
+        setLoginNote("Using the project's saved login session.");
+      }
+    });
     return () => {
       alive = false;
     };

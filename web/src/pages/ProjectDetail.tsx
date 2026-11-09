@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Globe2, Plus, Save, ShieldCheck } from "lucide-react";
+import { Globe2, LogIn, Plus, Save, ShieldCheck } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
 import { setSelectedProject } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
@@ -38,6 +38,10 @@ export default function ProjectDetail({ id }: { id: string }) {
   });
   const [scopeErr, setScopeErr] = useState("");
   const [saved, setSaved] = useState(false);
+  const [login, setLogin] = useState({ loginUrl: "", successUrl: "" });
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginErr, setLoginErr] = useState("");
+  const [loginNote, setLoginNote] = useState("");
 
   useEffect(() => {
     if (!scope.data) return;
@@ -62,6 +66,36 @@ export default function ProjectDetail({ id }: { id: string }) {
       refreshAll();
     } catch (e) {
       setTargetErr((e as Error).message);
+    }
+  }
+
+  async function loginAndSave() {
+    setLoginErr("");
+    setLoginNote("");
+    if (!login.loginUrl.trim()) {
+      setLoginErr("Login URL is required.");
+      return;
+    }
+    setLoginBusy(true);
+    try {
+      const res = await api<{ state_path: string; final_url: string }>("/api/auth/login", {
+        method: "POST",
+        body: {
+          project_id: id,
+          login_url: login.loginUrl.trim(),
+          success_url: login.successUrl.trim(),
+        },
+      });
+      await api(`/api/projects/${id}`, {
+        method: "PUT",
+        body: { auth_state_path: res.state_path },
+      });
+      refreshAll();
+      setLoginNote(`Session saved (${res.state_path}). New scans for this project pick it up automatically.`);
+    } catch (e) {
+      setLoginErr((e as Error).message);
+    } finally {
+      setLoginBusy(false);
     }
   }
 
@@ -277,6 +311,49 @@ export default function ProjectDetail({ id }: { id: string }) {
             <div className="flex justify-end">
               <Button size="sm" onClick={saveScope}>
                 <Save className="size-4" /> Save scope
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <LogIn className="size-4 text-emerald-700 dark:text-emerald-400" /> Scan login
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-xs text-muted-foreground">
+              For targets that need an account. Indago opens a visible browser, you log in by hand,
+              and the resulting Playwright storage state is saved on this project. New scans select
+              it automatically as <span className="font-mono">existing session</span>.
+            </p>
+            <Field label="Login URL" hint="The page with the login form. Must be inside project scope.">
+              <Input
+                value={login.loginUrl}
+                onChange={(e) => setLogin({ ...login, loginUrl: e.target.value })}
+                placeholder="https://app.example.com/login"
+              />
+            </Field>
+            <Field label="Success URL" hint="Optional. A URL only reachable after login; use it to confirm the session.">
+              <Input
+                value={login.successUrl}
+                onChange={(e) => setLogin({ ...login, successUrl: e.target.value })}
+                placeholder="https://app.example.com/dashboard"
+              />
+            </Field>
+            {project.data?.auth_state_path ? (
+              <p className="break-all text-[11px] text-emerald-700 dark:text-emerald-400">
+                Session saved: {project.data.auth_state_path}
+              </p>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">No saved session for this project yet.</p>
+            )}
+            {loginErr ? <Alert>{loginErr}</Alert> : null}
+            {loginNote ? <p className="break-all text-[11px] text-emerald-700 dark:text-emerald-400">{loginNote}</p> : null}
+            <div className="flex justify-end">
+              <Button size="sm" onClick={loginAndSave} disabled={loginBusy}>
+                <LogIn className="size-4" /> {loginBusy ? "Waiting for browser…" : "Log in & save session"}
               </Button>
             </div>
           </CardContent>
