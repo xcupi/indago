@@ -1,6 +1,6 @@
 # XSS payload library
 
-Indago's cheat-sheet library carries **135 families**: 22 hand-declared ones for
+Indago's cheat-sheet library carries **137 families**: 24 hand-declared ones for
 contexts the planner needed (attribute breakouts, JS-string breakouts, URL
 schemes, comment breakout) and 113 generated from every event-handler family the
 sheet documents, one representative vector each. It is derived from
@@ -23,7 +23,7 @@ cookie access.
   a target needs the wider net.
 
 `GET /api/payload-library` lists the families (`id`, `contexts`, `trigger`,
-`needs`, example with `{{marker}}`, rationale) — currently 135.
+`needs`, example with `{{marker}}`, rationale) — currently 137.
 
 How the generated table was built (`library_cheatsheet.json`): one entry per
 event-handler family from the sheet's two event sections, the sheet's own
@@ -87,3 +87,25 @@ does **not** already carry that shape; a duplicate spends a request on a payload
 the scanner already sent. Declare the contexts honestly, declare every character
 the vector needs, choose the cheapest trigger that works, and keep the marker as
 the only executable token.
+
+## Coverage audit (why the sheet is not copied 1:1)
+
+The sheet documents 141 event families; 113 are carried here. The remaining 28
+are excluded on purpose, and the reason is mechanical, not editorial:
+
+| Group | Count | Why it cannot become a detection probe here |
+| --- | --- | --- |
+| Media success events (`oncanplay`, `onloadedmetadata`, `onplay`, `ontimeupdate`, …) | 21 | The sheet fires them with `validvideo.mp4`/`validaudio.wav`. A missing file only fires *error* events, and headless Chromium in this environment has no media codecs, so a `data:` clip does not reach `readyState` either (verified). A family that can never fire is a wasted request, not coverage. |
+| Navigation/unload events (`onbeforeunload`, `onunload`, `onpagehide`, `onpageswap`) | 4 | They need a navigation the verifier does not perform; the sheet's own proof uses `sendBeacon`, which is exactly the callback this scanner refuses to send. |
+| `onbeforeprint`, `onunhandledrejection` | 2 | Need a print dialog or an extra script that itself executes. |
+| `onanimationcancel` | 1 | The sheet's vector needs a `:target` match, i.e. navigating to `#x`. |
+
+Other sections: **consuming tags** contributed two new families
+(`noembed`/`noframes` breakouts); `xmp`/`plaintext`/`title` consume markup
+without executing anything, and `select`/`textarea`/`style`/`script`/`iframe`
+are already carried. **Protocols**: `javascript:` is carried; `data:` executes
+in a new document the verifier does not inspect. **Other useful attributes**:
+`href`, `formaction`, `action`, `srcdoc` are already carried. **Special tags**
+(`meta` refresh to `javascript:`) is legacy and blocked by modern browsers.
+**Restricted characters**, **encoding** and **obfuscation** are bypass
+techniques and belong to the evasion pack, not to a detection library.
