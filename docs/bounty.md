@@ -171,9 +171,11 @@ exact submission bytes.
 
 Known gaps:
 
-- **Draft auto-fill**: the form fields are mapped and printed, but Indago does
-  not write the platform draft or submit (credits). That needs a stored
-  credential and a live test against `reports/draft`.
+- **Submission is manual by design.** Indago renders the submission, reviews it
+  with the triager pass and prints the form fields; the hunter presses Submit
+  on the platform. A submission spends credits, so it stays a human action.
+  Auto-filling the platform draft (without submitting) is still unimplemented;
+  it would need a stored credential and a live test against `reports/draft`.
 - **Per-program report templates** (`/programs/{slug}/report-templates`) are
   readable with a credential but not yet surfaced in the UI; the platform's
   standard five-section skeleton is what the renderer emits.
