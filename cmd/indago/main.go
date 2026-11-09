@@ -359,6 +359,9 @@ func cmdServe(args []string) error {
 	if p := web.ChromiumForPDF(*chromium); p != "" {
 		srv.SetPDFRenderer(web.NewChromiumPDFRenderer(p, *browserNoSandbox))
 	}
+	// ChatGPT OAuth: Indago keeps its own session under the data directory so
+	// an operator can log in once here instead of borrowing another tool's.
+	srv.SetChatGPTCredDir(filepath.Join(cfg.DataDir, "chatgpt"))
 	srv.SetCapabilities(web.Capabilities{
 		BrowserEnabled:       *useBrowser,
 		BrowserSandbox:       *useBrowser && !*browserNoSandbox,

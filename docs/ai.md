@@ -40,20 +40,23 @@ endpoint), `chatgpt` (OAuth), plus the gateway's own
 
 ### ChatGPT via OAuth (`chatgpt`)
 
-No API key is involved. `chatgpt` uses the ChatGPT/Codex OAuth session that a
-Hermes install already holds:
+No API key is involved. Indago logs in with the ChatGPT **device-code** flow and
+keeps its own session under `<data>/chatgpt/credentials.json` (0600 in a 0700
+directory):
 
-- Credential file: `INDAGO_CHATGPT_AUTH`, else `~/.hermes/auth.json`
-  (`credential_pool["openai-codex"]`).
-- Endpoint: `https://chatgpt.com/backend-api/codex` (Responses API), with
-  `ChatGPT-Account-ID` taken from the access-token claims.
-- Model: discovered from the account's own `/models` list at call time; override
-  with `INDAGO_LLM_MODEL_CHATGPT` if wanted.
+1. Settings → **ChatGPT OAuth session** → "Log in with ChatGPT".
+2. Open `https://auth.openai.com/codex/device`, enter the code shown, approve.
+3. Indago polls until OpenAI confirms, stores the tokens, and the provider list
+   flips to configured.
 
-The file is read-only for Indago: it never refreshes or rotates the token, so the
-agent's session is untouched. An expired access token fails with a message
-telling the operator to re-authenticate in Hermes; Indago does not refresh a
-shared credential behind another process's back.
+API: `POST /api/llm/chatgpt/login` (returns a code), `POST
+/api/llm/chatgpt/login/poll` (`{"device_auth_id": ...}` → `pending`/`done`),
+`GET /api/llm/chatgpt/session`, `DELETE /api/llm/chatgpt/session`.
+
+Indago owns that token, so it refreshes it on expiry (`grant_type=refresh_token`)
+and saves the rotated pair. If no Indago session exists it falls back to the
+ChatGPT/Codex session a Hermes install holds (`~/.hermes/auth.json`) — read-only,
+never refreshed, never written back.
 
 
 ## During a scan

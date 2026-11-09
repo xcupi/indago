@@ -75,6 +75,11 @@ type Server struct {
 	// stored settings plus per-provider env keys (INDAGO_LLM_KEY_<PROVIDER>),
 	// so a scan or report can name its provider. Nil with no store.
 	llmRegistry *llm.Registry
+	// chatgptDir is where Indago keeps its own ChatGPT OAuth session. Empty
+	// means only the borrowed Hermes session is available.
+	chatgptDir string
+	// pendingLogins holds in-flight ChatGPT device-code logins.
+	pendingLogins pendingLogins
 
 	// apiTokenDigest is SHA-256 of the configured bearer token (see
 	// SetAPIToken). Nil means the control API is unauthenticated.
@@ -115,6 +120,15 @@ func (s *Server) SetLoginFunc(fn LoginFunc) { s.login = fn }
 // SetPDFRenderer wires the HTML-to-PDF converter behind report format "pdf".
 // Not calling it (or passing nil) reports PDF export as unavailable.
 func (s *Server) SetPDFRenderer(r PDFRenderer) { s.pdf = r }
+
+// SetChatGPTCredDir wires Indago's own ChatGPT OAuth store (the device-code
+// login below writes here). Unset keeps login endpoints unavailable.
+func (s *Server) SetChatGPTCredDir(dir string) {
+	s.chatgptDir = dir
+	if s.llmRegistry != nil {
+		s.llmRegistry.SetChatGPTCredDir(dir)
+	}
+}
 
 // SetAIGateway wires the advisory AI Gateway. Not calling this (or passing
 // nil) leaves AI disabled — aiGateway() below falls back to ai.Disabled{}.
@@ -164,6 +178,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/llm/test", s.handleTestLLM)
 	mux.HandleFunc("POST /api/llm/models", s.handleListLLMModels)
 	mux.HandleFunc("GET /api/llm/providers", s.handleListLLMProviders)
+	mux.HandleFunc("GET /api/llm/chatgpt/session", s.handleChatGPTStatus)
+	mux.HandleFunc("POST /api/llm/chatgpt/login", s.handleChatGPTLoginStart)
+	mux.HandleFunc("POST /api/llm/chatgpt/login/poll", s.handleChatGPTLoginPoll)
+	mux.HandleFunc("DELETE /api/llm/chatgpt/session", s.handleChatGPTLogout)
 	mux.HandleFunc("POST /api/scans/{id}/ai/assist", s.handleScanAIAssist)
 
 	mux.HandleFunc("GET /api/projects", s.handleListProjects)

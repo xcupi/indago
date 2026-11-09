@@ -107,6 +107,10 @@ type Settings struct {
 	Model    string
 	BaseURL  string
 	APIKey   string
+	// CredentialsDir is where the chatgpt provider keeps Indago's own OAuth
+	// session (<data>/chatgpt). Empty falls back to the borrowed Hermes
+	// session only.
+	CredentialsDir string
 }
 
 // New returns a gateway from settings. When disabled (or provider empty) it

@@ -33,6 +33,10 @@ type Credential struct {
 	Plan         string
 	ExpiresAt    time.Time
 	Label        string
+	// Owned is true when Indago itself obtained the credential (its own store),
+	// which is what permits refreshing it. A borrowed Hermes session is
+	// read-only.
+	Owned bool
 }
 
 // Expired reports whether the access token is past its expiry.
@@ -135,6 +139,19 @@ func Load(path string) (Credential, error) {
 		return *fallback, nil
 	}
 	return Credential{}, fmt.Errorf("%w: no openai-codex entry in %s", ErrNoCredential, path)
+}
+
+// LoadPreferred returns Indago's own session when present, otherwise the
+// borrowed Hermes session (read-only).
+func LoadPreferred(storeDir string) (Credential, error) {
+	if storeDir != "" {
+		if c, err := NewStore(storeDir).Load(); err == nil {
+			return c, nil
+		} else if !errors.Is(err, ErrNoCredential) {
+			return Credential{}, err
+		}
+	}
+	return Load("")
 }
 
 // claims decodes the (unverified) JWT payload: it is used to read the account

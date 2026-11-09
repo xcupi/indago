@@ -34,6 +34,7 @@ const chatgptClientVersion = "0.153.0"
 
 type chatgptProvider struct {
 	credPath string
+	credDir  string
 	model    string
 }
 
@@ -76,12 +77,22 @@ type chatgptEvent struct {
 func (p *chatgptProvider) Name() string { return ProviderChatGPT }
 
 func (p *chatgptProvider) Complete(ctx context.Context, req Request) (*Response, error) {
-	cred, err := chatgpt.Load(p.credPath)
+	cred, err := chatgpt.LoadPreferred(p.credDir)
 	if err != nil {
 		return nil, fmt.Errorf("ai: chatgpt: %w", err)
 	}
 	if cred.Expired() {
-		return nil, fmt.Errorf("ai: chatgpt: OAuth session expired — re-authenticate in Hermes (codex login); Indago does not refresh the shared token")
+		if !cred.Owned {
+			return nil, fmt.Errorf("ai: chatgpt: the borrowed session expired — log in to ChatGPT from Indago Settings (or re-authenticate in Hermes)")
+		}
+		refreshed, rerr := chatgpt.Refresh(ctx, cred)
+		if rerr != nil {
+			return nil, fmt.Errorf("ai: chatgpt: refresh failed: %w", rerr)
+		}
+		if serr := chatgpt.NewStore(p.credDir).Save(refreshed); serr != nil {
+			return nil, fmt.Errorf("ai: chatgpt: save refreshed token: %w", serr)
+		}
+		cred = refreshed
 	}
 	model := strings.TrimSpace(p.model)
 	if model == "" {

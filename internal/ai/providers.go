@@ -94,8 +94,9 @@ func NewProvider(s Settings) (Provider, error) {
 	case ProviderAnthropic:
 		return &anthropicProvider{baseURL: baseURL, apiKey: s.APIKey, model: model}, nil
 	case ProviderChatGPT:
-		// No API key: the OAuth session is read from the Hermes auth store.
-		return &chatgptProvider{credPath: os.Getenv("INDAGO_CHATGPT_AUTH"), model: model}, nil
+		// No API key: the OAuth session is read from Indago's store, falling
+		// back to the borrowed Hermes session.
+		return &chatgptProvider{credPath: os.Getenv("INDAGO_CHATGPT_AUTH"), credDir: s.CredentialsDir, model: model}, nil
 	default:
 		return nil, fmt.Errorf("ai: unknown provider %q", s.Provider)
 	}

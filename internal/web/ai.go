@@ -69,6 +69,7 @@ func (s *Server) aiGatewayFor(provider, model string) (ai.Gateway, error) {
 	return ai.New(ai.Settings{
 		Enabled: true, Provider: cred.Provider, Model: cred.Model,
 		BaseURL: cred.BaseURL, APIKey: cred.APIKey(),
+		CredentialsDir: s.chatgptDir,
 	})
 }
 

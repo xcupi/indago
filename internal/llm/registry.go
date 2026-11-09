@@ -72,12 +72,20 @@ type Availability struct {
 // Registry resolves provider credentials from the stored configuration plus
 // the environment. It performs no I/O beyond reading local files/env.
 type Registry struct {
-	store *Store
+	store      *Store
+	chatgptDir string
 }
 
 // NewRegistry wraps a store. A nil store is allowed: only env-provided
 // providers resolve then.
 func NewRegistry(st *Store) *Registry { return &Registry{store: st} }
+
+// SetChatGPTCredDir points the chatgpt provider at Indago's own OAuth store.
+func (r *Registry) SetChatGPTCredDir(dir string) {
+	if r != nil {
+		r.chatgptDir = dir
+	}
+}
 
 func envName(provider, suffix string) string {
 	p := strings.ToUpper(provider)
@@ -117,12 +125,16 @@ func (r *Registry) Resolve(provider, model string) (Credential, error) {
 	// ChatGPT is OAuth: the session comes from the Hermes auth store, never
 	// from the settings key file or an env key.
 	if provider == ProviderChatGPT {
-		cred, err := chatgpt.Load("")
+		dir := ""
+		if r != nil {
+			dir = r.chatgptDir
+		}
+		cred, err := chatgpt.LoadPreferred(dir)
 		if err != nil {
 			return Credential{}, fmt.Errorf("%w: %v", ErrNoCredential, err)
 		}
-		if cred.Expired() {
-			return Credential{}, fmt.Errorf("%w: ChatGPT OAuth session expired — re-authenticate in Hermes", ErrNoCredential)
+		if cred.Expired() && !cred.Owned {
+			return Credential{}, fmt.Errorf("%w: ChatGPT OAuth session expired — log in from Indago Settings", ErrNoCredential)
 		}
 		m := strings.TrimSpace(os.Getenv(envName(provider, "MODEL")))
 		if strings.TrimSpace(model) != "" {
@@ -177,7 +189,12 @@ func (r *Registry) List() []Availability {
 			av.KeyHint = maskKey(cred.apiKey)
 			av.Source = "environment"
 			if p.ID == ProviderChatGPT {
-				av.Source = "oauth"
+				av.Source = "hermes"
+				if r != nil && r.chatgptDir != "" {
+					if _, e := chatgpt.NewStore(r.chatgptDir).Load(); e == nil {
+						av.Source = "indago"
+					}
+				}
 			}
 			if r != nil && r.store != nil {
 				if stored, e := r.store.Load(); e == nil && stored.Provider == p.ID {

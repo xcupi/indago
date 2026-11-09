@@ -31,6 +31,11 @@ export default function Settings() {
   const [token, setLocalToken] = useState(getToken());
   const [msg, setMsg] = useState("");
   const [probe, setProbe] = useState<Record<string, string>>({});
+  const cg = useApi<{ logged_in: boolean; source: string; account?: string; plan?: string; expires_at?: string }>(
+    "/api/llm/chatgpt/session",
+  );
+  const [cgLogin, setCgLogin] = useState<{ device_auth_id: string; user_code: string; url: string; interval_seconds: number } | null>(null);
+  const [cgMsg, setCgMsg] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
   const [models, setModels] = useState<string[]>([]);
@@ -71,6 +76,30 @@ export default function Settings() {
       base_url: status.data?.base_url ?? f.base_url,
     }));
   }, [status.data?.provider, status.data?.model, status.data?.base_url]);
+
+  // Poll the device-code login until OpenAI confirms it, then refresh the
+  // provider list so "chatgpt" flips to configured without a reload.
+  useEffect(() => {
+    if (!cgLogin) return;
+    const ms = Math.max(3, cgLogin.interval_seconds || 5) * 1000;
+    const timer = setInterval(async () => {
+      try {
+        const res = await api<{ state: string; account?: string }>("/api/llm/chatgpt/login/poll", {
+          method: "POST",
+          body: { device_auth_id: cgLogin.device_auth_id },
+        });
+        if (res.state === "done") {
+          setCgLogin(null);
+          setCgMsg(`Logged in${res.account ? ` as ${res.account}` : ""}.`);
+          refreshAll();
+        }
+      } catch (e) {
+        setCgLogin(null);
+        setCgMsg((e as Error).message);
+      }
+    }, ms);
+    return () => clearInterval(timer);
+  }, [cgLogin]);
 
   async function save() {
     setBusy("save");
@@ -264,6 +293,71 @@ export default function Settings() {
             )}
             {err ? <Alert>{err}</Alert> : null}
             {msg ? <p className="text-[11px] text-emerald-700 dark:text-emerald-400">{msg}</p> : null}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Zap className="size-4 text-emerald-700 dark:text-emerald-400" /> ChatGPT OAuth session
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 text-[11px]">
+            {cg.data?.logged_in ? (
+              <p className="text-foreground">
+                signed in{cg.data.account ? ` as ${cg.data.account}` : ""}
+                {cg.data.plan ? ` · plan ${cg.data.plan}` : ""} · source {cg.data.source}
+                {cg.data.expires_at ? ` · expires ${formatTime(cg.data.expires_at)}` : ""}
+              </p>
+            ) : (
+              <p className="text-muted-foreground">No session yet. Log in with a device code — no API key.</p>
+            )}
+            {cgLogin ? (
+              <div className="space-y-1 rounded-md border border-border bg-muted/30 p-2">
+                <p>
+                  Open{" "}
+                  <a className="text-emerald-700 underline dark:text-emerald-400" href={cgLogin.url} target="_blank" rel="noreferrer">
+                    {cgLogin.url}
+                  </a>{" "}
+                  and enter:
+                </p>
+                <p className="mono text-base tracking-widest text-foreground">{cgLogin.user_code}</p>
+                <p className="text-muted-foreground">Waiting for sign-in…</p>
+              </div>
+            ) : null}
+            {cgMsg ? <p className="text-muted-foreground">{cgMsg}</p> : null}
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                onClick={async () => {
+                  setCgMsg("");
+                  try {
+                    const d = await api<{ device_auth_id: string; user_code: string; url: string; interval_seconds: number }>(
+                      "/api/llm/chatgpt/login",
+                      { method: "POST", body: {} },
+                    );
+                    setCgLogin(d);
+                  } catch (e) {
+                    setCgMsg((e as Error).message);
+                  }
+                }}
+              >
+                Log in with ChatGPT
+              </Button>
+              {cg.data?.source === "indago" ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={async () => {
+                    await api("/api/llm/chatgpt/session", { method: "DELETE" });
+                    setCgMsg("Indago session cleared.");
+                    refreshAll();
+                  }}
+                >
+                  Log out
+                </Button>
+              ) : null}
+            </div>
           </CardContent>
         </Card>
 
