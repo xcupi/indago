@@ -20,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/indago/indago/internal/bounty"
 	"log/slog"
 	"net"
 	"os"
@@ -352,6 +353,8 @@ func cmdServe(args []string) error {
 	// data directory (0600 files in a 0700 directory) and the web handlers
 	// never return the key. Configuration-only: nothing here calls a provider.
 	srv.SetLLMStore(llm.NewStore(filepath.Join(cfg.DataDir, "llm")))
+	// Bug-bounty platform tokens live under the same data directory, 0600.
+	srv.SetBountyStore(bounty.NewStore(filepath.Join(cfg.DataDir, "bounty")))
 	srv.SetLoginFunc(loginFn) // nil unless -browser: endpoint then reports unavailable
 	// PDF export prints the HTML report through the same Chromium the browser
 	// engine uses; absent an executable the endpoint reports unavailability

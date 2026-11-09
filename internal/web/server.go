@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/indago/indago/internal/ai"
+	"github.com/indago/indago/internal/bounty"
 	"github.com/indago/indago/internal/config"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
@@ -67,6 +68,12 @@ type Server struct {
 	// ai.Disabled{} (the scanner must work with AI disabled): report
 	// creation then skips AI-drafted summaries, never fails because of it.
 	ai ai.Gateway
+
+	// bountyStore keeps the bug-bounty platform token (see internal/bounty).
+	// Nil leaves the bounty endpoints reporting that the integration is not
+	// configured; it never blocks the scanner.
+	bountyStore  *bounty.Store
+	bountyClient *bounty.Client
 
 	// llm is the LLM provider configuration store behind /api/llm/* (see
 	// internal/llm). Nil leaves those endpoints reporting that configuration
@@ -179,6 +186,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/llm/test", s.handleTestLLM)
 	mux.HandleFunc("POST /api/llm/models", s.handleListLLMModels)
 	mux.HandleFunc("GET /api/llm/providers", s.handleListLLMProviders)
+
+	// Bug-bounty platform integration (YesWeHack first). GET lists programs;
+	// PUT/DELETE manage the token; POST imports a program's scope.
+	mux.HandleFunc("GET /api/bounty/providers", s.handleListBountyProviders)
+	mux.HandleFunc("PUT /api/bounty/providers/yeswehack/token", s.handleSetBountyToken)
+	mux.HandleFunc("DELETE /api/bounty/providers/yeswehack/token", s.handleClearBountyToken)
+	mux.HandleFunc("GET /api/bounty/programs", s.handleBountyPrograms)
+	mux.HandleFunc("GET /api/bounty/programs/{slug}", s.handleBountyProgram)
+	mux.HandleFunc("POST /api/bounty/import", s.handleImportBountyPrograms)
 	mux.HandleFunc("GET /api/payload-library", s.handleListPayloadLibrary)
 	mux.HandleFunc("GET /api/llm/chatgpt/session", s.handleChatGPTStatus)
 	mux.HandleFunc("POST /api/llm/chatgpt/login", s.handleChatGPTLoginStart)

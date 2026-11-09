@@ -1,0 +1,127 @@
+package web_test
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/indago/indago/internal/bounty"
+	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/store/memory"
+	"github.com/indago/indago/internal/web"
+)
+
+// Importing a program must create a project whose scope is the program's own
+// web-application assets, and one seed target per host root — never a scan.
+func TestImportBountyProgramCreatesScopedProject(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/programs/acme", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"slug": "acme", "title": "ACME Program", "type": "bug-bounty", "rules": "Add header X-Bug-Bounty"})
+	})
+	mux.HandleFunc("/programs/acme/scopes", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-AUTH-TOKEN") != "tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
+			{"scope": "*.acme.test", "scope_type": "web-application", "asset_value": "https://app.acme.test"},
+			{"scope": "api.acme.test", "scope_type": "api", "asset_value": "https://api.acme.test"},
+		}})
+	})
+	ywh := httptest.NewServer(mux)
+	defer ywh.Close()
+	t.Setenv("INDAGO_YESWEHACK_API", ywh.URL)
+
+	st := memory.New()
+	srv := web.NewServer(st, nil, "test", slog.New(slog.NewTextHandler(io.Discard, nil)), nil, t.TempDir())
+	tokens := bounty.NewStore(t.TempDir())
+	if err := tokens.Set("tok"); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetBountyStore(tokens)
+	a := api{t: t, h: srv.Handler(), st: st}
+
+	var resp struct {
+		Imported []struct {
+			Slug      string   `json:"slug"`
+			ProjectID string   `json:"project_id"`
+			Hosts     []string `json:"hosts"`
+			Targets   []string `json:"targets"`
+			Skipped   []string `json:"skipped"`
+		} `json:"imported"`
+	}
+	a.mustJSON(a.do("POST", "/api/bounty/import", map[string]any{"slugs": []string{"acme"}}), http.StatusOK, &resp)
+	if len(resp.Imported) != 1 {
+		t.Fatalf("imported = %+v", resp.Imported)
+	}
+	got := resp.Imported[0]
+	if got.ProjectID == "" || len(got.Hosts) != 1 || got.Hosts[0] != "app.acme.test" {
+		t.Fatalf("hosts = %v (api scope must be skipped)", got.Hosts)
+	}
+	if len(got.Targets) != 1 || got.Targets[0] != "https://app.acme.test/" {
+		t.Fatalf("targets = %v", got.Targets)
+	}
+	if len(got.Skipped) != 1 {
+		t.Fatalf("skipped = %v", got.Skipped)
+	}
+
+	// The project and its scope exist; the scope allows the imported host and
+	// denies another one.
+	proj, err := st.Projects().Get(context.Background(), domain.ID(got.ProjectID))
+	if err != nil || proj.Name != "ACME Program" {
+		t.Fatalf("project = %+v err=%v", proj, err)
+	}
+	sc, err := st.Scopes().GetByProject(context.Background(), proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := sc.Permits("https://app.acme.test/login"); !d.Allowed {
+		t.Fatalf("imported scope denies its own host: %+v", d)
+	}
+	if d := sc.Permits("https://other.test/"); d.Allowed {
+		t.Fatal("imported scope allows an unrelated host")
+	}
+}
+
+func TestBountyProgramsAreNotFetchedImplicitly(t *testing.T) {
+	var calls int
+	ywh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Write([]byte(`{"items":[]}`))
+	}))
+	defer ywh.Close()
+	t.Setenv("INDAGO_YESWEHACK_API", ywh.URL)
+
+	st := memory.New()
+	srv := web.NewServer(st, nil, "test", slog.New(slog.NewTextHandler(io.Discard, nil)), nil, t.TempDir())
+	srv.SetBountyStore(bounty.NewStore(t.TempDir()))
+	a := api{t: t, h: srv.Handler(), st: st}
+
+	// Providers endpoint is configuration only: it must not contact the API.
+	var prov struct {
+		Providers []struct {
+			ID         string `json:"id"`
+			Configured bool   `json:"configured"`
+		} `json:"providers"`
+	}
+	a.mustJSON(a.do("GET", "/api/bounty/providers", nil), http.StatusOK, &prov)
+	if calls != 0 {
+		t.Fatalf("providers endpoint contacted the platform %d times", calls)
+	}
+	if len(prov.Providers) != 1 || prov.Providers[0].ID != "yeswehack" || prov.Providers[0].Configured {
+		t.Fatalf("providers = %+v", prov.Providers)
+	}
+
+	// The explicit Load path does contact it.
+	var list struct {
+		Count int `json:"count"`
+	}
+	a.mustJSON(a.do("GET", "/api/bounty/programs?refresh=1", nil), http.StatusOK, &list)
+	if calls != 1 {
+		t.Fatalf("programs endpoint calls = %d, want 1", calls)
+	}
+}

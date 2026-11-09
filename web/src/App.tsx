@@ -7,6 +7,7 @@ import ProjectDetail from "@/pages/ProjectDetail";
 import Scans from "@/pages/Scans";
 import ScanDetail from "@/pages/ScanDetail";
 import Settings from "@/pages/Settings";
+import Bounty from "@/pages/Bounty";
 import { FindingsPage, ReportsPage } from "@/pages/Collections";
 import { useRoute } from "@/lib/router";
 
@@ -21,6 +22,9 @@ export default function App() {
       break;
     case "scans":
       page = second ? <ScanDetail id={second} /> : <Scans />;
+      break;
+    case "bounty":
+      page = <Bounty />;
       break;
     case "findings":
       page = <FindingsPage />;
