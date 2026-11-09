@@ -35,7 +35,26 @@ credential came from (`settings` or `environment`); it never returns a key.
 
 Naming: `<PROVIDER>` is the provider id uppercased, non-alphanumerics replaced
 by `_`. Supported: `deepseek`, `openai`, `custom` (any OpenAI-compatible
-endpoint), plus the gateway's own `anthropic`/`openrouter`/`ollama`/`vllm`.
+endpoint), `chatgpt` (OAuth), plus the gateway's own
+`anthropic`/`openrouter`/`ollama`/`vllm`.
+
+### ChatGPT via OAuth (`chatgpt`)
+
+No API key is involved. `chatgpt` uses the ChatGPT/Codex OAuth session that a
+Hermes install already holds:
+
+- Credential file: `INDAGO_CHATGPT_AUTH`, else `~/.hermes/auth.json`
+  (`credential_pool["openai-codex"]`).
+- Endpoint: `https://chatgpt.com/backend-api/codex` (Responses API), with
+  `ChatGPT-Account-ID` taken from the access-token claims.
+- Model: discovered from the account's own `/models` list at call time; override
+  with `INDAGO_LLM_MODEL_CHATGPT` if wanted.
+
+The file is read-only for Indago: it never refreshes or rotates the token, so the
+agent's session is untouched. An expired access token fails with a message
+telling the operator to re-authenticate in Hermes; Indago does not refresh a
+shared credential behind another process's back.
+
 
 ## During a scan
 
@@ -81,7 +100,14 @@ is still generated, just without that paragraph.
 ## Verified providers
 
 - **DeepSeek** (via an OpenAI-compatible gateway): connect probe, scan assist and
-  report narrative all verified against a live endpoint.
-- **OpenAI**: the same code path is exercised by tests against a stub endpoint;
-  a live check needs an `INDAGO_LLM_KEY_OPENAI` key. Until one is set the API
+  report narrative verified against a live endpoint.
+- **ChatGPT (OAuth)**: verified live end to end — session probe (GET /models),
+  scan assist (model `gpt-6-astra`) and report narrative, all through the Codex
+  OAuth session, no API key.
+- **OpenAI API key**: the same code path is exercised by tests against a stub
+  endpoint; a live check needs `INDAGO_LLM_KEY_OPENAI`. Until one is set the API
   answers 400 with that exact instruction.
+
+Protocol notes for ChatGPT, all found the hard way: `/responses` (not
+`/chat/completions`), `"store": false`, `"stream": true` (non-streaming is
+rejected), and the answer arrives as `response.output_text.delta` SSE events.

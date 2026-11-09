@@ -2,6 +2,7 @@ package ai
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -18,11 +19,14 @@ const (
 	// ProviderCustom is any OpenAI-compatible endpoint (a gateway, a proxy)
 	// whose base URL the operator supplies.
 	ProviderCustom = "custom"
+	// ProviderChatGPT uses the ChatGPT/Codex OAuth session (no API key) and
+	// the Responses API at chatgpt.com/backend-api/codex.
+	ProviderChatGPT = "chatgpt"
 )
 
 // Providers lists the recognized provider identifiers.
 func Providers() []string {
-	return []string{ProviderOpenAI, ProviderAnthropic, ProviderOpenRouter, ProviderOllama, ProviderVLLM, ProviderDeepSeek, ProviderCustom}
+	return []string{ProviderOpenAI, ProviderAnthropic, ProviderOpenRouter, ProviderOllama, ProviderVLLM, ProviderDeepSeek, ProviderCustom, ProviderChatGPT}
 }
 
 // defaultBaseURL returns the conventional base URL for a provider when the
@@ -47,6 +51,8 @@ func defaultBaseURL(name string) string {
 	case ProviderCustom:
 		// No default: the operator must say where the gateway is.
 		return ""
+	case ProviderChatGPT:
+		return "https://chatgpt.com/backend-api/codex"
 	default:
 		return ""
 	}
@@ -87,6 +93,9 @@ func NewProvider(s Settings) (Provider, error) {
 		return &openAICompatProvider{name: name, baseURL: baseURL, apiKey: s.APIKey, model: model}, nil
 	case ProviderAnthropic:
 		return &anthropicProvider{baseURL: baseURL, apiKey: s.APIKey, model: model}, nil
+	case ProviderChatGPT:
+		// No API key: the OAuth session is read from the Hermes auth store.
+		return &chatgptProvider{credPath: os.Getenv("INDAGO_CHATGPT_AUTH"), model: model}, nil
 	default:
 		return nil, fmt.Errorf("ai: unknown provider %q", s.Provider)
 	}

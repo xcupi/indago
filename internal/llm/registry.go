@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/indago/indago/internal/chatgpt"
 )
 
 // ErrNoCredential means the provider is known but no key is available for it.
@@ -111,18 +113,34 @@ func (r *Registry) Resolve(provider, model string) (Credential, error) {
 	if provider == "" {
 		provider = DefaultProvider
 	}
+
+	// ChatGPT is OAuth: the session comes from the Hermes auth store, never
+	// from the settings key file or an env key.
+	if provider == ProviderChatGPT {
+		cred, err := chatgpt.Load("")
+		if err != nil {
+			return Credential{}, fmt.Errorf("%w: %v", ErrNoCredential, err)
+		}
+		if cred.Expired() {
+			return Credential{}, fmt.Errorf("%w: ChatGPT OAuth session expired — re-authenticate in Hermes", ErrNoCredential)
+		}
+		m := strings.TrimSpace(os.Getenv(envName(provider, "MODEL")))
+		if strings.TrimSpace(model) != "" {
+			m = strings.TrimSpace(model)
+		}
+		return Credential{Provider: provider, Model: m, BaseURL: cred.BaseURL, apiKey: cred.AccessToken}, nil
+	}
+
 	def, ok := LookupProvider(provider)
 	if !ok {
 		return Credential{}, fmt.Errorf("%w: %q", ErrInvalid, provider)
 	}
 
 	cred := Credential{Provider: provider, Model: def.DefaultModel, BaseURL: def.DefaultBaseURL}
-	source := ""
 	if stored.Configured() && stored.Provider == provider {
 		cred.Model = stored.Model
 		cred.BaseURL = stored.BaseURL
 		cred.apiKey = stored.apiKey
-		source = "settings"
 	}
 	if v := strings.TrimSpace(os.Getenv(envName(provider, "MODEL"))); v != "" {
 		cred.Model = v
@@ -132,7 +150,6 @@ func (r *Registry) Resolve(provider, model string) (Credential, error) {
 	}
 	if v := strings.TrimSpace(os.Getenv(envName(provider, "KEY"))); v != "" {
 		cred.apiKey = v
-		source = "environment"
 	}
 	if strings.TrimSpace(model) != "" {
 		cred.Model = strings.TrimSpace(model)
@@ -144,7 +161,6 @@ func (r *Registry) Resolve(provider, model string) (Credential, error) {
 		return Credential{}, fmt.Errorf("%w %q: set INDAGO_LLM_KEY_%s or save it in Settings",
 			ErrNoCredential, provider, strings.ToUpper(strings.ReplaceAll(provider, "-", "_")))
 	}
-	_ = source
 	return cred, nil
 }
 
@@ -160,6 +176,9 @@ func (r *Registry) List() []Availability {
 			av.BaseURL = cred.BaseURL
 			av.KeyHint = maskKey(cred.apiKey)
 			av.Source = "environment"
+			if p.ID == ProviderChatGPT {
+				av.Source = "oauth"
+			}
 			if r != nil && r.store != nil {
 				if stored, e := r.store.Load(); e == nil && stored.Provider == p.ID {
 					av.Source = "settings"

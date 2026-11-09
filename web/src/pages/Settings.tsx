@@ -30,6 +30,7 @@ export default function Settings() {
   const [form, setForm] = useState({ provider: "", model: "", base_url: "", api_key: "" });
   const [token, setLocalToken] = useState(getToken());
   const [msg, setMsg] = useState("");
+  const [probe, setProbe] = useState<Record<string, string>>({});
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
   const [models, setModels] = useState<string[]>([]);
@@ -156,8 +157,34 @@ export default function Settings() {
                   {(availability.data?.providers ?? []).map((p) => (
                     <div key={p.provider} className="flex items-center justify-between gap-2 text-[11px]">
                       <span className="text-foreground">{p.label}</span>
-                      <span className={p.configured ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>
-                        {p.configured ? `${p.model ?? "model?"} · ${p.source ?? "configured"}` : "no credential"}
+                      <span className="flex items-center gap-2">
+                        <span className={p.configured ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>
+                          {p.configured ? `${p.model || "model: auto"} · ${p.source ?? "configured"}` : "no credential"}
+                        </span>
+                        {p.configured ? (
+                          <button
+                            className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+                            onClick={async () => {
+                              try {
+                                const res = await api<{ ok: boolean; latency_ms?: number; error?: string }>(
+                                  `/api/llm/test?provider=${p.provider}`,
+                                  { method: "POST", body: {} },
+                                );
+                                setProbe((prev) => ({
+                                  ...prev,
+                                  [p.provider]: res.ok ? `ok ${res.latency_ms ?? 0}ms` : res.error || "failed",
+                                }));
+                              } catch (e) {
+                                setProbe((prev) => ({ ...prev, [p.provider]: (e as Error).message }));
+                              }
+                            }}
+                          >
+                            test
+                          </button>
+                        ) : null}
+                        {probe[p.provider] ? (
+                          <span className="text-[10px] text-muted-foreground">{probe[p.provider]}</span>
+                        ) : null}
                       </span>
                     </div>
                   ))}

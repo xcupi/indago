@@ -3,6 +3,7 @@ package web
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/indago/indago/internal/llm"
 )
@@ -118,8 +119,31 @@ func (s *Server) handleTestLLM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res := llm.NewProber(0).Test(r.Context(), cfg)
-	res.Error = cfg.Redact(res.Error) // defense in depth at the HTTP boundary
+	// ?provider= probes that provider instead of the stored one, using the
+	// same resolution a scan/report call would use (settings or env, and the
+	// ChatGPT OAuth session).
+	prober := llm.NewProber(0)
+	var res llm.ProbeResult
+	if provider := strings.TrimSpace(r.URL.Query().Get("provider")); provider != "" {
+		if s.llmRegistry == nil {
+			writeError(w, http.StatusServiceUnavailable, "LLM settings are not available on this server")
+			return
+		}
+		cred, err := s.llmRegistry.Resolve(provider, "")
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if cred.Provider == llm.ProviderChatGPT {
+			res = prober.ProbeChatGPT(r.Context())
+		} else {
+			res = prober.Test(r.Context(), cred.Config())
+		}
+		res.Error = cred.Redact(res.Error)
+	} else {
+		res = prober.Test(r.Context(), cfg)
+		res.Error = cfg.Redact(res.Error) // defense in depth at the HTTP boundary
+	}
 	if res.OK {
 		s.log.Info("LLM connection test succeeded",
 			"provider", res.Provider, "model", res.Model, "latency_ms", res.LatencyMS)

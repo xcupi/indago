@@ -35,6 +35,9 @@ const (
 	ProviderDeepSeek = "deepseek"
 	ProviderOpenAI   = "openai"
 	ProviderCustom   = "custom"
+	// ProviderChatGPT is the OAuth (Codex) provider: no API key, the session
+	// comes from the Hermes auth store.
+	ProviderChatGPT = "chatgpt"
 
 	// DefaultProvider is the provider a fresh configuration starts from.
 	DefaultProvider = ProviderDeepSeek
@@ -91,6 +94,13 @@ var providerList = []Provider{
 		// optional because local endpoints commonly run without auth.
 		ID:          ProviderCustom,
 		Label:       "Custom (OpenAI-compatible)",
+		RequiresKey: false,
+	},
+	{
+		// ChatGPT through the Codex OAuth session (no API key). The model is
+		// discovered from the account's own model list at call time.
+		ID:          ProviderChatGPT,
+		Label:       "ChatGPT (OAuth)",
 		RequiresKey: false,
 	},
 }
