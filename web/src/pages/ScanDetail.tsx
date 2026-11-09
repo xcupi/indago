@@ -22,6 +22,20 @@ function currentTab(): string {
 export default function ScanDetail({ id }: { id: string }) {
   const scan = useApi<Scan>(`/api/scans/${id}`, [], 3000);
   const [tab, setTab] = useState(currentTab());
+
+  // Keep the active tab in the hash so a deep link, a reload and Back/Forward
+  // all land on the same view — and so the browser's own navigation drives it.
+  useEffect(() => {
+    const onHash = () => setTab(currentTab());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  function changeTab(next: string) {
+    setTab(next);
+    const base = window.location.hash.split("?")[0] || `#/scans/${id}`;
+    window.location.hash = `${base}?tab=${next}`;
+  }
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [tuneOpen, setTuneOpen] = useState(false);
@@ -133,7 +147,7 @@ export default function ScanDetail({ id }: { id: string }) {
         />
       </div>
 
-      <Tabs value={tab} onValueChange={setTab}>
+      <Tabs value={tab} onValueChange={changeTab}>
         <TabsList className="flex-wrap">
           {[
             ["overview", "Overview"],

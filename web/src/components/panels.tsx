@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ExternalLink, FileText, Plus } from "lucide-react";
+import { Download, ExternalLink, FileText, Plus } from "lucide-react";
 import { Badge, SeverityBadge, VerdictBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -128,6 +128,16 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
                 <span className="mono">engine {selected.provenance?.engine ?? "—"}</span>
                 <span className="mono">source {selected.provenance?.discovery_source ?? "—"}</span>
               </div>
+              {selected.verdict === "confirmed" ? (
+                <div>
+                  <a
+                    href={`/api/scans/${scanId}/findings/${selected.id}/poc`}
+                    className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-emerald-700 dark:text-emerald-400 hover:bg-muted"
+                  >
+                    <Download className="size-3" /> download PoC (standalone HTML)
+                  </a>
+                </div>
+              ) : null}
               {selected.evidence_ids?.length ? (
                 <div className="flex flex-wrap gap-2">
                   {selected.evidence_ids.map((id) => (
@@ -209,19 +219,30 @@ export function EvidencePanel({ scanId }: { scanId: string }) {
 
 export function ReportsPanel({ scanId }: { scanId: string }) {
   const reports = useApi<Report[]>(`/api/scans/${scanId}/reports`);
+  const findings = useApi<Finding[]>(`/api/scans/${scanId}/findings?verdict=confirmed`);
   const [format, setFormat] = useState("html");
   const [mode, setMode] = useState("all");
+  const [picked, setPicked] = useState<string[]>([]);
+  const [ai, setAi] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  const confirmed = findings.data ?? [];
+  const toggle = (id: string) =>
+    setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+
   async function create() {
-    setBusy(true);
     setError("");
+    if (mode === "selected" && picked.length === 0) {
+      setError("Pick at least one finding for a selected report.");
+      return;
+    }
+    setBusy(true);
     try {
-      await api(`/api/scans/${scanId}/reports`, {
-        method: "POST",
-        body: { format, mode: mode === "all" ? "all" : "confirmed" },
-      });
+      const body: Record<string, unknown> = { format, mode };
+      if (mode === "selected") body.finding_ids = picked;
+      if (ai) body.ai_summary = true;
+      await api(`/api/scans/${scanId}/reports`, { method: "POST", body });
       refreshAll();
     } catch (e) {
       setError((e as Error).message);
@@ -229,6 +250,9 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
       setBusy(false);
     }
   }
+
+  const preview = new URLSearchParams({ mode });
+  if (mode === "selected") picked.forEach((id) => preview.append("finding_id", id));
 
   return (
     <div className="space-y-3">
@@ -255,13 +279,17 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
             >
               <option value="all">all</option>
               <option value="confirmed">confirmed only</option>
+              <option value="selected">selected findings</option>
             </select>
           </div>
+          <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <Switch checked={ai} onCheckedChange={setAi} /> AI summary
+          </label>
           <Button size="sm" onClick={create} disabled={busy}>
             <Plus className="size-4" /> {busy ? "Generating…" : "Generate report"}
           </Button>
           <a
-            href={`/api/scans/${scanId}/reports/preview?format=${format}&mode=${mode}`}
+            href={`/api/scans/${scanId}/reports/preview?${preview.toString()}`}
             target="_blank"
             rel="noreferrer"
             className="text-[11px] text-emerald-700 dark:text-emerald-400 hover:underline"
@@ -271,6 +299,37 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
           {error ? <span className="text-[11px] text-red-700 dark:text-red-400">{error}</span> : null}
         </CardContent>
       </Card>
+
+      {mode === "selected" ? (
+        <Card>
+          <CardContent className="space-y-2 p-3">
+            <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+              Confirmed findings ({confirmed.length})
+            </div>
+            {confirmed.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground">This scan has no confirmed findings to select.</p>
+            ) : (
+              <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
+                {confirmed.map((f) => (
+                  <label key={f.id} className="flex items-start gap-2 text-xs text-foreground">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={picked.includes(f.id)}
+                      onChange={() => toggle(f.id)}
+                    />
+                    <span className="min-w-0">
+                      <span className="block truncate">{f.title}</span>
+                      <span className="mono block text-[10px] text-muted-foreground">{shortId(f.id)}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
+            <div className="text-[11px] text-muted-foreground">{picked.length} selected</div>
+          </CardContent>
+        </Card>
+      ) : null}
 
       {reports.loading && !reports.data ? (
         <Loading />

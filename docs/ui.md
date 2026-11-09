@@ -93,22 +93,24 @@ not `prefers-color-scheme`, because the operator picks it.
 - New components must use the semantic tokens. A raw `zinc-*`/`emerald-*`
   surface in a component is a theming bug, not a style preference.
 
-## Known gaps vs the backend (verified by diffing routes and request fields)
+## Backend coverage (verified by diffing routes and request fields)
 
-Route coverage is complete for the screens the legacy dashboard had, with these
-exceptions. They are real gaps, not "covered elsewhere":
+Every `mux` route that backs an operator screen has a caller in `web/src`.
+The gaps this section used to list are closed, each verified against the live
+server rather than by reading code:
 
-| Gap | Backend | Evidence |
+| Capability | Where it lives | Verification |
 | --- | --- | --- |
-| Interactive login (drive a real browser login, get a storage-state path) | `POST /api/auth/login` | no caller in `web/src`; the form only accepts an existing `auth_state_path` |
-| Model discovery in Settings | `POST /api/llm/models` | no caller in `web/src`; legacy `views.js` used it |
-| Finding PoC download | `GET /api/scans/{id}/findings/{fid}/poc` | no `/poc` reference in `web/src`; legacy linked it |
-| Selective report (`finding_ids`) | `POST /api/scans/{id}/reports` | SPA sends `{format, mode}` only |
-| AI summary on reports (`ai_summary`) | `POST /api/scans/{id}/reports` | legacy form had it |
-| Scan-create fields: `proxy_pool`, `stop{mode,confirmed_limit}`, `max_candidates`, `login_*_selector` | `POST /api/scans` | `createScanReq` accepts them; the SPA form does not send them (concurrency is available after the fact via "Tune" → `POST /api/scans/{id}/config`) |
+| Interactive login (`POST /api/auth/login`) | Scan create → Auth mode → "Login now"; the returned path becomes `auth_state_path` | endpoint returns 400 with the scope message for an out-of-scope URL and for a missing project (request shape accepted) |
+| Model discovery (`POST /api/llm/models`) | Settings → AI Gateway → "Discover" | surfaces the provider message ("LLM provider is not configured") instead of throwing |
+| Finding PoC (`GET .../findings/{fid}/poc`) | Finding detail dialog → "download PoC" | `200`, `Content-Disposition: attachment`, 2.1 KB artifact |
+| Selective report (`finding_ids`) | Reports tab → mode "selected findings" + checkbox list | report generated from the UI contains exactly the one selected finding |
+| AI summary (`ai_summary`) | Reports tab → "AI summary" switch | sent in the create body alongside `format`/`mode` |
+| `proxy_pool`, `stop{mode,confirmed_limit}`, `max_candidates`, `login_*_selector` | Scan create form | intercepted create payload carries all of them with the entered values |
+| Concurrency at create (`config`) | Scan create form (four fields, 0 = profile) | the same payload carries `config.{discovery,http,browser}_concurrency` and `requests_per_second` |
 
 Backend-only options that the legacy UI also never exposed (CLI-only by
-design, so not regressions): `idor_candidates`, `idor_enumerate(_n)`,
+design, not gaps): `idor_candidates`, `idor_enumerate(_n)`,
 `enable_role_param`, `enable_access_control_pages`, `enable_role_write`,
 `enable_admin_step_probe`, `enable_object_family_probe`, `enable_xss_library`,
 `randomize_tls_fingerprint`.

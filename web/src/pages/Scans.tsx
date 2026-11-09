@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Play, Plus } from "lucide-react";
+import { LogIn, Play, Plus } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -34,17 +34,30 @@ export default function Scans() {
     authState: "",
     loginUrl: "",
     successUrl: "",
+    loginUserSel: "",
+    loginPassSel: "",
+    loginSubmitSel: "",
     quick: false,
     maxDepth: 0,
     maxPages: 0,
     maxEndpoints: 0,
+    maxCandidates: 0,
     candidateProfile: "standard",
     evasion: false,
     rawQuery: "off",
     recon: "off",
+    proxyPool: "",
+    stopMode: "continue_all",
+    stopN: 1,
+    cfgDiscovery: 0,
+    cfgHttp: 0,
+    cfgBrowser: 0,
+    cfgRate: 0,
   });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginNote, setLoginNote] = useState("");
 
   const filtered = useMemo(() => {
     const list = scans.data ?? [];
@@ -80,12 +93,35 @@ export default function Scans() {
         raw_query_injection: form.rawQuery,
         recon_level: form.recon,
       };
+      if (form.maxCandidates > 0) body.max_candidates = form.maxCandidates;
+      const proxies = form.proxyPool
+        .split(/[\n,]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (proxies.length) body.proxy_pool = proxies;
+      if (form.stopMode !== "continue_all") {
+        body.stop = {
+          mode: form.stopMode,
+          confirmed_limit: form.stopMode === "after_n_confirmed" ? form.stopN : 0,
+        };
+      }
+      if (form.cfgDiscovery || form.cfgHttp || form.cfgBrowser || form.cfgRate) {
+        body.config = {
+          discovery_concurrency: form.cfgDiscovery,
+          http_concurrency: form.cfgHttp,
+          browser_concurrency: form.cfgBrowser,
+          requests_per_second: form.cfgRate,
+        };
+      }
       if (form.auth !== "anonymous") {
         body.auth_mode = form.auth;
         if (form.auth === "existing") body.auth_state_path = form.authState;
         if (form.auth === "interactive" || form.auth === "mfa" || form.auth === "password") {
           body.login_url = form.loginUrl;
           body.success_url = form.successUrl;
+          if (form.loginUserSel) body.login_username_selector = form.loginUserSel;
+          if (form.loginPassSel) body.login_password_selector = form.loginPassSel;
+          if (form.loginSubmitSel) body.login_submit_selector = form.loginSubmitSel;
         }
       }
       const scan = await api<Scan>("/api/scans", { method: "POST", body });
@@ -97,6 +133,39 @@ export default function Scans() {
       setError((e as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Drives the server-side interactive login (POST /api/auth/login). The
+  // endpoint blocks until the operator finishes, so the button stays busy and
+  // the result is only the saved session PATH — never cookies or tokens.
+  async function loginNow() {
+    setError("");
+    setLoginNote("");
+    if (!projectId) {
+      setError("Pick a project first — the login is scope-checked against it.");
+      return;
+    }
+    if (!form.loginUrl.trim()) {
+      setError("Login URL is required to start an interactive login.");
+      return;
+    }
+    setLoginBusy(true);
+    try {
+      const res = await api<{ state_path: string; final_url: string }>("/api/auth/login", {
+        method: "POST",
+        body: {
+          project_id: projectId,
+          login_url: form.loginUrl.trim(),
+          success_url: form.successUrl.trim(),
+        },
+      });
+      setForm((f) => ({ ...f, auth: "existing", authState: res.state_path }));
+      setLoginNote(`Session saved to ${res.state_path} (landed on ${res.final_url}). Auth mode is now "existing session state".`);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoginBusy(false);
     }
   }
 
@@ -202,6 +271,36 @@ export default function Scans() {
                         onChange={(e) => setForm({ ...form, successUrl: e.target.value })}
                       />
                     </Field>
+                    <Field label="Username selector" hint="Optional: the password mode fills the form itself.">
+                      <Input
+                        placeholder="#email"
+                        value={form.loginUserSel}
+                        onChange={(e) => setForm({ ...form, loginUserSel: e.target.value })}
+                      />
+                    </Field>
+                    <Field label="Password selector">
+                      <Input
+                        placeholder="#password"
+                        value={form.loginPassSel}
+                        onChange={(e) => setForm({ ...form, loginPassSel: e.target.value })}
+                      />
+                    </Field>
+                    <Field label="Submit selector">
+                      <Input
+                        placeholder="button[type=submit]"
+                        value={form.loginSubmitSel}
+                        onChange={(e) => setForm({ ...form, loginSubmitSel: e.target.value })}
+                      />
+                    </Field>
+                    <div className="flex items-center gap-2 sm:col-span-2">
+                      <Button size="sm" variant="secondary" onClick={loginNow} disabled={loginBusy}>
+                        <LogIn className="size-4" /> {loginBusy ? "Waiting for login…" : "Login now (interactive)"}
+                      </Button>
+                      <span className="text-[11px] text-muted-foreground">
+                        Needs the server running with <span className="mono">-browser</span>; the result is the saved session path.
+                      </span>
+                    </div>
+                    {loginNote ? <p className="text-[11px] text-emerald-700 dark:text-emerald-400 sm:col-span-2">{loginNote}</p> : null}
                   </>
                 ) : null}
                 <Field label="Candidate profile">
@@ -268,6 +367,79 @@ export default function Scans() {
                   <Switch checked={form.evasion} onCheckedChange={(v) => setForm({ ...form, evasion: v })} />
                   Eager evasion pack
                 </label>
+                <Field label="Max candidates" hint="0 = profile cap.">
+                  <Input
+                    type="number"
+                    min={0}
+                    value={form.maxCandidates}
+                    onChange={(e) => setForm({ ...form, maxCandidates: Number(e.target.value) })}
+                  />
+                </Field>
+                <Field label="Stop policy">
+                  <select
+                    className="h-9 rounded-md border border-border bg-card px-2 text-sm"
+                    value={form.stopMode}
+                    onChange={(e) => setForm({ ...form, stopMode: e.target.value })}
+                  >
+                    <option value="continue_all">continue after confirmations</option>
+                    <option value="first_confirmed">stop at the first confirmed</option>
+                    <option value="after_n_confirmed">stop after N confirmed</option>
+                    <option value="pause_and_ask">pause and ask</option>
+                  </select>
+                </Field>
+                {form.stopMode === "after_n_confirmed" ? (
+                  <Field label="Confirmed limit (N)">
+                    <Input
+                      type="number"
+                      min={1}
+                      value={form.stopN}
+                      onChange={(e) => setForm({ ...form, stopN: Number(e.target.value) })}
+                    />
+                  </Field>
+                ) : null}
+                <Field label="Proxy pool" hint="One proxy URL per line; round-robin, direct when empty." className="sm:col-span-2">
+                  <Textarea
+                    rows={2}
+                    placeholder={"http://127.0.0.1:8080\nsocks5://127.0.0.1:1080"}
+                    value={form.proxyPool}
+                    onChange={(e) => setForm({ ...form, proxyPool: e.target.value })}
+                  />
+                </Field>
+                <div className="grid grid-cols-4 gap-2 sm:col-span-2">
+                  <Field label="Discovery conc." hint="0 = profile.">
+                    <Input
+                      type="number"
+                      min={0}
+                      value={form.cfgDiscovery}
+                      onChange={(e) => setForm({ ...form, cfgDiscovery: Number(e.target.value) })}
+                    />
+                  </Field>
+                  <Field label="HTTP conc.">
+                    <Input
+                      type="number"
+                      min={0}
+                      value={form.cfgHttp}
+                      onChange={(e) => setForm({ ...form, cfgHttp: Number(e.target.value) })}
+                    />
+                  </Field>
+                  <Field label="Browser conc.">
+                    <Input
+                      type="number"
+                      min={0}
+                      value={form.cfgBrowser}
+                      onChange={(e) => setForm({ ...form, cfgBrowser: Number(e.target.value) })}
+                    />
+                  </Field>
+                  <Field label="Req/sec">
+                    <Input
+                      type="number"
+                      min={0}
+                      step="0.5"
+                      value={form.cfgRate}
+                      onChange={(e) => setForm({ ...form, cfgRate: Number(e.target.value) })}
+                    />
+                  </Field>
+                </div>
               </div>
               {error ? <Alert>{error}</Alert> : null}
               <div className="flex items-center justify-between gap-2">

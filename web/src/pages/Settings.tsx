@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { KeyRound, Save, Server, Trash2, Zap } from "lucide-react";
+import { KeyRound, RefreshCw, Save, Server, Trash2, Zap } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -28,6 +28,34 @@ export default function Settings() {
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
+  const [models, setModels] = useState<string[]>([]);
+  const [modelBusy, setModelBusy] = useState(false);
+  const [modelNote, setModelNote] = useState("");
+
+  // POST /api/llm/models asks the SAVED provider for its model list. The
+  // endpoint returns {models, error} with 200 even when discovery fails, so
+  // the note carries the provider's message instead of throwing.
+  async function discoverModels() {
+    setModelBusy(true);
+    setModelNote("");
+    setErr("");
+    try {
+      const res = await api<{ models: string[]; error?: string }>("/api/llm/models", {
+        method: "POST",
+        body: {},
+      });
+      setModels(res.models ?? []);
+      if (!res.models?.length) {
+        setModelNote(res.error ? `No models: ${res.error}` : "The provider returned no models.");
+      } else {
+        setModelNote(`${res.models.length} models discovered — pick one.`);
+      }
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setModelBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (!status.data) return;
@@ -132,8 +160,32 @@ export default function Settings() {
                       ))}
                     </select>
                   </Field>
-                  <Field label="Model">
-                    <Input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+                  <Field label="Model" hint="Empty saves no model; discovery reads the saved provider.">
+                    <div className="flex gap-2">
+                      <Input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={discoverModels}
+                        disabled={modelBusy}
+                        title="Ask the saved provider for its model list"
+                      >
+                        <RefreshCw className="size-3.5" /> {modelBusy ? "…" : "Discover"}
+                      </Button>
+                    </div>
+                    {models.length ? (
+                      <select
+                        className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
+                        value={models.includes(form.model) ? form.model : ""}
+                        onChange={(e) => e.target.value && setForm({ ...form, model: e.target.value })}
+                      >
+                        <option value="">Pick a discovered model…</option>
+                        {models.map((m) => (
+                          <option key={m}>{m}</option>
+                        ))}
+                      </select>
+                    ) : null}
+                    {modelNote ? <p className="text-[11px] text-muted-foreground">{modelNote}</p> : null}
                   </Field>
                   <Field label="Base URL" hint="Optional for providers with a default endpoint." className="sm:col-span-2">
                     <Input
