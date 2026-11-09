@@ -47,6 +47,8 @@ claude, anthropic, openrouter, ollama, vllm, openai, custom, chatgpt.
 The subscription route is stricter than the API-key route, and the details are
 not optional:
 
+- Authorization goes to `https://claude.com/cai/oauth/authorize`; Claude Code
+  v2.1.84 moved it there from `claude.ai/oauth/authorize`.
 - The headless flow asks for
   `user:profile user:inference user:sessions:claude_code user:mcp_servers`;
   including `org:create_api_key` (the CLI localhost flow does) makes the

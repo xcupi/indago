@@ -19,7 +19,7 @@ func TestStartBuildsPKCEAuthorizationURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	q := u.Query()
-	if u.Host != "claude.ai" || q.Get("client_id") != ClientID {
+	if u.Host != "claude.com" || u.Path != "/cai/oauth/authorize" || q.Get("client_id") != ClientID {
 		t.Fatalf("url = %s", raw)
 	}
 	if q.Get("code_challenge_method") != "S256" || q.Get("code_challenge") == "" {

@@ -31,8 +31,11 @@ import (
 )
 
 const (
-	ClientID     = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-	AuthorizeURL = "https://claude.ai/oauth/authorize"
+	ClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	// Claude Code v2.1.84 moved the claude.ai authorization endpoint from
+	// claude.ai/oauth/authorize to claude.com/cai/oauth/authorize. The old
+	// host still renders the consent page but the authorize step fails.
+	AuthorizeURL = "https://claude.com/cai/oauth/authorize"
 	// platform.claude.com is the live token host; the console host is kept as
 	// a fallback. Both reject requests whose User-Agent looks like a browser
 	// or like claude-code, so the exchange sends the bare axios UA the real
