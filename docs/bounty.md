@@ -119,3 +119,30 @@ inspected (public detail/rules + the logged-in submission form):
   the finding's evidence as the PoC.
 - Scopes on the API and on the public page both put the severity in
   `asset_value`; the asset lives in `scope`.
+
+## Submission report template (implemented)
+
+`POST /api/scans/{id}/reports {"format":"markdown","template":"yeswehack","mode":"confirmed"}`
+renders one Markdown section per confirmed finding using the platform's own
+skeleton:
+
+```
+## Description
+## Exploitation
+## PoC
+## Risk
+## Remediation
+```
+
+Above the sections it prints the form fields as metadata: bug type (mapped from
+Indago's class), scope, endpoint, vulnerable part, part name, payload, technical
+environment, application fingerprint, CVE, impact, CVSS and IPs. Fields the
+scanner genuinely does not know (fingerprint, egress IP, CVE) are marked `—`
+with a hint, and CVSS is explicitly **not scored**: Indago has a severity
+verdict, not a vector, so the operator assigns it in the form.
+
+Rejected diagnostics are never included; only confirmed findings are rendered.
+
+The UI exposes it as Reports → format `markdown` → template
+`YesWeHack submission (markdown)` (choosing the template switches the format
+automatically).

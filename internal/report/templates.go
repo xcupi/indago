@@ -39,13 +39,18 @@ const (
 	TemplateTechnical Template = ""
 	TemplatePentest   Template = "pentest"
 	TemplateBugBounty Template = "bug_bounty"
+	// TemplateYesWeHack is the platform-specific submission layout: one
+	// Markdown section per confirmed finding, with the platform's five
+	// sections and its form fields as metadata. Markdown is its native
+	// format; HTML/PDF fall back to the pentest document.
+	TemplateYesWeHack Template = "yeswehack"
 )
 
 // IsValid reports whether the template is known. The empty value is the
 // technical layout, so an older caller that never sets it keeps working.
 func (t Template) IsValid() bool {
 	switch t {
-	case TemplateTechnical, TemplatePentest, TemplateBugBounty:
+	case TemplateTechnical, TemplatePentest, TemplateBugBounty, TemplateYesWeHack:
 		return true
 	}
 	return false

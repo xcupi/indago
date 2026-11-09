@@ -32,6 +32,9 @@ func (MarkdownGenerator) Format() domain.ReportFormat { return domain.ReportMark
 // map-keyed breakdown is rendered in sorted key order, so the same Data always
 // produces byte-identical Markdown.
 func (MarkdownGenerator) Generate(w io.Writer, data Data) error {
+	if data.Template == TemplateYesWeHack {
+		return writeYesWeHackMarkdown(w, data)
+	}
 	if data.Template != TemplateTechnical {
 		var b strings.Builder
 		docFor(data).renderMarkdown(&b)

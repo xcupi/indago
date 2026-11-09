@@ -164,3 +164,38 @@ func TestTemplateValidity(t *testing.T) {
 		}
 	}
 }
+
+// The YesWeHack layout must mirror the platform's own template: five Markdown
+// sections per confirmed finding, the form fields as metadata, and no rejected
+// diagnostic presented as a vulnerability.
+func TestYesWeHackTemplateUsesPlatformSections(t *testing.T) {
+	data := templateFixture()
+	data.Template = TemplateYesWeHack
+	data.Endpoints = map[domain.ID]string{"e1": "https://shop.example.test/?search=x"}
+	data.Findings[0].Detail = []byte(`{"method":"GET","parameter_name":"search","candidates":[{"value":"<svg onload=indago123>"}],"attempts":[{"candidate_value":"<svg onload=indago123>","verdict":"confirmed","notes":"the browser threw ReferenceError for the marker"}]}`)
+	var b strings.Builder
+	if err := (MarkdownGenerator{}).Generate(&b, data); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	for _, want := range []string{
+		"# YesWeHack submission — Acme Program",
+		"# 1. Reflected XSS in \"search\"",
+		"**Bug type:** Cross-Site Scripting (XSS)",
+		"**Scope:** https://shop.example.test/?search=x",
+		"**Part name:** search",
+		"**Payload:** `<svg onload=indago123>`",
+		"## Description", "## Exploitation", "## PoC", "## Risk", "## Remediation",
+		"not scored by Indago",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Admin probe rejected") {
+		t.Fatal("a rejected diagnostic was rendered into a submission report")
+	}
+	if strings.Contains(out, "CVSS:3.1/AV:N") {
+		t.Fatal("the template must not invent a CVSS vector")
+	}
+}

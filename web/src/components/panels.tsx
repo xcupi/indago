@@ -287,10 +287,16 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
               <select
                 className="h-8 rounded-md border border-border bg-background px-2 text-xs"
                 value={template}
-                onChange={(e) => setTemplate(e.target.value)}
+                onChange={(e) => {
+                  setTemplate(e.target.value);
+                  // The platform takes Markdown; switch the format with it so
+                  // the two choices cannot disagree.
+                  if (e.target.value === "yeswehack") setFormat("markdown");
+                }}
               >
                 <option value="pentest">pentest</option>
                 <option value="bug_bounty">bug bounty</option>
+                <option value="yeswehack">YesWeHack submission (markdown)</option>
                 <option value="technical">technical</option>
               </select>
             </div>
