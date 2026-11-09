@@ -5,11 +5,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, Input } from "@/components/ui/input";
 import { Alert, Code, Loading } from "@/components/ui/misc";
+import { Switch } from "@/components/ui/controls";
 import { api, getToken, refreshAll, setToken, useApi } from "@/lib/api";
 import { formatTime } from "@/lib/utils";
 
 interface LLMStatus {
   configured: boolean;
+  enabled?: boolean;
+  max_attempts?: number;
   provider?: string;
   model?: string;
   base_url?: string;
@@ -27,7 +30,7 @@ export default function Settings() {
   const caps = useApi<Record<string, unknown>>("/api/capabilities");
   const version = useApi<{ version?: string }>("/api/version");
 
-  const [form, setForm] = useState({ provider: "", model: "", base_url: "", api_key: "" });
+  const [form, setForm] = useState({ provider: "", model: "", base_url: "", api_key: "", enabled: true, max_attempts: 10 });
   const [token, setLocalToken] = useState(getToken());
   const [msg, setMsg] = useState("");
   const [probe, setProbe] = useState<Record<string, string>>({});
@@ -74,6 +77,8 @@ export default function Settings() {
       provider: status.data?.provider ?? f.provider,
       model: status.data?.model ?? f.model,
       base_url: status.data?.base_url ?? f.base_url,
+      enabled: status.data?.enabled ?? f.enabled,
+      max_attempts: status.data?.max_attempts ?? f.max_attempts,
     }));
   }, [status.data?.provider, status.data?.model, status.data?.base_url]);
 
@@ -113,6 +118,8 @@ export default function Settings() {
           model: form.model,
           base_url: form.base_url,
           api_key: form.api_key, // empty keeps the stored key
+          enabled: form.enabled,
+          max_attempts: Number(form.max_attempts) || 0,
         },
       });
       setForm({ ...form, api_key: "" });
@@ -267,6 +274,30 @@ export default function Settings() {
                       value={form.base_url}
                       onChange={(e) => setForm({ ...form, base_url: e.target.value })}
                       placeholder="https://api.example.com/v1"
+                    />
+                  </Field>
+                  <Field
+                    label="AI advisory"
+                    hint="Master switch. Off means no advisory call at all — scanning and reports keep working without a model."
+                    className="sm:col-span-2"
+                  >
+                    <div className="flex items-center gap-3">
+                      <Switch checked={form.enabled} onCheckedChange={(v) => setForm({ ...form, enabled: v })} />
+                      <span className="text-xs text-muted-foreground">
+                        {form.enabled ? "Enabled — payload diagnosis and report narration may run" : "Disabled — no LLM call is made"}
+                      </span>
+                    </div>
+                  </Field>
+                  <Field
+                    label="Attempts per parameter"
+                    hint="Advisory budget. After this many failed model calls for one parameter, Indago stops asking and continues with its own testing. Applies to every provider."
+                  >
+                    <Input
+                      type="number"
+                      min={1}
+                      max={50}
+                      value={form.max_attempts}
+                      onChange={(e) => setForm({ ...form, max_attempts: Number(e.target.value) })}
                     />
                   </Field>
                   <Field label="API key" hint="Empty keeps the stored key. Never echoed back." className="sm:col-span-2">

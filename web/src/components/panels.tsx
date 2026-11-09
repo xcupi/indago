@@ -156,6 +156,7 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
               {selected.detail ? (
                 <Code>{JSON.stringify(decodeDetail(selected.detail), null, 2)}</Code>
               ) : null}
+              <PayloadDoctor scanId={scanId} finding={selected} />
             </div>
           </DialogContent>
         ) : null}
@@ -837,5 +838,173 @@ export function AIAssistPanel({ scanId }: { scanId: string }) {
         ) : null}
       </CardContent>
     </Card>
+  );
+}
+
+
+/* Payload doctor ---------------------------------------------------------- */
+
+interface Diagnosis {
+  skipped?: boolean;
+  skip_reason?: string;
+  attempts_used?: number;
+  attempt_budget?: number;
+  duplicates_dropped?: number;
+  out_of_scope_dropped?: number;
+  diagnosis?: string;
+  why_failed?: string;
+  waf?: { suspected?: boolean; signature?: string; confidence?: string; notes?: string };
+  payloads?: {
+    payload: string;
+    encoded?: string;
+    context?: string;
+    rationale?: string;
+    proof?: string;
+    confidence?: string;
+    bypasses?: string;
+    class?: string;
+  }[];
+  next_steps?: string[];
+  provider?: string;
+  model?: string;
+}
+
+/**
+ * PayloadDoctor turns a failed candidate into an explanation plus new
+ * candidates, using the request/response evidence the scan already captured.
+ * It is advisory: nothing here confirms a finding or changes a verdict.
+ */
+function PayloadDoctor({ scanId, finding }: { scanId: string; finding: Finding }) {
+  const providers = useApi<{ providers: { provider: string; label: string; configured: boolean }[] }>("/api/llm/providers");
+  const [mode, setMode] = useState("why_failed");
+  const [provider, setProvider] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [res, setRes] = useState<Diagnosis | null>(null);
+  const [copied, setCopied] = useState("");
+
+  const usable = (providers.data?.providers ?? []).filter((p) => p.configured);
+
+  async function run() {
+    setBusy(true);
+    setErr("");
+    setRes(null);
+    try {
+      const out = await api<Diagnosis>(`/api/scans/${scanId}/ai/diagnose`, {
+        method: "POST",
+        body: { finding_id: finding.id, mode, provider: provider || undefined },
+      });
+      setRes(out);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(text);
+      setTimeout(() => setCopied(""), 1500);
+    } catch {
+      /* clipboard blocked; the text is visible to copy by hand */
+    }
+  }
+
+  return (
+    <div className="rounded-md border border-border p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium">Payload doctor</span>
+        <select
+          className="h-8 rounded-md border border-border bg-card px-2 text-[11px]"
+          value={mode}
+          onChange={(e) => setMode(e.target.value)}
+        >
+          <option value="why_failed">why did it fail</option>
+          <option value="waf_bypass">WAF bypass</option>
+          <option value="suggest">suggest payloads</option>
+        </select>
+        <select
+          className="h-8 rounded-md border border-border bg-card px-2 text-[11px]"
+          value={provider}
+          onChange={(e) => setProvider(e.target.value)}
+        >
+          <option value="">default provider</option>
+          {usable.map((p) => (
+            <option key={p.provider} value={p.provider}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        <Button size="sm" variant="outline" onClick={run} disabled={busy}>
+          {busy ? "reading evidence…" : "Diagnose"}
+        </Button>
+        {finding.verdict === "confirmed" ? (
+          <span className="text-[10px] text-muted-foreground">already confirmed — diagnosis will be skipped</span>
+        ) : null}
+      </div>
+      <p className="mt-1 text-[10px] text-muted-foreground">
+        Sends the stored request/response (secrets redacted) to the model. Advisory only; it never confirms a finding.
+        Suggestions are limited to Indago&apos;s classes and filtered against payloads already tried.
+      </p>
+
+      {err ? <p className="mt-2 text-[11px] text-red-600 dark:text-red-400">{err}</p> : null}
+
+      {res?.skipped ? (
+        <p className="mt-2 rounded-md bg-muted px-2 py-1.5 text-[11px] text-muted-foreground">{res.skip_reason}</p>
+      ) : null}
+
+      {res && !res.skipped ? (
+        <div className="mt-2 space-y-2">
+          <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
+            <span className="mono">{res.provider}/{res.model}</span>
+            {res.why_failed ? <span className="mono">why: {res.why_failed}</span> : null}
+            {typeof res.attempts_used === "number" ? (
+              <span className="mono">attempts {res.attempts_used}/{res.attempt_budget}</span>
+            ) : null}
+            {res.duplicates_dropped ? <span className="mono">{res.duplicates_dropped} repeat(s) dropped</span> : null}
+            {res.out_of_scope_dropped ? <span className="mono">{res.out_of_scope_dropped} out-of-scope dropped</span> : null}
+          </div>
+          {res.diagnosis ? <p className="text-xs leading-relaxed">{res.diagnosis}</p> : null}
+          {res.waf?.notes ? (
+            <p className="text-[11px] text-muted-foreground">
+              WAF: {res.waf.suspected ? `suspected (${res.waf.confidence ?? "?"})` : "not detected"} — {res.waf.notes}
+            </p>
+          ) : null}
+          {(res.payloads ?? []).map((p, i) => (
+            <div key={i} className="rounded border border-border p-2">
+              <div className="flex items-start justify-between gap-2">
+                <code className="mono break-all text-[11px]">{p.encoded || p.payload}</code>
+                <button
+                  className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted"
+                  onClick={() => copy(p.encoded || p.payload)}
+                >
+                  {copied === (p.encoded || p.payload) ? "copied" : "copy"}
+                </button>
+              </div>
+              {p.encoded && p.encoded !== p.payload ? (
+                <p className="mono mt-1 break-all text-[10px] text-muted-foreground">raw: {p.payload}</p>
+              ) : null}
+              <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-muted-foreground">
+                {p.class ? <span className="mono">{p.class}</span> : null}
+                {p.context ? <span className="mono">ctx {p.context}</span> : null}
+                {p.confidence ? <span className="mono">conf {p.confidence}</span> : null}
+              </div>
+              {p.rationale ? <p className="mt-1 text-[11px]">{p.rationale}</p> : null}
+              {p.proof ? <p className="mt-1 text-[10px] text-muted-foreground">proof: {p.proof}</p> : null}
+              {p.bypasses ? <p className="mt-1 text-[10px] text-muted-foreground">bypasses: {p.bypasses}</p> : null}
+            </div>
+          ))}
+          {res.next_steps?.length ? (
+            <ol className="ml-4 list-decimal space-y-0.5 text-[11px] text-muted-foreground">
+              {res.next_steps.map((n, i) => (
+                <li key={i}>{n}</li>
+              ))}
+            </ol>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }

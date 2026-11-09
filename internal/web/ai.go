@@ -134,6 +134,11 @@ func (s *Server) handleScanAIAssist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if allowed, why := s.aiAdvisoryAllowed(); !allowed {
+		writeError(w, http.StatusServiceUnavailable, why)
+		return
+	}
+
 	gw, err := s.aiGatewayFor(req.Provider, req.Model)
 	if err != nil {
 		if errors.Is(err, llm.ErrNoCredential) || errors.Is(err, llm.ErrInvalid) {

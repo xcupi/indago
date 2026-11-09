@@ -143,8 +143,35 @@ type Config struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	BaseURL  string `json:"base_url"`
+	// MaxAttempts is the advisory budget per parameter: after this many
+	// failed model calls for the same parameter, Indago stops asking and
+	// carries on with its own deterministic testing. 0 means DefaultMaxAttempts.
+	MaxAttempts int `json:"max_attempts,omitempty"`
+	// Enabled is the advisory master switch. Nil (a config written before the
+	// switch existed) means enabled: upgrading must not silently turn AI off.
+	Enabled *bool `json:"enabled,omitempty"`
 
 	apiKey string
+}
+
+// AIEnabled reports whether the operator allows advisory calls. A nil switch
+// (older config) is enabled.
+func (c Config) AIEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// DefaultMaxAttempts is the advisory budget when none is configured.
+const DefaultMaxAttempts = 10
+
+// AttemptBudget returns the effective per-parameter budget.
+func (c Config) AttemptBudget() int {
+	if c.MaxAttempts > 0 {
+		return c.MaxAttempts
+	}
+	return DefaultMaxAttempts
 }
 
 // Configured reports whether a provider has been saved.
@@ -175,25 +202,29 @@ func (c Config) String() string {
 // Status is the public, serializable view of a configuration. It is what
 // GET /api/llm/config returns: no key, only a masked hint.
 type Status struct {
-	Configured bool       `json:"configured"`
-	Provider   string     `json:"provider"`
-	Model      string     `json:"model"`
-	BaseURL    string     `json:"base_url"`
-	KeyHint    string     `json:"key_hint"`
-	KeySet     bool       `json:"key_set"`
-	Providers  []Provider `json:"providers"`
+	Configured  bool       `json:"configured"`
+	Enabled     bool       `json:"enabled"`
+	MaxAttempts int        `json:"max_attempts"`
+	Provider    string     `json:"provider"`
+	Model       string     `json:"model"`
+	BaseURL     string     `json:"base_url"`
+	KeyHint     string     `json:"key_hint"`
+	KeySet      bool       `json:"key_set"`
+	Providers   []Provider `json:"providers"`
 }
 
 // Status renders the configuration for an API response.
 func (c Config) Status() Status {
 	return Status{
-		Configured: c.Configured(),
-		Provider:   c.Provider,
-		Model:      c.Model,
-		BaseURL:    c.BaseURL,
-		KeyHint:    c.MaskedKey(),
-		KeySet:     c.HasKey(),
-		Providers:  Providers(),
+		Configured:  c.Configured(),
+		Provider:    c.Provider,
+		Model:       c.Model,
+		BaseURL:     c.BaseURL,
+		KeyHint:     c.MaskedKey(),
+		KeySet:      c.HasKey(),
+		Enabled:     c.AIEnabled(),
+		MaxAttempts: c.AttemptBudget(),
+		Providers:   Providers(),
 	}
 }
 
@@ -214,15 +245,19 @@ func maskKey(k string) string {
 // "keep the stored key"; there is deliberately no way to clear only the key
 // (DELETE /api/llm/config clears the whole configuration).
 type SetRequest struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	BaseURL  string `json:"base_url"`
-	APIKey   string `json:"api_key"`
+	// Enabled toggles advisory calls; nil keeps the current value.
+	Enabled *bool `json:"enabled,omitempty"`
+	// MaxAttempts is optional; 0 keeps the current/default budget.
+	MaxAttempts int    `json:"max_attempts,omitempty"`
+	Provider    string `json:"provider"`
+	Model       string `json:"model"`
+	BaseURL     string `json:"base_url"`
+	APIKey      string `json:"api_key"`
 }
 
 // normalize validates and fills a SetRequest. It never includes any submitted
 // value in an error: a secret pasted into the wrong field must not be echoed.
-func normalize(req SetRequest, existingKey string) (Config, error) {
+func normalize(req SetRequest, existingKey string, existingAttempts int, existingEnabled *bool) (Config, error) {
 	def, ok := LookupProvider(req.Provider)
 	if !ok {
 		return Config{}, invalid("unknown provider; valid providers are %s", providerIDs())
@@ -265,7 +300,21 @@ func normalize(req SetRequest, existingKey string) (Config, error) {
 		return Config{}, invalid("%s requires an API key", def.ID)
 	}
 
-	return Config{Provider: def.ID, Model: model, BaseURL: base, apiKey: key}, nil
+	attempts := req.MaxAttempts
+	if attempts < 0 || attempts > 50 {
+		return Config{}, invalid("max_attempts must be between 1 and 50")
+	}
+	if attempts == 0 {
+		attempts = existingAttempts
+	}
+	if attempts == 0 {
+		attempts = DefaultMaxAttempts
+	}
+	enabled := req.Enabled
+	if enabled == nil {
+		enabled = existingEnabled
+	}
+	return Config{Provider: def.ID, Model: model, BaseURL: base, MaxAttempts: attempts, Enabled: enabled, apiKey: key}, nil
 }
 
 // validateBaseURL accepts only an absolute http(s) URL with no embedded
@@ -303,6 +352,10 @@ type diskConfig struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	BaseURL  string `json:"base_url"`
+	// MaxAttempts and Enabled are operator policy, not secrets, so they live
+	// in the config file next to the provider choice.
+	MaxAttempts int   `json:"max_attempts,omitempty"`
+	Enabled     *bool `json:"enabled,omitempty"`
 }
 
 // Store reads and writes one LLM configuration under a dedicated directory.
@@ -365,7 +418,8 @@ func (s *Store) loadLocked() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	return Config{Provider: d.Provider, Model: d.Model, BaseURL: d.BaseURL, apiKey: key}, nil
+	return Config{Provider: d.Provider, Model: d.Model, BaseURL: d.BaseURL,
+		MaxAttempts: d.MaxAttempts, Enabled: d.Enabled, apiKey: key}, nil
 }
 
 func (s *Store) readKeyLocked() (string, error) {
@@ -391,7 +445,7 @@ func (s *Store) Set(req SetRequest) (Config, error) {
 		// silently overwritten — and its key, if any, must not be lost.
 		return Config{}, err
 	}
-	cfg, err := normalize(req, cur.apiKey)
+	cfg, err := normalize(req, cur.apiKey, cur.AttemptBudget(), cur.Enabled)
 	if err != nil {
 		return Config{}, err
 	}
@@ -421,10 +475,12 @@ func (s *Store) saveLocked(cfg Config) error {
 	}
 
 	b, err := json.MarshalIndent(diskConfig{
-		Version:  configVersion,
-		Provider: cfg.Provider,
-		Model:    cfg.Model,
-		BaseURL:  cfg.BaseURL,
+		Version:     configVersion,
+		Provider:    cfg.Provider,
+		Model:       cfg.Model,
+		BaseURL:     cfg.BaseURL,
+		MaxAttempts: cfg.MaxAttempts,
+		Enabled:     cfg.Enabled,
 	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("llm: encode config: %w", err)

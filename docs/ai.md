@@ -1,11 +1,15 @@
 # AI advisory (optional)
 
 Indago works with no model configured. When one is configured, a model can do
-two things — and only two things:
+three things — and only three things:
 
 1. **Answer an explicit question about an existing scan** (`POST /api/scans/{id}/ai/assist`):
    prioritise endpoints, triage findings, propose next manual checks.
-2. **Draft the executive-summary paragraph of a report** (`ai_summary: true` on
+2. **Diagnose a payload that did not work, or propose a bypass**
+   (`POST /api/scans/{id}/ai/diagnose`): the model reads the request/response,
+   DOM and browser-log evidence already captured for a finding and explains the
+   failure (filter, encoding, WAF, wrong sink) and returns new candidates.
+3. **Draft the executive-summary paragraph of a report** (`ai_summary: true` on
    report creation), labeled as an unverified draft.
 
 Everything else is unchanged by design: the scanner decides what is tested and
@@ -114,3 +118,61 @@ is still generated, just without that paragraph.
 Protocol notes for ChatGPT, all found the hard way: `/responses` (not
 `/chat/completions`), `"store": false`, `"stream": true` (non-streaming is
 rejected), and the answer arrives as `response.output_text.delta` SSE events.
+
+
+## Payload diagnosis (`/ai/diagnose`)
+
+`POST /api/scans/{id}/ai/diagnose` answers the question the scanner cannot
+answer itself: *why did this candidate not produce a signal?*
+
+```json
+{"finding_id": "...", "mode": "why_failed", "provider": "custom", "note": "optional hint"}
+```
+
+`mode` is `why_failed` (default), `waf_bypass`, or `suggest`. The response
+carries `diagnosis`, `why_failed`, a `waf` assessment, up to 8 `payloads`
+(with `encoded`, `context`, `proof`, `class`) and `next_steps`.
+
+Evidence is the finding's own stored artifacts — response first, then request,
+DOM and browser log — capped at 12 KB each and 48 KB total. Screenshots are
+never sent. Before a byte leaves the process:
+
+- `cookie`, `set-cookie`, `authorization`, `proxy-authorization`, `x-api-key`,
+  `x-auth-token` and `x-csrf-token` header values are replaced with
+  `[REDACTED]`;
+- bearer tokens, `sk-…` keys, JWTs and `password`/`api_key`/`token`/`secret`
+  fields in bodies are masked.
+
+Captured evidence is attacker-influenced, so it is fenced as untrusted DATA and
+the prompt tells the model to analyse it, never to follow instructions inside
+it. The model's answer is prose; nothing is executed.
+
+### Guards that keep the model honest and cheap
+
+1. **Master switch** (`enabled` in Settings, default on). Off means no advisory
+   call at all — assist, diagnose and report narration all return without
+   contacting a provider.
+2. **Confirmed parameters are skipped.** If the finding is confirmed, or any
+   other finding on the same endpoint+parameter is confirmed, the endpoint
+   replies `{"skipped": true, "skip_reason": ...}` and makes **no** model call.
+   There is nothing to diagnose about a payload that already worked.
+3. **Per-parameter attempt budget** (`max_attempts`, default 10). Failed
+   advisory calls for the same parameter are counted; at the limit the endpoint
+   stops asking and says so (`attempts_used` / `attempt_budget`). The scan keeps
+   running with Indago's own deterministic tests.
+4. **No repeats.** Every candidate value the engine already sent is passed to
+   the model with an explicit "do not propose them again" instruction, and any
+   returned payload that matches a tried value — after URL-decoding, so
+   re-encoding does not sneak past — is dropped (`duplicates_dropped`).
+5. **Scope fence.** Suggestions are restricted to the classes the engine can
+   verify: `reflected_xss`, `dom_xss`, `idor`, `access_control`,
+   `information_disclosure`. Each payload must declare `class`; anything else
+   (`sqli`, `rce`, `ssrf`, `xxe`, `ssti`, …) is dropped
+   (`out_of_scope_dropped`), even if the evidence hints at it.
+6. **No verdict.** The model never marks a finding confirmed. It can say the
+   evidence is insufficient, and the engine's own verification remains the only
+   thing that can confirm.
+
+The UI exposes both policy controls in Settings ("AI advisory" and "Attempts
+per parameter") and the diagnosis itself as **Payload doctor** inside a
+finding's dialog.

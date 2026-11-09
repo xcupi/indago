@@ -184,6 +184,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/llm/chatgpt/login/poll", s.handleChatGPTLoginPoll)
 	mux.HandleFunc("DELETE /api/llm/chatgpt/session", s.handleChatGPTLogout)
 	mux.HandleFunc("POST /api/scans/{id}/ai/assist", s.handleScanAIAssist)
+	mux.HandleFunc("POST /api/scans/{id}/ai/diagnose", s.handleDiagnosePayload)
 
 	mux.HandleFunc("GET /api/projects", s.handleListProjects)
 	mux.HandleFunc("POST /api/projects", s.handleCreateProject)

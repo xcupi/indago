@@ -158,7 +158,11 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	var aiSummary string
 	if req.AISummary {
-		aiSummary = s.draftAISummary(r.Context(), scanID, proj, sc, findings, len(all), req.AIProvider, req.AIModel)
+		if allowed, why := s.aiAdvisoryAllowed(); !allowed {
+			s.log.Info("report ai summary skipped: advisory disabled in Settings", "reason", why)
+		} else {
+			aiSummary = s.draftAISummary(r.Context(), scanID, proj, sc, findings, len(all), req.AIProvider, req.AIModel)
+		}
 	}
 	var buf bytes.Buffer
 	data := report.Data{
