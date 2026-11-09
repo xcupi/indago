@@ -1,7 +1,7 @@
 # Bug-bounty platform integration (YesWeHack)
 
-Status: browsing implemented and verified live; importing a program's scope is
-implemented and waits for a personal access token.
+Status: browsing and public-scope import are implemented and verified live.
+A personal access token is optional; it unlocks API scopes and templates.
 
 ## Authentication: token, not password
 
@@ -56,6 +56,26 @@ The UI has a **Load programs** button and does not fetch on page load or on
 re-render. The server caches a query for ten minutes; **Refresh** sends
 `refresh=1` to bypass the cache. Browsing therefore costs one platform call when
 the operator asks for it, not one per page view.
+
+## Where this sits in the workflow
+
+Bug bounty is **program intake**, not a post-scan submission screen. The order is:
+
+```
+find program -> import scope as a new project -> scan targets
+             -> generate YesWeHack report -> submit manually
+```
+
+Scope is always project-level: the imported project gets the program's
+`include_hosts` and path prefixes, and every scan under it is enforced against
+that scope. Importing never starts a scan.
+
+If a project already has a manually-entered scope and has already been scanned,
+do **not** import the program to "attach" it: import always creates a new
+project and never edits an existing one. Keep the existing project, generate a
+YesWeHack report from its scan, and check by hand that the finding's asset is in
+the program's published scope before submitting. To make the imported scope
+drive a fresh scan, import the program and scan the new project instead.
 
 ## Import: scope first, no scan started
 
