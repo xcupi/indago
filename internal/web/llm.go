@@ -169,16 +169,20 @@ func (s *Server) handleListLLMModels(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
+	provider := strings.ToLower(strings.TrimSpace(req.Provider))
 	cfg, err := s.llm.Load()
 	if errors.Is(err, llm.ErrNotConfigured) {
-		writeError(w, http.StatusBadRequest, "LLM provider is not configured")
-		return
-	}
-	if err != nil {
+		// An explicit OAuth provider can be listed even when no default
+		// provider is saved in Settings. Without one, there is nothing to ask.
+		if provider == "" {
+			writeError(w, http.StatusBadRequest, "LLM provider is not configured")
+			return
+		}
+		cfg = llm.Config{}
+	} else if err != nil {
 		s.writeInternalError(w, "read LLM settings", err)
 		return
 	}
-	provider := strings.ToLower(strings.TrimSpace(req.Provider))
 	if provider == "" {
 		provider = cfg.Provider
 	}
