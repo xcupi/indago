@@ -252,7 +252,7 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		// browser-verify job can even be enqueued (browser navigation carries no
 		// request body, so a POST/body-carrying candidate's finding stays
 		// Pending — see docs/scan-orchestration.md).
-		if res.reflection != nil && res.reflection.Reflected {
+		if res.reflection != nil && res.reflection.Reflected && !res.blockSuspected && !res.captchaSuspected {
 			e.enqueueVerification(ctx, job, ep, cand, focus, tc.ID)
 		}
 		// Independent of reflection: a throttle/maintenance page can echo the
@@ -273,7 +273,7 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		// Enqueue one child test job per planned candidate, before this (parent)
 		// job completes, so scan completion waits for them. Candidate jobs do not
 		// re-plan, so this does not recurse.
-		if res.reflection != nil && res.reflection.Plan != nil {
+		if res.reflection != nil && res.reflection.Plan != nil && !res.blockSuspected && !res.captchaSuspected {
 			e.enqueueCandidates(ctx, job, res.reflection.Plan)
 		}
 		if res.blockSuspected {
