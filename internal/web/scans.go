@@ -290,6 +290,7 @@ type createScanReq struct {
 	SkipAccessControl  bool `json:"skip_access_control"`
 	SkipIDOR           bool `json:"skip_idor"`
 	SkipInfoDisclosure bool `json:"skip_info_disclosure"`
+	SkipWriteEndpoints bool `json:"skip_write_endpoints"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -381,6 +382,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		SkipAccessControl:         req.SkipAccessControl,
 		SkipIDOR:                  req.SkipIDOR,
 		SkipInfoDisclosure:        req.SkipInfoDisclosure,
+		SkipWriteEndpoints:        req.SkipWriteEndpoints,
 	})
 	if err != nil {
 		s.writeScanError(w, err)

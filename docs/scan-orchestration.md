@@ -57,7 +57,12 @@ per scan:
   unchanged). Discovery still runs; skipped reflected-XSS engines do not
   enqueue per-parameter reflection jobs, and skipped bounded passes are not
   started. `skip_dom_xss` also omits the client-side open-redirect probe, which
-  is part of the DOM pass.
+  is part of the DOM pass. `skip_write_endpoints` (on by default for bounty
+  imports and the New scan UI) additionally keeps every payload-bearing engine
+  away from POST/PUT/PATCH/DELETE endpoints, Laravel `_method` overrides, and
+  state-changing path verbs (`store_`, `update_`, `delete_`, `upload`, …).
+  Turn it off only when the target owner has authorized records to be created
+  or changed.
 - **Provenance** (`user_provided`, `crawler`, `form`, `sitemap`, `robots`, …) is
   stored on every endpoint/parameter and surfaced in status.
 - **Session-terminating links are skipped on authenticated scans.** When the

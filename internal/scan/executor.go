@@ -35,6 +35,10 @@ type ExecutorConfig struct {
 	// against a live target can change its state, so it is an explicit opt-in.
 	// Jobs for such endpoints are recorded as SKIPPED, not failed.
 	AllowStateChanging bool
+	// SkipWriteEndpoints keeps payload-bearing jobs away from endpoints that
+	// look like writes even when AllowStateChanging is on. Set from
+	// ScanConfig.SkipWriteEndpoints; off preserves legacy behavior.
+	SkipWriteEndpoints bool
 	// OnBlock is called once when a request reports 429/503 backpressure or a
 	// newly appearing CAPTCHA. The controller uses it to pause the scan rather
 	// than continuing to spend requests into a block. A 403/406 filter
@@ -216,6 +220,13 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		kind = fmt.Sprintf("candidate %s/%s; parameter %s (%s)", cand.Source, cand.Category, focus.Name, focus.Location)
 	case focus != nil:
 		kind = fmt.Sprintf("reflection; parameter %s (%s)", focus.Name, focus.Location)
+	}
+	// Write-endpoint safeguard applies BEFORE the broader state-changing
+	// opt-in: even with AllowStateChanging on (needed for role-write/IDOR
+	// probes), a reflected-XSS payload must not mutate a record just because
+	// the crawler found a store/update form. Explicit scan opt-out only.
+	if e.cfg.SkipWriteEndpoints && isWriteLikeEndpoint(ep, params) {
+		return result{skipped: true, note: fmt.Sprintf("%s skipped: write-like endpoint %s %s is disabled by skip_write_endpoints", kind, ep.Method, endpointLabel(ep.URL))}
 	}
 	// State-changing safeguard applies to baseline, reflection, AND candidate jobs:
 	// a candidate breakout is never sent to a state-changing endpoint unless the
@@ -739,6 +750,39 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 		req.ContentType = observedJSONContentType(ep.ContentType)
 	}
 	return req, nil
+}
+
+// isWriteLikeEndpoint conservatively identifies endpoints that can change
+// server state even when the HTTP method looks safe. Laravel-style forms often
+// spoof PUT/PATCH/DELETE through a `_method` field, and some applications
+// expose state changes as GET routes (`store_x`, `update_x`, `delete_x`).
+// This is deliberately broader than isSafeMethod: it protects a scan from
+// creating records while still allowing ordinary GET/query pages through.
+func isWriteLikeEndpoint(ep *domain.Endpoint, params []*domain.Parameter) bool {
+	if ep == nil {
+		return false
+	}
+	switch ep.Method {
+	case domain.MethodPOST, domain.MethodPUT, domain.MethodPATCH, domain.MethodDELETE:
+		return true
+	}
+	for _, p := range params {
+		if p != nil && strings.EqualFold(strings.TrimSpace(p.Name), "_method") {
+			return true
+		}
+	}
+	u, err := url.Parse(ep.URL)
+	if err != nil {
+		return true // unparseable target: fail closed for a payload-bearing job
+	}
+	for _, seg := range strings.Split(strings.ToLower(strings.Trim(u.Path, "/")), "/") {
+		for _, verb := range []string{"store", "update", "delete", "create", "upload", "remove", "save", "submit", "approve", "reject", "insert", "process", "transfer", "checkout", "register", "password", "role"} {
+			if strings.HasPrefix(seg, verb) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isSafeMethod(m domain.HTTPMethod) bool {

@@ -69,6 +69,7 @@ export interface ScanConfig {
   skip_access_control?: boolean;
   skip_idor?: boolean;
   skip_info_disclosure?: boolean;
+  skip_write_endpoints?: boolean;
   skip_global_injection?: boolean;
   skip_static_assets?: boolean;
 }

@@ -372,6 +372,7 @@ type CreateScanParams struct {
 	SkipAccessControl  bool
 	SkipIDOR           bool
 	SkipInfoDisclosure bool
+	SkipWriteEndpoints bool
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -551,6 +552,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.SkipAccessControl = p.SkipAccessControl
 	cfg.SkipIDOR = p.SkipIDOR
 	cfg.SkipInfoDisclosure = p.SkipInfoDisclosure
+	cfg.SkipWriteEndpoints = p.SkipWriteEndpoints
 
 	statePath, err := c.resolveAuth(ctx, mode, p, scope, c.huntingUserAgent(&domain.Scan{Config: domain.ScanConfig{HuntingUserAgent: project.HuntingUserAgent, HuntingUserAgentReplace: project.HuntingUserAgentReplace}}))
 	if err != nil {

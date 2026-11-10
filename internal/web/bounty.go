@@ -355,6 +355,7 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 					// query/form-first plan and can be tuned later.
 					SkipGlobalInjection: true,
 					SkipStaticAssets:    true,
+					SkipWriteEndpoints:  true,
 					AuthMode:            domain.AuthAnonymous,
 				})
 				if err != nil {

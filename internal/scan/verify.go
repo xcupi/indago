@@ -311,6 +311,9 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 	if vj.Candidate.Combined {
 		note = fmt.Sprintf("browser verification; combined candidate %s/%s; parameters %s (%s) + %s (%s)", vj.Candidate.Source, vj.Candidate.Category, focus.Name, focus.Location, vj.Candidate.ParameterB, vj.Candidate.LocationB)
 	}
+	if e.cfg.SkipWriteEndpoints && isWriteLikeEndpoint(ep, params) {
+		return verifyResult{skipped: true, note: fmt.Sprintf("%s skipped: write-like endpoint %s %s is disabled by skip_write_endpoints", note, ep.Method, endpointLabel(ep.URL))}
+	}
 	if !e.cfg.AllowStateChanging && !isSafeMethod(ep.Method) {
 		return verifyResult{skipped: true, note: fmt.Sprintf("%s skipped: %s is state-changing and AllowStateChanging is off", note, ep.Method)}
 	}

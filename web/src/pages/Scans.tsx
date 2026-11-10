@@ -82,6 +82,7 @@ export default function Scans() {
     skipAccessControl: false,
     skipIDOR: false,
     skipInfoDisclosure: false,
+    skipWriteEndpoints: true,
     rawQuery: "off",
     recon: "off",
     proxyPool: "",
@@ -192,6 +193,7 @@ export default function Scans() {
         skip_access_control: form.skipAccessControl,
         skip_idor: form.skipIDOR,
         skip_info_disclosure: form.skipInfoDisclosure,
+        skip_write_endpoints: form.skipWriteEndpoints,
         raw_query_injection: form.rawQuery,
         recon_level: form.recon,
       };
@@ -451,6 +453,18 @@ export default function Scans() {
                       </label>
                     ))}
                   </div>
+                  <label className="mt-2 flex items-start gap-2 border-t border-border pt-2 text-xs text-foreground">
+                    <Switch
+                      checked={form.skipWriteEndpoints}
+                      onCheckedChange={(v) => setForm({ ...form, skipWriteEndpoints: v })}
+                    />
+                    <span>
+                      Skip write-like endpoints (store/update/delete/upload, POST forms)
+                      <span className="block text-[10px] text-muted-foreground">
+                        Keeps XSS probes from creating or changing records. Uncheck only when you intend to test writes.
+                      </span>
+                    </span>
+                  </label>
                 </div>
                 <label className="flex items-center gap-2 text-xs text-foreground">
                   <Switch checked={form.library} onCheckedChange={(v) => setForm({ ...form, library: v })} />

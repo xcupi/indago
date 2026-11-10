@@ -273,6 +273,10 @@ func (c *Controller) enqueueObjectFamilyProbes(ctx context.Context, scanID domai
 	if err != nil {
 		return
 	}
+	if sc.Config.SkipWriteEndpoints {
+		c.log.Info("object-family probe skipped: write-like endpoints disabled", "scan", scanID)
+		return
+	}
 	// Same rule as cases 35/36: the server's -allow-state-changing authorizes
 	// the POST that creates the caller's own object, and the per-scan flag
 	// remains for a server that has not been started with it.

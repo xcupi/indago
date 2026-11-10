@@ -224,6 +224,14 @@ type ScanConfig struct {
 	SkipIDOR           bool `json:"skip_idor,omitempty"`
 	SkipInfoDisclosure bool `json:"skip_info_disclosure,omitempty"`
 
+	// SkipWriteEndpoints keeps payload-bearing engines away from endpoints
+	// that look like writes: non-GET/HEAD/OPTIONS methods, Laravel-style
+	// `_method` overrides, and path verbs such as store/update/delete/upload.
+	// A reflected-XSS probe must not create or mutate records merely because a
+	// form was in crawl scope. Off by default for backward compatibility; new
+	// imports and the UI default to on.
+	SkipWriteEndpoints bool `json:"skip_write_endpoints,omitempty"`
+
 	// RequestsPerSecond is ONE budget for all of the scan's target-facing
 	// requests: discovery fetches (crawl, sitemap, robots, content), redirect
 	// hops, raw test requests, and browser discovery/verification navigations.

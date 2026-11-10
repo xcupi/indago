@@ -541,6 +541,11 @@ func (e *accessControlExecutor) runRoleField(ctx context.Context, job *domain.Te
 		return d, domain.OutcomeSuccess, nil, false, true
 	}
 
+	// A scan that opted out of write-like endpoints must not reach the
+	// profile-update write slice, even when role-write itself is enabled.
+	if sc, err := e.store.Scans().Get(ctx, job.ScanID); err == nil && sc.Config.SkipWriteEndpoints {
+		return skip("write-like endpoints are disabled by skip_write_endpoints")
+	}
 	// State-changing guard: no request at all is sent unless the operator
 	// explicitly opted into writes (AGENTS.md §2). Scan creation refuses to
 	// enable this mode without the opt-in; this is the job-level enforcement.
