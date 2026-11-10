@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FolderPlus, Trash2 } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
@@ -24,13 +24,29 @@ export default function Projects() {
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkErr, setBulkErr] = useState("");
   const [bulkNote, setBulkNote] = useState("");
+  const [pageSize, setPageSize] = useState(10);
+  const [page, setPage] = useState(1);
 
   const projectsList = projects.data ?? [];
   const selectedIDs = Object.keys(selected).filter((id) => selected[id]);
-  const allSelected = projectsList.length > 0 && selectedIDs.length === projectsList.length;
+  const pageCount = Math.max(1, Math.ceil(projectsList.length / pageSize));
+  const pageStart = (page - 1) * pageSize;
+  const pagedProjects = projectsList.slice(pageStart, pageStart + pageSize);
+  const allOnPage = pagedProjects.length > 0 && pagedProjects.every((p) => selected[p.id]);
 
-  function toggleAll(checked: boolean) {
-    setSelected(checked ? Object.fromEntries(projectsList.map((p) => [p.id, true])) : {});
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+
+  function togglePage(checked: boolean) {
+    setSelected((prev) => {
+      const next = { ...prev };
+      for (const p of pagedProjects) {
+        if (checked) next[p.id] = true;
+        else delete next[p.id];
+      }
+      return next;
+    });
   }
 
   async function deleteSelected() {
@@ -139,10 +155,10 @@ export default function Projects() {
                 <label className="flex items-center gap-2 text-xs text-foreground">
                   <input
                     type="checkbox"
-                    checked={allSelected}
-                    onChange={(e) => toggleAll(e.target.checked)}
+                    checked={allOnPage}
+                    onChange={(e) => togglePage(e.target.checked)}
                   />
-                  Select all
+                  Select all on this page
                 </label>
                 {selectedIDs.length > 0 ? (
                   <>
@@ -157,6 +173,21 @@ export default function Projects() {
                   <span className="text-[11px] text-muted-foreground">Select projects to delete them together.</span>
                 )}
                 {bulkNote ? <span className="text-[11px] text-emerald-700 dark:text-emerald-400">{bulkNote}</span> : null}
+                <label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+                  Per page
+                  <select
+                    className="h-8 rounded-md border border-border bg-background px-2 text-xs text-foreground"
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setPage(1);
+                    }}
+                  >
+                    <option value={10}>10</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                  </select>
+                </label>
               </div>
               {bulkErr ? <div className="px-3 pt-2"><Alert className="border-amber-200 text-amber-800 dark:border-amber-900 dark:text-amber-300">{bulkErr}</Alert></div> : null}
               <Table>
@@ -166,8 +197,8 @@ export default function Projects() {
                     <input
                       type="checkbox"
                       aria-label="Select all projects"
-                      checked={allSelected}
-                      onChange={(e) => toggleAll(e.target.checked)}
+                      checked={allOnPage}
+                      onChange={(e) => togglePage(e.target.checked)}
                     />
                   </TableHead>
                   <TableHead>Name</TableHead>
@@ -177,7 +208,7 @@ export default function Projects() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {projectsList.map((p) => (
+                {pagedProjects.map((p) => (
                   <TableRow key={p.id} className="cursor-pointer" onClick={() => navigate(`/projects/${p.id}`)}>
                     <TableCell onClick={(e) => e.stopPropagation()}>
                       <input
@@ -195,6 +226,22 @@ export default function Projects() {
                 ))}
               </TableBody>
             </Table>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
+              <span>
+                Showing {projectsList.length ? pageStart + 1 : 0}–{Math.min(pageStart + pageSize, projectsList.length)} of {projectsList.length} projects
+              </span>
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="outline" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+                  Previous
+                </Button>
+                <span>
+                  Page {page} / {pageCount}
+                </span>
+                <Button size="sm" variant="outline" disabled={page >= pageCount} onClick={() => setPage((p) => p + 1)}>
+                  Next
+                </Button>
+              </div>
+            </div>
             </>
           )}
         </CardContent>
