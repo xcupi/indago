@@ -135,3 +135,36 @@ func TestBulkDeleteProjectsRefusesRunningScan(t *testing.T) {
 		t.Fatalf("running project should remain: %v", err)
 	}
 }
+
+func TestDeleteTargetRemovesOnlyUnstartedDraftScans(t *testing.T) {
+	a := newAPI(t, nil)
+	scanID := createTestScan(t, a)
+	var sc domain.Scan
+	a.mustJSON(a.do("GET", "/api/scans/"+string(scanID), nil), http.StatusOK, &sc)
+	if sc.State != domain.ScanCreated {
+		t.Fatalf("test setup scan state = %s, want created", sc.State)
+	}
+	if rec := a.do("DELETE", "/api/projects/"+string(sc.ProjectID)+"/targets/"+string(sc.TargetID), nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("target delete with draft scan = %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := a.st.Scans().Get(context.Background(), scanID); err == nil {
+		t.Fatal("draft scan survived target deletion")
+	}
+	if _, err := a.st.Targets().Get(context.Background(), sc.TargetID); err == nil {
+		t.Fatal("target survived deletion")
+	}
+}
+
+func TestDeleteTargetRefusesStartedScan(t *testing.T) {
+	a := newAPI(t, nil)
+	scanID := createTestScan(t, a)
+	var sc domain.Scan
+	a.mustJSON(a.do("GET", "/api/scans/"+string(scanID), nil), http.StatusOK, &sc)
+	sc.State = domain.ScanPaused
+	if err := a.st.Scans().Update(context.Background(), &sc); err != nil {
+		t.Fatal(err)
+	}
+	if rec := a.do("DELETE", "/api/projects/"+string(sc.ProjectID)+"/targets/"+string(sc.TargetID), nil); rec.Code != http.StatusConflict {
+		t.Fatalf("target delete with started scan = %d, want 409", rec.Code)
+	}
+}

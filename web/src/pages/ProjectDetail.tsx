@@ -370,7 +370,7 @@ export default function ProjectDetail({ id }: { id: string }) {
                             variant="ghost"
                             className="text-red-600 dark:text-red-400"
                             onClick={async () => {
-                              if (!confirm(`Delete target ${t.name}?`)) return;
+                              if (!confirm(`Delete target ${t.name}? Its unstarted draft scan(s) will be removed too. Started scans block deletion.`)) return;
                               try {
                                 await api(`/api/projects/${id}/targets/${t.id}`, { method: "DELETE" });
                                 refreshAll();

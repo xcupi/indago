@@ -243,13 +243,29 @@ func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 		s.writeLookupError(w, err)
 		return
 	}
-	// A target with scans keeps its history: deleting it would orphan them.
-	if scans, err := s.store.Scans().ListByProject(r.Context(), projectID); err == nil {
-		for _, sc := range scans {
-			if sc.TargetID == targetID {
-				writeError(w, http.StatusConflict, "this target has scans; delete those scans first")
-				return
-			}
+	// A target with a draft scan is still just an import artifact: the scan
+	// has never run, so remove it with the target. Any scan that has actually
+	// moved past "created" keeps its history and blocks the delete.
+	scans, err := s.store.Scans().ListByProject(r.Context(), projectID)
+	if err != nil {
+		s.writeInternalError(w, "list scans", err)
+		return
+	}
+	var drafts []domain.ID
+	for _, sc := range scans {
+		if sc.TargetID != targetID {
+			continue
+		}
+		if sc.State != domain.ScanCreated {
+			writeError(w, http.StatusConflict, "this target has a scan that has already started; delete that scan first")
+			return
+		}
+		drafts = append(drafts, sc.ID)
+	}
+	for _, scanID := range drafts {
+		if err := s.deleteScanCascade(r, scanID); err != nil {
+			s.writeInternalError(w, "delete draft scan", err)
+			return
 		}
 	}
 	if err := s.store.Targets().Delete(r.Context(), targetID); err != nil {
