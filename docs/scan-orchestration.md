@@ -51,6 +51,13 @@ per scan:
 - **Runtime backpressure pause.** A live 429/503 or a newly appearing CAPTCHA
   pauses the scan on its first occurrence. A 403 filter rejection is left for
   the separately bounded evasion pass, not auto-paused.
+- **Capability selection.** A scan can omit engines with
+  `skip_reflected_xss`, `skip_dom_xss`, `skip_access_control`, `skip_idor`, and
+  `skip_info_disclosure` (all false by default, so existing scans are
+  unchanged). Discovery still runs; skipped reflected-XSS engines do not
+  enqueue per-parameter reflection jobs, and skipped bounded passes are not
+  started. `skip_dom_xss` also omits the client-side open-redirect probe, which
+  is part of the DOM pass.
 - **Provenance** (`user_provided`, `crawler`, `form`, `sitemap`, `robots`, …) is
   stored on every endpoint/parameter and surfaced in status.
 - **Session-terminating links are skipped on authenticated scans.** When the

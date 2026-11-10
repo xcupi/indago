@@ -218,6 +218,9 @@ type Config struct {
 	SkipGlobalInjection bool
 	// SkipStaticAssets drops non-seed static resources before registration.
 	SkipStaticAssets bool
+	// SkipReflectedXSS keeps parameters/injection points for DOM/IDOR/access
+	// work but does not enqueue the per-parameter reflection job.
+	SkipReflectedXSS bool
 }
 
 // DefaultConfig returns conservative discovery defaults.

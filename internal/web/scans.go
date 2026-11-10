@@ -284,6 +284,12 @@ type createScanReq struct {
 	SkipGlobalInjection bool `json:"skip_global_injection"`
 	// SkipStaticAssets drops crawler/browser-discovered static resources.
 	SkipStaticAssets bool `json:"skip_static_assets"`
+	// Capability switches; true omits that engine's jobs.
+	SkipReflectedXSS   bool `json:"skip_reflected_xss"`
+	SkipDOMXSS         bool `json:"skip_dom_xss"`
+	SkipAccessControl  bool `json:"skip_access_control"`
+	SkipIDOR           bool `json:"skip_idor"`
+	SkipInfoDisclosure bool `json:"skip_info_disclosure"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -370,6 +376,11 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		EnableXSSLibrary:          req.EnableXSSLibrary,
 		SkipGlobalInjection:       req.SkipGlobalInjection,
 		SkipStaticAssets:          req.SkipStaticAssets,
+		SkipReflectedXSS:          req.SkipReflectedXSS,
+		SkipDOMXSS:                req.SkipDOMXSS,
+		SkipAccessControl:         req.SkipAccessControl,
+		SkipIDOR:                  req.SkipIDOR,
+		SkipInfoDisclosure:        req.SkipInfoDisclosure,
 	})
 	if err != nil {
 		s.writeScanError(w, err)

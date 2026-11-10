@@ -77,6 +77,11 @@ export default function Scans() {
     library: false,
     skipGlobal: true,
     skipStatic: true,
+    skipReflectedXSS: false,
+    skipDOMXSS: false,
+    skipAccessControl: false,
+    skipIDOR: false,
+    skipInfoDisclosure: false,
     rawQuery: "off",
     recon: "off",
     proxyPool: "",
@@ -182,6 +187,11 @@ export default function Scans() {
         enable_xss_library: form.library,
         skip_global_injection: form.skipGlobal,
         skip_static_assets: form.skipStatic,
+        skip_reflected_xss: form.skipReflectedXSS,
+        skip_dom_xss: form.skipDOMXSS,
+        skip_access_control: form.skipAccessControl,
+        skip_idor: form.skipIDOR,
+        skip_info_disclosure: form.skipInfoDisclosure,
         raw_query_injection: form.rawQuery,
         recon_level: form.recon,
       };
@@ -419,6 +429,29 @@ export default function Scans() {
                   <Switch checked={form.evasion} onCheckedChange={(v) => setForm({ ...form, evasion: v })} />
                   Eager evasion pack
                 </label>
+                <div className="rounded-md border border-border bg-muted/30 p-2 sm:col-span-2">
+                  <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Attack capabilities</div>
+                  <p className="mb-2 text-[10px] text-muted-foreground">
+                    Unchecked means the engine is skipped. Discovery still runs; the other selected engines keep working.
+                  </p>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {[
+                      ["skipReflectedXSS", "Reflected XSS"],
+                      ["skipDOMXSS", "DOM XSS + client redirect"],
+                      ["skipAccessControl", "Access control"],
+                      ["skipIDOR", "IDOR"],
+                      ["skipInfoDisclosure", "Information disclosure"],
+                    ].map(([key, label]) => (
+                      <label key={key} className="flex items-center gap-2 text-xs text-foreground">
+                        <Switch
+                          checked={!Boolean(form[key as keyof typeof form])}
+                          onCheckedChange={(v) => setForm({ ...form, [key]: !v })}
+                        />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
                 <label className="flex items-center gap-2 text-xs text-foreground">
                   <Switch checked={form.library} onCheckedChange={(v) => setForm({ ...form, library: v })} />
                   XSS payload library (PortSwigger families)

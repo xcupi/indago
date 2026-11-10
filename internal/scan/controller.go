@@ -366,6 +366,12 @@ type CreateScanParams struct {
 	SkipGlobalInjection bool
 	// SkipStaticAssets drops crawler/browser-discovered static resources.
 	SkipStaticAssets bool
+	// Capability switches; see domain.ScanConfig.
+	SkipReflectedXSS   bool
+	SkipDOMXSS         bool
+	SkipAccessControl  bool
+	SkipIDOR           bool
+	SkipInfoDisclosure bool
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -540,6 +546,11 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.EnableXSSLibrary = p.EnableXSSLibrary
 	cfg.SkipGlobalInjection = p.SkipGlobalInjection
 	cfg.SkipStaticAssets = p.SkipStaticAssets
+	cfg.SkipReflectedXSS = p.SkipReflectedXSS
+	cfg.SkipDOMXSS = p.SkipDOMXSS
+	cfg.SkipAccessControl = p.SkipAccessControl
+	cfg.SkipIDOR = p.SkipIDOR
+	cfg.SkipInfoDisclosure = p.SkipInfoDisclosure
 
 	statePath, err := c.resolveAuth(ctx, mode, p, scope, c.huntingUserAgent(&domain.Scan{Config: domain.ScanConfig{HuntingUserAgent: project.HuntingUserAgent, HuntingUserAgentReplace: project.HuntingUserAgentReplace}}))
 	if err != nil {

@@ -251,6 +251,7 @@ func (c *Controller) discoveryConfig(sc *domain.Scan) discovery.Config {
 	}
 	cfg.SkipGlobalInjection = sc.Config.SkipGlobalInjection
 	cfg.SkipStaticAssets = sc.Config.SkipStaticAssets
+	cfg.SkipReflectedXSS = sc.Config.SkipReflectedXSS
 	if sc.Config.MaxPages > 0 {
 		cfg.MaxPages = sc.Config.MaxPages
 	}
@@ -479,8 +480,10 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 	// with the new jobs still queued.
 	if !ex.evasionPassDone.Load() {
 		ex.evasionPassDone.Store(true)
-		c.enqueueEvasionEscalationCandidates(ctx, ex.scanID)
-		return false
+		if !sc.Config.SkipReflectedXSS {
+			c.enqueueEvasionEscalationCandidates(ctx, ex.scanID)
+			return false
+		}
 	}
 	// Bounded, one-time combined (multi-parameter) candidate fallback pass
 	// (see combined.go): the FIRST time the ordinary job queue goes quiet,
@@ -491,8 +494,10 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 	// branch is reached on every subsequent quiet tick too.
 	if !ex.combinedPassDone.Load() {
 		ex.combinedPassDone.Store(true)
-		c.enqueueCombinedCandidates(ctx, ex.scanID)
-		return false
+		if !sc.Config.SkipReflectedXSS {
+			c.enqueueCombinedCandidates(ctx, ex.scanID)
+			return false
+		}
 	}
 	// Bounded, one-time probe passes. They are enqueued on the SAME quiet
 	// tick and are independent of each other: DOM-XSS probing is
@@ -510,14 +515,18 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 	// endpoint regardless.
 	if !ex.domXSSPassDone.Load() {
 		ex.domXSSPassDone.Store(true)
-		c.enqueueDOMXSSProbes(ctx, ex.scanID)
-		passes = true
+		if !sc.Config.SkipDOMXSS {
+			c.enqueueDOMXSSProbes(ctx, ex.scanID)
+			passes = true
+		}
 	}
 	// IDOR: only for a scan that opted into the engine (see idor.go).
 	if !ex.idorPassDone.Load() {
 		ex.idorPassDone.Store(true)
-		c.enqueueIDORProbes(ctx, ex.scanID)
-		passes = true
+		if !sc.Config.SkipIDOR {
+			c.enqueueIDORProbes(ctx, ex.scanID)
+			passes = true
+		}
 	}
 	// Access control: bounded by robots.txt/sitemap provenance and a fixed
 	// admin-path vocabulary (see accesscontrol.go). No opt-in flag: every
@@ -525,22 +534,28 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 	// and the pass never sends a state-changing method.
 	if !ex.accessControlPassDone.Load() {
 		ex.accessControlPassDone.Store(true)
-		c.enqueueAccessControlProbes(ctx, ex.scanID)
-		passes = true
+		if !sc.Config.SkipAccessControl {
+			c.enqueueAccessControlProbes(ctx, ex.scanID)
+			passes = true
+		}
 	}
 	// Case 19's second source: administrative paths a discovered page's OWN
 	// scripts disclose. Same anonymous GET probe, same bounds.
 	if !ex.accessDisclosurePassDone.Load() {
 		ex.accessDisclosurePassDone.Store(true)
-		c.enqueueAccessControlDisclosureProbes(ctx, ex.scanID)
-		passes = true
+		if !sc.Config.SkipAccessControl {
+			c.enqueueAccessControlDisclosureProbes(ctx, ex.scanID)
+			passes = true
+		}
 	}
 	// Case 20: client-controlled flag differential. Opt-in (it may propose the
 	// conventional /admin path when discovery found no privileged endpoint).
 	if !ex.roleFlagPassDone.Load() {
 		ex.roleFlagPassDone.Store(true)
-		c.enqueueRoleFlagProbes(ctx, ex.scanID)
-		passes = true
+		if !sc.Config.SkipAccessControl {
+			c.enqueueRoleFlagProbes(ctx, ex.scanID)
+			passes = true
+		}
 	}
 	// Case 21: role-field write on the caller's own profile. Opt-in AND
 	// state-changing opt-in; scan creation already refuses any other
@@ -549,16 +564,20 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 	// endpoint, no mutation, no opt-in (see disclosure.go).
 	if !ex.disclosurePassDone.Load() {
 		ex.disclosurePassDone.Store(true)
-		c.enqueueDisclosureProbes(ctx, ex.scanID)
-		// Case 37 rides the same pass: one wrong-typed GET per numeric query
-		// parameter, bounded.
-		c.enqueueDisclosureErrorProbes(ctx, ex.scanID)
-		passes = true
+		if !sc.Config.SkipInfoDisclosure {
+			c.enqueueDisclosureProbes(ctx, ex.scanID)
+			// Case 37 rides the same pass: one wrong-typed GET per numeric query
+			// parameter, bounded.
+			c.enqueueDisclosureErrorProbes(ctx, ex.scanID)
+			passes = true
+		}
 	}
 	if !ex.roleFieldPassDone.Load() {
 		ex.roleFieldPassDone.Store(true)
-		c.enqueueRoleFieldProbes(ctx, ex.scanID)
-		passes = true
+		if !sc.Config.SkipAccessControl {
+			c.enqueueRoleFieldProbes(ctx, ex.scanID)
+			passes = true
+		}
 	}
 	if passes {
 		return false

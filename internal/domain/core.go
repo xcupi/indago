@@ -214,6 +214,16 @@ type ScanConfig struct {
 	// backward compatibility.
 	SkipStaticAssets bool `json:"skip_static_assets,omitempty"`
 
+	// Capability switches. False keeps the engine enabled (the historical
+	// behavior for every existing scan); true omits that engine's jobs while
+	// leaving discovery and the other engines intact. OMIT the DOM switch to
+	// also omit the client-side open-redirect probe, which rides that pass.
+	SkipReflectedXSS   bool `json:"skip_reflected_xss,omitempty"`
+	SkipDOMXSS         bool `json:"skip_dom_xss,omitempty"`
+	SkipAccessControl  bool `json:"skip_access_control,omitempty"`
+	SkipIDOR           bool `json:"skip_idor,omitempty"`
+	SkipInfoDisclosure bool `json:"skip_info_disclosure,omitempty"`
+
 	// RequestsPerSecond is ONE budget for all of the scan's target-facing
 	// requests: discovery fetches (crawl, sitemap, robots, content), redirect
 	// hops, raw test requests, and browser discovery/verification navigations.

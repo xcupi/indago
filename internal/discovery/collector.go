@@ -517,11 +517,13 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 		return false
 	}
 
-	_ = c.enqueueJob(ctx, domain.JobTarget{
-		EndpointID:       endpointID,
-		InjectionPointID: ip.ID,
-		URL:              info.Canonical,
-	})
+	if !c.cfg.SkipReflectedXSS {
+		_ = c.enqueueJob(ctx, domain.JobTarget{
+			EndpointID:       endpointID,
+			InjectionPointID: ip.ID,
+			URL:              info.Canonical,
+		})
+	}
 	return true
 }
 

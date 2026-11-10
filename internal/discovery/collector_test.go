@@ -726,3 +726,28 @@ func TestCollectorKeepsEveryObservedParameterValue(t *testing.T) {
 		}
 	}
 }
+
+// Capability selection: with reflected XSS disabled, parameters and injection
+// points are still persisted for the remaining engines, but no reflection job
+// is queued for them. Endpoint-level baseline jobs remain.
+func TestCollectorSkipsReflectionJobsWhenReflectedXSSDisabled(t *testing.T) {
+	cfg := discovery.DefaultConfig()
+	cfg.SkipReflectedXSS = true
+	c, _, q, scanID := newCollector(t, cfg)
+	ctx := context.Background()
+
+	if _, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{
+		URL: "http://example.com/search?q=hello", Method: domain.MethodGET, Source: domain.SourceCrawler,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := q.Jobs(ctx, scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range jobs {
+		if !job.Target.InjectionPointID.Empty() {
+			t.Fatalf("reflection job queued despite SkipReflectedXSS: %+v", job.Target)
+		}
+	}
+}
