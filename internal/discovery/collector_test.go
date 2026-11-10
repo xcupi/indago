@@ -329,6 +329,49 @@ func TestCollectorQueryParamsBecomeInjectionPoints(t *testing.T) {
 	}
 }
 
+// AddEndpoint registers query parameters straight from the URL, so the
+// framework-control filter must also run there. A DataTables request otherwise
+// creates one injection point per column and a bogus 403 "block" diagnostic.
+func TestCollectorSkipsTableControlParamsOnEndpoint(t *testing.T) {
+	cfg := discovery.DefaultConfig()
+	cfg.SkipGlobalInjection = true
+	cfg.SkipStaticAssets = true
+	c, st, _, scanID := newCollector(t, cfg)
+	ctx := context.Background()
+	id, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{
+		URL: "http://example.com/contact-management/table?draw=1&start=0&length=10" +
+			"&columns%5B0%5D%5Bname%5D=full_name&columns%5B1%5D%5Bsearch%5D%5Bvalue%5D=x" +
+			"&search%5Bvalue%5D=&order%5B0%5D%5Bdir%5D=asc&_=1794330944655&q=hello",
+		Method: domain.MethodGET, Source: domain.SourceBrowserNetwork,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err := st.Parameters().ListByEndpoint(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, p := range params {
+		got[p.Name] = true
+	}
+	for _, name := range []string{"draw", "start", "length", "columns[0][name]", "columns[1][search][value]", "search[value]", "order[0][dir]", "_"} {
+		if got[name] {
+			t.Fatalf("framework parameter %q was registered; params=%v", name, got)
+		}
+	}
+	if !got["q"] {
+		t.Fatalf("application parameter q was dropped; params=%v", got)
+	}
+	ips, err := st.InjectionPoints().ListByScan(ctx, scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ips) != 1 {
+		t.Fatalf("expected one injection point for q, got %d", len(ips))
+	}
+}
+
 func TestCollectorAddParameterAutoCreatesEndpoint(t *testing.T) {
 	c, st, _, scanID := newCollector(t, discovery.DefaultConfig())
 	ctx := context.Background()

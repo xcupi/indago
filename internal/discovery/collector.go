@@ -423,7 +423,7 @@ func (c *Collector) appendParamExample(ctx context.Context, paramID domain.ID, v
 func isTableControlParam(name string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
 	switch n {
-	case "draw", "start", "length", "search[value]", "search[regex]":
+	case "_", "draw", "start", "length", "search[value]", "search[regex]":
 		return true
 	}
 	return strings.HasPrefix(n, "columns[") ||
@@ -483,6 +483,13 @@ func (c *Collector) AddParameter(ctx context.Context, p ParamCandidate) error {
 // charge its per-scan budget only for real probes.
 func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, method domain.HTTPMethod, info URLInfo, name string, loc domain.ParamLocation, example string, source domain.DiscoverySource) bool {
 	if name == "" {
+		return false
+	}
+	// AddEndpoint registers query parameters directly from the URL, bypassing
+	// AddParameter; apply the framework-control filter here as well. Otherwise
+	// a DataTables-backed page registers every column/draw/order field as an
+	// injection point and floods the queue with protocol noise.
+	if loc == domain.LocationQuery && source != domain.SourceUserProvided && isTableControlParam(name) {
 		return false
 	}
 	pkey := ParamKey(method, info, name, loc)
