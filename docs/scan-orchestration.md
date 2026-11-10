@@ -395,6 +395,7 @@ so all three always agree:
 | … with an existing session | `POST /api/scans` + `"auth_mode":"existing","auth_state_path":"/abs/state.json"` | `indago scan create … -auth-state FILE` (`-auth existing` implied; a relative path is made absolute by the CLI) |
 | start / pause / resume / cancel | `POST /api/scans/{id}/{action}` | `indago scan start\|pause\|resume\|cancel ID` |
 | runtime concurrency / rate (`requests_per_second` paces all target-facing traffic of the scan) | `POST /api/scans/{id}/config` (the four runtime fields; crawl extent preserved) | `indago scan config ID [-discovery N] [-http N] [-browser N] [-rate N]` |
+| attack-engine selection before start | `PUT /api/scans/{id}/capabilities` (draft scans only; imported scans qualify) | — |
 | status (state, discovery, jobs, findings, request rate, live workers, 429/5xx, redacted session) | `GET /api/scans/{id}/status` | `indago scan status ID [-json]` |
 | interactive login (capture a session file for `existing` mode; needs `-browser` and explicit project scope) | `POST /api/auth/login` (`project_id`, `login_url`, optional `success_url`) | `auth login -project PID -login-url URL [-success-url GLOB]` |
 

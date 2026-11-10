@@ -440,6 +440,48 @@ type reconfigureReq struct {
 // handleReconfigureScan changes a scan's concurrency/rate at runtime. It reads
 // the scan's current config and overlays only the four runtime fields, so the
 // crawl-extent controls set at creation are never clobbered.
+type capabilitiesReq struct {
+	SkipReflectedXSS   bool `json:"skip_reflected_xss"`
+	SkipDOMXSS         bool `json:"skip_dom_xss"`
+	SkipAccessControl  bool `json:"skip_access_control"`
+	SkipIDOR           bool `json:"skip_idor"`
+	SkipInfoDisclosure bool `json:"skip_info_disclosure"`
+}
+
+// handleUpdateScanCapabilities edits the attack selection of a draft scan.
+// Capabilities are immutable once execution has started: disabling an engine
+// mid-flight would leave its already-queued jobs behind, while enabling one
+// would require rebuilding passes that start-time discovery has already
+// passed. A paused scan can be recreated with the desired selection.
+func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Request) {
+	id := domain.ID(r.PathValue("id"))
+	sc, err := s.store.Scans().Get(r.Context(), id)
+	if err != nil {
+		s.writeLookupError(w, err)
+		return
+	}
+	if sc.State != domain.ScanCreated {
+		writeError(w, http.StatusConflict, "attack capabilities can only be changed before the scan starts; recreate the scan to change a completed or paused run")
+		return
+	}
+	var req capabilitiesReq
+	if err := readJSON(r, &req); err != nil {
+		writeJSONBodyError(w, err)
+		return
+	}
+	sc.Config.SkipReflectedXSS = req.SkipReflectedXSS
+	sc.Config.SkipDOMXSS = req.SkipDOMXSS
+	sc.Config.SkipAccessControl = req.SkipAccessControl
+	sc.Config.SkipIDOR = req.SkipIDOR
+	sc.Config.SkipInfoDisclosure = req.SkipInfoDisclosure
+	sc.UpdatedAt = time.Now()
+	if err := s.store.Scans().Update(r.Context(), sc); err != nil {
+		s.writeInternalError(w, "update scan capabilities", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sc)
+}
+
 func (s *Server) handleReconfigureScan(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(r.PathValue("id"))
 	sc, err := s.store.Scans().Get(r.Context(), id)

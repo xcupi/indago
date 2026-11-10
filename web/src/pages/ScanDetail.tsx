@@ -4,7 +4,7 @@ import { PageTitle } from "@/components/Layout";
 import { Badge, StateBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/controls";
+import { Dialog, DialogContent, Switch, Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/controls";
 import { Field, Input } from "@/components/ui/input";
 import { Alert, Code, Loading, Stat } from "@/components/ui/misc";
 import { AIAssistPanel, CoveragePanel, EndpointsPanel, EvidencePanel, ExplorerPanel, FindingsPanel, IDORPanel, ReportsPanel, TestsPanel } from "@/components/panels";
@@ -54,6 +54,14 @@ export default function ScanDetail({ id }: { id: string }) {
   const [error, setError] = useState("");
   const [tuneOpen, setTuneOpen] = useState(false);
   const [tune, setTune] = useState({ discovery: 2, http: 4, browser: 1, rate: 2 });
+  const [capOpen, setCapOpen] = useState(false);
+  const [caps, setCaps] = useState({
+    reflected: true,
+    dom: true,
+    access: true,
+    idor: true,
+    disclosure: true,
+  });
 
   useEffect(() => {
     if (scan.data?.config) {
@@ -65,6 +73,18 @@ export default function ScanDetail({ id }: { id: string }) {
       });
     }
   }, [scan.data?.id]);
+
+  useEffect(() => {
+    const c = scan.data?.config;
+    if (!c) return;
+    setCaps({
+      reflected: !c.skip_reflected_xss,
+      dom: !c.skip_dom_xss,
+      access: !c.skip_access_control,
+      idor: !c.skip_idor,
+      disclosure: !c.skip_info_disclosure,
+    });
+  }, [scan.data?.id, scan.data?.updated_at]);
 
   async function act(action: string) {
     setBusy(action);
@@ -93,6 +113,29 @@ export default function ScanDetail({ id }: { id: string }) {
         },
       });
       setTuneOpen(false);
+      refreshAll();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function saveCapabilities() {
+    setBusy("caps");
+    setError("");
+    try {
+      await api(`/api/scans/${id}/capabilities`, {
+        method: "PUT",
+        body: {
+          skip_reflected_xss: !caps.reflected,
+          skip_dom_xss: !caps.dom,
+          skip_access_control: !caps.access,
+          skip_idor: !caps.idor,
+          skip_info_disclosure: !caps.disclosure,
+        },
+      });
+      setCapOpen(false);
       refreshAll();
     } catch (e) {
       setError((e as Error).message);
@@ -148,6 +191,11 @@ export default function ScanDetail({ id }: { id: string }) {
             <Button size="sm" variant="outline" onClick={() => setTuneOpen(true)}>
               <SlidersHorizontal className="size-4" /> Tune
             </Button>
+            {s.state === "created" ? (
+              <Button size="sm" variant="outline" onClick={() => setCapOpen(true)}>
+                Capabilities
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -298,6 +346,42 @@ export default function ScanDetail({ id }: { id: string }) {
             </Button>
             <Button size="sm" onClick={saveTune} disabled={busy === "tune"}>
               {busy === "tune" ? "Saving…" : "Apply"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={capOpen} onOpenChange={setCapOpen}>
+        <DialogContent
+          title="Attack capabilities"
+          description="Changes are allowed until the scan starts. Imported scans start as drafts, so their defaults can be adjusted here before the first start."
+        >
+          <div className="space-y-3">
+            {[
+              ["reflected", "Reflected XSS", "Per-parameter reflection and candidate jobs."],
+              ["dom", "DOM XSS + client redirect", "Browser taint analysis and client-side open-redirect probe."],
+              ["access", "Access control", "Role/flag/field and admin-path checks."],
+              ["idor", "IDOR", "Object-family and identifier checks."],
+              ["disclosure", "Information disclosure", "Sensitive files, SCM/git exposure and error probes."],
+            ].map(([key, label, hint]) => (
+              <label key={key} className="flex items-start justify-between gap-4 rounded-md border border-border p-3">
+                <span>
+                  <span className="block text-xs font-medium text-foreground">{label}</span>
+                  <span className="block text-[11px] text-muted-foreground">{hint}</span>
+                </span>
+                <Switch
+                  checked={Boolean(caps[key as keyof typeof caps])}
+                  onCheckedChange={(v) => setCaps({ ...caps, [key]: v })}
+                />
+              </label>
+            ))}
+          </div>
+          <div className="mt-4 flex justify-end gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setCapOpen(false)}>
+              Cancel
+            </Button>
+            <Button size="sm" onClick={saveCapabilities} disabled={busy === "caps"}>
+              {busy === "caps" ? "Saving…" : "Save capabilities"}
             </Button>
           </div>
         </DialogContent>

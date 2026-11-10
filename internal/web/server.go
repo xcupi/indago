@@ -274,6 +274,7 @@ func (s *Server) Handler() http.Handler {
 	// A specific pattern takes precedence over {action}, so runtime reconfigure
 	// has its own route rather than going through handleScanAction.
 	mux.HandleFunc("POST /api/scans/{id}/config", s.handleReconfigureScan)
+	mux.HandleFunc("PUT /api/scans/{id}/capabilities", s.handleUpdateScanCapabilities)
 	mux.HandleFunc("POST /api/scans/{id}/{action}", s.handleScanAction)
 
 	mux.HandleFunc("GET /api/evidence/{id}", s.handleGetEvidence)

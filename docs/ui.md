@@ -45,6 +45,7 @@ primitives (Radix + cva, vendored as source under `web/src/components/ui/`).
 | `GET /api/scans/{id}` (polled) | Scan header + Overview tab (state and stats are read from the scan object; `/status` and `/stats` are not called) |
 | `POST /api/scans/{id}/{start,pause,resume,cancel}` | Scan header actions |
 | `POST /api/scans/{id}/config` | "Tune" dialog (concurrency, rate) |
+| `PUT /api/scans/{id}/capabilities` | "Capabilities" dialog on a draft scan (attack engine selection) |
 | `GET /api/scans/{id}/coverage` | Coverage tab (with every fallback skip reason) |
 | `GET /api/scans/{id}/explorer` | Explorer tab (search, gap filter, DOM sinks) |
 | `GET /api/scans/{id}/endpoints` | Endpoints tab |

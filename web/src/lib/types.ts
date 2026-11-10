@@ -64,6 +64,13 @@ export interface ScanConfig {
   max_depth?: number;
   max_pages?: number;
   max_endpoints?: number;
+  skip_reflected_xss?: boolean;
+  skip_dom_xss?: boolean;
+  skip_access_control?: boolean;
+  skip_idor?: boolean;
+  skip_info_disclosure?: boolean;
+  skip_global_injection?: boolean;
+  skip_static_assets?: boolean;
 }
 
 export interface Scan {
