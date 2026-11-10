@@ -152,13 +152,40 @@ func selectDOMXSSEndpoints(endpoints []*domain.Endpoint) []*domain.Endpoint {
 // selection inside Handle. It reuses the scan's existing Endpoint registry —
 // never a parallel discovery mechanism. Best-effort throughout: a failure
 // here is logged, never fatal.
+// defaultMaxDOMXSSEndpoints keeps the browser group bounded on large sites:
+// each selected page expands into every DOM source, and browser work is the
+// slowest group. Operators can raise max_dom_xss_endpoints explicitly.
+const defaultMaxDOMXSSEndpoints = 25
+
 func (c *Controller) enqueueDOMXSSProbes(ctx context.Context, scanID domain.ID) {
 	endpoints, err := c.store.Endpoints().ListByScan(ctx, scanID)
 	if err != nil {
 		c.log.Warn("dom-xss probes: list endpoints", "scan", scanID, "err", err)
 		return
 	}
+	sc, err := c.store.Scans().Get(ctx, scanID)
+	if err != nil {
+		c.log.Warn("dom-xss probes: load scan", "scan", scanID, "err", err)
+		return
+	}
 	targets := selectDOMXSSEndpoints(endpoints)
+	if sc.Config.SkipDownloadEndpoints {
+		filtered := targets[:0]
+		for _, ep := range targets {
+			if !isDownloadLikeEndpoint(ep) {
+				filtered = append(filtered, ep)
+			}
+		}
+		targets = filtered
+	}
+	limit := sc.Config.MaxDOMXSSEndpoints
+	if limit <= 0 {
+		limit = defaultMaxDOMXSSEndpoints
+	}
+	if len(targets) > limit {
+		c.log.Info("dom-xss probes: endpoint cap applied", "scan", scanID, "discovered", len(targets), "cap", limit)
+		targets = targets[:limit]
+	}
 	now := time.Now()
 	n := 0
 	for _, ep := range targets {

@@ -83,6 +83,8 @@ export default function Scans() {
     skipIDOR: false,
     skipInfoDisclosure: false,
     skipWriteEndpoints: true,
+    skipDownloadEndpoints: true,
+    maxDOMXSSEndpoints: 25,
     rawQuery: "off",
     recon: "off",
     proxyPool: "",
@@ -194,6 +196,8 @@ export default function Scans() {
         skip_idor: form.skipIDOR,
         skip_info_disclosure: form.skipInfoDisclosure,
         skip_write_endpoints: form.skipWriteEndpoints,
+        skip_download_endpoints: form.skipDownloadEndpoints,
+        max_dom_xss_endpoints: form.maxDOMXSSEndpoints,
         raw_query_injection: form.rawQuery,
         recon_level: form.recon,
       };
@@ -465,6 +469,18 @@ export default function Scans() {
                       </span>
                     </span>
                   </label>
+                  <label className="mt-1 flex items-start gap-2 text-xs text-foreground">
+                    <Switch
+                      checked={form.skipDownloadEndpoints}
+                      onCheckedChange={(v) => setForm({ ...form, skipDownloadEndpoints: v })}
+                    />
+                    <span>
+                      Skip export/download endpoints
+                      <span className="block text-[10px] text-muted-foreground">
+                        Avoids large file routes that can stall a worker until timeout.
+                      </span>
+                    </span>
+                  </label>
                 </div>
                 <label className="flex items-center gap-2 text-xs text-foreground">
                   <Switch checked={form.library} onCheckedChange={(v) => setForm({ ...form, library: v })} />
@@ -502,6 +518,9 @@ export default function Scans() {
                   />
                   <p className="text-[11px] text-muted-foreground">0 = profile cap.</p>
                 </div>
+                <Field label="Max DOM endpoints" hint="Caps pages that receive the per-source DOM probe set. 0 = default 25.">
+                  <Input type="number" min={0} value={form.maxDOMXSSEndpoints} onChange={(e) => setForm({ ...form, maxDOMXSSEndpoints: Number(e.target.value) })} />
+                </Field>
                 <Field label="Stop policy">
                   <select
                     className="h-9 rounded-md border border-border bg-card px-2 text-sm"

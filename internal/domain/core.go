@@ -232,6 +232,18 @@ type ScanConfig struct {
 	// imports and the UI default to on.
 	SkipWriteEndpoints bool `json:"skip_write_endpoints,omitempty"`
 
+	// SkipDownloadEndpoints omits obvious export/download routes from
+	// payload-bearing tests. Such routes often stream a large file or block
+	// for a long time; probing them spends a worker timeout without producing
+	// an injection point. On by default for new scans/imports.
+	SkipDownloadEndpoints bool `json:"skip_download_endpoints,omitempty"`
+
+	// MaxDOMXSSEndpoints caps how many discovered HTML pages receive the
+	// per-source DOM-XSS probe set. 0 means the server default. Keeping this
+	// bounded matters because each page expands into every DOM source and the
+	// browser group is the slowest worker group.
+	MaxDOMXSSEndpoints int `json:"max_dom_xss_endpoints,omitempty"`
+
 	// RequestsPerSecond is ONE budget for all of the scan's target-facing
 	// requests: discovery fetches (crawl, sitemap, robots, content), redirect
 	// hops, raw test requests, and browser discovery/verification navigations.

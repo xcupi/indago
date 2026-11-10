@@ -62,7 +62,11 @@ per scan:
   away from POST/PUT/PATCH/DELETE endpoints, Laravel `_method` overrides, and
   state-changing path verbs (`store_`, `update_`, `delete_`, `upload`, …).
   Turn it off only when the target owner has authorized records to be created
-  or changed.
+  or changed. `skip_download_endpoints` (default on) likewise omits obvious
+  export/download routes, which often stream a large body or stall a worker
+  until timeout. `max_dom_xss_endpoints` caps the pages that receive the
+  per-source DOM probe set (default 25; each page expands into every DOM
+  source and browser work is the slowest worker group).
 - **Provenance** (`user_provided`, `crawler`, `form`, `sitemap`, `robots`, …) is
   stored on every endpoint/parameter and surfaced in status.
 - **Session-terminating links are skipped on authenticated scans.** When the

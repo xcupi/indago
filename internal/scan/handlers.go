@@ -34,6 +34,7 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	execCfg := c.opts.Executor
 	if sc != nil {
 		execCfg.SkipWriteEndpoints = sc.Config.SkipWriteEndpoints
+		execCfg.SkipDownloadEndpoints = sc.Config.SkipDownloadEndpoints
 	}
 	if c.opts.AutoPauseOnBlock && execCfg.OnBlock == nil {
 		execCfg.OnBlock = func(scanID domain.ID, reason string) {

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -39,6 +40,9 @@ type ExecutorConfig struct {
 	// look like writes even when AllowStateChanging is on. Set from
 	// ScanConfig.SkipWriteEndpoints; off preserves legacy behavior.
 	SkipWriteEndpoints bool
+	// SkipDownloadEndpoints omits export/download routes from payload jobs:
+	// they tend to stream a large file or stall a worker.
+	SkipDownloadEndpoints bool
 	// OnBlock is called once when a request reports 429/503 backpressure or a
 	// newly appearing CAPTCHA. The controller uses it to pause the scan rather
 	// than continuing to spend requests into a block. A 403/406 filter
@@ -227,6 +231,9 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 	// the crawler found a store/update form. Explicit scan opt-out only.
 	if e.cfg.SkipWriteEndpoints && isWriteLikeEndpoint(ep, params) {
 		return result{skipped: true, note: fmt.Sprintf("%s skipped: write-like endpoint %s %s is disabled by skip_write_endpoints", kind, ep.Method, endpointLabel(ep.URL))}
+	}
+	if e.cfg.SkipDownloadEndpoints && isDownloadLikeEndpoint(ep) {
+		return result{skipped: true, note: fmt.Sprintf("%s skipped: export/download endpoint %s %s is disabled by skip_download_endpoints", kind, ep.Method, endpointLabel(ep.URL))}
 	}
 	// State-changing safeguard applies to baseline, reflection, AND candidate jobs:
 	// a candidate breakout is never sent to a state-changing endpoint unless the
@@ -750,6 +757,31 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 		req.ContentType = observedJSONContentType(ep.ContentType)
 	}
 	return req, nil
+}
+
+// isDownloadLikeEndpoint identifies export/download routes that commonly
+// stream a large body or hold the connection open. They are not injection
+// points for reflected/DOM XSS and can stall a worker until its timeout.
+func isDownloadLikeEndpoint(ep *domain.Endpoint) bool {
+	if ep == nil {
+		return false
+	}
+	u, err := url.Parse(ep.URL)
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(strings.TrimSuffix(u.Path, "/"))
+	for _, seg := range strings.Split(strings.Trim(path, "/"), "/") {
+		if seg == "export" || seg == "download" || strings.HasPrefix(seg, "export_") || strings.HasPrefix(seg, "download_") {
+			return true
+		}
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".csv", ".xls", ".xlsx", ".pdf", ".zip", ".doc", ".docx":
+		return true
+	}
+	q := strings.ToLower(u.RawQuery)
+	return strings.Contains(q, "download=") || strings.Contains(q, "export=")
 }
 
 // isWriteLikeEndpoint conservatively identifies endpoints that can change

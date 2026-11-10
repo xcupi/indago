@@ -70,6 +70,8 @@ export interface ScanConfig {
   skip_idor?: boolean;
   skip_info_disclosure?: boolean;
   skip_write_endpoints?: boolean;
+  skip_download_endpoints?: boolean;
+  max_dom_xss_endpoints?: number;
   skip_global_injection?: boolean;
   skip_static_assets?: boolean;
 }

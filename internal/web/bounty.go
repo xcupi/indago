@@ -353,10 +353,12 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 					// header/cookie reflections before testing the pages'
 					// own parameters; imports start with the quieter,
 					// query/form-first plan and can be tuned later.
-					SkipGlobalInjection: true,
-					SkipStaticAssets:    true,
-					SkipWriteEndpoints:  true,
-					AuthMode:            domain.AuthAnonymous,
+					SkipGlobalInjection:   true,
+					SkipStaticAssets:      true,
+					SkipWriteEndpoints:    true,
+					SkipDownloadEndpoints: true,
+					MaxDOMXSSEndpoints:    25,
+					AuthMode:              domain.AuthAnonymous,
 				})
 				if err != nil {
 					scanErr = err.Error()
