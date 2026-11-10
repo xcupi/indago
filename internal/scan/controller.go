@@ -67,6 +67,11 @@ var (
 	// Resume re-establishes the session and finds it gone or changed). It is
 	// operator-fixable input, never an internal failure.
 	ErrAuth = errors.New("scan: authentication")
+	// ErrWAFPreflight reports that the preflight request was blocked by
+	// backpressure, a CAPTCHA/challenge, or a WAF-identified 403/406. The scan
+	// is paused before discovery or payload work; retry after the target's
+	// cooldown window.
+	ErrWAFPreflight = errors.New("scan: WAF preflight")
 )
 
 // errSkipWrite lets a mutate callback signal "nothing changed; do not persist".
@@ -147,6 +152,17 @@ type Options struct {
 	// test building a Controller without a real data dir still works,
 	// just not with the server's actual layout).
 	SessionsDir string
+
+	// Preflight performs one benign request to the target before discovery
+	// starts. A 429/503, a CAPTCHA/challenge page, or a WAF-identified 403/406
+	// pauses the scan instead of sending the whole crawl/payload plan into a
+	// block. Off by default for embedded/test controllers; the server enables it.
+	Preflight bool
+	// AutoPauseOnBlock pauses a running scan when a live request reports
+	// backpressure (429/503) or a newly appearing CAPTCHA. A 403 filter
+	// rejection does NOT auto-pause: that is the evidence that can justify the
+	// separately bounded evasion pass. Off by default for tests.
+	AutoPauseOnBlock bool
 }
 
 func (o Options) withDefaults() Options {
@@ -637,6 +653,7 @@ func (c *Controller) Start(ctx context.Context, scanID domain.ID) error {
 			return err
 		}
 		s.StartedAt = &started
+		s.Error = ""
 		return nil
 	})
 	if err != nil {
@@ -645,6 +662,13 @@ func (c *Controller) Start(ctx context.Context, scanID domain.ID) error {
 
 	ex, err := c.launch(ctx, sc, scope, target)
 	if err != nil {
+		if errors.Is(err, ErrWAFPreflight) {
+			_, _ = c.mutate(ctx, scanID, func(s *domain.Scan) error {
+				s.Error = err.Error()
+				return transition(s, domain.ScanPaused)
+			})
+			return err
+		}
 		c.failScan(scanID, fmt.Sprintf("start: %v", err))
 		return err
 	}
@@ -676,6 +700,28 @@ func (c *Controller) Pause(ctx context.Context, scanID domain.ID) error {
 	ex.pause()
 	c.log.Info("scan paused", "scan", scanID)
 	return nil
+}
+
+// pauseForBlock is the asynchronous callback used by live executors when the
+// target answers 429/503 or presents a CAPTCHA. The request itself is not a
+// vulnerability verdict; continuing would only spend more traffic against a
+// target that has explicitly asked for a pause.
+func (c *Controller) pauseForBlock(scanID domain.ID, reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ex, ok := c.running[scanID]
+	if !ok {
+		return
+	}
+	if _, err := c.mutate(context.Background(), scanID, func(s *domain.Scan) error {
+		s.Error = reason
+		return transition(s, domain.ScanPaused)
+	}); err != nil {
+		c.log.Warn("hold scan after block signal", "scan", scanID, "err", err)
+		return
+	}
+	ex.pause()
+	c.log.Info("scan paused after target block signal", "scan", scanID, "reason", reason)
 }
 
 // Resume continues a paused scan. If the scan was restored after a restart (no
@@ -730,7 +776,11 @@ func (c *Controller) Resume(ctx context.Context, scanID domain.ID) error {
 	}
 
 	sc, err = c.mutate(ctx, scanID, func(s *domain.Scan) error {
-		return transition(s, domain.ScanRunning)
+		if err := transition(s, domain.ScanRunning); err != nil {
+			return err
+		}
+		s.Error = ""
+		return nil
 	})
 	if err != nil {
 		return err
@@ -739,6 +789,7 @@ func (c *Controller) Resume(ctx context.Context, scanID domain.ID) error {
 	if err != nil {
 		// Put the scan back so the operator can retry.
 		_, _ = c.mutate(context.Background(), scanID, func(s *domain.Scan) error {
+			s.Error = err.Error()
 			return transition(s, domain.ScanPaused)
 		})
 		return err

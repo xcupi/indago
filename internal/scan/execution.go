@@ -131,6 +131,13 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 	if len(cookies) > 0 {
 		eng = eng.WithSessionCookies(cookies)
 	}
+	if c.opts.Preflight {
+		if err := c.preflightTarget(runCtx, eng, target); err != nil {
+			cancel()
+			closeHTTP()
+			return nil, err
+		}
+	}
 
 	handlers := c.opts.Handlers
 	if handlers == nil {

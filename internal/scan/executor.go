@@ -35,6 +35,12 @@ type ExecutorConfig struct {
 	// against a live target can change its state, so it is an explicit opt-in.
 	// Jobs for such endpoints are recorded as SKIPPED, not failed.
 	AllowStateChanging bool
+	// OnBlock is called once when a request reports 429/503 backpressure or a
+	// newly appearing CAPTCHA. The controller uses it to pause the scan rather
+	// than continuing to spend requests into a block. A 403/406 filter
+	// rejection is deliberately NOT reported here: that is the evidence the
+	// bounded evasion pass is allowed to act on.
+	OnBlock func(scanID domain.ID, reason string)
 }
 
 func (c ExecutorConfig) withDefaults() ExecutorConfig {
@@ -62,6 +68,7 @@ type executor struct {
 	cfg       ExecutorConfig
 	log       *slog.Logger
 	baselines *baselineCache // reuses a baseline across an endpoint's injection points
+	blockOnce sync.Once      // reports the first backpressure/CAPTCHA to OnBlock
 	// findingsMu serializes Finding correlation (upsertPendingFinding) against
 	// both other candidates in this executor AND verifyExecutor's
 	// correlateVerification for the same scan — see newExecutor's doc. Never
@@ -252,9 +259,13 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		// marker, and the escalation gate still needs the recorded signal.
 		if res.blockSuspected {
 			e.recordBlockFinding(ctx, job, ep, focus, res.blockBaselineStatus, res.blockMutatedStatus, tc.ID)
+			if throttleSignal(res.blockBaselineStatus, res.blockMutatedStatus) {
+				e.reportBlock(job.ScanID, fmt.Sprintf("target answered HTTP %d/%d during candidate testing; scan paused instead of spending more requests", res.blockBaselineStatus, res.blockMutatedStatus))
+			}
 		}
 		if res.captchaSuspected {
 			e.recordCaptchaFinding(ctx, job, ep, focus, res.captchaLabel, tc.ID)
+			e.reportBlock(job.ScanID, res.captchaLabel+" challenge appeared during candidate testing; scan paused")
 		}
 		return res
 	case focus != nil:
@@ -267,14 +278,28 @@ func (e *executor) run(ctx context.Context, job *domain.TestJob, tc *domain.Test
 		}
 		if res.blockSuspected {
 			e.recordBlockFinding(ctx, job, ep, focus, res.blockBaselineStatus, res.blockMutatedStatus, tc.ID)
+			if throttleSignal(res.blockBaselineStatus, res.blockMutatedStatus) {
+				e.reportBlock(job.ScanID, fmt.Sprintf("target answered HTTP %d/%d during candidate testing; scan paused instead of spending more requests", res.blockBaselineStatus, res.blockMutatedStatus))
+			}
 		}
 		if res.captchaSuspected {
 			e.recordCaptchaFinding(ctx, job, ep, focus, res.captchaLabel, tc.ID)
+			e.reportBlock(job.ScanID, res.captchaLabel+" challenge appeared during candidate testing; scan paused")
 		}
 		return res
 	default:
 		return e.runBaselineOnly(ctx, tc, ep, params)
 	}
+}
+
+// reportBlock asks the controller to pause the scan on the first live
+// backpressure/CAPTCHA signal. It is one-shot per executor; repeated findings
+// are still recorded, but they must not cause repeated pause attempts.
+func (e *executor) reportBlock(scanID domain.ID, reason string) {
+	if e.cfg.OnBlock == nil {
+		return
+	}
+	e.blockOnce.Do(func() { e.cfg.OnBlock(scanID, reason) })
 }
 
 // rawQueryAppendCovered reports whether this job is the AUTO-mode raw-query

@@ -31,8 +31,14 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	if sc != nil {
 		ua = c.huntingUserAgent(sc)
 	}
-	h[domain.JobTest] = newExecutor(c.store, eng, c.opts.Evidence, c.queue, c.opts.Executor, c.log, findingsMu, tokenMu)
-	verify := newVerifyExecutor(c.store, eng, c.verifier(), c.opts.Evidence, c.queue, scope, c.opts.Executor, c.log, findingsMu, tokenMu, proxyPool, limiter)
+	execCfg := c.opts.Executor
+	if c.opts.AutoPauseOnBlock && execCfg.OnBlock == nil {
+		execCfg.OnBlock = func(scanID domain.ID, reason string) {
+			go c.pauseForBlock(scanID, reason)
+		}
+	}
+	h[domain.JobTest] = newExecutor(c.store, eng, c.opts.Evidence, c.queue, execCfg, c.log, findingsMu, tokenMu)
+	verify := newVerifyExecutor(c.store, eng, c.verifier(), c.opts.Evidence, c.queue, scope, execCfg, c.log, findingsMu, tokenMu, proxyPool, limiter)
 	verify.userAgent = ua
 	h[domain.JobVerify] = verify
 	// DOM XSS shares findingsMu too: its Finding correlation is a
