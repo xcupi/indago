@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { LogIn, Play, Plus } from "lucide-react";
+import { Play, Plus } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/controls";
+import { Dialog, DialogContent, DialogTrigger, Tooltip } from "@/components/ui/controls";
 import { Field, Input, Textarea } from "@/components/ui/input";
 import { Label } from "@/components/ui/input";
 import { Switch } from "@/components/ui/controls";
@@ -17,6 +17,20 @@ import { formatTime, shortId } from "@/lib/utils";
 import { selectedProject } from "@/components/Layout";
 
 const PROFILES = ["conservative", "balanced", "fast"];
+
+function InfoTip({ text }: { text: string }) {
+  return (
+    <Tooltip label={text}>
+      <button
+        type="button"
+        aria-label="More information"
+        className="inline-flex size-4 items-center justify-center rounded-full border border-border text-[9px] font-semibold text-muted-foreground hover:bg-muted"
+      >
+        i
+      </button>
+    </Tooltip>
+  );
+}
 
 export default function Scans() {
   const [projectId, setProjectId] = useState(selectedProject());
@@ -67,7 +81,6 @@ export default function Scans() {
   const [error, setError] = useState("");
   const [projectScope, setProjectScope] = useState<Scope | null>(null);
   const [busy, setBusy] = useState(false);
-  const [loginBusy, setLoginBusy] = useState(false);
   const [loginNote, setLoginNote] = useState("");
 
   const filtered = useMemo(() => {
@@ -102,6 +115,7 @@ export default function Scans() {
   }, [projectId]);
 
   const selectedTarget = (targets.data ?? []).find((t) => t.id === form.target_id);
+  const selectedProfile = (authProfiles.data ?? []).find((p) => p.id === selectedTarget?.auth_profile_id);
   const targetHost = (() => {
     if (!selectedTarget) return "";
     try {
@@ -204,39 +218,6 @@ export default function Scans() {
     }
   }
 
-  // Drives the server-side interactive login (POST /api/auth/login). The
-  // endpoint blocks until the operator finishes, so the button stays busy and
-  // the result is only the saved session PATH — never cookies or tokens.
-  async function loginNow() {
-    setError("");
-    setLoginNote("");
-    if (!projectId) {
-      setError("Pick a project first — the login is scope-checked against it.");
-      return;
-    }
-    if (!form.loginUrl.trim()) {
-      setError("Login URL is required to start an interactive login.");
-      return;
-    }
-    setLoginBusy(true);
-    try {
-      const res = await api<{ state_path: string; final_url: string }>("/api/auth/login", {
-        method: "POST",
-        body: {
-          project_id: projectId,
-          login_url: form.loginUrl.trim(),
-          success_url: form.successUrl.trim(),
-        },
-      });
-      setForm((f) => ({ ...f, auth: "existing", authState: res.state_path }));
-      setLoginNote(`Session saved to ${res.state_path} (landed on ${res.final_url}). Auth mode is now "existing session state".`);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setLoginBusy(false);
-    }
-  }
-
   return (
     <div>
       <PageTitle
@@ -328,69 +309,24 @@ export default function Scans() {
                     placeholder={"https://app.example.com/"}
                   />
                 </Field>
-                <Field label="Auth mode">
-                  <select
-                    className="h-9 rounded-md border border-border bg-card px-2 text-sm"
-                    value={form.auth}
-                    onChange={(e) => setForm({ ...form, auth: e.target.value })}
-                  >
-                    <option value="anonymous">anonymous</option>
-                    <option value="existing">existing session state</option>
-                    <option value="password">password (server env)</option>
-                    <option value="interactive">interactive</option>
-                    <option value="mfa">interactive + MFA</option>
-                  </select>
-                </Field>
-                {form.auth === "existing" ? (
-                  <Field label="Auth state path" hint="Absolute server-side path.">
-                    <Input
-                      value={form.authState}
-                      onChange={(e) => setForm({ ...form, authState: e.target.value })}
-                    />
-                  </Field>
-                ) : form.auth !== "anonymous" ? (
-                  <>
-                    <Field label="Login URL">
-                      <Input value={form.loginUrl} onChange={(e) => setForm({ ...form, loginUrl: e.target.value })} />
-                    </Field>
-                    <Field label="Success URL glob" hint="e.g. **/my-account*">
-                      <Input
-                        value={form.successUrl}
-                        onChange={(e) => setForm({ ...form, successUrl: e.target.value })}
-                      />
-                    </Field>
-                    <Field label="Username selector" hint="Optional: the password mode fills the form itself.">
-                      <Input
-                        placeholder="#email"
-                        value={form.loginUserSel}
-                        onChange={(e) => setForm({ ...form, loginUserSel: e.target.value })}
-                      />
-                    </Field>
-                    <Field label="Password selector">
-                      <Input
-                        placeholder="#password"
-                        value={form.loginPassSel}
-                        onChange={(e) => setForm({ ...form, loginPassSel: e.target.value })}
-                      />
-                    </Field>
-                    <Field label="Submit selector">
-                      <Input
-                        placeholder="button[type=submit]"
-                        value={form.loginSubmitSel}
-                        onChange={(e) => setForm({ ...form, loginSubmitSel: e.target.value })}
-                      />
-                    </Field>
-                    <div className="flex items-center gap-2 sm:col-span-2">
-                      <Button size="sm" variant="secondary" onClick={loginNow} disabled={loginBusy}>
-                        <LogIn className="size-4" /> {loginBusy ? "Waiting for login…" : "Login now (interactive)"}
-                      </Button>
-                      <span className="text-[11px] text-muted-foreground">
-                        Needs the server running with <span className="mono">-browser</span>; the result is the saved session path.
-                      </span>
-                    </div>
-                    {loginNote ? <p className="text-[11px] text-emerald-700 dark:text-emerald-400 sm:col-span-2">{loginNote}</p> : null}
-                  </>
-                ) : null}
+                <div className="sm:col-span-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px]">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-muted-foreground">Authentication</span>
+                    <span className="mono text-foreground">
+                      {selectedProfile ? selectedProfile.name : "anonymous"}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-muted-foreground">
+                    Inherited from the selected target. Change it on the project page: Targets → Login.
+                    A scan does not need another auth mode.
+                  </p>
+                  {selectedProfile && !selectedProfile.state_path ? (
+                    <p className="mt-1 text-amber-700 dark:text-amber-400">
+                      This profile has no saved session yet. Re-login it on the project page before starting.
+                    </p>
+                  ) : null}
+                  {loginNote ? <p className="mt-1 text-emerald-700 dark:text-emerald-400">{loginNote}</p> : null}
+                </div>
                 <Field label="Candidate profile">
                   <select
                     className="h-9 rounded-md border border-border bg-card px-2 text-sm"
@@ -428,27 +364,27 @@ export default function Scans() {
                   </select>
                 </Field>
                 <div className="grid grid-cols-3 gap-2 sm:col-span-2">
-                  <Field label="Max depth">
-                    <Input
-                      type="number"
-                      value={form.maxDepth}
-                      onChange={(e) => setForm({ ...form, maxDepth: Number(e.target.value) })}
-                    />
-                  </Field>
-                  <Field label="Max pages">
-                    <Input
-                      type="number"
-                      value={form.maxPages}
-                      onChange={(e) => setForm({ ...form, maxPages: Number(e.target.value) })}
-                    />
-                  </Field>
-                  <Field label="Max endpoints">
-                    <Input
-                      type="number"
-                      value={form.maxEndpoints}
-                      onChange={(e) => setForm({ ...form, maxEndpoints: Number(e.target.value) })}
-                    />
-                  </Field>
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center gap-1">
+                      <Label>Max depth</Label>
+                      <InfoTip text="How many link hops discovery follows from the seed. 0 = profile default; 1 = seed plus links on it; 3 = up to three hops. Example: /app → /app/admin (depth 1) → /app/admin/users (depth 2)." />
+                    </div>
+                    <Input type="number" value={form.maxDepth} onChange={(e) => setForm({ ...form, maxDepth: Number(e.target.value) })} />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center gap-1">
+                      <Label>Max pages</Label>
+                      <InfoTip text="Maximum HTML pages the crawler may fetch. 0 = profile default. Example: 50 stops after 50 pages, which keeps a large site bounded; 200 is a broader crawl." />
+                    </div>
+                    <Input type="number" value={form.maxPages} onChange={(e) => setForm({ ...form, maxPages: Number(e.target.value) })} />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center gap-1">
+                      <Label>Max endpoints</Label>
+                      <InfoTip text="Maximum discovered endpoints kept for testing. 0 = profile default. Example: 100 caps the job list on a huge application; raise it when you need wider coverage." />
+                    </div>
+                    <Input type="number" value={form.maxEndpoints} onChange={(e) => setForm({ ...form, maxEndpoints: Number(e.target.value) })} />
+                  </div>
                 </div>
                 <label className="flex items-center gap-2 text-xs text-foreground">
                   <Switch checked={form.quick} onCheckedChange={(v) => setForm({ ...form, quick: v })} />
@@ -466,14 +402,19 @@ export default function Scans() {
                   Adds the cheat-sheet families the canonical planner does not carry. Only vectors whose context and
                   required characters match the reflection are sent; the profile still caps the total.
                 </p>
-                <Field label="Max candidates" hint="0 = profile cap.">
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-1">
+                    <Label>Max candidates</Label>
+                    <InfoTip text="Maximum payload candidates sent per injection point. 0 = profile cap. Example: 5 sends at most five variants for one parameter; lower it for noisy apps, raise it for a WAF that blocks the first few." />
+                  </div>
                   <Input
                     type="number"
                     min={0}
                     value={form.maxCandidates}
                     onChange={(e) => setForm({ ...form, maxCandidates: Number(e.target.value) })}
                   />
-                </Field>
+                  <p className="text-[11px] text-muted-foreground">0 = profile cap.</p>
+                </div>
                 <Field label="Stop policy">
                   <select
                     className="h-9 rounded-md border border-border bg-card px-2 text-sm"
