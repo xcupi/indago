@@ -1087,12 +1087,28 @@ function PayloadDoctor({ scanId, finding }: { scanId: string; finding: Finding }
   const providers = useApi<{ providers: { provider: string; label: string; configured: boolean }[] }>("/api/llm/providers");
   const [mode, setMode] = useState("why_failed");
   const [provider, setProvider] = useState("");
+  const [model, setModel] = useState("");
+  const [models, setModels] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [res, setRes] = useState<Diagnosis | null>(null);
   const [copied, setCopied] = useState("");
 
   const usable = (providers.data?.providers ?? []).filter((p) => p.configured);
+  const effective = provider || usable[0]?.provider || "";
+
+  useEffect(() => {
+    let alive = true;
+    setModel("");
+    setModels([]);
+    if (!effective) return;
+    api<{ models: string[] }>("/api/llm/models", { method: "POST", body: { provider: effective } })
+      .then((res) => alive && setModels(res.models ?? []))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [effective]);
 
   async function run() {
     setBusy(true);
@@ -1101,7 +1117,7 @@ function PayloadDoctor({ scanId, finding }: { scanId: string; finding: Finding }
     try {
       const out = await api<Diagnosis>(`/api/scans/${scanId}/ai/diagnose`, {
         method: "POST",
-        body: { finding_id: finding.id, mode, provider: provider || undefined },
+        body: { finding_id: finding.id, mode, provider: effective || undefined, model: model || undefined },
       });
       setRes(out);
     } catch (e) {
@@ -1136,7 +1152,7 @@ function PayloadDoctor({ scanId, finding }: { scanId: string; finding: Finding }
         </select>
         <select
           className="h-8 rounded-md border border-border bg-card px-2 text-[11px]"
-          value={provider}
+          value={effective}
           onChange={(e) => setProvider(e.target.value)}
         >
           <option value="">default provider</option>
@@ -1144,6 +1160,16 @@ function PayloadDoctor({ scanId, finding }: { scanId: string; finding: Finding }
             <option key={p.provider} value={p.provider}>
               {p.label}
             </option>
+          ))}
+        </select>
+        <select
+          className="h-8 max-w-[14rem] rounded-md border border-border bg-card px-2 text-[11px]"
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+        >
+          <option value="">provider default model</option>
+          {models.map((m) => (
+            <option key={m} value={m}>{m}</option>
           ))}
         </select>
         <Button size="sm" variant="outline" onClick={run} disabled={busy}>
