@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -133,7 +134,7 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 
 	handlers := c.opts.Handlers
 	if handlers == nil {
-		handlers = c.defaultHandlers(eng, scope, sc.Config.ProxyPool, limiter, sc.Config.IDORCandidates,
+		handlers = c.defaultHandlers(sc, eng, scope, sc.Config.ProxyPool, limiter, sc.Config.IDORCandidates,
 			idor.EnumerationOptions{Enabled: sc.Config.EnableIDOREnumeration, Neighbours: sc.Config.IDOREnumerationNeighbours})
 	}
 	pool := worker.New(c.queue, handlers, c.poolConfig(sc), c.log)
@@ -187,12 +188,19 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 // defaultHandlers) — this is the raw-HTTP-side half of the same "every
 // outbound request this scan makes" contract (domain.ScanConfig.ProxyPool).
 func (c *Controller) scanHTTPEngine(sc *domain.Scan) (httpengine.Engine, func()) {
-	if len(sc.Config.ProxyPool) == 0 && !sc.Config.RandomizeTLSFingerprint {
+	if len(sc.Config.ProxyPool) == 0 && !sc.Config.RandomizeTLSFingerprint && sc.Config.HuntingUserAgent == "" {
 		return c.opts.HTTP, func() {}
 	}
 	cfg := c.opts.HTTPConfig
 	cfg.ProxyPool = sc.Config.ProxyPool
 	cfg.RandomizeTLSFingerprint = sc.Config.RandomizeTLSFingerprint
+	if sc.Config.HuntingUserAgent != "" {
+		if sc.Config.HuntingUserAgentReplace {
+			cfg.UserAgent = sc.Config.HuntingUserAgent
+		} else {
+			cfg.UserAgent = strings.TrimSpace(httpengine.DefaultUserAgent + " " + sc.Config.HuntingUserAgent)
+		}
+	}
 	eng, err := httpengine.New(cfg)
 	if err != nil {
 		// A scan-scoped client failing to build (e.g. a malformed proxy URL
@@ -210,6 +218,19 @@ func (c *Controller) scanHTTPEngine(sc *domain.Scan) (httpengine.Engine, func())
 // defaults and the scan's own concurrency and crawl-extent controls. The crawl
 // controls are read here (at discovery start); a value of 0 means "keep the
 // server/profile default", except QuickScan which forces seeds-only.
+// huntingUserAgent returns the User-Agent every request and browser context
+// of this scan should use. Empty means "leave the engine/browser default".
+func (c *Controller) huntingUserAgent(sc *domain.Scan) string {
+	ua := strings.TrimSpace(sc.Config.HuntingUserAgent)
+	if ua == "" {
+		return ""
+	}
+	if sc.Config.HuntingUserAgentReplace {
+		return ua
+	}
+	return strings.TrimSpace(httpengine.DefaultUserAgent + " " + ua)
+}
+
 func (c *Controller) discoveryConfig(sc *domain.Scan) discovery.Config {
 	cfg := discovery.DefaultConfig()
 	if c.opts.Discovery != nil {
@@ -240,6 +261,7 @@ func (c *Controller) discoveryConfig(sc *domain.Scan) discovery.Config {
 	if mode, err := discovery.ParseRawQueryMode(sc.Config.RawQueryInjection); err == nil {
 		cfg.RawQueryInjection = mode
 	}
+	cfg.HuntingUserAgent = c.huntingUserAgent(sc)
 	return cfg
 }
 

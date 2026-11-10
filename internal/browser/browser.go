@@ -259,6 +259,9 @@ type RenderOptions struct {
 	Screenshot bool
 	// Limiter paces the navigation; see NavOptions.Limiter.
 	Limiter *ratelimit.Limiter
+	// UserAgent, when set, is sent by every request in the render context.
+	// Scans use it for a program's required hunting identifier.
+	UserAgent string
 }
 
 // RenderResult captures observations from loading a page. Fields are generic so

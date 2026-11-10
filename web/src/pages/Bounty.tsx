@@ -42,6 +42,8 @@ interface Imported {
   project_id: string;
   targets: string[];
   hosts: string[];
+  scan_id?: string;
+  scan_error?: string;
   skipped?: string[];
 }
 
@@ -377,7 +379,8 @@ export default function Bounty() {
               {importing ? <Loader2 className="size-3.5 animate-spin" /> : null} Import {pickedCount || ""} selected
             </Button>
             <span className="text-[11px] text-muted-foreground">
-              Import reads the program's scope table and creates a project with that scope — it does not start a scan.
+              Import reads the program's scope table, creates a project with that scope, and a draft scan
+              for the first web target (anonymous auth). It does not start the scan.
             </span>
           </div>
 
@@ -413,7 +416,8 @@ export default function Bounty() {
           {imported ? (
             <div className="space-y-2 rounded-md border border-border p-2.5">
               <p className="text-[11px] text-muted-foreground">
-                Imported as projects with the platform's scope. No scan was started — open a project and pick the targets you want to test.
+                Imported as projects with the platform's scope. A draft scan was created for the first target
+                with anonymous auth; review the scope and User-Agent, then start it. No scan was started automatically.
               </p>
               {imported.map((it) => (
                 <div key={it.slug} className="text-[11px]">
@@ -421,6 +425,12 @@ export default function Bounty() {
                     {it.title}
                   </a>
                   <span className="ml-2 mono text-muted-foreground">{it.hosts.join(", ") || "no host"}</span>
+                  {it.scan_id ? (
+                    <a className="ml-2 text-muted-foreground hover:underline" href={`#/scans/${it.scan_id}`}>
+                      draft scan
+                    </a>
+                  ) : null}
+                  {it.scan_error ? <span className="ml-2 text-amber-700 dark:text-amber-400">scan: {it.scan_error}</span> : null}
                   {it.skipped?.length ? <span className="ml-2 text-muted-foreground">skipped: {it.skipped.join(", ")}</span> : null}
                 </div>
               ))}

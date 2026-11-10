@@ -93,7 +93,22 @@ func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeader
 		opts.Proxy = &pw.Proxy{Server: proxyServer}
 	}
 	if len(extraHeaders) > 0 {
-		opts.ExtraHttpHeaders = extraHeaders
+		// Playwright's ExtraHTTPHeaders does not reliably override the
+		// browser's own User-Agent. Use the first-class UserAgent option for
+		// that header and leave the rest as extra headers.
+		if ua, ok := extraHeaders["User-Agent"]; ok && strings.TrimSpace(ua) != "" {
+			opts.UserAgent = pw.String(ua)
+			rest := make(map[string]string, len(extraHeaders)-1)
+			for k, v := range extraHeaders {
+				if !strings.EqualFold(k, "User-Agent") {
+					rest[k] = v
+				}
+			}
+			extraHeaders = rest
+		}
+		if len(extraHeaders) > 0 {
+			opts.ExtraHttpHeaders = extraHeaders
+		}
 	}
 	c, err := b.b.NewContext(opts)
 	if err != nil {

@@ -8,6 +8,8 @@ export interface Project {
   name: string;
   notes?: string;
   auth_state_path?: string;
+  hunting_user_agent?: string;
+  hunting_user_agent_replace?: boolean;
   created_at: string;
   updated_at?: string;
 }

@@ -15,9 +15,15 @@ type Project struct {
 	// AuthStatePath is the saved Playwright storage state used when a scan
 	// chooses auth_mode "existing". Empty means the project has no saved
 	// login. It is a server-side path, never a credential itself.
-	AuthStatePath string    `json:"auth_state_path,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	AuthStatePath string `json:"auth_state_path,omitempty"`
+	// HuntingUserAgent is the program-specific traffic identifier, e.g. the
+	// suffix a YesWeHack program requires on every request. Empty means the
+	// engine's own User-Agent. HuntingUserAgentReplace selects whether the
+	// value replaces that default or is appended to it.
+	HuntingUserAgent        string    `json:"hunting_user_agent,omitempty"`
+	HuntingUserAgentReplace bool      `json:"hunting_user_agent_replace,omitempty"`
+	CreatedAt               time.Time `json:"created_at"`
+	UpdatedAt               time.Time `json:"updated_at"`
 }
 
 // Target is a web application (identified by a base URL) belonging to a project.
@@ -169,6 +175,12 @@ type ScanConfig struct {
 	DiscoveryConcurrency int `json:"discovery_concurrency"`
 	HTTPConcurrency      int `json:"http_concurrency"`
 	BrowserConcurrency   int `json:"browser_concurrency"`
+	// HuntingUserAgent/HuntingUserAgentReplace are copied from the project at
+	// scan creation/start so every raw request and browser context carries the
+	// program's required traffic identifier.
+	HuntingUserAgent        string `json:"hunting_user_agent,omitempty"`
+	HuntingUserAgentReplace bool   `json:"hunting_user_agent_replace,omitempty"`
+
 	// RequestsPerSecond is ONE budget for all of the scan's target-facing
 	// requests: discovery fetches (crawl, sitemap, robots, content), redirect
 	// hops, raw test requests, and browser discovery/verification navigations.

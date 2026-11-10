@@ -42,6 +42,35 @@ export default function ProjectDetail({ id }: { id: string }) {
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginErr, setLoginErr] = useState("");
   const [loginNote, setLoginNote] = useState("");
+  const [hunting, setHunting] = useState({ ua: "", replace: false });
+  const [huntingNote, setHuntingNote] = useState("");
+  const [huntingErr, setHuntingErr] = useState("");
+
+  useEffect(() => {
+    if (!project.data) return;
+    setHunting({
+      ua: project.data.hunting_user_agent ?? "",
+      replace: Boolean(project.data.hunting_user_agent_replace),
+    });
+  }, [project.data]);
+
+  async function saveHunting() {
+    setHuntingErr("");
+    setHuntingNote("");
+    try {
+      await api(`/api/projects/${id}`, {
+        method: "PUT",
+        body: {
+          hunting_user_agent: hunting.ua.trim(),
+          hunting_user_agent_replace: hunting.replace,
+        },
+      });
+      setHuntingNote("Saved. Scans started from now on use this User-Agent.");
+      refreshAll();
+    } catch (e) {
+      setHuntingErr((e as Error).message);
+    }
+  }
 
   useEffect(() => {
     if (!scope.data) return;
@@ -255,6 +284,45 @@ export default function ProjectDetail({ id }: { id: string }) {
                 </TableBody>
               </Table>
             )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Globe2 className="size-4 text-sky-700 dark:text-sky-400" /> Hunting User-Agent
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Field
+              label="Program value"
+              hint="Paste the exact value from the program's hunting requirements, e.g. -BugBounty-CyberGhost--31337. It is appended to Indago's User-Agent unless you choose to replace it."
+            >
+              <Input
+                value={hunting.ua}
+                onChange={(e) => setHunting((h) => ({ ...h, ua: e.target.value }))}
+                placeholder="-BugBounty-Program--31337"
+                spellCheck={false}
+              />
+            </Field>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <label className="flex items-center gap-2 text-sm">
+                <Switch
+                  checked={hunting.replace}
+                  onCheckedChange={(v) => setHunting((h) => ({ ...h, replace: v }))}
+                />
+                Replace the default User-Agent
+              </label>
+              <Button size="sm" onClick={saveHunting}>
+                <Save className="size-4" /> Save User-Agent
+              </Button>
+            </div>
+            {huntingErr && <Alert className="border-red-200 text-red-700 dark:border-red-900 dark:text-red-400">{huntingErr}</Alert>}
+            {huntingNote && <p className="text-xs text-emerald-700 dark:text-emerald-400">{huntingNote}</p>}
+            <p className="text-xs text-muted-foreground">
+              Most YesWeHack programs ask you to append a suffix; a few require a full replacement.
+              Keep the exact casing and hyphens. Scans already running are not changed.
+            </p>
           </CardContent>
         </Card>
 

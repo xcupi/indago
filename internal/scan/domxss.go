@@ -1539,6 +1539,7 @@ type domXSSExecutor struct {
 	// shared with this scan's executor/verifyExecutor.
 	findingsMu *sync.Mutex
 	limiter    *ratelimit.Limiter
+	userAgent  string
 	proxyPool  []string
 	proxyNext  atomic.Uint64
 	// scripts is the per-SCAN bounded, content-addressed cache of same-origin
@@ -1610,7 +1611,11 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	sessionStatePath := e.sessionStatePathFor(ctx, job.ScanID)
 	proxy := e.nextProxy() // one proxy per job, shared by every per-selector context below
 	newContext := func() (*browser.Context, error) {
-		return e.browser.NewContext(ctx, browser.ContextOptions{AllowRequest: allow, StorageStatePath: sessionStatePath, ProxyServer: proxy})
+		opts := browser.ContextOptions{AllowRequest: allow, StorageStatePath: sessionStatePath, ProxyServer: proxy}
+		if e.userAgent != "" {
+			opts.ExtraHeaders = map[string]string{"User-Agent": e.userAgent}
+		}
+		return e.browser.NewContext(ctx, opts)
 	}
 	bctx, err := newContext()
 	if err != nil {

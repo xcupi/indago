@@ -332,9 +332,11 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateProjectReq struct {
-	Name          *string `json:"name,omitempty"`
-	Notes         *string `json:"notes,omitempty"`
-	AuthStatePath *string `json:"auth_state_path,omitempty"`
+	Name                    *string `json:"name,omitempty"`
+	Notes                   *string `json:"notes,omitempty"`
+	AuthStatePath           *string `json:"auth_state_path,omitempty"`
+	HuntingUserAgent        *string `json:"hunting_user_agent,omitempty"`
+	HuntingUserAgentReplace *bool   `json:"hunting_user_agent_replace,omitempty"`
 }
 
 // handleUpdateProject stores project metadata, including the saved login
@@ -361,6 +363,17 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Notes != nil {
 		p.Notes = *req.Notes
+	}
+	if req.HuntingUserAgent != nil {
+		ua := strings.TrimSpace(*req.HuntingUserAgent)
+		if len(ua) > 512 || strings.ContainsAny(ua, "\r\n") {
+			writeError(w, http.StatusBadRequest, "hunting_user_agent must be a single header value under 512 bytes")
+			return
+		}
+		p.HuntingUserAgent = ua
+	}
+	if req.HuntingUserAgentReplace != nil {
+		p.HuntingUserAgentReplace = *req.HuntingUserAgentReplace
 	}
 	if req.AuthStatePath != nil {
 		path := strings.TrimSpace(*req.AuthStatePath)

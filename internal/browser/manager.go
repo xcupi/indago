@@ -216,7 +216,11 @@ func (m *Manager) forget(c *Context) {
 // Render implements the Browser facade: it opens a throwaway isolated context,
 // loads the URL, gathers observations, and tears the context down.
 func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*RenderResult, error) {
-	c, err := m.NewContext(ctx, ContextOptions{StorageStatePath: opts.SessionStatePath, AllowRequest: opts.AllowRequest})
+	var extra map[string]string
+	if strings.TrimSpace(opts.UserAgent) != "" {
+		extra = map[string]string{"User-Agent": opts.UserAgent}
+	}
+	c, err := m.NewContext(ctx, ContextOptions{StorageStatePath: opts.SessionStatePath, AllowRequest: opts.AllowRequest, ExtraHeaders: extra})
 	if err != nil {
 		return nil, err
 	}

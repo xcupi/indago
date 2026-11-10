@@ -438,7 +438,7 @@ func TestJobAccessControlIsWiredToTheHTTPGroup(t *testing.T) {
 	if !found {
 		t.Fatal("JobAccessControl is not in any worker group: queued jobs would never be leased")
 	}
-	h := c.defaultHandlers(nil, openScope(), nil, ratelimit.New(0), nil)
+	h := c.defaultHandlers(nil, nil, openScope(), nil, ratelimit.New(0), nil)
 	if _, ok := h[domain.JobAccessControl].(*accessControlExecutor); !ok {
 		t.Fatalf("JobAccessControl handler = %T, want the real accessControlExecutor", h[domain.JobAccessControl])
 	}

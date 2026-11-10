@@ -28,6 +28,7 @@ import (
 
 	"github.com/indago/indago/internal/bounty"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/scan"
 )
 
 // SetBountyStore wires the token store and its client. INDAGO_YESWEHACK_API
@@ -192,13 +193,15 @@ type importedProgram struct {
 	ProjectID string   `json:"project_id"`
 	Targets   []string `json:"targets"`
 	Hosts     []string `json:"hosts"`
+	ScanID    string   `json:"scan_id,omitempty"`
+	ScanError string   `json:"scan_error,omitempty"`
 	Skipped   []string `json:"skipped,omitempty"`
 }
 
 // handleImportBountyPrograms turns selected programs into projects with an
-// explicit scope. It never creates a scan: the operator checks the targets they
-// want tested, and the existing scan form (with its rate/profile controls)
-// stays the place where a test is started.
+// explicit scope and one draft scan for the first target, using anonymous auth.
+// The scan is created but not started: the operator reviews the target/scope,
+// sets the program's hunting User-Agent when required, then starts it.
 func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Request) {
 	if s.bountyClient == nil || s.bountyStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "bounty integration is not configured on this server")
@@ -275,14 +278,33 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 			s.writeInternalError(w, "create scope", err)
 			return
 		}
+		var firstTarget domain.ID
 		for _, raw := range targets {
 			t := &domain.Target{ID: domain.NewID(), ProjectID: p.ID, Name: raw, BaseURL: raw, CreatedAt: now, UpdatedAt: now}
 			if err := s.store.Targets().Create(r.Context(), t); err != nil {
 				s.writeInternalError(w, "create target", err)
 				return
 			}
+			if firstTarget == "" {
+				firstTarget = t.ID
+			}
 		}
-		out = append(out, importedProgram{Slug: slug, Title: detail.Title, ProjectID: string(p.ID), Targets: targets, Hosts: hosts, Skipped: skipped})
+		var scanID, scanErr string
+		if s.ctrl != nil && firstTarget != "" {
+			if created, err := s.ctrl.CreateScan(r.Context(), scan.CreateScanParams{
+				ProjectID: p.ID,
+				TargetID:  firstTarget,
+				Name:      "Imported: " + detail.Title,
+				Profile:   domain.ProfileConservative,
+				AuthMode:  domain.AuthAnonymous,
+			}); err != nil {
+				scanErr = err.Error()
+				s.log.Warn("bounty import: draft scan not created", "slug", slug, "error", err)
+			} else {
+				scanID = string(created.ID)
+			}
+		}
+		out = append(out, importedProgram{Slug: slug, Title: detail.Title, ProjectID: string(p.ID), Targets: targets, Hosts: hosts, ScanID: scanID, ScanError: scanErr, Skipped: skipped})
 		s.log.Info("bounty program imported", "provider", "yeswehack", "slug", slug, "hosts", len(hosts), "targets", len(targets))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"imported": out})

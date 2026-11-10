@@ -355,7 +355,8 @@ const (
 // CreateScan validates scope and inputs, then persists a scan in the Created
 // state together with a pending session. It performs no testing.
 func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domain.Scan, error) {
-	if _, err := c.store.Projects().Get(ctx, p.ProjectID); err != nil {
+	project, err := c.store.Projects().Get(ctx, p.ProjectID)
+	if err != nil {
 		return nil, fmt.Errorf("scan: project: %w", err)
 	}
 	target, err := c.store.Targets().Get(ctx, p.TargetID)
@@ -435,6 +436,11 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	}
 	if _, err := detection.ResolveProfile(cfg.CandidateProfile, cfg.MaxCandidates); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrBadConfig, err)
+	}
+	cfg.HuntingUserAgent = project.HuntingUserAgent
+	cfg.HuntingUserAgentReplace = project.HuntingUserAgentReplace
+	if strings.ContainsAny(cfg.HuntingUserAgent, "\r\n") {
+		return nil, fmt.Errorf("%w: hunting user agent must be a single header value", ErrBadConfig)
 	}
 	cfg.EnableEvasion = p.EnableEvasion
 	// Raw query-string injection is a separate, opt-in capability. Parse the
@@ -562,6 +568,13 @@ func (c *Controller) Start(ctx context.Context, scanID domain.ID) error {
 	}
 	if sc.State != domain.ScanCreated {
 		return fmt.Errorf("%w: can only start a created scan (state=%s)", ErrBadState, sc.State)
+	}
+	// A project may be edited after its scan was queued (the bounty import
+	// creates a scan immediately). Pick up the latest hunting identity at
+	// start so the operator does not have to recreate the scan.
+	if project, err := c.store.Projects().Get(ctx, sc.ProjectID); err == nil {
+		sc.Config.HuntingUserAgent = project.HuntingUserAgent
+		sc.Config.HuntingUserAgentReplace = project.HuntingUserAgentReplace
 	}
 
 	// Defense in depth: re-check scope at start (scope may have changed).

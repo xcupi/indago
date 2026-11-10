@@ -14,7 +14,7 @@ import (
 	"github.com/indago/indago/internal/worker"
 )
 
-func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope, proxyPool []string, limiter *ratelimit.Limiter, idorCandidates []string, idorEnum ...idor.EnumerationOptions) map[domain.JobType]worker.Handler {
+func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, scope domain.Scope, proxyPool []string, limiter *ratelimit.Limiter, idorCandidates []string, idorEnum ...idor.EnumerationOptions) map[domain.JobType]worker.Handler {
 	var enum idor.EnumerationOptions
 	if len(idorEnum) > 0 {
 		enum = idorEnum[0]
@@ -27,13 +27,20 @@ func (c *Controller) defaultHandlers(eng httpengine.Engine, scope domain.Scope, 
 	// withDynamicTokenLock in dynamic_params.go.
 	findingsMu := &sync.Mutex{}
 	tokenMu := &sync.Mutex{}
+	ua := ""
+	if sc != nil {
+		ua = c.huntingUserAgent(sc)
+	}
 	h[domain.JobTest] = newExecutor(c.store, eng, c.opts.Evidence, c.queue, c.opts.Executor, c.log, findingsMu, tokenMu)
-	h[domain.JobVerify] = newVerifyExecutor(c.store, eng, c.verifier(), c.opts.Evidence, c.queue, scope, c.opts.Executor, c.log, findingsMu, tokenMu, proxyPool, limiter)
+	verify := newVerifyExecutor(c.store, eng, c.verifier(), c.opts.Evidence, c.queue, scope, c.opts.Executor, c.log, findingsMu, tokenMu, proxyPool, limiter)
+	verify.userAgent = ua
+	h[domain.JobVerify] = verify
 	// DOM XSS shares findingsMu too: its Finding correlation is a
 	// read-then-write against the SAME store.Findings() rows Reflected
 	// XSS's own correlation touches (though never the same dedup key —
 	// see domXSSFindingDedupKey's disjoint "\x00dom_xss\x00" tag).
 	dom := newDOMXSSExecutor(c.store, c.browserManager(), c.opts.Evidence, scope, c.log, findingsMu)
+	dom.userAgent = ua
 	dom.limiter = limiter
 	dom.proxyPool = append([]string(nil), proxyPool...)
 	h[domain.JobDOMXSS] = dom

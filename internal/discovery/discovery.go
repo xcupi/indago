@@ -168,6 +168,9 @@ func (c *liveConcurrency) Set(n int) {
 // Config tunes discovery behavior. Zero values get sensible defaults via
 // withDefaults.
 type Config struct {
+	// HuntingUserAgent, when set, is sent by browser renders for a program's
+	// required traffic identifier. Empty keeps the browser default.
+	HuntingUserAgent string
 	// Limiter is the scan's shared request-rate limiter. Browser-based sources
 	// pace their navigations with it; HTTP fetches are paced by the scan's
 	// scope-enforcing engine, which is handed the same limiter. nil = unlimited.

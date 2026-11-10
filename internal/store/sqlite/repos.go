@@ -78,15 +78,15 @@ type projectRepo struct{ db *sql.DB }
 
 func (r *projectRepo) Create(ctx context.Context, p *domain.Project) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO projects (id, name, notes, auth_state_path, created_at, updated_at) VALUES (?,?,?,?,?,?)`,
-		p.ID, p.Name, p.Notes, p.AuthStatePath, ts(p.CreatedAt), ts(p.UpdatedAt))
+		`INSERT INTO projects (id, name, notes, auth_state_path, hunting_user_agent, hunting_user_agent_replace, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+		p.ID, p.Name, p.Notes, p.AuthStatePath, p.HuntingUserAgent, p.HuntingUserAgentReplace, ts(p.CreatedAt), ts(p.UpdatedAt))
 	return err
 }
 
 func scanProject(sc scanner) (*domain.Project, error) {
 	var p domain.Project
 	var created, updated string
-	if err := sc.Scan(&p.ID, &p.Name, &p.Notes, &p.AuthStatePath, &created, &updated); err != nil {
+	if err := sc.Scan(&p.ID, &p.Name, &p.Notes, &p.AuthStatePath, &p.HuntingUserAgent, &p.HuntingUserAgentReplace, &created, &updated); err != nil {
 		return nil, err
 	}
 	p.CreatedAt, _ = parseTS(created)
@@ -95,13 +95,13 @@ func scanProject(sc scanner) (*domain.Project, error) {
 }
 
 func (r *projectRepo) Get(ctx context.Context, id domain.ID) (*domain.Project, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, name, notes, auth_state_path, created_at, updated_at FROM projects WHERE id=?`, id)
+	row := r.db.QueryRowContext(ctx, `SELECT id, name, notes, auth_state_path, hunting_user_agent, hunting_user_agent_replace, created_at, updated_at FROM projects WHERE id=?`, id)
 	p, err := scanProject(row)
 	return p, mapGetErr(err)
 }
 
 func (r *projectRepo) List(ctx context.Context) ([]*domain.Project, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, name, notes, auth_state_path, created_at, updated_at FROM projects ORDER BY created_at`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, name, notes, auth_state_path, hunting_user_agent, hunting_user_agent_replace, created_at, updated_at FROM projects ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -119,8 +119,8 @@ func (r *projectRepo) List(ctx context.Context) ([]*domain.Project, error) {
 
 func (r *projectRepo) Update(ctx context.Context, p *domain.Project) error {
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE projects SET name=?, notes=?, auth_state_path=?, updated_at=? WHERE id=?`,
-		p.Name, p.Notes, p.AuthStatePath, ts(p.UpdatedAt), p.ID)
+		`UPDATE projects SET name=?, notes=?, auth_state_path=?, hunting_user_agent=?, hunting_user_agent_replace=?, updated_at=? WHERE id=?`,
+		p.Name, p.Notes, p.AuthStatePath, p.HuntingUserAgent, p.HuntingUserAgentReplace, ts(p.UpdatedAt), p.ID)
 	return affected(res, err)
 }
 

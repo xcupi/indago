@@ -487,6 +487,7 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			ObservationWindow: 250 * time.Millisecond,
 			AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
 			SessionStatePath:  in.SessionStatePath,
+			UserAgent:         n.cfg.HuntingUserAgent,
 		})
 		if err != nil {
 			if errors.Is(err, browser.ErrNotImplemented) {

@@ -582,7 +582,7 @@ func TestJobIDORIsWiredToTheHTTPGroup(t *testing.T) {
 	if !found {
 		t.Fatal("JobIDOR is not in any worker group: queued IDOR jobs would never be leased")
 	}
-	h := c.defaultHandlers(nil, openScope(), nil, ratelimit.New(0), []string{"carlos"})
+	h := c.defaultHandlers(nil, nil, openScope(), nil, ratelimit.New(0), []string{"carlos"})
 	if _, ok := h[domain.JobIDOR].(*idorExecutor); !ok {
 		t.Fatalf("JobIDOR handler = %T, want the real idorExecutor", h[domain.JobIDOR])
 	}

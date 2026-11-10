@@ -68,7 +68,8 @@ find program -> import scope as a new project -> scan targets
 
 Scope is always project-level: the imported project gets the program's
 `include_hosts` and path prefixes, and every scan under it is enforced against
-that scope. Importing never starts a scan.
+that scope. Importing creates a **draft scan for the first web target with
+anonymous auth**, but does not start it.
 
 If a project already has a manually-entered scope and has already been scanned,
 do **not** import the program to "attach" it: import always creates a new
@@ -77,32 +78,53 @@ YesWeHack report from its scan, and check by hand that the finding's asset is in
 the program's published scope before submitting. To make the imported scope
 drive a fresh scan, import the program and scan the new project instead.
 
-## Import: scope first, no scan started
+## Import: scope first, draft scan created
 
 `POST /api/bounty/import {"slugs":["acme","globex"]}` creates, per program:
 
 - a **project** named after the program (notes record the platform slug);
 - a **scope** whose `include_hosts` are the program's `web-application` assets
   (wildcards become the parent host, subdomains allowed), and
-- one **seed target** per host root (`https://host/`).
+- one **seed target** per host root (`https://host/`), and
+- one **draft scan** for the first target, profile `conservative`, auth mode
+  `anonymous`. It stays in `created` state until the operator starts it.
 
 Assets of other scope types (api, mobile, …) are listed in `skipped`, not turned
 into targets. An asset that is a **path**, not a host root (for example
 `https://target.test/challenge/one`), becomes a seed on that path and adds
 `include_path_prefixes: ["/challenge/one"]`, so the crawler cannot leave the
-program's authorized area. No scan is created: the operator checks the targets they want in
-the project and starts scans with the normal form, so rate/profile controls and
-the scope enforcement stay where they already are. Out-of-scope hosts never run
+program's authorized area. The draft scan gives the operator a one-click next
+step; they still review the targets, set the program's hunting User-Agent, and
+start it manually. Rate/profile controls and scope enforcement stay where they
+already were. Out-of-scope hosts never run
 because the scan's scope rejects them — not because the importer remembered to
 filter.
 
-## Still to wire (needs the token to be verified, not guessed)
+## Hunting User-Agent
 
-- **Required request headers**: many programs require a header such as
-  `X-Bug-Bounty: <username>` so the platform can attribute traffic. The program's
-  rules are public in the detail response; once a token is present the rules and
-  the per-program report template are both available, and the header should be
-  stored on the scan/target and applied by the HTTP engine to every request.
+Some programs require the hunter to append a program-specific value to the
+User-Agent, for example CyberGhost:
+
+```
+-BugBounty-CyberGhost--31337
+```
+
+The format is **not** universal: PIA uses `-BugBounty-PIA--31337`, Tencent
+`-BugBounty-tencent-31337`, Moneybox `bugbounty-0421`, Paddle `BugBounty`,
+Ooredoo `-BugBounty-ooredoo-portal`, and Infomaniak replaces the UA with
+`Infomaniak-YWH-Bugbounty`. Always copy the exact value from the program's
+**Hunting requirements**; the API's `rules` field does not always include that
+section (CyberGhost is one example).
+
+Indago stores the value on the project (**Project → Hunting User-Agent**). By
+default it is appended to `Indago` (`Indago <value>`); enable **Replace the
+default User-Agent** for programs that require a full replacement. The value is
+copied to new scans, and `Start` re-reads the project so a draft scan created by
+an import still picks up a value added afterwards. It is applied to raw HTTP,
+discovery browser contexts, browser verification and DOM-XSS contexts.
+
+## Still to wire
+
 - **Report template**: `GET /programs/{slug}/report-templates` returns the
   program's own submission template, and `reports/draft` defines the fields a
   report must fill (`title`, `scope`, `description`, `technical_information`,

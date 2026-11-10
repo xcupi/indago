@@ -203,6 +203,7 @@ type verifyExecutor struct {
 	// limiter is the scan's shared request-rate limiter; every browser
 	// navigation this executor drives is paced with it (verification.Input.Limiter).
 	limiter   *ratelimit.Limiter
+	userAgent string
 	proxyNext atomic.Uint64
 }
 
@@ -390,9 +391,15 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 		// BrowserVerifier.Verify). A combined candidate's SECOND parameter
 		// gets the identical treatment, independently of the first (either
 		// half, or both, can be Header/Cookie).
+		if e.userAgent != "" {
+			in.ExtraHeaders = map[string]string{"User-Agent": e.userAgent}
+		}
 		switch focus.Location {
 		case domain.LocationHeader:
-			in.ExtraHeaders = map[string]string{focus.Name: vj.Candidate.Value}
+			if in.ExtraHeaders == nil {
+				in.ExtraHeaders = map[string]string{}
+			}
+			in.ExtraHeaders[focus.Name] = vj.Candidate.Value
 		case domain.LocationCookie:
 			in.ExtraCookies = []*http.Cookie{{Name: focus.Name, Value: vj.Candidate.Value}}
 		}

@@ -21,8 +21,10 @@ import { cn, shortId } from "@/lib/utils";
 
 const NAV = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard, href: "#/dashboard" },
-  { key: "projects", label: "Projects", icon: FolderKanban, href: "#/projects" },
+  // Program intake comes first: a bounty import creates the project, scope,
+  // targets and a draft scan. Projects remains the manual entry point.
   { key: "bounty", label: "Bug bounty", icon: Bug, href: "#/bounty" },
+  { key: "projects", label: "Projects", icon: FolderKanban, href: "#/projects" },
   { key: "scans", label: "Scans", icon: ScanLine, href: "#/scans" },
   { key: "findings", label: "Findings", icon: ShieldCheck, href: "#/findings" },
   { key: "reports", label: "Reports", icon: FileText, href: "#/reports" },
