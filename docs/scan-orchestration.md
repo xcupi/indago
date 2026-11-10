@@ -41,6 +41,16 @@ per scan:
 - **Seeds**: the scan's `SeedURLs`, or the target base URL when none were given.
   Every seed must be in scope at creation (an out-of-scope seed is rejected, not
   silently dropped).
+- **WAF preflight (server builds).** Before the worker pool or discovery starts,
+  `Controller.launch` sends one benign request to the scan's first seed (or the
+  target base URL when no seed was supplied). HTTP 429/503, a Cloudflare
+  challenge/block page, or a 403/406 carrying a WAF vendor header pauses the
+  scan with a `scan: WAF preflight` error instead of spending the crawl/payload
+  budget into a challenge. A plain application 403 is not treated as a WAF
+  block.
+- **Runtime backpressure pause.** A live 429/503 or a newly appearing CAPTCHA
+  pauses the scan on its first occurrence. A 403 filter rejection is left for
+  the separately bounded evasion pass, not auto-paused.
 - **Provenance** (`user_provided`, `crawler`, `form`, `sitemap`, `robots`, …) is
   stored on every endpoint/parameter and surfaced in status.
 - **Session-terminating links are skipped on authenticated scans.** When the
