@@ -77,6 +77,10 @@ type Provider struct {
 	RequiresKey    bool   `json:"requires_key"`
 	// Default marks the provider the UI starts from when nothing is configured.
 	Default bool `json:"default,omitempty"`
+	// Hidden keeps a provider resolvable for existing configs/tests but out of
+	// the operator-facing provider pickers. The current UI intentionally exposes
+	// only DeepSeek, Claude, Custom, and ChatGPT.
+	Hidden bool `json:"-"`
 }
 
 var providerList = []Provider{
@@ -104,24 +108,28 @@ var providerList = []Provider{
 		Label:          "Anthropic (Messages API)",
 		DefaultBaseURL: "https://api.anthropic.com/v1",
 		RequiresKey:    true,
+		Hidden:         true,
 	},
 	{
 		ID:             ProviderOpenRouter,
 		Label:          "OpenRouter",
 		DefaultBaseURL: "https://openrouter.ai/api/v1",
 		RequiresKey:    true,
+		Hidden:         true,
 	},
 	{
 		ID:             ProviderOllama,
 		Label:          "Ollama (local)",
 		DefaultBaseURL: "http://127.0.0.1:11434/v1",
 		RequiresKey:    false,
+		Hidden:         true,
 	},
 	{
 		ID:             ProviderVLLM,
 		Label:          "vLLM (local)",
 		DefaultBaseURL: "http://127.0.0.1:8000/v1",
 		RequiresKey:    false,
+		Hidden:         true,
 	},
 	{
 		ID:             ProviderOpenAI,
@@ -129,6 +137,7 @@ var providerList = []Provider{
 		DefaultBaseURL: "https://api.openai.com/v1",
 		DefaultModel:   "gpt-4o-mini",
 		RequiresKey:    true,
+		Hidden:         true,
 	},
 	{
 		// Any OpenAI-compatible endpoint: local vLLM/Ollama, OpenRouter, a
@@ -151,8 +160,12 @@ var providerList = []Provider{
 
 // Providers returns a copy of the supported provider definitions.
 func Providers() []Provider {
-	out := make([]Provider, len(providerList))
-	copy(out, providerList)
+	out := make([]Provider, 0, len(providerList))
+	for _, p := range providerList {
+		if !p.Hidden {
+			out = append(out, p)
+		}
+	}
 	return out
 }
 
@@ -169,8 +182,9 @@ func LookupProvider(id string) (Provider, bool) {
 }
 
 func providerIDs() string {
-	ids := make([]string, 0, len(providerList))
-	for _, p := range providerList {
+	providers := Providers()
+	ids := make([]string, 0, len(providers))
+	for _, p := range providers {
 		ids = append(ids, p.ID)
 	}
 	return strings.Join(ids, ", ")

@@ -184,7 +184,7 @@ func (r *Registry) Resolve(provider, model string) (Credential, error) {
 // List reports every supported provider with its availability.
 func (r *Registry) List() []Availability {
 	out := make([]Availability, 0, len(providerList))
-	for _, p := range providerList {
+	for _, p := range Providers() {
 		cred, err := r.Resolve(p.ID, "")
 		av := Availability{Provider: p.ID, Label: p.Label}
 		if err == nil {

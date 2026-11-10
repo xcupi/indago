@@ -103,8 +103,8 @@ func TestScanAIAssistNoCredential(t *testing.T) {
 }
 
 func TestListLLMProvidersShowsEnvironmentCredentials(t *testing.T) {
-	t.Setenv("INDAGO_LLM_KEY_OPENAI", "test-key")
-	t.Setenv("INDAGO_LLM_MODEL_OPENAI", "gpt-test")
+	t.Setenv("INDAGO_LLM_KEY_DEEPSEEK", "test-key")
+	t.Setenv("INDAGO_LLM_MODEL_DEEPSEEK", "deepseek-test")
 	a := newAIAPI(t)
 
 	var resp struct {
@@ -118,14 +118,14 @@ func TestListLLMProvidersShowsEnvironmentCredentials(t *testing.T) {
 	a.mustJSON(a.do("GET", "/api/llm/providers", nil), http.StatusOK, &resp)
 	var seen bool
 	for _, p := range resp.Providers {
-		if p.Provider == "openai" {
+		if p.Provider == "deepseek" {
 			seen = true
-			if !p.Configured || p.Source != "environment" || p.Model != "gpt-test" {
-				t.Fatalf("openai availability = %+v", p)
+			if !p.Configured || p.Source != "environment" || p.Model != "deepseek-test" {
+				t.Fatalf("deepseek availability = %+v", p)
 			}
 		}
 	}
 	if !seen {
-		t.Fatalf("openai missing from %+v", resp.Providers)
+		t.Fatalf("deepseek missing from %+v", resp.Providers)
 	}
 }
