@@ -66,6 +66,12 @@ func classifySkip(note string) skipReason {
 	case strings.Contains(n, "allowstatechanging is off"):
 		return skipReason{"state_changing_disabled", sevMedium, "State-changing methods are disabled (POST/PUT/PATCH/DELETE not tested)",
 			"Start the server with -allow-state-changing only for a target and scope where sending those requests is authorized."}
+	case strings.Contains(n, "skip_write_endpoints"):
+		return skipReason{"write_endpoints_skipped", sevInfo, "Write-like endpoints skipped by policy",
+			"The scan was configured to keep payloads away from POST/PUT/PATCH/DELETE and state-changing routes. This is an intentional safety skip, not a failed test."}
+	case strings.Contains(n, "skip_download_endpoints"):
+		return skipReason{"download_endpoints_skipped", sevInfo, "Export/download endpoints skipped by policy",
+			"The scan was configured to omit export/download routes that can stream large files or hold a worker until timeout. This is intentional."}
 	case strings.Contains(n, "browser verification supports") || strings.Contains(n, "not supported for browser document replay"):
 		return skipReason{"verification_unsupported", sevMedium, "Browser verification does not support this request shape",
 			"Candidates were not confirmed in a browser. Verify these endpoints manually."}
@@ -190,6 +196,10 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		out.Warnings = append(out.Warnings, coverageWarning{"browser_disabled", sevHigh,
 			"The browser engine is not enabled on this server. DOM XSS probes are not run and reflected-XSS candidates cannot be confirmed in a browser, so zero findings does not mean the target is clean."})
 	}
+	if st.Scan.Config.SkipDOMXSS {
+		out.Warnings = append(out.Warnings, coverageWarning{"dom_xss_disabled", sevInfo,
+			"DOM XSS was disabled for this scan; DOM source probes were intentionally not run. This is a declared coverage choice, not a failed engine."})
+	}
 	for _, rs := range out.Reasons {
 		if rs.Severity == sevInfo || (rs.Code == "browser_unavailable" && !s.caps.BrowserEnabled) {
 			continue // informational, or already covered by the browser_disabled warning
@@ -231,9 +241,11 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 					strconv.Itoa(n) + " of " + strconv.Itoa(model.Summary.Parameters) + " discovered parameter(s) are not fully tested (errored, never run, or only partly completed). Open the Endpoints tab to see which."})
 			}
 			ds := model.Summary.DOMByStatus
-			if n := ds[stErrored] + ds[stNotRun] + ds[stPartial]; n > 0 {
-				out.Warnings = append(out.Warnings, coverageWarning{"dom_sources_untested", sevMedium,
-					strconv.Itoa(n) + " DOM XSS source probe(s) errored, never ran, or only partly completed. Open the Endpoints tab to see which pages."})
+			if !st.Scan.Config.SkipDOMXSS {
+				if n := ds[stErrored] + ds[stNotRun] + ds[stPartial]; n > 0 {
+					out.Warnings = append(out.Warnings, coverageWarning{"dom_sources_untested", sevMedium,
+						strconv.Itoa(n) + " DOM XSS source probe(s) errored, never ran, or only partly completed. Open the Endpoints tab to see which pages."})
+				}
 			}
 		}
 	}

@@ -231,6 +231,32 @@ func TestIDORConfirmsForeignObject(t *testing.T) {
 	}
 }
 
+// A target can name its account page /profile_user instead of the four
+// conventional paths. The page is already in the scan's endpoint registry, so
+// the identity baseline must use it rather than skipping every IDOR probe.
+func TestIDORIdentityUsesDiscoveredProfilePage(t *testing.T) {
+	env, srv := newIDOREnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if r.URL.Path != "/profile_user" {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `<h1>Not found</h1>`)
+			return
+		}
+		fmt.Fprint(w, `<h1>Profile</h1><p>Your username is <strong>wiener</strong></p><p>Email: wiener@example.com</p>`)
+	})
+	ep := env.endpoint(srv.URL+"/my-account?id=wiener", domain.MethodGET)
+	env.endpoint(srv.URL+"/profile_user", domain.MethodGET)
+
+	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, nil, idor.EnumerationOptions{})
+	ident, _ := ex.identity(context.Background(), env.scanID, ep)
+	if ident == nil || ident.Identity.Empty() {
+		t.Fatalf("identity was not established: %+v", ident)
+	}
+	if ident.Source != srv.URL+"/profile_user" {
+		t.Fatalf("identity source = %q, want the discovered /profile_user page", ident.Source)
+	}
+}
+
 func TestIDORSamePrincipalIsNeverConfirmed(t *testing.T) {
 	env, srv := newIDOREnv(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")

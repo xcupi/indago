@@ -660,6 +660,87 @@ func (e *idorExecutor) knownIdentity(ctx context.Context, scanID domain.ID) *ido
 	return nil
 }
 
+// maxIdentityPaths bounds the identity-page probes: four conventional paths
+// plus at most four pages discovery already found on the same origin.
+const maxIdentityPaths = 8
+
+// identityPaths starts with the conventional account pages and adds
+// application-specific profile/account pages the crawler already discovered.
+// A target that calls its account page /profile_user otherwise forced the
+// engine to skip every IDOR probe even though the page was in the scan's own
+// endpoint registry. The additions are read-only GET/HEAD paths, same origin,
+// bounded, and filtered away from admin/write/list surfaces.
+func (e *idorExecutor) identityPaths(ctx context.Context, ep *domain.Endpoint) []string {
+	paths := []string{"/my-account", "/profile", "/account", "/me"}
+	seen := map[string]bool{}
+	for _, p := range paths {
+		seen[p] = true
+	}
+	origin := originOf(ep.URL)
+	if origin == "" {
+		return paths
+	}
+	endpoints, err := e.store.Endpoints().ListByScan(ctx, ep.ScanID)
+	if err != nil {
+		return paths
+	}
+	for _, candidate := range endpoints {
+		if candidate == nil || (candidate.Method != "" && candidate.Method != domain.MethodGET && candidate.Method != domain.MethodHEAD) {
+			continue
+		}
+		u, err := url.Parse(candidate.URL)
+		if err != nil || u.Scheme+"://"+u.Host != origin {
+			continue
+		}
+		p := strings.TrimSuffix(u.Path, "/")
+		if p == "" || p == "/" || len(p) > 80 || seen[p] || !isIdentityPath(p) {
+			continue
+		}
+		seen[p] = true
+		paths = append(paths, p)
+		if len(paths) >= maxIdentityPaths {
+			break
+		}
+	}
+	return paths
+}
+
+// isIdentityPath recognizes a page that is likely to identify the signed-in
+// caller. It is deliberately narrow: a profile/account/me segment is required,
+// and admin, list, mutation and API paths are excluded.
+func isIdentityPath(path string) bool {
+	p := strings.ToLower(strings.Trim(path, "/"))
+	if p == "" || strings.Contains(p, "//") {
+		return false
+	}
+	segments := strings.Split(p, "/")
+	if len(segments) > 3 {
+		return false
+	}
+	for _, seg := range segments {
+		switch {
+		case strings.Contains(seg, "logout"), strings.Contains(seg, "log-out"),
+			strings.Contains(seg, "signout"), strings.Contains(seg, "sign-out"),
+			strings.Contains(seg, "delete"), strings.Contains(seg, "remove"),
+			strings.Contains(seg, "update"), strings.Contains(seg, "edit"),
+			strings.Contains(seg, "store"), strings.Contains(seg, "create"),
+			strings.Contains(seg, "upload"), strings.Contains(seg, "export"),
+			strings.Contains(seg, "download"), strings.Contains(seg, "admin"),
+			strings.Contains(seg, "api"), strings.Contains(seg, "list"):
+			return false
+		}
+	}
+	for _, seg := range segments {
+		if strings.Contains(seg, "profile") || strings.Contains(seg, "account") {
+			return true
+		}
+		if seg == "me" || seg == "my" || seg == "user" {
+			return true
+		}
+	}
+	return false
+}
+
 // identity returns the scan's caller-identity baseline, establishing and
 // persisting it on first use. The baseline is read back from a TestCase so a
 // restarted scan does not probe the account page again. Only bounded, common
@@ -678,7 +759,7 @@ func (e *idorExecutor) identity(ctx context.Context, scanID domain.ID, ep *domai
 
 	origin := originOf(ep.URL)
 	var tried []string
-	for _, path := range []string{"/my-account", "/profile", "/account", "/me"} {
+	for _, path := range e.identityPaths(ctx, ep) {
 		if origin == "" {
 			break
 		}

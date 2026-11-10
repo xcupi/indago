@@ -163,6 +163,28 @@ func TestCoverageGroupsReasonsAndKeepsBenignSkipsAsInfo(t *testing.T) {
 	}
 }
 
+func TestCoverageClassifiesIntentionalWriteAndDownloadSkipsAsInfo(t *testing.T) {
+	a, id := coverageAPI(t, web.Capabilities{BrowserEnabled: true})
+	seedTest(t, a, id, domain.VulnReflectedXSS, domain.TestCaseSkipped, "", "http://127.0.0.1:1/form", "reflection; parameter q (form) skipped: write-like endpoint POST /form is disabled by skip_write_endpoints")
+	seedTest(t, a, id, domain.VulnReflectedXSS, domain.TestCaseSkipped, "", "http://127.0.0.1:1/export", "reflection; parameter q (query) skipped: export/download endpoint GET /export is disabled by skip_download_endpoints")
+
+	var c coverageResp
+	a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
+	by := map[string]string{}
+	for _, r := range c.Reasons {
+		by[r.Code] = r.Severity
+	}
+	if by["write_endpoints_skipped"] != "info" || by["download_endpoints_skipped"] != "info" {
+		t.Fatalf("intentional policy skips must be info: %+v", c.Reasons)
+	}
+	if c.CoverageGaps {
+		t.Fatalf("intentional policy skips must not mark the scan as a coverage gap: %+v", c)
+	}
+	if c.warning("write_endpoints_skipped") || c.warning("download_endpoints_skipped") {
+		t.Fatalf("intentional policy skips should not produce warning banners: %+v", c.Warnings)
+	}
+}
+
 func TestCoverageCleanScanHasNoGaps(t *testing.T) {
 	a, id := coverageAPI(t, web.Capabilities{BrowserEnabled: true})
 	seedTest(t, a, id, domain.VulnReflectedXSS, domain.TestCaseCompleted, domain.OutcomeSuccess, "http://127.0.0.1:1/x?q=1", "not reflected")
