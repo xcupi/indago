@@ -13,6 +13,7 @@ import { api, refreshAll, useApi } from "@/lib/api";
 import type { AuthProfile, Project, Scan, Scope, Target } from "@/lib/types";
 import { navigate } from "@/lib/router";
 import { formatTime, shortId } from "@/lib/utils";
+import { Pagination, usePagination } from "@/components/Pagination";
 
 function lines(value: string): string[] {
   return value
@@ -190,6 +191,11 @@ export default function ProjectDetail({ id }: { id: string }) {
   }
 
   const projectScans = (scans.data ?? []).filter((s) => s.project_id === id);
+  const pagedScans = usePagination(projectScans);
+  useEffect(() => {
+    pagedScans.setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectScans.length]);
   const authProfiles = useApi<AuthProfile[]>(`/api/projects/${id}/auth-profiles`);
   const targetList = targets.data ?? [];
   const targetPageCount = Math.max(1, Math.ceil(targetList.length / 10));
@@ -567,6 +573,9 @@ export default function ProjectDetail({ id }: { id: string }) {
       <Card className="mt-4">
         <CardHeader>
           <CardTitle>Scans in this project</CardTitle>
+          <p className="text-[11px] text-muted-foreground">
+            Per-scan attack selection lives in Scans → New scan → Attack capabilities.
+          </p>
         </CardHeader>
         <CardContent className="p-0">
           {projectScans.length === 0 ? (
@@ -584,7 +593,7 @@ export default function ProjectDetail({ id }: { id: string }) {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {projectScans.map((s) => (
+                {pagedScans.rows.map((s) => (
                   <TableRow key={s.id} className="cursor-pointer" onClick={() => navigate(`/scans/${s.id}`)}>
                     <TableCell>
                       <div className="mono text-[11px] text-muted-foreground">{shortId(s.id)}</div>
@@ -601,6 +610,7 @@ export default function ProjectDetail({ id }: { id: string }) {
             </Table>
           )}
         </CardContent>
+        {projectScans.length > 0 ? <Pagination {...pagedScans} /> : null}
       </Card>
     </div>
   );
