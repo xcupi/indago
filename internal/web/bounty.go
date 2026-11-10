@@ -264,14 +264,18 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 		// the same scope; skip it and say so.
 		existing, _ := s.store.Projects().List(r.Context())
 		already := false
+		existingProjectID := ""
 		for _, p := range existing {
 			if strings.Contains(p.Notes, "YesWeHack ("+slug+")") {
 				already = true
+				existingProjectID = string(p.ID)
 				break
 			}
 		}
 		if already {
-			out = append(out, importedProgram{Slug: slug, Title: detail.Title, Skipped: []string{"already imported"}})
+			// A repeated import is not an error: keep one project per program
+			// and point the operator at the existing one instead.
+			out = append(out, importedProgram{Slug: slug, Title: detail.Title, ProjectID: existingProjectID, Skipped: []string{"already imported"}})
 			continue
 		}
 		hosts, targets, prefixes, skipped := webScopeTargets(scopes)

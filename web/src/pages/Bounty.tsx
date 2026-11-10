@@ -468,7 +468,7 @@ export default function Bounty() {
                   <a className="font-medium text-emerald-700 hover:underline dark:text-emerald-400" href={`#/projects/${it.project_id}`}>
                     {it.title}
                   </a>
-                  <span className="ml-2 mono text-muted-foreground">{it.hosts.join(", ") || "no host"}</span>
+                  <span className="ml-2 mono text-muted-foreground">{(it.hosts ?? []).join(", ") || "no host"}</span>
                   {(it.scan_ids?.length ? it.scan_ids : it.scan_id ? [it.scan_id] : []).map((scanID, i) => (
                     <a key={scanID} className="ml-2 text-muted-foreground hover:underline" href={`#/scans/${scanID}`}>
                       draft scan {i + 1}
