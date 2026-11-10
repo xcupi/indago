@@ -25,6 +25,7 @@ interface ProvidersResponse {
     public_browse: boolean;
     credential?: string;
     expires_at?: string;
+    expired?: boolean;
     note: string;
   }[];
 }
@@ -46,6 +47,22 @@ interface Imported {
   scan_error?: string;
   hunting_user_agent?: string;
   skipped?: string[];
+}
+
+function formatExpiry(value?: string): string {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  const formatted = d.toLocaleString("id-ID", {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZone: "Asia/Jakarta",
+  });
+  return `${formatted} WIB`;
 }
 
 /**
@@ -86,6 +103,8 @@ export default function Bounty() {
 
   const ywh = providers.data?.providers.find((p) => p.id === "yeswehack");
   const configured = Boolean(ywh?.configured);
+  const expired = Boolean(ywh?.expired) || Boolean(ywh?.expires_at && new Date(ywh.expires_at).getTime() <= Date.now());
+  const connected = configured && !expired;
 
   async function saveToken() {
     setSaving(true);
@@ -94,6 +113,7 @@ export default function Bounty() {
     try {
       await api("/api/bounty/providers/yeswehack/token", { method: "PUT", body: { token } });
       setToken("");
+      setShowToken(false);
       setTokenMsg("Token saved. Scopes and report templates are now available.");
       refreshAll();
     } catch (e) {
@@ -241,15 +261,24 @@ export default function Bounty() {
           ) : (
             <>
               <p className="text-xs text-muted-foreground">
-                {configured
-                  ? `Connected with a ${ywh?.credential === "session" ? "hunter session token" : "personal access token"}${ywh?.expires_at ? `, valid until ${ywh.expires_at}` : ""}. Scopes, report templates and drafts are read from the API.`
-                  : "Import works without connecting (scopes come from the public program page). To use the API as a hunter, log in to yeswehack.com, then copy the session token: DevTools console → copy(localStorage.access_token) → paste below. Managers can paste a personal access token instead."}
+                {expired
+                  ? `Your ${ywh?.credential === "session" ? "hunter session token" : "credential"} expired ${formatExpiry(ywh?.expires_at)}. API scopes and templates need a fresh token; public program browsing can continue.`
+                  : connected
+                    ? `Connected with a ${ywh?.credential === "session" ? "hunter session token" : "personal access token"}${ywh?.expires_at ? `, valid until ${formatExpiry(ywh.expires_at)}` : ""}. Scopes, report templates and drafts are read from the API.`
+                    : "Import works without connecting (scopes come from the public program page). To use the API as a hunter, log in to yeswehack.com, then copy the session token: DevTools console → copy(localStorage.access_token) → paste below. Managers can paste a personal access token instead."}
               </p>
-              {configured && !showToken ? (
+              <p className="rounded-md border border-border bg-muted/30 px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
+                <span className="font-medium text-foreground">What is a hunter session token?</span>{" "}
+                It is the short-lived access token from your logged-in yeswehack.com browser tab,
+                not your password and not a manager API key. Copy it with{" "}
+                <span className="mono">copy(localStorage.access_token)</span> in DevTools, paste it here, and
+                replace it when it expires. A personal access token is the alternative for manager accounts.
+              </p>
+              {connected && !showToken ? (
                 <div className="flex flex-wrap items-center gap-2 text-[11px]">
                   <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
                     connected · {ywh?.credential === "session" ? "hunter session" : "personal access token"}
-                    {ywh?.expires_at ? ` · expires ${ywh.expires_at}` : ""}
+                    {ywh?.expires_at ? ` · expires ${formatExpiry(ywh.expires_at)}` : ""}
                   </span>
                   <Button size="sm" variant="outline" onClick={() => setShowToken(true)}>
                     Replace credential

@@ -32,6 +32,13 @@ written `0600` in a `0700` directory (`<data>/bounty/yeswehack.token`), and the
 API only reports `configured: true/false` — never the value. Clear it with
 `DELETE /api/bounty/providers/yeswehack/token`.
 
+Hunter session JWTs are short-lived. Indago decodes their `exp` claim and the
+UI shows the expiry in local WIB time; after expiry the credential is marked
+**expired**, API scopes/templates/drafts require a replacement, and public
+program browsing continues without it. The UI explains how to copy the token
+from the logged-in browser (`copy(localStorage.access_token)`) and offers
+**Replace credential**.
+
 One trap in the public page: `asset_value` there is the **severity**
 (`MEDIUM`), while `scope` is the asset. The importer only accepts a value that
 parses as a host and never a severity word.
@@ -200,6 +207,10 @@ automatically).
 ## Workflow with a model
 
 1. Connect (session token) and import the program → project + scope + targets.
+   Import also creates a draft scan for the first in-scope web target: the
+   balanced/medium profile, depth 3, 200 pages, 500 endpoints, standard
+   candidates (8 per injection point), anonymous auth. It is not started, so
+   login/auth and tuning remain explicit actions.
 2. Scan inside that scope; findings land as usual.
 3. Generate the submission: `template=yeswehack`, `format=markdown`.
 4. `POST /api/scans/{id}/ai/report-review` (or Reports → **Review with AI**)

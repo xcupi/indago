@@ -48,6 +48,7 @@ type bountyProvider struct {
 	PublicBrowse bool   `json:"public_browse"`
 	Credential   string `json:"credential,omitempty"`
 	ExpiresAt    string `json:"expires_at,omitempty"`
+	Expired      bool   `json:"expired,omitempty"`
 	Note         string `json:"note"`
 }
 
@@ -57,13 +58,16 @@ func (s *Server) handleListBountyProviders(w http.ResponseWriter, r *http.Reques
 	if configured {
 		kind, expires = bounty.CredentialInfo(s.bountyStore.Token())
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"providers": []bountyProvider{{
-			ID: "yeswehack", Label: "YesWeHack", Configured: configured, PublicBrowse: true,
-			Credential: kind, ExpiresAt: expires.Format(time.RFC3339),
-			Note: "Browsing programs works without a token; importing a program's scope needs a personal access token (X-AUTH-TOKEN).",
-		}},
-	})
+	p := bountyProvider{
+		ID: "yeswehack", Label: "YesWeHack", Configured: configured, PublicBrowse: true,
+		Credential: kind,
+		Note:       "Hunter session token: copy localStorage.access_token from a logged-in yeswehack.com tab. It expires with that browser session. Managers can use a personal access token instead.",
+	}
+	if !expires.IsZero() {
+		p.ExpiresAt = expires.Format(time.RFC3339)
+		p.Expired = time.Now().After(expires)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"providers": []bountyProvider{p}})
 }
 
 type setBountyTokenReq struct {
@@ -130,6 +134,17 @@ func (s *Server) handleBountyPrograms(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "bounty integration is not configured on this server")
 		return
 	}
+	client := s.bountyClient
+	if s.bountyStore != nil && s.bountyStore.Configured() {
+		_, expires := bounty.CredentialInfo(s.bountyStore.Token())
+		if !expires.IsZero() && time.Now().After(expires) {
+			// Program browsing is public. An expired hunter session must not
+			// turn that into a 401: show the public list and let the UI ask
+			// for a replacement token for scopes/templates.
+			client = bounty.NewClient(client.BaseURL, nil)
+			client.WebBase = s.bountyClient.WebBase
+		}
+	}
 	q := bounty.Query{
 		Search:     strings.TrimSpace(r.URL.Query().Get("search")),
 		ScopeTypes: splitCSV(r.URL.Query().Get("scope_type")),
@@ -137,7 +152,7 @@ func (s *Server) handleBountyPrograms(w http.ResponseWriter, r *http.Request) {
 		Page:       atoiDefault(r.URL.Query().Get("page"), 1),
 	}
 	refresh := r.URL.Query().Get("refresh") == "1"
-	items, total, cached, err := s.bountyClient.ListPrograms(r.Context(), q, refresh)
+	items, total, cached, err := client.ListPrograms(r.Context(), q, refresh)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "listing programs failed: "+err.Error())
 		return
@@ -315,8 +330,17 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 				ProjectID: p.ID,
 				TargetID:  firstTarget,
 				Name:      "Imported: " + detail.Title,
-				Profile:   domain.ProfileConservative,
-				AuthMode:  domain.AuthAnonymous,
+				// Balanced is the medium preset. The crawl controls are
+				// explicit so the imported scan does not look like an empty
+				// 0/0 job and can actually discover something without tuning.
+				Profile:          domain.ProfileBalanced,
+				QuickScan:        false,
+				MaxDepth:         3,
+				MaxPages:         200,
+				MaxEndpoints:     500,
+				CandidateProfile: "standard",
+				MaxCandidates:    8,
+				AuthMode:         domain.AuthAnonymous,
 			}); err != nil {
 				scanErr = err.Error()
 				s.log.Warn("bounty import: draft scan not created", "slug", slug, "error", err)

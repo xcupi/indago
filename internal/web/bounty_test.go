@@ -11,12 +11,14 @@ import (
 
 	"github.com/indago/indago/internal/bounty"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/queue"
+	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/store/memory"
 	"github.com/indago/indago/internal/web"
 )
 
 // Importing a program must create a project whose scope is the program's own
-// web-application assets, and one seed target per host root — never a scan.
+// web-application assets, plus one draft scan for the first in-scope target.
 func TestImportBountyProgramCreatesScopedProject(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/programs/acme", func(w http.ResponseWriter, r *http.Request) {
@@ -223,5 +225,62 @@ func TestImportKeepsPathScopedAsset(t *testing.T) {
 	}
 	if d := sc.Permits("https://target.test/other"); d.Allowed {
 		t.Fatal("scope allowed a path outside the program asset")
+	}
+}
+
+func TestImportCreatesBalancedScanWithUsableDefaults(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/programs/acme", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"slug": "acme", "title": "ACME Program", "type": "bug-bounty"})
+	})
+	mux.HandleFunc("/programs/acme/scopes", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-AUTH-TOKEN") != "tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
+			{"scope": "app.acme.test", "scope_type": "web-application", "asset_value": "https://app.acme.test"},
+		}})
+	})
+	ywh := httptest.NewServer(mux)
+	defer ywh.Close()
+	t.Setenv("INDAGO_YESWEHACK_API", ywh.URL)
+
+	st := memory.New()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := web.NewServer(st, scan.NewController(st, queue.NewMemory(), log, "test", scan.Options{}), "test", log, nil, t.TempDir())
+	tokens := bounty.NewStore(t.TempDir())
+	if err := tokens.Set("tok"); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetBountyStore(tokens)
+	a := api{t: t, h: srv.Handler(), st: st}
+
+	var resp struct {
+		Imported []struct {
+			ScanID    string `json:"scan_id"`
+			ScanError string `json:"scan_error"`
+		} `json:"imported"`
+	}
+	a.mustJSON(a.do("POST", "/api/bounty/import", map[string]any{"slugs": []string{"acme"}}), http.StatusOK, &resp)
+	if len(resp.Imported) != 1 || resp.Imported[0].ScanID == "" {
+		t.Fatalf("import = %+v, want a created scan", resp.Imported)
+	}
+	sc, err := st.Scans().Get(context.Background(), domain.ID(resp.Imported[0].ScanID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.Profile != domain.ProfileBalanced {
+		t.Fatalf("profile = %q, want balanced", sc.Profile)
+	}
+	if sc.Config.MaxDepth != 3 || sc.Config.MaxPages != 200 || sc.Config.MaxEndpoints != 500 {
+		t.Fatalf("crawl defaults = depth %d pages %d endpoints %d, want 3/200/500",
+			sc.Config.MaxDepth, sc.Config.MaxPages, sc.Config.MaxEndpoints)
+	}
+	if sc.Config.CandidateProfile != "standard" || sc.Config.MaxCandidates != 8 {
+		t.Fatalf("candidate defaults = %q/%d, want standard/8", sc.Config.CandidateProfile, sc.Config.MaxCandidates)
+	}
+	if sc.State != domain.ScanCreated {
+		t.Fatalf("state = %q, want an unstarted draft", sc.State)
 	}
 }
