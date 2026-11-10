@@ -313,12 +313,12 @@ export default function Scans() {
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-muted-foreground">Authentication</span>
                     <span className="mono text-foreground">
-                      {selectedProfile ? selectedProfile.name : "anonymous"}
+                      {selectedProfile ? selectedProfile.name : form.auth === "existing" ? "project fallback session" : "anonymous"}
                     </span>
                   </div>
                   <p className="mt-1 text-muted-foreground">
-                    Inherited from the selected target. Change it on the project page: Targets → Login.
-                    A scan does not need another auth mode.
+                    Inherited from the selected target (or the project fallback when the target has none).
+                    Change it on the project page: Targets → Login. A scan does not need another auth mode.
                   </p>
                   {selectedProfile && !selectedProfile.state_path ? (
                     <p className="mt-1 text-amber-700 dark:text-amber-400">
