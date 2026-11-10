@@ -614,6 +614,12 @@ func (c *Controller) Start(ctx context.Context, scanID domain.ID) error {
 	if d := scope.Permits(target.BaseURL); !d.Allowed {
 		return fmt.Errorf("%w: %s", ErrOutOfScope, d.Reason)
 	}
+	// A target's auth profile can be assigned after its scan was created (the
+	// bounty import creates scans before the operator logs in). Pick it up at
+	// start so an imported draft does not silently run anonymously.
+	if err := c.inheritTargetAuthProfile(ctx, sc, target); err != nil {
+		return err
+	}
 
 	if err := c.establishSession(ctx, sc); err != nil {
 		return err
@@ -1116,6 +1122,52 @@ func (c *Controller) loadScope(ctx context.Context, projectID domain.ID) (domain
 		return domain.Scope{}, ErrScopeEmpty
 	}
 	return *scope, nil
+}
+
+// inheritTargetAuthProfile upgrades a draft scan to the target's reusable
+// session when the operator assigned one after the scan was created. The
+// target profile is authoritative: a scan without its own profile must not
+// silently keep testing anonymously.
+func (c *Controller) inheritTargetAuthProfile(ctx context.Context, sc *domain.Scan, target *domain.Target) error {
+	profileID := sc.Config.AuthProfileID
+	if profileID == "" {
+		profileID = target.AuthProfileID
+	}
+	if profileID == "" {
+		return nil
+	}
+	profile, err := c.store.AuthProfiles().Get(ctx, profileID)
+	if err != nil {
+		return fmt.Errorf("%w: load auth profile: %v", ErrAuth, err)
+	}
+	if profile.ProjectID != sc.ProjectID {
+		return fmt.Errorf("%w: auth profile does not belong to the scan project", ErrAuth)
+	}
+	if profile.StatePath == "" {
+		return fmt.Errorf("%w: auth profile %q has no saved session; log in on the target first", ErrAuth, profile.Name)
+	}
+	if sc.SessionID.Empty() {
+		return fmt.Errorf("%w: scan has no session row", ErrAuth)
+	}
+	sess, err := c.store.Sessions().Get(ctx, sc.SessionID)
+	if err != nil {
+		return fmt.Errorf("%w: load session: %v", ErrAuth, err)
+	}
+	if sess.Mode == domain.AuthExisting && sess.StatePath == profile.StatePath {
+		sc.Config.AuthProfileID = profile.ID
+		return nil
+	}
+	sess.Mode = domain.AuthExisting
+	sess.StatePath = profile.StatePath
+	sess.State = domain.SessionAuthenticating
+	sess.ExpiresAt = nil
+	sess.LastError = ""
+	sess.UpdatedAt = time.Now()
+	if err := c.store.Sessions().Update(ctx, sess); err != nil {
+		return fmt.Errorf("%w: update session: %v", ErrAuth, err)
+	}
+	sc.Config.AuthProfileID = profile.ID
+	return nil
 }
 
 func (c *Controller) establishSession(ctx context.Context, sc *domain.Scan) error {
