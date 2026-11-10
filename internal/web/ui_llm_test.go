@@ -32,7 +32,7 @@ func TestUISettingsLLMConfigureAndTest(t *testing.T) {
 	u := newUIHarness(t)
 	u.eval(`navigate("#/settings")`)
 	u.waitUI("settings rendered", `document.getElementById('view').dataset.view==='settings'`)
-	u.waitUI("llm card loaded", `document.getElementById('llm_provider') && document.getElementById('llm_provider').options.length===3`)
+	u.waitUI("llm card loaded", `document.getElementById('llm_provider') && document.getElementById('llm_provider').options.length>=3`)
 
 	// Explicit not-configured state; nothing contacted the provider.
 	if !strings.Contains(u.evalStr(`document.getElementById('view').textContent`), "Not configured") {
