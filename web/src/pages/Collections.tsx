@@ -4,6 +4,8 @@ import { selectedProject, setSelectedProject } from "@/components/Layout";
 import { Badge, SeverityBadge, VerdictBadge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Empty, Loading } from "@/components/ui/misc";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Pagination, usePagination } from "@/components/Pagination";
 import { useApi } from "@/lib/api";
@@ -126,26 +128,40 @@ export function FindingsPage() {
   const findings = useApi<Finding[]>("/api/findings");
   const filter = useCollectionFilter(scans.data ?? []);
   const scanById = useMemo(() => new Map((scans.data ?? []).map((s) => [s.id, s])), [scans.data]);
+  const [q, setQ] = useState("");
+  const [verdict, setVerdict] = useState("");
+  const [severity, setSeverity] = useState("");
 
   const rows = useMemo(() => {
+    const needle = q.trim().toLowerCase();
     return (findings.data ?? []).filter((f) => {
-      if (filter.scan) return f.scan_id === filter.scan;
-      return filter.scanIDs.has(f.scan_id);
+      if (filter.scan) {
+        if (f.scan_id !== filter.scan) return false;
+      } else if (!filter.scanIDs.has(f.scan_id)) {
+        return false;
+      }
+      if (verdict && f.verdict !== verdict) return false;
+      if (severity && f.severity !== severity) return false;
+      if (needle) {
+        const haystack = [f.title, f.summary, f.vuln_class, f.location].filter(Boolean).join(" ").toLowerCase();
+        if (!haystack.includes(needle)) return false;
+      }
+      return true;
     });
-  }, [findings.data, filter.scan, filter.scanIDs]);
+  }, [findings.data, filter.scan, filter.scanIDs, q, verdict, severity]);
 
   const confirmed = rows.filter((f) => f.verdict === "confirmed").length;
   const paged = usePagination(rows);
   useEffect(() => {
     paged.setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filter.project, filter.scan]);
+  }, [filter.project, filter.scan, q, verdict, severity]);
 
   return (
     <div>
       <PageTitle
         title="Findings"
-        subtitle={`Every finding across scans and projects — ${rows.length} shown, ${confirmed} confirmed.`}
+        subtitle={`Every finding across scans and projects — ${rows.length} matching, ${confirmed} confirmed.`}
       />
       {scans.loading && !scans.data ? (
         <Loading />
@@ -159,6 +175,56 @@ export function FindingsPage() {
             projects={filter.projects}
             scans={filter.projectScans}
           />
+          <Card className="mb-4">
+            <CardContent className="flex flex-wrap items-end gap-2 p-3">
+              <label className="flex min-w-[220px] flex-1 flex-col gap-1 text-[11px] uppercase tracking-wide text-muted-foreground">
+                Search
+                <Input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="Title, class, summary…"
+                  className="h-8 normal-case"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] uppercase tracking-wide text-muted-foreground">
+                Verdict
+                <select
+                  className="h-8 rounded-md border border-border bg-background px-2 text-xs normal-case"
+                  value={verdict}
+                  onChange={(e) => setVerdict(e.target.value)}
+                >
+                  <option value="">All verdicts</option>
+                  <option value="confirmed">Confirmed</option>
+                  <option value="rejected">Rejected</option>
+                  <option value="inconclusive">Inconclusive</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] uppercase tracking-wide text-muted-foreground">
+                Severity
+                <select
+                  className="h-8 rounded-md border border-border bg-background px-2 text-xs normal-case"
+                  value={severity}
+                  onChange={(e) => setSeverity(e.target.value)}
+                >
+                  <option value="">Any severity</option>
+                  {["critical", "high", "medium", "low"].map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </label>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setQ("");
+                  setVerdict("");
+                  setSeverity("");
+                }}
+              >
+                Clear
+              </Button>
+            </CardContent>
+          </Card>
           {findings.loading && !findings.data ? (
             <Loading />
           ) : rows.length === 0 ? (
