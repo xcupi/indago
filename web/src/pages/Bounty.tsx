@@ -78,6 +78,8 @@ export default function Bounty() {
     scopes_error?: string;
   } | null>(null);
   const [detailBusy, setDetailBusy] = useState("");
+  const [selectingAll, setSelectingAll] = useState(false);
+  const [selectAllNote, setSelectAllNote] = useState("");
 
   const ywh = providers.data?.providers.find((p) => p.id === "yeswehack");
   const configured = Boolean(ywh?.configured);
@@ -119,6 +121,45 @@ export default function Bounty() {
       setPrograms([]);
     } finally {
       setLoading(false);
+    }
+  }
+
+  const allOnPage = Boolean(programs?.length) && (programs ?? []).every((p) => picked[p.slug]);
+
+  function toggleAllOnPage() {
+    if (!programs) return;
+    const next = { ...picked };
+    for (const p of programs) next[p.slug] = !allOnPage;
+    setPicked(next);
+    setSelectAllNote("");
+  }
+
+  async function selectAllResults() {
+    setSelectingAll(true);
+    setErr("");
+    setSelectAllNote("");
+    try {
+      const next = { ...picked };
+      let p = 1;
+      let more = true;
+      let seen = 0;
+      while (more && p <= 20) {
+        const q = new URLSearchParams({ type: "bug-bounty", scope_type: "web-application", page: String(p) });
+        if (search.trim()) q.set("search", search.trim());
+        const res = await api<{ items: Program[]; has_more: boolean }>(`/api/bounty/programs?${q.toString()}`);
+        for (const item of res.items) {
+          next[item.slug] = true;
+          seen++;
+        }
+        more = res.has_more;
+        p++;
+      }
+      setPicked(next);
+      setSelectAllNote(`${seen} program${seen === 1 ? "" : "s"} selected across ${p - 1} page${p - 1 === 1 ? "" : "s"}.`);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSelectingAll(false);
     }
   }
 
@@ -240,6 +281,32 @@ export default function Bounty() {
             Bounty programs filtered to <span className="mono">web-application</span> scope (
             {programs === null ? "not loaded yet — press Load" : `page ${page}, ${programs.length} of ${total || programs.length}${cached ? ", cached" : ""}`}).
           </p>
+
+          {programs !== null ? (
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 px-2.5 py-2">
+              <label className="flex items-center gap-2 text-[11px] text-foreground">
+                <input type="checkbox" checked={allOnPage} onChange={toggleAllOnPage} />
+                Select all on this page
+              </label>
+              <Button size="sm" variant="outline" onClick={selectAllResults} disabled={selectingAll || loading || !total}>
+                {selectingAll ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                Select all results ({total || "?"})
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setPicked({});
+                  setSelectAllNote("");
+                }}
+                disabled={pickedCount === 0}
+              >
+                Clear
+              </Button>
+              <span className="ml-auto text-[11px] text-muted-foreground">{pickedCount} selected</span>
+            </div>
+          ) : null}
+          {selectAllNote ? <p className="text-[11px] text-emerald-700 dark:text-emerald-400">{selectAllNote}</p> : null}
 
           {programs === null ? (
             <Empty>Programs are not loaded. Press “Load programs” to query YesWeHack.</Empty>
