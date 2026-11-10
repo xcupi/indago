@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/httpengine"
 )
@@ -44,7 +43,7 @@ func preflightBlockReason(resp *httpengine.Response) string {
 	if resp == nil {
 		return ""
 	}
-	label, captcha := detection.DetectCaptcha(resp.Body)
+	challenge := preflightChallenge(resp.Body)
 	vendor := wafVendor(resp.Headers)
 	mitigated := strings.ToLower(strings.TrimSpace(resp.Headers.Get("CF-Mitigated")))
 	switch {
@@ -54,14 +53,32 @@ func preflightBlockReason(resp *httpengine.Response) string {
 			return fmt.Sprintf("target answered HTTP %d (Retry-After %s) at preflight; wait before retrying", resp.Status, retry)
 		}
 		return fmt.Sprintf("target answered HTTP %d (backpressure/unavailable) at preflight; wait before retrying", resp.Status)
-	case captcha && strings.Contains(strings.ToLower(label), "cloudflare"):
-		return fmt.Sprintf("%s challenge page at preflight; Indago does not solve or bypass CAPTCHAs — wait for the challenge/cooldown window", label)
+	case challenge:
+		return "Cloudflare challenge page at preflight; Indago does not solve or bypass CAPTCHAs — wait for the challenge/cooldown window"
 	case mitigated == "challenge" || mitigated == "managed_challenge":
 		return "target marked the preflight as a bot challenge (CF-Mitigated: " + mitigated + "); wait before retrying"
 	case (resp.Status == http.StatusForbidden || resp.Status == http.StatusNotAcceptable) && vendor != "":
 		return fmt.Sprintf("%s rejected the preflight with HTTP %d; wait for the WAF/cooldown window before retrying", vendor, resp.Status)
 	}
 	return ""
+}
+
+// preflightChallenge recognises an actual Cloudflare challenge/block page.
+// It deliberately does not treat every reCAPTCHA/Turnstile widget as a WAF
+// block: a login page can legitimately embed one, and pausing the whole scan
+// for that would be a false positive. CF-Mitigated is handled separately in
+// preflightBlockReason.
+func preflightChallenge(body []byte) bool {
+	lower := strings.ToLower(string(body))
+	for _, marker := range []string{
+		"challenge-platform", "cf_chl_opt", "cf-chl-", "jschl_vc",
+		"just a moment", "attention required",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // wafVendor returns a short vendor label when response headers identify an

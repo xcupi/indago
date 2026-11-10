@@ -27,6 +27,9 @@ var captchaMarkers = []struct {
 	{"Cloudflare challenge", "challenges.cloudflare.com"},
 	{"Cloudflare challenge", "cf_chl_opt"},
 	{"Cloudflare challenge", "jschl_vc"}, // classic Cloudflare "I'm Under Attack" 5-second challenge
+	{"Cloudflare challenge", "challenge-platform"},
+	{"Cloudflare challenge", "just a moment"},
+	{"Cloudflare challenge", "attention required"},
 	{"Generic CAPTCHA", "captcha-container"},
 }
 
