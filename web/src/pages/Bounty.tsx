@@ -169,6 +169,15 @@ export default function Bounty() {
   async function runImport() {
     const slugs = Object.keys(picked).filter((s) => picked[s]);
     if (!slugs.length) return;
+    // Selections can span pages (and survive changing the program list), so
+    // make the exact count explicit before a destructive intake action.
+    if (slugs.length > 1) {
+      const preview = slugs.slice(0, 8).join("\n");
+      const more = slugs.length > 8 ? `\n… and ${slugs.length - 8} more` : "";
+      if (!confirm(`Import ${slugs.length} selected programs?\n\n${preview}${more}\n\nThis is the entire selection, not only the visible page.`)) {
+        return;
+      }
+    }
     setImporting(true);
     setErr("");
     try {
