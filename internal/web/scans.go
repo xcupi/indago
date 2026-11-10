@@ -12,6 +12,7 @@ import (
 
 	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/idor"
 	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/store"
@@ -484,7 +485,8 @@ func (s *Server) handleInteractiveLogin(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "project_id is required for login; select a project and configure Projects → Scope, including explicitly authorized SSO hosts")
 		return
 	}
-	if _, err := s.store.Projects().Get(r.Context(), req.ProjectID); err != nil {
+	project, err := s.store.Projects().Get(r.Context(), req.ProjectID)
+	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			s.writeInternalError(w, "login project", err)
 			return
@@ -506,7 +508,16 @@ func (s *Server) handleInteractiveLogin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	allow := func(raw string) bool { return scope.Permits(raw).Allowed }
-	statePath, finalURL, err := s.login(r.Context(), LoginParams{AllowRequest: allow, LoginURL: u.String(), SuccessURL: strings.TrimSpace(req.SuccessURL)})
+	ua := strings.TrimSpace(project.HuntingUserAgent)
+	if ua != "" && !project.HuntingUserAgentReplace {
+		ua = httpengine.DefaultUserAgent + " " + ua
+	}
+	statePath, finalURL, err := s.login(r.Context(), LoginParams{
+		AllowRequest: allow,
+		LoginURL:     u.String(),
+		SuccessURL:   strings.TrimSpace(req.SuccessURL),
+		UserAgent:    ua,
+	})
 	if err != nil {
 		if r.Context().Err() != nil {
 			// Operator navigated away / canceled: not a server fault.

@@ -312,7 +312,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", nil, opts.AllowRequest) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
+	ch, err := b.NewContext("", "", loginHeaders(opts.UserAgent), opts.AllowRequest) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}
@@ -346,6 +346,16 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	}
 	_, finalURL, _ := ph.Goto(opts.LoginURL, "", WaitCommit, m.cfg.NavigationTimeout) // best-effort current URL
 	return &LoginResult{StorageStatePath: opts.StorageStatePath, FinalURL: finalURL}, nil
+}
+
+// loginHeaders adds the project's hunting User-Agent to a login context. The
+// Playwright adapter turns this into its first-class userAgent option, which is
+// more reliable than an extra header.
+func loginHeaders(ua string) map[string]string {
+	if strings.TrimSpace(ua) == "" {
+		return nil
+	}
+	return map[string]string{"User-Agent": ua}
 }
 
 // autoLoginScript fills and submits a login form headless, with no operator
@@ -443,7 +453,7 @@ func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginR
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", nil, opts.AllowRequest) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
+	ch, err := b.NewContext("", "", loginHeaders(opts.UserAgent), opts.AllowRequest) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}

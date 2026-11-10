@@ -45,6 +45,7 @@ export default function ProjectDetail({ id }: { id: string }) {
   const [hunting, setHunting] = useState({ ua: "", replace: false });
   const [huntingNote, setHuntingNote] = useState("");
   const [huntingErr, setHuntingErr] = useState("");
+  const [targetPage, setTargetPage] = useState(1);
 
   useEffect(() => {
     if (!project.data) return;
@@ -150,6 +151,14 @@ export default function ProjectDetail({ id }: { id: string }) {
   }
 
   const projectScans = (scans.data ?? []).filter((s) => s.project_id === id);
+  const targetList = targets.data ?? [];
+  const targetPageCount = Math.max(1, Math.ceil(targetList.length / 10));
+  const pagedTargets = targetList.slice((targetPage - 1) * 10, targetPage * 10);
+
+  // Keep the page valid after deleting targets or adding a new one.
+  useEffect(() => {
+    if (targetPage > targetPageCount) setTargetPage(targetPageCount);
+  }, [targetPage, targetPageCount]);
 
   return (
     <div>
@@ -193,6 +202,46 @@ export default function ProjectDetail({ id }: { id: string }) {
         }
       />
 
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Globe2 className="size-4 text-sky-700 dark:text-sky-400" /> Hunting User-Agent
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Field
+              label="Program value"
+              hint="Paste the exact value from the program's hunting requirements, e.g. -BugBounty-CyberGhost--31337. It is appended to Indago's User-Agent unless you choose to replace it."
+            >
+              <Input
+                value={hunting.ua}
+                onChange={(e) => setHunting((h) => ({ ...h, ua: e.target.value }))}
+                placeholder="-BugBounty-Program--31337"
+                spellCheck={false}
+              />
+            </Field>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <label className="flex items-center gap-2 text-sm">
+                <Switch
+                  checked={hunting.replace}
+                  onCheckedChange={(v) => setHunting((h) => ({ ...h, replace: v }))}
+                />
+                Replace the default User-Agent
+              </label>
+              <Button size="sm" onClick={saveHunting}>
+                <Save className="size-4" /> Save User-Agent
+              </Button>
+            </div>
+            {huntingErr && <Alert className="border-red-200 text-red-700 dark:border-red-900 dark:text-red-400">{huntingErr}</Alert>}
+            {huntingNote && <p className="text-xs text-emerald-700 dark:text-emerald-400">{huntingNote}</p>}
+            <p className="text-xs text-muted-foreground">
+              Most YesWeHack programs ask you to append a suffix; a few require a full replacement.
+              Keep the exact casing and hyphens. Scans already running are not changed.
+            </p>
+          </CardContent>
+        </Card>
+
+
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
@@ -231,7 +280,7 @@ export default function ProjectDetail({ id }: { id: string }) {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {(targets.data ?? []).map((t) => (
+                  {pagedTargets.map((t) => (
                     <TableRow key={t.id}>
                       <TableCell className="text-foreground">{t.name}</TableCell>
                       <TableCell className="mono text-[11px] text-muted-foreground">{t.base_url}</TableCell>
@@ -284,45 +333,29 @@ export default function ProjectDetail({ id }: { id: string }) {
                 </TableBody>
               </Table>
             )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Globe2 className="size-4 text-sky-700 dark:text-sky-400" /> Hunting User-Agent
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <Field
-              label="Program value"
-              hint="Paste the exact value from the program's hunting requirements, e.g. -BugBounty-CyberGhost--31337. It is appended to Indago's User-Agent unless you choose to replace it."
-            >
-              <Input
-                value={hunting.ua}
-                onChange={(e) => setHunting((h) => ({ ...h, ua: e.target.value }))}
-                placeholder="-BugBounty-Program--31337"
-                spellCheck={false}
-              />
-            </Field>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <label className="flex items-center gap-2 text-sm">
-                <Switch
-                  checked={hunting.replace}
-                  onCheckedChange={(v) => setHunting((h) => ({ ...h, replace: v }))}
-                />
-                Replace the default User-Agent
-              </label>
-              <Button size="sm" onClick={saveHunting}>
-                <Save className="size-4" /> Save User-Agent
-              </Button>
-            </div>
-            {huntingErr && <Alert className="border-red-200 text-red-700 dark:border-red-900 dark:text-red-400">{huntingErr}</Alert>}
-            {huntingNote && <p className="text-xs text-emerald-700 dark:text-emerald-400">{huntingNote}</p>}
-            <p className="text-xs text-muted-foreground">
-              Most YesWeHack programs ask you to append a suffix; a few require a full replacement.
-              Keep the exact casing and hyphens. Scans already running are not changed.
-            </p>
+            {targetList.length > 10 ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-2 text-[11px] text-muted-foreground">
+                <span>
+                  Showing {(targetPage - 1) * 10 + 1}–{Math.min(targetPage * 10, targetList.length)} of {targetList.length} targets
+                </span>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="outline" disabled={targetPage <= 1} onClick={() => setTargetPage((p) => p - 1)}>
+                    Previous
+                  </Button>
+                  <span>
+                    Page {targetPage} / {targetPageCount}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={targetPage >= targetPageCount}
+                    onClick={() => setTargetPage((p) => p + 1)}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 

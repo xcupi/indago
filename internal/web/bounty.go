@@ -195,6 +195,7 @@ type importedProgram struct {
 	Hosts     []string `json:"hosts"`
 	ScanID    string   `json:"scan_id,omitempty"`
 	ScanError string   `json:"scan_error,omitempty"`
+	UserAgent string   `json:"hunting_user_agent,omitempty"`
 	Skipped   []string `json:"skipped,omitempty"`
 }
 
@@ -264,6 +265,19 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 		}
 		now := time.Now()
 		p := &domain.Project{ID: domain.NewID(), Name: detail.Title, Notes: "Imported from YesWeHack (" + slug + ")", CreatedAt: now, UpdatedAt: now}
+		// Some programs put the hunting User-Agent only in the public page's
+		// "User agent" section (the API rules field is often abbreviated).
+		// Best effort: a failed lookup must not fail the import.
+		ruleText := strings.ToLower(detail.Rules + " " + detail.RulesHTML)
+		if strings.Contains(ruleText, "user-agent") || strings.Contains(ruleText, "user agent") || strings.Contains(ruleText, "hunting requirement") {
+			if ua, replace, err := s.bountyClient.PublicHuntingUserAgent(r.Context(), slug); err == nil && ua != "" {
+				p.HuntingUserAgent = ua
+				p.HuntingUserAgentReplace = replace
+				s.log.Info("bounty hunting user-agent imported", "slug", slug, "value", ua, "replace", replace)
+			} else if err != nil {
+				s.log.Warn("bounty hunting user-agent lookup failed", "slug", slug, "error", err)
+			}
+		}
 		if err := s.store.Projects().Create(r.Context(), p); err != nil {
 			s.writeInternalError(w, "create project", err)
 			return
@@ -285,11 +299,17 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 				s.writeInternalError(w, "create target", err)
 				return
 			}
-			if firstTarget == "" {
+			// Pick the first seed the imported scope actually permits. Some
+			// programs scope only a path prefix, so the first host-root target
+			// can legitimately be out of scope and would make CreateScan fail.
+			if firstTarget == "" && sc.Permits(t.BaseURL).Allowed {
 				firstTarget = t.ID
 			}
 		}
 		var scanID, scanErr string
+		if firstTarget == "" && len(targets) > 0 {
+			scanErr = "no imported target is permitted by the program scope"
+		}
 		if s.ctrl != nil && firstTarget != "" {
 			if created, err := s.ctrl.CreateScan(r.Context(), scan.CreateScanParams{
 				ProjectID: p.ID,
@@ -304,7 +324,7 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 				scanID = string(created.ID)
 			}
 		}
-		out = append(out, importedProgram{Slug: slug, Title: detail.Title, ProjectID: string(p.ID), Targets: targets, Hosts: hosts, ScanID: scanID, ScanError: scanErr, Skipped: skipped})
+		out = append(out, importedProgram{Slug: slug, Title: detail.Title, ProjectID: string(p.ID), Targets: targets, Hosts: hosts, ScanID: scanID, ScanError: scanErr, UserAgent: p.HuntingUserAgent, Skipped: skipped})
 		s.log.Info("bounty program imported", "provider", "yeswehack", "slug", slug, "hosts", len(hosts), "targets", len(targets))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"imported": out})

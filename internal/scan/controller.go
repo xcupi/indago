@@ -494,7 +494,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.EnableObjectFamilyProbe = p.EnableObjectFamilyProbe
 	cfg.EnableXSSLibrary = p.EnableXSSLibrary
 
-	statePath, err := c.resolveAuth(ctx, mode, p, scope)
+	statePath, err := c.resolveAuth(ctx, mode, p, scope, c.huntingUserAgent(&domain.Scan{Config: domain.ScanConfig{HuntingUserAgent: project.HuntingUserAgent, HuntingUserAgentReplace: project.HuntingUserAgentReplace}}))
 	if err != nil {
 		return nil, err
 	}
@@ -860,7 +860,7 @@ func (c *Controller) Shutdown() {
 // (blocking CreateScan until it finishes, times out, or the context is
 // canceled, the same contract web.LoginFunc's standalone /api/auth/login
 // endpoint already has). Returns the state path to persist on the Session.
-func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p CreateScanParams, scope domain.Scope) (string, error) {
+func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p CreateScanParams, scope domain.Scope, userAgent string) (string, error) {
 	statePath := strings.TrimSpace(p.AuthStatePath)
 	loginURL := strings.TrimSpace(p.LoginURL)
 	successURL := strings.TrimSpace(p.SuccessURL)
@@ -911,7 +911,7 @@ func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p Cr
 		if err != nil {
 			return "", fmt.Errorf("%w: build session state path: %w", ErrAuth, err)
 		}
-		res, err := mgr.InteractiveLogin(ctx, browser.LoginOptions{AllowRequest: allow, LoginURL: loginURL, SuccessURLGlob: successURL, StorageStatePath: path})
+		res, err := mgr.InteractiveLogin(ctx, browser.LoginOptions{AllowRequest: allow, LoginURL: loginURL, SuccessURLGlob: successURL, StorageStatePath: path, UserAgent: userAgent})
 		if err != nil {
 			return "", fmt.Errorf("%w: interactive login: %w", ErrAuth, err)
 		}

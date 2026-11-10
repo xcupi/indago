@@ -44,6 +44,7 @@ interface Imported {
   hosts: string[];
   scan_id?: string;
   scan_error?: string;
+  hunting_user_agent?: string;
   skipped?: string[];
 }
 
@@ -431,6 +432,7 @@ export default function Bounty() {
                     </a>
                   ) : null}
                   {it.scan_error ? <span className="ml-2 text-amber-700 dark:text-amber-400">scan: {it.scan_error}</span> : null}
+                  {it.hunting_user_agent ? <span className="ml-2 mono text-muted-foreground">UA: {it.hunting_user_agent}</span> : null}
                   {it.skipped?.length ? <span className="ml-2 text-muted-foreground">skipped: {it.skipped.join(", ")}</span> : null}
                 </div>
               ))}

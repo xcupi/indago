@@ -315,6 +315,7 @@ func cmdServe(args []string) error {
 				AllowRequest:     p.AllowRequest,
 				SuccessURLGlob:   p.SuccessURL,
 				StorageStatePath: statePath,
+				UserAgent:        p.UserAgent,
 			})
 			if err != nil {
 				return "", "", err

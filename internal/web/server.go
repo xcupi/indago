@@ -127,6 +127,9 @@ type LoginParams struct {
 	AllowRequest func(string) bool
 	LoginURL     string // page to open for the operator to log in on
 	SuccessURL   string // optional glob; login is considered done when the browser reaches it
+	// UserAgent is the project's hunting identity, when configured. Login
+	// traffic must carry it too: a program can require it on every request.
+	UserAgent string
 }
 
 // SetLoginFunc installs the interactive-login implementation. A nil fn (the

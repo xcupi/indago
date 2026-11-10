@@ -86,8 +86,9 @@ drive a fresh scan, import the program and scan the new project instead.
 - a **scope** whose `include_hosts` are the program's `web-application` assets
   (wildcards become the parent host, subdomains allowed), and
 - one **seed target** per host root (`https://host/`), and
-- one **draft scan** for the first target, profile `conservative`, auth mode
-  `anonymous`. It stays in `created` state until the operator starts it.
+- one **draft scan** for the first target the imported scope permits, profile
+  `conservative`, auth mode `anonymous`. It stays in `created` state until the
+  operator starts it.
 
 Assets of other scope types (api, mobile, …) are listed in `skipped`, not turned
 into targets. An asset that is a **path**, not a host root (for example
@@ -118,10 +119,14 @@ section (CyberGhost is one example).
 
 Indago stores the value on the project (**Project → Hunting User-Agent**). By
 default it is appended to `Indago` (`Indago <value>`); enable **Replace the
-default User-Agent** for programs that require a full replacement. The value is
-copied to new scans, and `Start` re-reads the project so a draft scan created by
-an import still picks up a value added afterwards. It is applied to raw HTTP,
-discovery browser contexts, browser verification and DOM-XSS contexts.
+default User-Agent** for programs that require a full replacement. Import tries
+to read the value from the public page's **User agent** section automatically
+(verified with Infomaniak, `Infomaniak-YWH-Bugbounty`, replace mode); if the
+section is missing or ambiguous, set it by hand. The value is copied to new
+scans, and `Start` re-reads the project so a draft scan created by an import
+still picks up a value added afterwards. It is applied to raw HTTP, discovery
+browser contexts, browser verification, DOM-XSS contexts, and the interactive
+scan-login browser.
 
 ## Still to wire
 

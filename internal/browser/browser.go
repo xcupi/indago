@@ -193,10 +193,12 @@ type ScreenshotOptions struct {
 type LoginOptions struct {
 	// AllowRequest is mandatory: use the project's Scope.Permits for all login traffic.
 	AllowRequest     func(string) bool
-	LoginURL         string        // page to open for the operator to log in
-	SuccessURLGlob   string        // navigation to this URL glob signals success
-	StorageStatePath string        // where to save the authenticated session
-	Timeout          time.Duration // overall wait for the operator (0 → 5m)
+	LoginURL         string // page to open for the operator to log in
+	SuccessURLGlob   string // navigation to this URL glob signals success
+	StorageStatePath string // where to save the authenticated session
+	// UserAgent, when set, is sent by every request in the login context.
+	UserAgent string
+	Timeout   time.Duration // overall wait for the operator (0 → 5m)
 }
 
 // LoginResult is returned after a successful interactive login.
@@ -232,7 +234,9 @@ type AutoLoginOptions struct {
 	// submits, however long that actually takes.
 	SuccessURLGlob   string
 	StorageStatePath string
-	Timeout          time.Duration // overall wait (0 → 2m; shorter than interactive's 5m since no human step is involved)
+	// UserAgent, when set, is sent by every request in the login context.
+	UserAgent string
+	Timeout   time.Duration // overall wait (0 → 2m; shorter than interactive's 5m since no human step is involved)
 }
 
 // PoolStats is a snapshot of Manager resources.
