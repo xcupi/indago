@@ -10,6 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { api, refreshAll, useApi } from "@/lib/api";
 import type { Coverage, EndpointRow, Evidence, Finding, Report, TestRow } from "@/lib/types";
 import { formatTime, shortId } from "@/lib/utils";
+import { Pagination, usePagination } from "@/components/Pagination";
 
 function decodeDetail(detail?: string): unknown {
   if (!detail) return undefined;
@@ -34,6 +35,11 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
   );
 
   const rows = (findings.data ?? []).filter((f) => !severity || f.severity === severity);
+  const paged = usePagination(rows);
+  useEffect(() => {
+    paged.setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [verdict, severity]);
 
   return (
     <div className="space-y-3">
@@ -90,7 +96,7 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {rows.map((f) => (
+                {paged.rows.map((f) => (
                   <TableRow key={f.id} className="cursor-pointer" onClick={() => setSelected(f)}>
                     <TableCell>
                       <VerdictBadge verdict={f.verdict} />
@@ -113,6 +119,7 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
           </CardContent>
         </Card>
       )}
+      <Pagination {...paged} />
 
       <Dialog open={Boolean(selected)} onOpenChange={(v) => !v && setSelected(null)}>
         {selected ? (
@@ -169,8 +176,10 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
 
 export function EvidencePanel({ scanId }: { scanId: string }) {
   const evidence = useApi<Evidence[]>(`/api/scans/${scanId}/evidence`);
+  const items = evidence.data ?? [];
+  const paged = usePagination(items);
   if (evidence.loading && !evidence.data) return <Loading />;
-  if (!(evidence.data ?? []).length) return <Empty>No evidence recorded yet.</Empty>;
+  if (!items.length) return <Empty>No evidence recorded yet.</Empty>;
   return (
     <Card>
       <CardContent className="p-0">
@@ -186,7 +195,7 @@ export function EvidencePanel({ scanId }: { scanId: string }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {(evidence.data ?? []).map((e) => (
+            {paged.rows.map((e) => (
               <TableRow key={e.id}>
                 <TableCell>
                   <Badge tone="info">{e.kind}</Badge>
@@ -212,6 +221,7 @@ export function EvidencePanel({ scanId }: { scanId: string }) {
           </TableBody>
         </Table>
       </CardContent>
+      <Pagination {...paged} />
     </Card>
   );
 }
@@ -632,8 +642,10 @@ export function CoveragePanel({ scanId }: { scanId: string }) {
 
 export function EndpointsPanel({ scanId }: { scanId: string }) {
   const endpoints = useApi<EndpointRow[]>(`/api/scans/${scanId}/endpoints`, [], 5000);
+  const items = endpoints.data ?? [];
+  const paged = usePagination(items);
   if (endpoints.loading && !endpoints.data) return <Loading />;
-  if (!(endpoints.data ?? []).length) return <Empty>No endpoints discovered yet.</Empty>;
+  if (!items.length) return <Empty>No endpoints discovered yet.</Empty>;
   return (
     <Card>
       <CardContent className="p-0">
@@ -647,7 +659,7 @@ export function EndpointsPanel({ scanId }: { scanId: string }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {(endpoints.data ?? []).map((e) => (
+            {paged.rows.map((e) => (
               <TableRow key={e.id}>
                 <TableCell>
                   <Badge tone="info">{e.method}</Badge>
@@ -662,6 +674,7 @@ export function EndpointsPanel({ scanId }: { scanId: string }) {
           </TableBody>
         </Table>
       </CardContent>
+      <Pagination {...paged} />
     </Card>
   );
 }
@@ -692,11 +705,22 @@ interface ExplorerResponse {
 export function ExplorerPanel({ scanId }: { scanId: string }) {
   const [q, setQ] = useState("");
   const [gaps, setGaps] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  useEffect(() => {
+    setPage(1);
+  }, [q, gaps]);
   const query = new URLSearchParams();
   if (q.trim()) query.set("q", q.trim());
   if (gaps) query.set("gaps", "1");
-  query.set("limit", "200");
-  const explorer = useApi<ExplorerResponse>(`/api/scans/${scanId}/explorer?${query.toString()}`, [q, gaps], 5000);
+  query.set("limit", String(pageSize));
+  query.set("offset", String((page - 1) * pageSize));
+  const explorer = useApi<ExplorerResponse>(`/api/scans/${scanId}/explorer?${query.toString()}`, [q, gaps, page, pageSize], 5000);
+  const total = explorer.data?.total ?? 0;
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  useEffect(() => {
+    if (page > pages) setPage(pages);
+  }, [page, pages]);
 
   return (
     <div className="space-y-3">
@@ -717,6 +741,7 @@ export function ExplorerPanel({ scanId }: { scanId: string }) {
       ) : !(explorer.data?.items ?? []).length ? (
         <Empty>No endpoints match this filter.</Empty>
       ) : (
+        <>
         <Card>
           <CardContent className="p-0">
             <Table>
@@ -751,6 +776,8 @@ export function ExplorerPanel({ scanId }: { scanId: string }) {
             </Table>
           </CardContent>
         </Card>
+        <Pagination page={page} pages={pages} pageSize={pageSize} total={total} start={(page - 1) * pageSize} setPage={setPage} setPageSize={setPageSize} />
+        </>
       )}
     </div>
   );
@@ -823,11 +850,16 @@ interface TestsResponse {
 }
 
 export function TestsPanel({ scanId }: { scanId: string }) {
-  const tests = useApi<TestsResponse>(`/api/scans/${scanId}/tests?limit=100`, [], 5000);
+  const tests = useApi<TestsResponse>(`/api/scans/${scanId}/tests?limit=500`, [], 5000);
   const rows = tests.data?.items ?? [];
   const [filter, setFilter] = useState("");
   const visible = useMemo(() => rows.filter((t) => !filter || t.vuln_class === filter), [rows, filter]);
   const classes = useMemo(() => Array.from(new Set(rows.map((t) => t.vuln_class))).sort(), [rows]);
+  const paged = usePagination(visible);
+  useEffect(() => {
+    paged.setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter]);
 
   if (tests.loading && !tests.data) return <Loading />;
   if (!rows.length) return <Empty>No test cases recorded yet.</Empty>;
@@ -872,7 +904,7 @@ export function TestsPanel({ scanId }: { scanId: string }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {visible.slice(0, 300).map((t) => (
+              {paged.rows.map((t) => (
                 <TableRow key={t.id}>
                   <TableCell>
                     <Badge tone="violet">{t.vuln_class}</Badge>
@@ -890,6 +922,7 @@ export function TestsPanel({ scanId }: { scanId: string }) {
           </Table>
         </CardContent>
       </Card>
+      <Pagination {...paged} />
     </div>
   );
 }

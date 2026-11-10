@@ -5,6 +5,7 @@ import { Badge, SeverityBadge, VerdictBadge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Empty, Loading } from "@/components/ui/misc";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Pagination, usePagination } from "@/components/Pagination";
 import { useApi } from "@/lib/api";
 import { navigate, useQuery } from "@/lib/router";
 import type { Finding, Project, Report, Scan } from "@/lib/types";
@@ -134,6 +135,11 @@ export function FindingsPage() {
   }, [findings.data, filter.scan, filter.scanIDs]);
 
   const confirmed = rows.filter((f) => f.verdict === "confirmed").length;
+  const paged = usePagination(rows);
+  useEffect(() => {
+    paged.setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter.project, filter.scan]);
 
   return (
     <div>
@@ -172,7 +178,7 @@ export function FindingsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {rows.map((f) => {
+                    {paged.rows.map((f) => {
                       const sc = scanById.get(f.scan_id);
                       const projectName = filter.projects.find((p) => p.id === sc?.project_id)?.name ?? "—";
                       return (
@@ -204,6 +210,7 @@ export function FindingsPage() {
               </CardContent>
             </Card>
           )}
+          <Pagination {...paged} />
         </>
       )}
     </div>
