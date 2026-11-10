@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { FolderPlus } from "lucide-react";
+import { FolderPlus, Trash2 } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -20,6 +20,54 @@ export default function Projects() {
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkErr, setBulkErr] = useState("");
+  const [bulkNote, setBulkNote] = useState("");
+
+  const projectsList = projects.data ?? [];
+  const selectedIDs = Object.keys(selected).filter((id) => selected[id]);
+  const allSelected = projectsList.length > 0 && selectedIDs.length === projectsList.length;
+
+  function toggleAll(checked: boolean) {
+    setSelected(checked ? Object.fromEntries(projectsList.map((p) => [p.id, true])) : {});
+  }
+
+  async function deleteSelected() {
+    if (!selectedIDs.length) return;
+    if (
+      !confirm(
+        `Delete ${selectedIDs.length} project(s) and all their scans, findings, evidence and reports? ` +
+          "This cannot be undone. Projects with a running scan are skipped.",
+      )
+    ) {
+      return;
+    }
+    setBulkBusy(true);
+    setBulkErr("");
+    setBulkNote("");
+    try {
+      const res = await api<{
+        results: { project_id: string; deleted: boolean; scans_deleted?: number; error?: string }[];
+        deleted: number;
+        failed: number;
+      }>("/api/projects/bulk-delete", {
+        method: "POST",
+        body: { project_ids: selectedIDs, delete_scans: true },
+      });
+      setBulkNote(
+        `Deleted ${res.deleted} project(s)${res.failed ? `; ${res.failed} skipped` : ""}.`,
+      );
+      const failures = res.results.filter((r) => r.error);
+      if (failures.length) setBulkErr(failures.map((r) => `${shortId(r.project_id)}: ${r.error}`).join(" · "));
+      setSelected({});
+      refreshAll();
+    } catch (e) {
+      setBulkErr((e as Error).message);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
 
   async function create() {
     if (!name.trim()) {
@@ -81,14 +129,47 @@ export default function Projects() {
         <CardContent className="p-0">
           {projects.loading && !projects.data ? (
             <Loading />
-          ) : (projects.data ?? []).length === 0 ? (
+          ) : projectsList.length === 0 ? (
             <div className="p-4">
               <Empty>No projects yet. Create one to define a scope and add targets.</Empty>
             </div>
           ) : (
-            <Table>
+            <>
+              <div className="flex flex-wrap items-center gap-3 border-b border-border px-3 py-2">
+                <label className="flex items-center gap-2 text-xs text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={(e) => toggleAll(e.target.checked)}
+                  />
+                  Select all
+                </label>
+                {selectedIDs.length > 0 ? (
+                  <>
+                    <Button size="sm" variant="destructive" onClick={deleteSelected} disabled={bulkBusy}>
+                      {bulkBusy ? "Deleting…" : <><Trash2 className="size-4" /> Delete selected ({selectedIDs.length})</>}
+                    </Button>
+                    <button className="text-[11px] text-muted-foreground hover:text-foreground" onClick={() => setSelected({})}>
+                      Clear
+                    </button>
+                  </>
+                ) : (
+                  <span className="text-[11px] text-muted-foreground">Select projects to delete them together.</span>
+                )}
+                {bulkNote ? <span className="text-[11px] text-emerald-700 dark:text-emerald-400">{bulkNote}</span> : null}
+              </div>
+              {bulkErr ? <div className="px-3 pt-2"><Alert className="border-amber-200 text-amber-800 dark:border-amber-900 dark:text-amber-300">{bulkErr}</Alert></div> : null}
+              <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-8">
+                    <input
+                      type="checkbox"
+                      aria-label="Select all projects"
+                      checked={allSelected}
+                      onChange={(e) => toggleAll(e.target.checked)}
+                    />
+                  </TableHead>
                   <TableHead>Name</TableHead>
                   <TableHead>ID</TableHead>
                   <TableHead>Created</TableHead>
@@ -96,8 +177,16 @@ export default function Projects() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(projects.data ?? []).map((p) => (
+                {projectsList.map((p) => (
                   <TableRow key={p.id} className="cursor-pointer" onClick={() => navigate(`/projects/${p.id}`)}>
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${p.name}`}
+                        checked={Boolean(selected[p.id])}
+                        onChange={(e) => setSelected((prev) => ({ ...prev, [p.id]: e.target.checked }))}
+                      />
+                    </TableCell>
                     <TableCell className="font-medium text-foreground">{p.name}</TableCell>
                     <TableCell className="mono text-[11px] text-muted-foreground">{shortId(p.id)}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">{formatTime(p.created_at)}</TableCell>
@@ -106,6 +195,7 @@ export default function Projects() {
                 ))}
               </TableBody>
             </Table>
+            </>
           )}
         </CardContent>
       </Card>

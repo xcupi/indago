@@ -77,3 +77,61 @@ func TestDeleteRunningScanRefused(t *testing.T) {
 		t.Fatalf("running scan delete = %d, want 409", rec.Code)
 	}
 }
+
+func TestBulkDeleteProjectsDeletesTheirScans(t *testing.T) {
+	a := newAPI(t, nil)
+	scan1 := createTestScan(t, a)
+	scan2 := createTestScan(t, a)
+	var s1, s2 domain.Scan
+	a.mustJSON(a.do("GET", "/api/scans/"+string(scan1), nil), http.StatusOK, &s1)
+	a.mustJSON(a.do("GET", "/api/scans/"+string(scan2), nil), http.StatusOK, &s2)
+	if s1.ProjectID == s2.ProjectID {
+		t.Fatal("test setup produced the same project twice")
+	}
+
+	var out struct {
+		Deleted int `json:"deleted"`
+		Failed  int `json:"failed"`
+	}
+	a.mustJSON(a.do("POST", "/api/projects/bulk-delete", map[string]any{
+		"project_ids":  []string{string(s1.ProjectID), string(s2.ProjectID)},
+		"delete_scans": true,
+	}), http.StatusOK, &out)
+	if out.Deleted != 2 || out.Failed != 0 {
+		t.Fatalf("bulk delete = %+v", out)
+	}
+	for _, id := range []domain.ID{s1.ProjectID, s2.ProjectID} {
+		if _, err := a.st.Projects().Get(context.Background(), id); err == nil {
+			t.Fatalf("project %s survived", id)
+		}
+	}
+	for _, id := range []domain.ID{scan1, scan2} {
+		if _, err := a.st.Scans().Get(context.Background(), id); err == nil {
+			t.Fatalf("scan %s survived", id)
+		}
+	}
+}
+
+func TestBulkDeleteProjectsRefusesRunningScan(t *testing.T) {
+	a := newAPI(t, nil)
+	scanID := createTestScan(t, a)
+	var sc domain.Scan
+	a.mustJSON(a.do("GET", "/api/scans/"+string(scanID), nil), http.StatusOK, &sc)
+	sc.State = domain.ScanRunning
+	if err := a.st.Scans().Update(context.Background(), &sc); err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Deleted int `json:"deleted"`
+		Failed  int `json:"failed"`
+	}
+	a.mustJSON(a.do("POST", "/api/projects/bulk-delete", map[string]any{
+		"project_ids": []string{string(sc.ProjectID)}, "delete_scans": true,
+	}), http.StatusOK, &out)
+	if out.Deleted != 0 || out.Failed != 1 {
+		t.Fatalf("running project bulk delete = %+v", out)
+	}
+	if _, err := a.st.Projects().Get(context.Background(), sc.ProjectID); err != nil {
+		t.Fatalf("running project should remain: %v", err)
+	}
+}

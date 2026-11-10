@@ -31,7 +31,19 @@ func (s *Server) handleDeleteScan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "this scan is still active; stop it before deleting")
 		return
 	}
+	if err := s.deleteScanCascade(r, scanID); err != nil {
+		s.writeInternalError(w, "delete scan", err)
+		return
+	}
+	s.log.Info("scan deleted", "scan", scanID)
+	w.WriteHeader(http.StatusNoContent)
+}
 
+// deleteScanCascade removes a scan's reports, AI tasks, evidence and every
+// child row, then the scan itself. The caller must have checked that the scan
+// is not running/canceling. Operations are best-effort for child rows (a
+// missing row is not a failure), except the final scan delete.
+func (s *Server) deleteScanCascade(r *http.Request, scanID domain.ID) error {
 	// Reports: remove the stored file, then the row.
 	if reports, err := s.store.Reports().ListByScan(r.Context(), scanID); err == nil {
 		for _, rpt := range reports {
@@ -61,13 +73,7 @@ func (s *Server) handleDeleteScan(w http.ResponseWriter, r *http.Request) {
 	s.deleteInjectionPoints(r, scanID)
 	s.deleteParameters(r, scanID)
 	s.deleteEndpoints(r, scanID)
-
-	if err := s.store.Scans().Delete(r.Context(), scanID); err != nil {
-		s.writeInternalError(w, "delete scan", err)
-		return
-	}
-	s.log.Info("scan deleted", "scan", scanID)
-	w.WriteHeader(http.StatusNoContent)
+	return s.store.Scans().Delete(r.Context(), scanID)
 }
 
 func idsOfFindings(rows []*domain.Finding) []domain.ID {
@@ -155,6 +161,17 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "this project still has scans; delete them first (each scan owns its evidence and reports)")
 		return
 	}
+	if err := s.deleteProjectCascade(r, projectID); err != nil {
+		s.writeInternalError(w, "delete project", err)
+		return
+	}
+	s.log.Info("project deleted", "project", projectID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteProjectCascade removes a project's remaining targets and scope, then
+// the project row. It does not inspect or delete scans: callers decide that.
+func (s *Server) deleteProjectCascade(r *http.Request, projectID domain.ID) error {
 	targets, _ := s.store.Targets().ListByProject(r.Context(), projectID)
 	for _, t := range targets {
 		_ = s.store.Targets().Delete(r.Context(), t.ID)
@@ -162,12 +179,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	if sc, err := s.store.Scopes().GetByProject(r.Context(), projectID); err == nil {
 		_ = s.store.Scopes().Delete(r.Context(), sc.ID)
 	}
-	if err := s.store.Projects().Delete(r.Context(), projectID); err != nil {
-		s.writeInternalError(w, "delete project", err)
-		return
-	}
-	s.log.Info("project deleted", "project", projectID)
-	w.WriteHeader(http.StatusNoContent)
+	return s.store.Projects().Delete(r.Context(), projectID)
 }
 
 type updateTargetReq struct {
