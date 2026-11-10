@@ -242,6 +242,8 @@ func (c *Controller) discoveryConfig(sc *domain.Scan) discovery.Config {
 	if sc.Config.MaxDepth > 0 {
 		cfg.MaxDepth = sc.Config.MaxDepth
 	}
+	cfg.SkipGlobalInjection = sc.Config.SkipGlobalInjection
+	cfg.SkipStaticAssets = sc.Config.SkipStaticAssets
 	if sc.Config.MaxPages > 0 {
 		cfg.MaxPages = sc.Config.MaxPages
 	}

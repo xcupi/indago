@@ -346,6 +346,10 @@ type CreateScanParams struct {
 	EnableObjectFamilyProbe bool
 	// EnableXSSLibrary opts into the cheat-sheet library families.
 	EnableXSSLibrary bool
+	// SkipGlobalInjection omits header/cookie injection points.
+	SkipGlobalInjection bool
+	// SkipStaticAssets drops crawler/browser-discovered static resources.
+	SkipStaticAssets bool
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -518,6 +522,8 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.EnableAdminStepProbe = p.EnableAdminStepProbe
 	cfg.EnableObjectFamilyProbe = p.EnableObjectFamilyProbe
 	cfg.EnableXSSLibrary = p.EnableXSSLibrary
+	cfg.SkipGlobalInjection = p.SkipGlobalInjection
+	cfg.SkipStaticAssets = p.SkipStaticAssets
 
 	statePath, err := c.resolveAuth(ctx, mode, p, scope, c.huntingUserAgent(&domain.Scan{Config: domain.ScanConfig{HuntingUserAgent: project.HuntingUserAgent, HuntingUserAgentReplace: project.HuntingUserAgentReplace}}))
 	if err != nil {

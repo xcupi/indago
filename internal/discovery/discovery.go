@@ -212,6 +212,12 @@ type Config struct {
 	// registers nothing, so every pre-existing scan is unchanged. Read at
 	// discovery time, like the crawl controls.
 	RawQueryInjection RawQueryMode
+
+	// SkipGlobalInjection omits header/cookie injection points. The default
+	// false preserves the previous coverage for existing scans.
+	SkipGlobalInjection bool
+	// SkipStaticAssets drops non-seed static resources before registration.
+	SkipStaticAssets bool
 }
 
 // DefaultConfig returns conservative discovery defaults.

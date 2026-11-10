@@ -192,21 +192,34 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 	if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: pageURL, Method: domain.MethodGET, Source: domain.SourceCrawler, ContentType: ct}); err != nil {
 		return nil, err
 	}
-	c.applyParamWordlist(ctx, sink, pageURL)
+	// A seed such as https://example.com/ commonly redirects to
+	// https://www.example.com/. Resolve relative links and register the final
+	// page too; otherwise the crawler can discover only the redirect source
+	// and never see the real site's navigation.
+	baseURL := pageURL
+	if resp.FinalURL != "" && resp.FinalURL != pageURL {
+		if final, err := Normalize(resp.FinalURL); err == nil && in.Scope.Permits(final.Canonical).Allowed {
+			if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: final.Canonical, Method: domain.MethodGET, Source: domain.SourceCrawler, ContentType: ct}); err != nil {
+				return nil, err
+			}
+			baseURL = final.Canonical
+		}
+	}
+	c.applyParamWordlist(ctx, sink, baseURL)
 
 	if !strings.Contains(strings.ToLower(ct), "html") {
 		return nil, nil // only parse HTML
 	}
 	body := string(resp.Body)
 	for _, name := range ExtractScriptParamNames(body) {
-		_ = sink.AddParameter(ctx, ParamCandidate{EndpointURL: pageURL, EndpointMethod: domain.MethodGET,
+		_ = sink.AddParameter(ctx, ParamCandidate{EndpointURL: baseURL, EndpointMethod: domain.MethodGET,
 			Name: name, Location: domain.LocationQuery, Source: domain.SourceScriptLiteral})
 	}
 
 	// Forms. ExtractForms promotes handler-derived submit targets to POST,
 	// so their inputs follow the same body-parameter path as declared POST forms.
 	for _, f := range ExtractForms(body) {
-		actionInfo, err := NormalizeRef(pageURL, f.Action)
+		actionInfo, err := NormalizeRef(baseURL, f.Action)
 		if err != nil || !in.Scope.Permits(actionInfo.Canonical).Allowed {
 			continue
 		}
@@ -234,7 +247,7 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 	// Links → endpoints + next level.
 	var nextLinks []string
 	for _, ref := range ExtractLinks(body) {
-		info, err := NormalizeRef(pageURL, ref)
+		info, err := NormalizeRef(baseURL, ref)
 		if err != nil || !in.Scope.Permits(info.Canonical).Allowed {
 			continue
 		}

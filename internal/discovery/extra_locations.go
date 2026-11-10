@@ -44,6 +44,9 @@ func isSessionCookieName(name string) bool { return sessionCookieNamePattern.Mat
 // would normally send, and only the mutated/candidate request overrides it
 // (see buildRequest in internal/scan/executor.go).
 func (c *Collector) registerHeaderInjectionPoints(ctx context.Context, endpointID domain.ID, method domain.HTTPMethod, info URLInfo, source domain.DiscoverySource) {
+	if c.cfg.SkipGlobalInjection {
+		return
+	}
 	for _, name := range defaultHeaderInjectionNames {
 		c.registerParam(ctx, endpointID, method, info, name, domain.LocationHeader, "", source)
 	}
@@ -56,6 +59,9 @@ func (c *Collector) registerHeaderInjectionPoints(ctx context.Context, endpointI
 // path is not sent just because its name was registered on this endpoint.
 // Never fabricates a cookie: an anonymous scan has no points here.
 func (c *Collector) registerCookieInjectionPoints(ctx context.Context, endpointID domain.ID, method domain.HTTPMethod, info URLInfo, source domain.DiscoverySource) {
+	if c.cfg.SkipGlobalInjection {
+		return
+	}
 	for _, ck := range c.cfg.SessionCookies {
 		if ck == nil || ck.Name == "" || isSessionCookieName(ck.Name) {
 			continue

@@ -280,6 +280,10 @@ type createScanReq struct {
 	EnableObjectFamilyProbe bool `json:"enable_object_family_probe"`
 	// EnableXSSLibrary opts into the cheat-sheet library families.
 	EnableXSSLibrary bool `json:"enable_xss_library"`
+	// SkipGlobalInjection omits header/cookie injection points.
+	SkipGlobalInjection bool `json:"skip_global_injection"`
+	// SkipStaticAssets drops crawler/browser-discovered static resources.
+	SkipStaticAssets bool `json:"skip_static_assets"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -364,6 +368,8 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		EnableAdminStepProbe:      req.EnableAdminStepProbe,
 		EnableObjectFamilyProbe:   req.EnableObjectFamilyProbe,
 		EnableXSSLibrary:          req.EnableXSSLibrary,
+		SkipGlobalInjection:       req.SkipGlobalInjection,
+		SkipStaticAssets:          req.SkipStaticAssets,
 	})
 	if err != nil {
 		s.writeScanError(w, err)

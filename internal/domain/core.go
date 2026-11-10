@@ -201,6 +201,19 @@ type ScanConfig struct {
 	// when it came from a target profile rather than a manual path.
 	AuthProfileID ID `json:"auth_profile_id,omitempty"`
 
+	// SkipGlobalInjection omits the location-agnostic header and cookie
+	// injection points from discovery. Those points are useful on a small
+	// application, but on a WAF-fronted site they mostly generate CAPTCHA
+	// inconclusive findings and consume the request budget before the
+	// endpoint's own query/form parameters are tested. Off by default so
+	// existing scans keep their previous coverage; new imports opt in.
+	SkipGlobalInjection bool `json:"skip_global_injection,omitempty"`
+	// SkipStaticAssets drops crawler/browser-discovered CSS, JavaScript,
+	// images, fonts and similar resources before they become test targets.
+	// Operator-supplied seeds are never dropped. Off by default for
+	// backward compatibility.
+	SkipStaticAssets bool `json:"skip_static_assets,omitempty"`
+
 	// RequestsPerSecond is ONE budget for all of the scan's target-facing
 	// requests: discovery fetches (crawl, sitemap, robots, content), redirect
 	// hops, raw test requests, and browser discovery/verification navigations.

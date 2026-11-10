@@ -349,7 +349,13 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 					MaxEndpoints:     500,
 					CandidateProfile: "standard",
 					MaxCandidates:    8,
-					AuthMode:         domain.AuthAnonymous,
+					// A WAF-fronted program otherwise spends its budget on
+					// header/cookie reflections before testing the pages'
+					// own parameters; imports start with the quieter,
+					// query/form-first plan and can be tuned later.
+					SkipGlobalInjection: true,
+					SkipStaticAssets:    true,
+					AuthMode:            domain.AuthAnonymous,
 				})
 				if err != nil {
 					scanErr = err.Error()

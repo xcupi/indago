@@ -286,6 +286,10 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 	if d := c.scope.Permits(info.Canonical); !d.Allowed {
 		return "", nil // out of scope: silently skip (fail closed)
 	}
+	if c.cfg.SkipStaticAssets && ep.Source != domain.SourceUserProvided && IsStaticAssetPath(info.Path) {
+		c.log.Debug("discovery: skipping static asset", "url", info.Canonical, "source", ep.Source)
+		return "", nil
+	}
 
 	// An authenticated scan's crawler-style sources (crawler, forms, browser
 	// network capture, sitemap, robots, content discovery) must not follow a

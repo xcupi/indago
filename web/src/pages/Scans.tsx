@@ -75,6 +75,8 @@ export default function Scans() {
     candidateProfile: "standard",
     evasion: false,
     library: false,
+    skipGlobal: true,
+    skipStatic: true,
     rawQuery: "off",
     recon: "off",
     proxyPool: "",
@@ -178,6 +180,8 @@ export default function Scans() {
         candidate_profile: form.candidateProfile,
         enable_evasion: form.evasion,
         enable_xss_library: form.library,
+        skip_global_injection: form.skipGlobal,
+        skip_static_assets: form.skipStatic,
         raw_query_injection: form.rawQuery,
         recon_level: form.recon,
       };
@@ -422,6 +426,21 @@ export default function Scans() {
                 <p className="text-[10px] text-muted-foreground">
                   Adds the cheat-sheet families the canonical planner does not carry. Only vectors whose context and
                   required characters match the reflection are sent; the profile still caps the total.
+                </p>
+                <label className="flex items-center gap-2 text-xs text-foreground">
+                  <Switch checked={form.skipGlobal} onCheckedChange={(v) => setForm({ ...form, skipGlobal: v })} />
+                  Skip header/cookie injection points
+                </label>
+                <p className="text-[10px] text-muted-foreground">
+                  Header and cookie probes are useful on small apps but often trigger WAF/CAPTCHA noise on large sites.
+                  Off by default for the quiet query/form-first plan.
+                </p>
+                <label className="flex items-center gap-2 text-xs text-foreground">
+                  <Switch checked={form.skipStatic} onCheckedChange={(v) => setForm({ ...form, skipStatic: v })} />
+                  Skip static assets
+                </label>
+                <p className="text-[10px] text-muted-foreground">
+                  Drops crawler/browser-discovered CSS, JS, images and fonts before they become test endpoints.
                 </p>
                 <div className="flex flex-col gap-1.5">
                   <div className="flex items-center gap-1">
