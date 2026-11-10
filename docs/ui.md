@@ -24,8 +24,10 @@ has three problems:
 primitives (Radix + cva, vendored as source under `web/src/components/ui/`).
 
 - **Build wiring.** `make ui` builds into `internal/web/assets/next/`, which the Go
-  server already serves from the same embedded tree. The SPA is reachable at
-  **`/next/`**; the legacy dashboard keeps `/` until the cutover below.
+  server embeds. The SPA is served at **`/`** (the root); its relative asset URLs
+  are mapped from `/assets/` to the embedded `next/assets/` tree. `/next/`
+  remains an alias. The old dashboard stays at `/legacy/` only for the legacy
+  integration tests.
 - **Typed API client** (`src/lib/api.ts`): JSON in/out, `X-Indago-Client: ui` on every
   request (the server's CSRF guard), optional bearer token from
   `localStorage["indago.token"]`, one `useApi` hook with refresh events and polling.

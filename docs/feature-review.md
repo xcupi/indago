@@ -69,12 +69,12 @@ fuzzing. They either leave the target scope or need a third-party data source.
   bearer token for remote binds. With the default flags the capability endpoint
   correctly reports them off.
 
-### Control plane (SPA at `/next/`)
+### Control plane (SPA at `/`)
 
 Pages: Dashboard, Projects, Project detail (scope editor, targets, scans),
 Scans, Scan detail (Overview, Coverage, Explorer, Endpoints, Tests, Evidence,
 Reports, IDOR, AI advisory), Findings, Reports, Bug bounty, Settings.
-Legacy dashboard stays at `/` for cutover.
+Legacy dashboard stays at `/legacy/` for the legacy integration tests; `/` is the SPA.
 
 ### AI (advisory only)
 
