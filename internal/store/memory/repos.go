@@ -10,6 +10,7 @@ import (
 // Accessors wiring each repo to its table.
 
 func (s *Store) Projects() store.ProjectRepo               { return projectRepo{s.projects} }
+func (s *Store) AuthProfiles() store.AuthProfileRepo       { return authProfileRepo{s.authProfiles} }
 func (s *Store) Targets() store.TargetRepo                 { return targetRepo{s.targets} }
 func (s *Store) Scopes() store.ScopeRepo                   { return scopeRepo{s.scopes} }
 func (s *Store) Scans() store.ScanRepo                     { return scanRepo{s.scans} }
@@ -35,6 +36,22 @@ func (r projectRepo) Get(_ context.Context, id domain.ID) (*domain.Project, erro
 func (r projectRepo) List(_ context.Context) ([]*domain.Project, error) { return r.t.list(nil), nil }
 func (r projectRepo) Update(_ context.Context, p *domain.Project) error { return r.t.update(p) }
 func (r projectRepo) Delete(_ context.Context, id domain.ID) error      { return r.t.remove(id) }
+
+// --- Auth profile ---
+
+type authProfileRepo struct{ t *table[domain.AuthProfile] }
+
+func (r authProfileRepo) Create(_ context.Context, p *domain.AuthProfile) error {
+	return r.t.create(p)
+}
+func (r authProfileRepo) Get(_ context.Context, id domain.ID) (*domain.AuthProfile, error) {
+	return r.t.get(id)
+}
+func (r authProfileRepo) ListByProject(_ context.Context, pid domain.ID) ([]*domain.AuthProfile, error) {
+	return r.t.list(func(p *domain.AuthProfile) bool { return p.ProjectID == pid }), nil
+}
+func (r authProfileRepo) Update(_ context.Context, p *domain.AuthProfile) error { return r.t.update(p) }
+func (r authProfileRepo) Delete(_ context.Context, id domain.ID) error          { return r.t.remove(id) }
 
 // --- Target ---
 

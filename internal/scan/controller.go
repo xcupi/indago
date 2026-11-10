@@ -252,6 +252,10 @@ type CreateScanParams struct {
 	Config    *domain.ScanConfig // override, used when Profile == Custom
 	Stop      domain.StopPolicy
 	AuthMode  domain.AuthMode
+	// AuthProfileID optionally selects a reusable target/project session.
+	// When AuthMode is empty, the profile supplies auth_mode "existing";
+	// explicit AuthMode anonymous still means anonymous.
+	AuthProfileID domain.ID
 	// AuthStatePath is the saved session material (cookies/storage state) to
 	// import when AuthMode is AuthExisting — e.g. the file an interactive login
 	// run earlier saved. Ignored for every other mode.
@@ -366,6 +370,26 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	if target.ProjectID != p.ProjectID {
 		return nil, errors.New("scan: target does not belong to project")
 	}
+	profileID := p.AuthProfileID
+	if profileID == "" {
+		profileID = target.AuthProfileID
+	}
+	if profileID != "" {
+		authProfile, err := c.store.AuthProfiles().Get(ctx, profileID)
+		if err != nil {
+			return nil, fmt.Errorf("scan: auth profile: %w", err)
+		}
+		if authProfile.ProjectID != p.ProjectID {
+			return nil, errors.New("scan: auth profile does not belong to project")
+		}
+		if authProfile.StatePath == "" {
+			return nil, fmt.Errorf("%w: auth profile %q has no saved session", ErrAuth, authProfile.Name)
+		}
+		if p.AuthMode == "" || (p.AuthMode == domain.AuthExisting && p.AuthStatePath == "") {
+			p.AuthMode = domain.AuthExisting
+			p.AuthStatePath = authProfile.StatePath
+		}
+	}
 
 	// Scope is mandatory and must permit the target base URL. Fail closed.
 	scope, err := c.loadScope(ctx, p.ProjectID)
@@ -439,6 +463,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	}
 	cfg.HuntingUserAgent = project.HuntingUserAgent
 	cfg.HuntingUserAgentReplace = project.HuntingUserAgentReplace
+	cfg.AuthProfileID = profileID
 	if strings.ContainsAny(cfg.HuntingUserAgent, "\r\n") {
 		return nil, fmt.Errorf("%w: hunting user agent must be a single header value", ErrBadConfig)
 	}

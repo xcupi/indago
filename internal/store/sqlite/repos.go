@@ -58,6 +58,7 @@ func mapGetErr(err error) error {
 // Accessors.
 
 func (d *DB) Projects() store.ProjectRepo               { return &projectRepo{d.db} }
+func (d *DB) AuthProfiles() store.AuthProfileRepo       { return &authProfileRepo{d.db} }
 func (d *DB) Targets() store.TargetRepo                 { return &targetRepo{d.db} }
 func (d *DB) Scopes() store.ScopeRepo                   { return &scopeRepo{d.db} }
 func (d *DB) Scans() store.ScanRepo                     { return &scanRepo{d.db} }
@@ -129,21 +130,78 @@ func (r *projectRepo) Delete(ctx context.Context, id domain.ID) error {
 	return affected(res, err)
 }
 
+// --- Auth profile ---
+
+type authProfileRepo struct{ db *sql.DB }
+
+func (r *authProfileRepo) Create(ctx context.Context, p *domain.AuthProfile) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO auth_profiles (id, project_id, name, login_url, success_url, state_path, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+		p.ID, p.ProjectID, p.Name, p.LoginURL, p.SuccessURL, p.StatePath, ts(p.CreatedAt), ts(p.UpdatedAt))
+	return err
+}
+
+func scanAuthProfile(sc scanner) (*domain.AuthProfile, error) {
+	var p domain.AuthProfile
+	var created, updated string
+	if err := sc.Scan(&p.ID, &p.ProjectID, &p.Name, &p.LoginURL, &p.SuccessURL, &p.StatePath, &created, &updated); err != nil {
+		return nil, err
+	}
+	p.CreatedAt, _ = parseTS(created)
+	p.UpdatedAt, _ = parseTS(updated)
+	return &p, nil
+}
+
+func (r *authProfileRepo) Get(ctx context.Context, id domain.ID) (*domain.AuthProfile, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT id, project_id, name, login_url, success_url, state_path, created_at, updated_at FROM auth_profiles WHERE id=?`, id)
+	p, err := scanAuthProfile(row)
+	return p, mapGetErr(err)
+}
+
+func (r *authProfileRepo) ListByProject(ctx context.Context, projectID domain.ID) ([]*domain.AuthProfile, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id, project_id, name, login_url, success_url, state_path, created_at, updated_at FROM auth_profiles WHERE project_id=? ORDER BY created_at`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*domain.AuthProfile
+	for rows.Next() {
+		p, err := scanAuthProfile(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (r *authProfileRepo) Update(ctx context.Context, p *domain.AuthProfile) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE auth_profiles SET name=?, login_url=?, success_url=?, state_path=?, updated_at=? WHERE id=?`,
+		p.Name, p.LoginURL, p.SuccessURL, p.StatePath, ts(p.UpdatedAt), p.ID)
+	return affected(res, err)
+}
+
+func (r *authProfileRepo) Delete(ctx context.Context, id domain.ID) error {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM auth_profiles WHERE id=?`, id)
+	return affected(res, err)
+}
+
 // --- Target ---
 
 type targetRepo struct{ db *sql.DB }
 
 func (r *targetRepo) Create(ctx context.Context, t *domain.Target) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO targets (id, project_id, name, base_url, created_at, updated_at) VALUES (?,?,?,?,?,?)`,
-		t.ID, t.ProjectID, t.Name, t.BaseURL, ts(t.CreatedAt), ts(t.UpdatedAt))
+		`INSERT INTO targets (id, project_id, name, base_url, auth_profile_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`,
+		t.ID, t.ProjectID, t.Name, t.BaseURL, t.AuthProfileID, ts(t.CreatedAt), ts(t.UpdatedAt))
 	return err
 }
 
 func scanTarget(sc scanner) (*domain.Target, error) {
 	var t domain.Target
 	var created, updated string
-	if err := sc.Scan(&t.ID, &t.ProjectID, &t.Name, &t.BaseURL, &created, &updated); err != nil {
+	if err := sc.Scan(&t.ID, &t.ProjectID, &t.Name, &t.BaseURL, &t.AuthProfileID, &created, &updated); err != nil {
 		return nil, err
 	}
 	t.CreatedAt, _ = parseTS(created)
@@ -152,13 +210,13 @@ func scanTarget(sc scanner) (*domain.Target, error) {
 }
 
 func (r *targetRepo) Get(ctx context.Context, id domain.ID) (*domain.Target, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id, project_id, name, base_url, created_at, updated_at FROM targets WHERE id=?`, id)
+	row := r.db.QueryRowContext(ctx, `SELECT id, project_id, name, base_url, auth_profile_id, created_at, updated_at FROM targets WHERE id=?`, id)
 	t, err := scanTarget(row)
 	return t, mapGetErr(err)
 }
 
 func (r *targetRepo) ListByProject(ctx context.Context, projectID domain.ID) ([]*domain.Target, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, project_id, name, base_url, created_at, updated_at FROM targets WHERE project_id=? ORDER BY created_at`, projectID)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, project_id, name, base_url, auth_profile_id, created_at, updated_at FROM targets WHERE project_id=? ORDER BY created_at`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -176,8 +234,8 @@ func (r *targetRepo) ListByProject(ctx context.Context, projectID domain.ID) ([]
 
 func (r *targetRepo) Update(ctx context.Context, t *domain.Target) error {
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE targets SET project_id=?, name=?, base_url=?, updated_at=? WHERE id=?`,
-		t.ProjectID, t.Name, t.BaseURL, ts(t.UpdatedAt), t.ID)
+		`UPDATE targets SET project_id=?, name=?, base_url=?, auth_profile_id=?, updated_at=? WHERE id=?`,
+		t.ProjectID, t.Name, t.BaseURL, t.AuthProfileID, ts(t.UpdatedAt), t.ID)
 	return affected(res, err)
 }
 

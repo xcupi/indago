@@ -26,14 +26,31 @@ type Project struct {
 	UpdatedAt               time.Time `json:"updated_at"`
 }
 
+// AuthProfile is a reusable authenticated session for a project. Many targets
+// can point at one profile (SSO), while a target that needs a different account
+// points at a different profile. The state is a Playwright storage-state file.
+type AuthProfile struct {
+	ID         ID        `json:"id"`
+	ProjectID  ID        `json:"project_id"`
+	Name       string    `json:"name"`
+	LoginURL   string    `json:"login_url,omitempty"`
+	SuccessURL string    `json:"success_url,omitempty"`
+	StatePath  string    `json:"state_path,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
 // Target is a web application (identified by a base URL) belonging to a project.
 type Target struct {
-	ID        ID        `json:"id"`
-	ProjectID ID        `json:"project_id"`
-	Name      string    `json:"name"`
-	BaseURL   string    `json:"base_url"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        ID     `json:"id"`
+	ProjectID ID     `json:"project_id"`
+	Name      string `json:"name"`
+	BaseURL   string `json:"base_url"`
+	// AuthProfileID is optional. Empty means anonymous (or the project-level
+	// legacy fallback); a profile is shared by as many targets as needed.
+	AuthProfileID ID        `json:"auth_profile_id,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // Scope defines the explicit boundary of what may be tested. Scope enforcement
@@ -180,6 +197,9 @@ type ScanConfig struct {
 	// program's required traffic identifier.
 	HuntingUserAgent        string `json:"hunting_user_agent,omitempty"`
 	HuntingUserAgentReplace bool   `json:"hunting_user_agent_replace,omitempty"`
+	// AuthProfileID records which reusable session supplied this scan's auth,
+	// when it came from a target profile rather than a manual path.
+	AuthProfileID ID `json:"auth_profile_id,omitempty"`
 
 	// RequestsPerSecond is ONE budget for all of the scan's target-facing
 	// requests: discovery fetches (crawl, sitemap, robots, content), redirect

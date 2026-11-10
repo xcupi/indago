@@ -11,7 +11,7 @@ import { StateBadge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Alert, Empty, Loading, Stat } from "@/components/ui/misc";
 import { api, refreshAll, useApi } from "@/lib/api";
-import type { Project, Scan, Scope, Target } from "@/lib/types";
+import type { AuthProfile, Project, Scan, Scope, Target } from "@/lib/types";
 import { navigate } from "@/lib/router";
 import { formatTime, shortId } from "@/lib/utils";
 import { selectedProject } from "@/components/Layout";
@@ -30,6 +30,7 @@ export default function Scans() {
   const projects = useApi<Project[]>("/api/projects");
   const scans = useApi<Scan[]>("/api/scans", [], 5000);
   const targets = useApi<Target[]>(projectId ? `/api/projects/${projectId}/targets` : null, [projectId]);
+  const authProfiles = useApi<AuthProfile[]>(projectId ? `/api/projects/${projectId}/auth-profiles` : null, [projectId]);
 
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({
@@ -38,6 +39,7 @@ export default function Scans() {
     seeds: "",
     profile: "conservative",
     auth: "anonymous",
+    authProfileId: "",
     authState: "",
     loginUrl: "",
     successUrl: "",
@@ -115,6 +117,19 @@ export default function Scans() {
       ),
   );
 
+  useEffect(() => {
+    if (!selectedTarget) return;
+    const profile = (authProfiles.data ?? []).find((p) => p.id === selectedTarget.auth_profile_id);
+    if (profile?.state_path) {
+      setForm((f) =>
+        f.target_id === selectedTarget.id && (f.auth === "anonymous" || f.auth === "existing")
+          ? { ...f, auth: "existing", authState: profile.state_path as string, authProfileId: profile.id }
+          : f,
+      );
+      setLoginNote(`Using target auth session: ${profile.name}.`);
+    }
+  }, [selectedTarget, authProfiles.data]);
+
   const running = filtered.filter((s) => s.state === "running").length;
   const confirmed = filtered.reduce((n, s) => n + (s.stats?.findings_confirmed ?? 0), 0);
 
@@ -167,6 +182,7 @@ export default function Scans() {
       }
       if (form.auth !== "anonymous") {
         body.auth_mode = form.auth;
+        if (form.authProfileId) body.auth_profile_id = form.authProfileId;
         if (form.auth === "existing") body.auth_state_path = form.authState;
         if (form.auth === "interactive" || form.auth === "mfa" || form.auth === "password") {
           body.login_url = form.loginUrl;

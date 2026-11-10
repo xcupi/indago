@@ -28,6 +28,7 @@ var ErrConflict = errors.New("store: conflict")
 // domain aggregate plus lifecycle methods.
 type Store interface {
 	Projects() ProjectRepo
+	AuthProfiles() AuthProfileRepo
 	Targets() TargetRepo
 	Scopes() ScopeRepo
 	Scans() ScanRepo
@@ -56,6 +57,15 @@ type ProjectRepo interface {
 	Get(ctx context.Context, id domain.ID) (*domain.Project, error)
 	List(ctx context.Context) ([]*domain.Project, error)
 	Update(ctx context.Context, p *domain.Project) error
+	Delete(ctx context.Context, id domain.ID) error
+}
+
+// AuthProfileRepo persists reusable authenticated sessions.
+type AuthProfileRepo interface {
+	Create(ctx context.Context, p *domain.AuthProfile) error
+	Get(ctx context.Context, id domain.ID) (*domain.AuthProfile, error)
+	ListByProject(ctx context.Context, projectID domain.ID) ([]*domain.AuthProfile, error)
+	Update(ctx context.Context, p *domain.AuthProfile) error
 	Delete(ctx context.Context, id domain.ID) error
 }
 

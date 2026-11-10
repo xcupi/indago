@@ -97,39 +97,41 @@ func (t *table[T]) first(filter func(*T) bool) (*T, error) {
 
 // Store is the in-memory store.Store implementation.
 type Store struct {
-	projects   *table[domain.Project]
-	targets    *table[domain.Target]
-	scopes     *table[domain.Scope]
-	scans      *table[domain.Scan]
-	endpoints  *table[domain.Endpoint]
-	parameters *table[domain.Parameter]
-	injpoints  *table[domain.InjectionPoint]
-	jobs       *table[domain.TestJob]
-	testcases  *table[domain.TestCase]
-	findings   *table[domain.Finding]
-	evidence   *table[domain.Evidence]
-	sessions   *table[domain.Session]
-	reports    *table[domain.Report]
-	aitasks    *table[domain.AITask]
+	projects     *table[domain.Project]
+	authProfiles *table[domain.AuthProfile]
+	targets      *table[domain.Target]
+	scopes       *table[domain.Scope]
+	scans        *table[domain.Scan]
+	endpoints    *table[domain.Endpoint]
+	parameters   *table[domain.Parameter]
+	injpoints    *table[domain.InjectionPoint]
+	jobs         *table[domain.TestJob]
+	testcases    *table[domain.TestCase]
+	findings     *table[domain.Finding]
+	evidence     *table[domain.Evidence]
+	sessions     *table[domain.Session]
+	reports      *table[domain.Report]
+	aitasks      *table[domain.AITask]
 }
 
 // New returns an empty in-memory store.
 func New() *Store {
 	return &Store{
-		projects:   newTable(func(p *domain.Project) domain.ID { return p.ID }, cloneProject),
-		targets:    newTable(func(t *domain.Target) domain.ID { return t.ID }, cloneTarget),
-		scopes:     newTable(func(s *domain.Scope) domain.ID { return s.ID }, cloneScope),
-		scans:      newTable(func(s *domain.Scan) domain.ID { return s.ID }, cloneScan),
-		endpoints:  newTable(func(e *domain.Endpoint) domain.ID { return e.ID }, cloneEndpoint),
-		parameters: newTable(func(p *domain.Parameter) domain.ID { return p.ID }, cloneParameter),
-		injpoints:  newTable(func(i *domain.InjectionPoint) domain.ID { return i.ID }, cloneInjectionPoint),
-		jobs:       newTable(func(j *domain.TestJob) domain.ID { return j.ID }, cloneJob),
-		testcases:  newTable(func(t *domain.TestCase) domain.ID { return t.ID }, cloneTestCase),
-		findings:   newTable(func(f *domain.Finding) domain.ID { return f.ID }, cloneFinding),
-		evidence:   newTable(func(e *domain.Evidence) domain.ID { return e.ID }, cloneEvidence),
-		sessions:   newTable(func(s *domain.Session) domain.ID { return s.ID }, cloneSession),
-		reports:    newTable(func(r *domain.Report) domain.ID { return r.ID }, cloneReport),
-		aitasks:    newTable(func(t *domain.AITask) domain.ID { return t.ID }, cloneAITask),
+		projects:     newTable(func(p *domain.Project) domain.ID { return p.ID }, cloneProject),
+		authProfiles: newTable(func(p *domain.AuthProfile) domain.ID { return p.ID }, cloneAuthProfile),
+		targets:      newTable(func(t *domain.Target) domain.ID { return t.ID }, cloneTarget),
+		scopes:       newTable(func(s *domain.Scope) domain.ID { return s.ID }, cloneScope),
+		scans:        newTable(func(s *domain.Scan) domain.ID { return s.ID }, cloneScan),
+		endpoints:    newTable(func(e *domain.Endpoint) domain.ID { return e.ID }, cloneEndpoint),
+		parameters:   newTable(func(p *domain.Parameter) domain.ID { return p.ID }, cloneParameter),
+		injpoints:    newTable(func(i *domain.InjectionPoint) domain.ID { return i.ID }, cloneInjectionPoint),
+		jobs:         newTable(func(j *domain.TestJob) domain.ID { return j.ID }, cloneJob),
+		testcases:    newTable(func(t *domain.TestCase) domain.ID { return t.ID }, cloneTestCase),
+		findings:     newTable(func(f *domain.Finding) domain.ID { return f.ID }, cloneFinding),
+		evidence:     newTable(func(e *domain.Evidence) domain.ID { return e.ID }, cloneEvidence),
+		sessions:     newTable(func(s *domain.Session) domain.ID { return s.ID }, cloneSession),
+		reports:      newTable(func(r *domain.Report) domain.ID { return r.ID }, cloneReport),
+		aitasks:      newTable(func(t *domain.AITask) domain.ID { return t.ID }, cloneAITask),
 	}
 }
 

@@ -179,12 +179,20 @@ func (s *Server) deleteProjectCascade(r *http.Request, projectID domain.ID) erro
 	if sc, err := s.store.Scopes().GetByProject(r.Context(), projectID); err == nil {
 		_ = s.store.Scopes().Delete(r.Context(), sc.ID)
 	}
+	if profiles, err := s.store.AuthProfiles().ListByProject(r.Context(), projectID); err == nil {
+		for _, p := range profiles {
+			_ = s.store.AuthProfiles().Delete(r.Context(), p.ID)
+		}
+	}
 	return s.store.Projects().Delete(r.Context(), projectID)
 }
 
 type updateTargetReq struct {
 	Name    string `json:"name"`
 	BaseURL string `json:"base_url"`
+	// AuthProfileID is optional; an empty string clears the target's login.
+	// A missing field leaves the current assignment unchanged.
+	AuthProfileID *string `json:"auth_profile_id,omitempty"`
 }
 
 func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
@@ -208,6 +216,18 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	t.Name = req.Name
 	t.BaseURL = u.String()
+	if req.AuthProfileID != nil {
+		profileID := domain.ID(strings.TrimSpace(*req.AuthProfileID))
+		if profileID != "" {
+			profile, err := s.projectAuthProfile(r, projectID, profileID)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "auth_profile_id does not belong to this project")
+				return
+			}
+			_ = profile
+		}
+		t.AuthProfileID = profileID
+	}
 	if err := s.store.Targets().Update(r.Context(), t); err != nil {
 		s.writeInternalError(w, "update target", err)
 		return

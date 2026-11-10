@@ -10,7 +10,7 @@ import { StateBadge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Alert, Empty, Loading } from "@/components/ui/misc";
 import { api, refreshAll, useApi } from "@/lib/api";
-import type { Project, Scan, Scope, Target } from "@/lib/types";
+import type { AuthProfile, Project, Scan, Scope, Target } from "@/lib/types";
 import { navigate } from "@/lib/router";
 import { formatTime, shortId } from "@/lib/utils";
 
@@ -38,7 +38,7 @@ export default function ProjectDetail({ id }: { id: string }) {
   });
   const [scopeErr, setScopeErr] = useState("");
   const [saved, setSaved] = useState(false);
-  const [login, setLogin] = useState({ loginUrl: "", successUrl: "" });
+  const [login, setLogin] = useState({ profileId: "", profileName: "", loginUrl: "", successUrl: "" });
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginErr, setLoginErr] = useState("");
   const [loginNote, setLoginNote] = useState("");
@@ -106,26 +106,65 @@ export default function ProjectDetail({ id }: { id: string }) {
       setLoginErr("Login URL is required.");
       return;
     }
+    if (!login.profileId && !login.profileName.trim()) {
+      setLoginErr("Name this auth session so targets can share it.");
+      return;
+    }
     setLoginBusy(true);
     try {
-      const res = await api<{ state_path: string; final_url: string }>("/api/auth/login", {
+      const body: Record<string, string> = {
+        project_id: id,
+        login_url: login.loginUrl.trim(),
+        success_url: login.successUrl.trim(),
+      };
+      if (login.profileId) body.auth_profile_id = login.profileId;
+      else body.profile_name = login.profileName.trim();
+      const res = await api<{ state_path: string; final_url: string; auth_profile_id?: string }>("/api/auth/login", {
         method: "POST",
-        body: {
-          project_id: id,
-          login_url: login.loginUrl.trim(),
-          success_url: login.successUrl.trim(),
-        },
-      });
-      await api(`/api/projects/${id}`, {
-        method: "PUT",
-        body: { auth_state_path: res.state_path },
+        body,
       });
       refreshAll();
-      setLoginNote(`Session saved (${res.state_path}). New scans for this project pick it up automatically.`);
+      setLoginNote(`Session saved (${res.state_path}). Targets assigned to this auth session use it automatically.`);
+      if (res.auth_profile_id) {
+        setLogin((l) => ({ ...l, profileId: res.auth_profile_id as string }));
+      }
     } catch (e) {
       setLoginErr((e as Error).message);
     } finally {
       setLoginBusy(false);
+    }
+  }
+
+  function editAuthProfile(p: AuthProfile) {
+    setLogin({
+      profileId: p.id,
+      profileName: p.name,
+      loginUrl: p.login_url ?? "",
+      successUrl: p.success_url ?? "",
+    });
+    setLoginNote(`Re-login for ${p.name}. The saved session will be refreshed for every target using it.`);
+  }
+
+  async function deleteAuthProfile(p: AuthProfile) {
+    if (!confirm(`Delete auth session "${p.name}"? Targets using it will become anonymous.`)) return;
+    try {
+      await api(`/api/projects/${id}/auth-profiles/${p.id}`, { method: "DELETE" });
+      refreshAll();
+      if (login.profileId === p.id) setLogin({ profileId: "", profileName: "", loginUrl: "", successUrl: "" });
+    } catch (e) {
+      setLoginErr((e as Error).message);
+    }
+  }
+
+  async function assignAuthProfile(t: Target, profileID: string) {
+    try {
+      await api(`/api/projects/${id}/targets/${t.id}`, {
+        method: "PUT",
+        body: { name: t.name, base_url: t.base_url, auth_profile_id: profileID },
+      });
+      refreshAll();
+    } catch (e) {
+      alert((e as Error).message);
     }
   }
 
@@ -151,6 +190,7 @@ export default function ProjectDetail({ id }: { id: string }) {
   }
 
   const projectScans = (scans.data ?? []).filter((s) => s.project_id === id);
+  const authProfiles = useApi<AuthProfile[]>(`/api/projects/${id}/auth-profiles`);
   const targetList = targets.data ?? [];
   const targetPageCount = Math.max(1, Math.ceil(targetList.length / 10));
   const pagedTargets = targetList.slice((targetPage - 1) * 10, targetPage * 10);
@@ -276,6 +316,7 @@ export default function ProjectDetail({ id }: { id: string }) {
                   <TableRow>
                     <TableHead>Name</TableHead>
                     <TableHead>Base URL</TableHead>
+                    <TableHead>Login</TableHead>
                     <TableHead />
                   </TableRow>
                 </TableHeader>
@@ -284,6 +325,20 @@ export default function ProjectDetail({ id }: { id: string }) {
                     <TableRow key={t.id}>
                       <TableCell className="text-foreground">{t.name}</TableCell>
                       <TableCell className="mono text-[11px] text-muted-foreground">{t.base_url}</TableCell>
+                      <TableCell>
+                        <select
+                          className="h-8 max-w-40 rounded-md border border-border bg-background px-1.5 text-[11px]"
+                          value={t.auth_profile_id ?? ""}
+                          onChange={(e) => assignAuthProfile(t, e.target.value)}
+                        >
+                          <option value="">anonymous</option>
+                          {(authProfiles.data ?? []).map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name}
+                            </option>
+                          ))}
+                        </select>
+                      </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-1">
                           <Button size="sm" variant="ghost" onClick={() => navigate(`/scans?target=${t.id}`)}>
@@ -420,36 +475,77 @@ export default function ProjectDetail({ id }: { id: string }) {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <LogIn className="size-4 text-emerald-700 dark:text-emerald-400" /> Scan login
+              <LogIn className="size-4 text-emerald-700 dark:text-emerald-400" /> Auth sessions
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-xs text-muted-foreground">
-              For targets that need an account. Indago opens a visible browser, you log in by hand,
-              and the resulting Playwright storage state is saved on this project. New scans select
-              it automatically as <span className="font-mono">existing session</span>.
+              One saved login can be shared by many targets — useful for SSO such as HackTheBox.
+              Assign a session per target in the Targets table. A target that needs another account
+              can point at a different session.
             </p>
-            <Field label="Login URL" hint="The page with the login form. Must be inside project scope.">
-              <Input
-                value={login.loginUrl}
-                onChange={(e) => setLogin({ ...login, loginUrl: e.target.value })}
-                placeholder="https://app.example.com/login"
-              />
-            </Field>
-            <Field label="Success URL" hint="Optional. A URL only reachable after login; use it to confirm the session.">
-              <Input
-                value={login.successUrl}
-                onChange={(e) => setLogin({ ...login, successUrl: e.target.value })}
-                placeholder="https://app.example.com/dashboard"
-              />
-            </Field>
-            {project.data?.auth_state_path ? (
-              <p className="break-all text-[11px] text-emerald-700 dark:text-emerald-400">
-                Session saved: {project.data.auth_state_path}
-              </p>
+            {(authProfiles.data ?? []).length === 0 ? (
+              <p className="text-[11px] text-muted-foreground">No auth sessions yet. Create one below.</p>
             ) : (
-              <p className="text-[11px] text-muted-foreground">No saved session for this project yet.</p>
+              <div className="space-y-1">
+                {(authProfiles.data ?? []).map((p) => {
+                  const used = targetList.filter((t) => t.auth_profile_id === p.id).length;
+                  return (
+                    <div key={p.id} className="flex flex-wrap items-center gap-2 rounded-md border border-border px-2.5 py-2 text-[11px]">
+                      <div className="min-w-0 flex-1">
+                        <div className="font-medium text-foreground">{p.name}</div>
+                        <div className="text-muted-foreground">
+                          {p.state_path ? "session saved" : "no session yet"} · used by {used} target{used === 1 ? "" : "s"}
+                        </div>
+                      </div>
+                      <Button size="sm" variant="outline" onClick={() => editAuthProfile(p)}>
+                        Re-login
+                      </Button>
+                      <Button size="sm" variant="ghost" className="text-red-600 dark:text-red-400" onClick={() => deleteAuthProfile(p)}>
+                        Delete
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
             )}
+            <div className="border-t border-border pt-3">
+              <Field label="Session name" hint="A label for this login, e.g. HackTheBox SSO. Targets can share it.">
+                <Input
+                  value={login.profileName}
+                  onChange={(e) => setLogin({ ...login, profileName: e.target.value })}
+                  placeholder="e.g. HackTheBox SSO"
+                  disabled={Boolean(login.profileId)}
+                />
+              </Field>
+              {login.profileId ? (
+                <p className="text-[11px] text-muted-foreground">
+                  Re-login mode. The saved session will be replaced for every target using it.{" "}
+                  <button
+                    className="underline"
+                    onClick={() => setLogin({ profileId: "", profileName: "", loginUrl: "", successUrl: "" })}
+                  >
+                    cancel
+                  </button>
+                </p>
+              ) : null}
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                <Field label="Login URL" hint="The SSO/login page. Must be inside project scope.">
+                  <Input
+                    value={login.loginUrl}
+                    onChange={(e) => setLogin({ ...login, loginUrl: e.target.value })}
+                    placeholder="https://app.example.com/login"
+                  />
+                </Field>
+                <Field label="Success URL" hint="Optional. A URL only reachable after login.">
+                  <Input
+                    value={login.successUrl}
+                    onChange={(e) => setLogin({ ...login, successUrl: e.target.value })}
+                    placeholder="https://app.example.com/dashboard"
+                  />
+                </Field>
+              </div>
+            </div>
             {loginErr ? <Alert>{loginErr}</Alert> : null}
             {loginNote ? <p className="break-all text-[11px] text-emerald-700 dark:text-emerald-400">{loginNote}</p> : null}
             <div className="flex justify-end">

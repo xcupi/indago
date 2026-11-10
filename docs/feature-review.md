@@ -71,7 +71,7 @@ fuzzing. They either leave the target scope or need a third-party data source.
 
 ### Control plane (SPA at `/`)
 
-Pages: Dashboard, Projects, Project detail (scope editor, targets, scans),
+Pages: Dashboard, Projects, Project detail (scope editor, targets, shared auth sessions, scans),
 Scans, Scan detail (Overview, Coverage, Explorer, Endpoints, Tests, Evidence,
 Reports, IDOR, AI advisory), Findings, Reports, Bug bounty, Settings.
 Legacy dashboard stays at `/legacy/` for the legacy integration tests; `/` is the SPA.

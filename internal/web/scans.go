@@ -184,11 +184,12 @@ type stopReq struct {
 }
 
 type createScanReq struct {
-	ProjectID string `json:"project_id"`
-	TargetID  string `json:"target_id"`
-	Name      string `json:"name"`
-	Profile   string `json:"profile"`
-	AuthMode  string `json:"auth_mode"`
+	ProjectID     string `json:"project_id"`
+	TargetID      string `json:"target_id"`
+	Name          string `json:"name"`
+	Profile       string `json:"profile"`
+	AuthMode      string `json:"auth_mode"`
+	AuthProfileID string `json:"auth_profile_id,omitempty"`
 	// AuthStatePath is the absolute, server-side path of saved session
 	// material (Playwright storage state) for auth_mode "existing".
 	AuthStatePath string `json:"auth_state_path"`
@@ -334,6 +335,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		Config:                req.Config,
 		Stop:                  stop,
 		AuthMode:              mode,
+		AuthProfileID:         domain.ID(req.AuthProfileID),
 		AuthStatePath:         req.AuthStatePath,
 		LoginURL:              req.LoginURL,
 		SuccessURL:            req.SuccessURL,
@@ -459,6 +461,11 @@ type loginReq struct {
 	ProjectID  domain.ID `json:"project_id"`
 	LoginURL   string    `json:"login_url"`
 	SuccessURL string    `json:"success_url"`
+	// A login either creates a new reusable profile (ProfileName) or refreshes
+	// an existing one (AuthProfileID). With neither, it keeps the legacy
+	// project-level fallback session.
+	AuthProfileID domain.ID `json:"auth_profile_id,omitempty"`
+	ProfileName   string    `json:"profile_name,omitempty"`
 }
 
 // handleInteractiveLogin drives a visible-browser login and returns the saved
@@ -494,6 +501,18 @@ func (s *Server) handleInteractiveLogin(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "login project not found; select an existing project")
 		return
 	}
+	var profile *domain.AuthProfile
+	if req.AuthProfileID != "" {
+		profile, err = s.projectAuthProfile(r, req.ProjectID, req.AuthProfileID)
+		if err != nil {
+			s.writeLookupError(w, err)
+			return
+		}
+	}
+	if req.ProfileName != "" && len(strings.TrimSpace(req.ProfileName)) > 120 {
+		writeError(w, http.StatusBadRequest, "profile_name must be at most 120 characters")
+		return
+	}
 	scope, err := s.store.Scopes().GetByProject(r.Context(), req.ProjectID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
@@ -527,8 +546,44 @@ func (s *Server) handleInteractiveLogin(w http.ResponseWriter, r *http.Request) 
 		s.writeInternalError(w, "interactive login", err)
 		return
 	}
+	profileID := ""
+	switch {
+	case profile != nil:
+		profile.StatePath = statePath
+		profile.LoginURL = u.String()
+		profile.SuccessURL = strings.TrimSpace(req.SuccessURL)
+		profile.UpdatedAt = time.Now()
+		if err := s.store.AuthProfiles().Update(r.Context(), profile); err != nil {
+			s.writeInternalError(w, "save auth profile session", err)
+			return
+		}
+		profileID = string(profile.ID)
+	case strings.TrimSpace(req.ProfileName) != "":
+		now := time.Now()
+		created := &domain.AuthProfile{
+			ID: domain.NewID(), ProjectID: req.ProjectID, Name: strings.TrimSpace(req.ProfileName),
+			LoginURL: u.String(), SuccessURL: strings.TrimSpace(req.SuccessURL), StatePath: statePath,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		if err := s.store.AuthProfiles().Create(r.Context(), created); err != nil {
+			s.writeInternalError(w, "create auth profile session", err)
+			return
+		}
+		profileID = string(created.ID)
+	default:
+		project.AuthStatePath = statePath
+		project.UpdatedAt = time.Now()
+		if err := s.store.Projects().Update(r.Context(), project); err != nil {
+			s.writeInternalError(w, "save project session", err)
+			return
+		}
+	}
 	// Return the path and final URL only. No session material crosses the API.
-	writeJSON(w, http.StatusOK, map[string]string{"state_path": statePath, "final_url": finalURL})
+	out := map[string]string{"state_path": statePath, "final_url": finalURL}
+	if profileID != "" {
+		out["auth_profile_id"] = profileID
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // writeScanError maps controller errors to HTTP statuses: bad input → 400,

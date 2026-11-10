@@ -49,6 +49,11 @@ func cloneProject(p *domain.Project) *domain.Project {
 	return &c
 }
 
+func cloneAuthProfile(p *domain.AuthProfile) *domain.AuthProfile {
+	c := *p
+	return &c
+}
+
 func cloneTarget(t *domain.Target) *domain.Target {
 	c := *t
 	return &c

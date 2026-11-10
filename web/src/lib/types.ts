@@ -14,11 +14,23 @@ export interface Project {
   updated_at?: string;
 }
 
+export interface AuthProfile {
+  id: ID;
+  project_id: ID;
+  name: string;
+  login_url?: string;
+  success_url?: string;
+  state_path?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
 export interface Target {
   id: ID;
   project_id: ID;
   name: string;
   base_url: string;
+  auth_profile_id?: ID;
   created_at: string;
 }
 
