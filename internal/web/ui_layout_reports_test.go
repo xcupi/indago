@@ -38,7 +38,7 @@ func TestUILayoutReportsWrapAtPhoneWidth(t *testing.T) {
 				} else {
 					label = state + " " + tab + " 420px"
 					doc = `document.getElementById('narrow').contentDocument`
-					u.eval(fmt.Sprintf(`document.getElementById('narrow').src=%q`, u.url+"/#/scans/"+string(scanID)+"/"+tab))
+					u.eval(fmt.Sprintf(`document.getElementById('narrow').src=%q`, u.url+"/legacy/#/scans/"+string(scanID)+"/"+tab))
 				}
 				ready := `.getElementById('reportsBody').textContent==='No reports yet.'`
 				if populated {

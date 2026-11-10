@@ -100,8 +100,8 @@ func TestStaticUIServed(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("index status %d", rec.Code)
 	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte("INDAGO")) {
-		t.Fatal("index page does not contain expected content")
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`id="root"`)) {
+		t.Fatal("index page does not contain the SPA mount point")
 	}
 }
 

@@ -278,13 +278,46 @@ func (s *Server) Handler() http.Handler {
 
 	// Static UI.
 	sub, _ := fs.Sub(assetsFS, "assets")
-	mux.Handle("GET /", http.FileServer(http.FS(sub)))
+	staticUI := http.FileServer(http.FS(sub))
+	nextAssets, _ := fs.Sub(sub, "next/assets")
+	nextFiles := http.StripPrefix("/assets/", http.FileServer(http.FS(nextAssets)))
+	mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/", "/index.html":
+			serveEmbeddedHTML(w, sub, "next/index.html")
+		case "/legacy", "/legacy/":
+			serveEmbeddedHTML(w, sub, "index.html")
+		default:
+			// The SPA index is built with base "./" so it can be served at
+			// either "/" or "/next/". At "/", "./assets" resolves to
+			// /assets/; map that to the built SPA asset directory.
+			if strings.HasPrefix(r.URL.Path, "/assets/") {
+				nextFiles.ServeHTTP(w, r)
+				return
+			}
+			staticUI.ServeHTTP(w, r)
+		}
+	}))
 
 	// Order matters: instrument sees every outcome (the guard's 403s, the
 	// limiter's 429s, the token check's 401s). The guard runs first, then the
 	// limiter, then the bearer-token check, so unauthenticated floods are
 	// limited too.
 	return s.withLogging(s.instrument(mux, s.guard(s.rateLimit(s.requireAPIToken(mux)))))
+}
+
+// serveEmbeddedHTML serves one embedded file as the document. FileServer is not
+// used for this: it redirects an index.html request to its directory, which
+// would turn a request for "/" into a redirect to /next/.
+func serveEmbeddedHTML(w http.ResponseWriter, fsys fs.FS, name string) {
+	b, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		http.NotFound(w, nil)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(b)
 }
 
 // --- handlers ---

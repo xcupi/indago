@@ -202,7 +202,7 @@ export default function ProjectDetail({ id }: { id: string }) {
         }
       />
 
-        <Card>
+        <Card className="mb-4">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Globe2 className="size-4 text-sky-700 dark:text-sky-400" /> Hunting User-Agent

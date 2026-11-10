@@ -180,7 +180,7 @@ func newUIHarnessWithHandler(t *testing.T, token string, caps web.Capabilities, 
 			t.Fatal(err)
 		}
 	}
-	if _, err := page.Navigate(ctx, srv.URL, browser.NavOptions{}); err != nil {
+	if _, err := page.Navigate(ctx, srv.URL+"/legacy/", browser.NavOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	u := &uiHarness{t: t, st: st, ctrl: ctrl, ev: evStore, page: page, ctx: ctx, bctx: bctx, url: srv.URL}
