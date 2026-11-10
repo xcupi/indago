@@ -207,10 +207,10 @@ automatically).
 ## Workflow with a model
 
 1. Connect (session token) and import the program → project + scope + targets.
-   Import also creates a draft scan for the first in-scope web target: the
-   balanced/medium profile, depth 3, 200 pages, 500 endpoints, standard
-   candidates (8 per injection point), anonymous auth. It is not started, so
-   login/auth and tuning remain explicit actions.
+   Import also creates one draft scan per in-scope web target: the balanced/medium
+   profile, depth 3, 200 pages, 500 endpoints, standard candidates (8 per
+   injection point), anonymous auth. They are not started, so login/auth and
+   tuning remain explicit actions.
 2. Scan inside that scope; findings land as usual.
 3. Generate the submission: `template=yeswehack`, `format=markdown`.
 4. `POST /api/scans/{id}/ai/report-review` (or Reports → **Review with AI**)

@@ -240,6 +240,7 @@ func TestImportCreatesBalancedScanWithUsableDefaults(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
 			{"scope": "app.acme.test", "scope_type": "web-application", "asset_value": "https://app.acme.test"},
+			{"scope": "shop.acme.test", "scope_type": "web-application", "asset_value": "https://shop.acme.test"},
 		}})
 	})
 	ywh := httptest.NewServer(mux)
@@ -258,13 +259,14 @@ func TestImportCreatesBalancedScanWithUsableDefaults(t *testing.T) {
 
 	var resp struct {
 		Imported []struct {
-			ScanID    string `json:"scan_id"`
-			ScanError string `json:"scan_error"`
+			ScanID    string   `json:"scan_id"`
+			ScanIDs   []string `json:"scan_ids"`
+			ScanError string   `json:"scan_error"`
 		} `json:"imported"`
 	}
 	a.mustJSON(a.do("POST", "/api/bounty/import", map[string]any{"slugs": []string{"acme"}}), http.StatusOK, &resp)
-	if len(resp.Imported) != 1 || resp.Imported[0].ScanID == "" {
-		t.Fatalf("import = %+v, want a created scan", resp.Imported)
+	if len(resp.Imported) != 1 || resp.Imported[0].ScanID == "" || len(resp.Imported[0].ScanIDs) != 2 {
+		t.Fatalf("import = %+v, want one scan per imported target", resp.Imported)
 	}
 	sc, err := st.Scans().Get(context.Background(), domain.ID(resp.Imported[0].ScanID))
 	if err != nil {

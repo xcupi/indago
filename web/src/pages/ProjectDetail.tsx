@@ -341,7 +341,14 @@ export default function ProjectDetail({ id }: { id: string }) {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-1">
-                          <Button size="sm" variant="ghost" onClick={() => navigate(`/scans?target=${t.id}`)}>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              setSelectedProject(id);
+                              navigate(`/scans?target=${t.id}`);
+                            }}
+                          >
                             Scan →
                           </Button>
                           <Button

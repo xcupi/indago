@@ -33,6 +33,7 @@ function InfoTip({ text }: { text: string }) {
 }
 
 export default function Scans() {
+  const targetQuery = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("target") ?? "";
   const [projectId, setProjectId] = useState(selectedProject());
   // The sidebar's project picker is shared context: follow it while this page
   // is open, instead of only reading it once at mount.
@@ -43,12 +44,18 @@ export default function Scans() {
   }, []);
   const projects = useApi<Project[]>("/api/projects");
   const scans = useApi<Scan[]>("/api/scans", [], 5000);
+  // A sidebar project can disappear (deleted project or a stale localStorage
+  // value). Do not keep filtering the list by an id that no longer exists.
+  useEffect(() => {
+    if (!projects.data || !projectId) return;
+    if (!projects.data.some((p) => p.id === projectId)) setSelectedProject("");
+  }, [projectId, projects.data]);
   const targets = useApi<Target[]>(projectId ? `/api/projects/${projectId}/targets` : null, [projectId]);
   const authProfiles = useApi<AuthProfile[]>(projectId ? `/api/projects/${projectId}/auth-profiles` : null, [projectId]);
 
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(Boolean(targetQuery));
   const [form, setForm] = useState({
-    target_id: "",
+    target_id: targetQuery,
     name: "",
     seeds: "",
     profile: "conservative",
@@ -532,6 +539,21 @@ export default function Scans() {
           value={filtered.reduce((n, s) => n + (s.stats?.findings_rejected ?? 0), 0)}
           tone="success"
         />
+      </div>
+
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+        <span className="uppercase tracking-wide">Project filter</span>
+        <select
+          className="h-8 rounded-md border border-border bg-background px-2 text-xs text-foreground"
+          value={projectId}
+          onChange={(e) => setSelectedProject(e.target.value)}
+        >
+          <option value="">All projects</option>
+          {(projects.data ?? []).map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+        <span>{filtered.length === 1 ? "1 scan" : `${filtered.length} scans`}</span>
       </div>
 
       <Card>

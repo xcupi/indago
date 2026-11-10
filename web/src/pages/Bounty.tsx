@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ArrowRight, ExternalLink, KeyRound, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
-import { PageTitle } from "@/components/Layout";
+import { PageTitle, setSelectedProject } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, Input } from "@/components/ui/input";
@@ -44,6 +44,7 @@ interface Imported {
   targets: string[];
   hosts: string[];
   scan_id?: string;
+  scan_ids?: string[];
   scan_error?: string;
   hunting_user_agent?: string;
   skipped?: string[];
@@ -203,6 +204,10 @@ export default function Bounty() {
     try {
       const res = await api<{ imported: Imported[] }>("/api/bounty/import", { method: "POST", body: { slugs } });
       setImported(res.imported);
+      // Make the imported project the active sidebar project so the Scans
+      // page shows its auto-created drafts immediately.
+      const firstProject = res.imported.find((i) => i.project_id);
+      if (firstProject) setSelectedProject(firstProject.project_id);
       setPicked({});
     } catch (e) {
       setErr((e as Error).message);
@@ -418,8 +423,8 @@ export default function Bounty() {
               {importing ? <Loader2 className="size-3.5 animate-spin" /> : null} Import {pickedCount || ""} selected
             </Button>
             <span className="text-[11px] text-muted-foreground">
-              Import reads the program's scope table, creates a project with that scope, and a draft scan
-              for the first web target (anonymous auth). It does not start the scan.
+              Import reads the program's scope table, creates a project with that scope, and one draft scan
+              per in-scope web target (anonymous auth, balanced defaults). It does not start the scans.
             </span>
           </div>
 
@@ -455,8 +460,8 @@ export default function Bounty() {
           {imported ? (
             <div className="space-y-2 rounded-md border border-border p-2.5">
               <p className="text-[11px] text-muted-foreground">
-                Imported as projects with the platform's scope. A draft scan was created for the first target
-                with anonymous auth; review the scope and User-Agent, then start it. No scan was started automatically.
+                Imported as projects with the platform's scope and one draft scan per in-scope target with anonymous
+                auth. Review the scope and User-Agent, then start each scan. No scan was started automatically.
               </p>
               {imported.map((it) => (
                 <div key={it.slug} className="text-[11px]">
@@ -464,11 +469,11 @@ export default function Bounty() {
                     {it.title}
                   </a>
                   <span className="ml-2 mono text-muted-foreground">{it.hosts.join(", ") || "no host"}</span>
-                  {it.scan_id ? (
-                    <a className="ml-2 text-muted-foreground hover:underline" href={`#/scans/${it.scan_id}`}>
-                      draft scan
+                  {(it.scan_ids?.length ? it.scan_ids : it.scan_id ? [it.scan_id] : []).map((scanID, i) => (
+                    <a key={scanID} className="ml-2 text-muted-foreground hover:underline" href={`#/scans/${scanID}`}>
+                      draft scan {i + 1}
                     </a>
-                  ) : null}
+                  ))}
                   {it.scan_error ? <span className="ml-2 text-amber-700 dark:text-amber-400">scan: {it.scan_error}</span> : null}
                   {it.hunting_user_agent ? <span className="ml-2 mono text-muted-foreground">UA: {it.hunting_user_agent}</span> : null}
                   {it.skipped?.length ? <span className="ml-2 text-muted-foreground">skipped: {it.skipped.join(", ")}</span> : null}

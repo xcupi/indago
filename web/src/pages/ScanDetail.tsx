@@ -113,7 +113,7 @@ export default function ScanDetail({ id }: { id: string }) {
   const jobsDone = jobStats.data?.succeeded ?? stats?.jobs_completed ?? 0;
   const jobsCanceled = jobStats.data?.canceled ?? stats?.jobs_canceled ?? 0;
   const jobsFailed = jobStats.data?.failed ?? stats?.jobs_failed ?? 0;
-  const canStart = s.state === "queued" || s.state === "draft";
+  const canStart = s.state === "created" || s.state === "queued" || s.state === "draft";
   const canPause = s.state === "running";
   const canResume = s.state === "paused";
   const canCancel = ["running", "paused", "queued"].includes(s.state);

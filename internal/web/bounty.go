@@ -209,6 +209,7 @@ type importedProgram struct {
 	Targets   []string `json:"targets"`
 	Hosts     []string `json:"hosts"`
 	ScanID    string   `json:"scan_id,omitempty"`
+	ScanIDs   []string `json:"scan_ids,omitempty"`
 	ScanError string   `json:"scan_error,omitempty"`
 	UserAgent string   `json:"hunting_user_agent,omitempty"`
 	Skipped   []string `json:"skipped,omitempty"`
@@ -307,48 +308,58 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 			s.writeInternalError(w, "create scope", err)
 			return
 		}
-		var firstTarget domain.ID
+		var targetIDs []domain.ID
+		targetURLs := map[domain.ID]string{}
 		for _, raw := range targets {
 			t := &domain.Target{ID: domain.NewID(), ProjectID: p.ID, Name: raw, BaseURL: raw, CreatedAt: now, UpdatedAt: now}
 			if err := s.store.Targets().Create(r.Context(), t); err != nil {
 				s.writeInternalError(w, "create target", err)
 				return
 			}
-			// Pick the first seed the imported scope actually permits. Some
-			// programs scope only a path prefix, so the first host-root target
-			// can legitimately be out of scope and would make CreateScan fail.
-			if firstTarget == "" && sc.Permits(t.BaseURL).Allowed {
-				firstTarget = t.ID
+			// Keep every seed the imported scope actually permits. Some
+			// programs scope only a path prefix, so a host-root target can be
+			// out of scope and would make CreateScan fail.
+			if sc.Permits(t.BaseURL).Allowed {
+				targetIDs = append(targetIDs, t.ID)
+				targetURLs[t.ID] = t.BaseURL
 			}
 		}
-		var scanID, scanErr string
-		if firstTarget == "" && len(targets) > 0 {
+		var scanIDs []string
+		var scanErr string
+		if len(targetIDs) == 0 && len(targets) > 0 {
 			scanErr = "no imported target is permitted by the program scope"
 		}
-		if s.ctrl != nil && firstTarget != "" {
-			if created, err := s.ctrl.CreateScan(r.Context(), scan.CreateScanParams{
-				ProjectID: p.ID,
-				TargetID:  firstTarget,
-				Name:      "Imported: " + detail.Title,
-				// Balanced is the medium preset. The crawl controls are
-				// explicit so the imported scan does not look like an empty
-				// 0/0 job and can actually discover something without tuning.
-				Profile:          domain.ProfileBalanced,
-				QuickScan:        false,
-				MaxDepth:         3,
-				MaxPages:         200,
-				MaxEndpoints:     500,
-				CandidateProfile: "standard",
-				MaxCandidates:    8,
-				AuthMode:         domain.AuthAnonymous,
-			}); err != nil {
-				scanErr = err.Error()
-				s.log.Warn("bounty import: draft scan not created", "slug", slug, "error", err)
-			} else {
-				scanID = string(created.ID)
+		if s.ctrl != nil {
+			for _, targetID := range targetIDs {
+				created, err := s.ctrl.CreateScan(r.Context(), scan.CreateScanParams{
+					ProjectID: p.ID,
+					TargetID:  targetID,
+					Name:      "Imported: " + detail.Title + " — " + targetURLs[targetID],
+					// Balanced is the medium preset. The crawl controls are
+					// explicit so the imported scan does not look like an empty
+					// 0/0 job and can actually discover something without tuning.
+					Profile:          domain.ProfileBalanced,
+					QuickScan:        false,
+					MaxDepth:         3,
+					MaxPages:         200,
+					MaxEndpoints:     500,
+					CandidateProfile: "standard",
+					MaxCandidates:    8,
+					AuthMode:         domain.AuthAnonymous,
+				})
+				if err != nil {
+					scanErr = err.Error()
+					s.log.Warn("bounty import: draft scan not created", "slug", slug, "target", targetID, "error", err)
+					continue
+				}
+				scanIDs = append(scanIDs, string(created.ID))
 			}
 		}
-		out = append(out, importedProgram{Slug: slug, Title: detail.Title, ProjectID: string(p.ID), Targets: targets, Hosts: hosts, ScanID: scanID, ScanError: scanErr, UserAgent: p.HuntingUserAgent, Skipped: skipped})
+		scanID := ""
+		if len(scanIDs) > 0 {
+			scanID = scanIDs[0]
+		}
+		out = append(out, importedProgram{Slug: slug, Title: detail.Title, ProjectID: string(p.ID), Targets: targets, Hosts: hosts, ScanID: scanID, ScanIDs: scanIDs, ScanError: scanErr, UserAgent: p.HuntingUserAgent, Skipped: skipped})
 		s.log.Info("bounty program imported", "provider", "yeswehack", "slug", slug, "hosts", len(hosts), "targets", len(targets))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"imported": out})
