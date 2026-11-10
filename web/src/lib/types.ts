@@ -117,6 +117,27 @@ export interface Evidence {
   created_at: string;
 }
 
+/** Evidence metadata as returned by GET /api/scans/{id}/evidence. */
+export interface EvidenceView {
+  id: ID;
+  kind: string;
+  role: "baseline" | "candidate" | "browser" | string;
+  media_type?: string;
+  size: number;
+  sha256?: string;
+  created_at: string;
+}
+
+/** The scan evidence endpoint groups evidence under the finding it backs. */
+export interface ScanEvidenceGroup {
+  finding_id: ID;
+  finding_title: string;
+  verdict: string;
+  section: string;
+  verified_candidate?: string;
+  evidence: EvidenceView[];
+}
+
 export interface Report {
   id: ID;
   scan_id: ID;

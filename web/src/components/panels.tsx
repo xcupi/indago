@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Code, Empty, Loading } from "@/components/ui/misc";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api, refreshAll, useApi } from "@/lib/api";
-import type { Coverage, EndpointRow, Evidence, Finding, Report, TestRow } from "@/lib/types";
+import type { Coverage, EndpointRow, Evidence, Finding, Report, ScanEvidenceGroup, TestRow } from "@/lib/types";
 import { formatTime, shortId } from "@/lib/utils";
 import { Pagination, usePagination } from "@/components/Pagination";
 
@@ -175,53 +175,82 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
 /* Evidence ---------------------------------------------------------------- */
 
 export function EvidencePanel({ scanId }: { scanId: string }) {
-  const evidence = useApi<Evidence[]>(`/api/scans/${scanId}/evidence`);
-  const items = evidence.data ?? [];
-  const paged = usePagination(items);
+  const evidence = useApi<ScanEvidenceGroup[]>(`/api/scans/${scanId}/evidence`);
+  const groups = evidence.data ?? [];
+  const withEvidence = groups.filter((g) => (g.evidence ?? []).length > 0);
+  const withoutEvidence = groups.length - withEvidence.length;
+  const paged = usePagination(withEvidence);
   if (evidence.loading && !evidence.data) return <Loading />;
-  if (!items.length) return <Empty>No evidence recorded yet.</Empty>;
+  if (!groups.length) return <Empty>No evidence recorded for this scan yet.</Empty>;
   return (
     <Card>
       <CardContent className="p-0">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Kind</TableHead>
-              <TableHead>Note</TableHead>
-              <TableHead>Type</TableHead>
-              <TableHead>Size</TableHead>
-              <TableHead>Created</TableHead>
-              <TableHead />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {paged.rows.map((e) => (
-              <TableRow key={e.id}>
-                <TableCell>
-                  <Badge tone="info">{e.kind}</Badge>
-                </TableCell>
-                <TableCell className="max-w-[28rem] truncate text-xs text-muted-foreground">{e.note ?? "—"}</TableCell>
-                <TableCell className="mono text-[11px] text-muted-foreground">{e.media_type ?? "—"}</TableCell>
-                <TableCell className="tabular-nums text-xs text-muted-foreground">
-                  {(e.size / 1024).toFixed(1)} KB
-                </TableCell>
-                <TableCell className="text-[11px] text-muted-foreground">{formatTime(e.created_at)}</TableCell>
-                <TableCell className="text-right">
-                  <a
-                    href={`/api/evidence/${e.id}/content`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-[11px] text-emerald-700 dark:text-emerald-400 hover:underline"
-                  >
-                    open <ExternalLink className="size-3" />
-                  </a>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+        <div className="border-b border-border px-3 py-2 text-[11px] text-muted-foreground">
+          {withEvidence.length} finding{withEvidence.length === 1 ? "" : "s"} with stored evidence
+          {withoutEvidence > 0 ? ` · ${withoutEvidence} without evidence (diagnostics/rejected points are often empty)` : ""}
+        </div>
+        {withEvidence.length === 0 ? (
+          <Empty>
+            No stored request/response or browser artifacts yet. The findings in this scan are diagnostics or
+            non-reflecting tests, so there is nothing to open.
+          </Empty>
+        ) : (
+          paged.rows.map((g) => (
+            <div key={g.finding_id} className="border-b border-border p-3 last:border-b-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <VerdictBadge verdict={g.verdict} />
+                <span className="min-w-0 flex-1 text-xs font-medium text-foreground">{g.finding_title}</span>
+                {g.section ? <Badge tone="neutral">{g.section}</Badge> : null}
+              </div>
+              {g.verified_candidate ? (
+                <Code className="mt-2 max-h-24">{g.verified_candidate}</Code>
+              ) : null}
+              <Table className="mt-2">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Kind</TableHead>
+                    <TableHead>Role</TableHead>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Size</TableHead>
+                    <TableHead>Created</TableHead>
+                    <TableHead />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {g.evidence.map((e) => (
+                    <TableRow key={e.id}>
+                      <TableCell>
+                        <Badge tone="info">{e.kind}</Badge>
+                      </TableCell>
+                      <TableCell>
+                        <Badge tone={e.role === "baseline" ? "neutral" : e.role === "browser" ? "violet" : "warn"}>
+                          {e.role}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="mono text-[11px] text-muted-foreground">{e.media_type ?? "—"}</TableCell>
+                      <TableCell className="tabular-nums text-xs text-muted-foreground">
+                        {(e.size / 1024).toFixed(1)} KB
+                      </TableCell>
+                      <TableCell className="text-[11px] text-muted-foreground">{formatTime(e.created_at)}</TableCell>
+                      <TableCell className="text-right">
+                        <a
+                          href={`/api/evidence/${e.id}/content`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 text-[11px] text-emerald-700 dark:text-emerald-400 hover:underline"
+                        >
+                          open <ExternalLink className="size-3" />
+                        </a>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          ))
+        )}
       </CardContent>
-      <Pagination {...paged} />
+      {withEvidence.length > 0 ? <Pagination {...paged} /> : null}
     </Card>
   );
 }
