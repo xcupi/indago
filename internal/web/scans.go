@@ -417,6 +417,18 @@ func (s *Server) handleScanAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := do(); err != nil {
+		// A WAF preflight block is a controlled outcome, not a server error:
+		// Start has already moved the scan to paused and recorded the reason.
+		// Return the paused state so the UI can render it as a pause, not a 500.
+		if errors.Is(err, scan.ErrWAFPreflight) {
+			st, stErr := s.ctrl.Status(r.Context(), id)
+			if stErr != nil {
+				s.writeLookupError(w, stErr)
+				return
+			}
+			writeJSON(w, http.StatusOK, st)
+			return
+		}
 		s.writeScanError(w, err)
 		return
 	}
