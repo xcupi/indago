@@ -709,6 +709,9 @@ func (c *Controller) snapshotStats(ctx context.Context, scanID domain.ID) domain
 	if q, err := c.queue.Stats(ctx, scanID); err == nil {
 		st.JobsQueued = q.Queued
 		st.JobsCompleted = q.Succeeded
+		st.JobsFailed = q.Failed
+		st.JobsCanceled = q.Canceled
+		st.JobsTotal = q.Total()
 	}
 	if fs, err := c.store.Findings().ListByScan(ctx, scanID); err == nil {
 		for _, f := range fs {

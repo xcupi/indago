@@ -12,6 +12,16 @@ import { api, refreshAll, useApi } from "@/lib/api";
 import type { Scan } from "@/lib/types";
 import { formatTime, pct, shortId } from "@/lib/utils";
 
+interface QueueStats {
+  queued: number;
+  leased: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  canceled: number;
+  dead: number;
+}
+
 function currentTab(): string {
   const hash = window.location.hash;
   const i = hash.indexOf("?");
@@ -21,6 +31,10 @@ function currentTab(): string {
 
 export default function ScanDetail({ id }: { id: string }) {
   const scan = useApi<Scan>(`/api/scans/${id}`, [], 3000);
+  // The queue is the source of truth for job progress. Reading it separately
+  // keeps the denominator stable when cancel moves queued jobs to canceled:
+  // 1200/1400 must not become 1200/1200.
+  const jobStats = useApi<QueueStats>(`/api/scans/${id}/stats`, [], 3000);
   const [tab, setTab] = useState(currentTab());
 
   // Keep the active tab in the hash so a deep link, a reload and Back/Forward
@@ -92,6 +106,13 @@ export default function ScanDetail({ id }: { id: string }) {
   if (!s) return <Alert>{scan.error ?? "Scan not found."}</Alert>;
 
   const stats = s.stats;
+  const jobsTotal = jobStats.data
+    ? jobStats.data.queued + jobStats.data.leased + jobStats.data.running +
+      jobStats.data.succeeded + jobStats.data.failed + jobStats.data.canceled + jobStats.data.dead
+    : stats?.jobs_total ?? (stats?.jobs_completed ?? 0) + (stats?.jobs_queued ?? 0);
+  const jobsDone = jobStats.data?.succeeded ?? stats?.jobs_completed ?? 0;
+  const jobsCanceled = jobStats.data?.canceled ?? stats?.jobs_canceled ?? 0;
+  const jobsFailed = jobStats.data?.failed ?? stats?.jobs_failed ?? 0;
   const canStart = s.state === "queued" || s.state === "draft";
   const canPause = s.state === "running";
   const canResume = s.state === "paused";
@@ -142,8 +163,8 @@ export default function ScanDetail({ id }: { id: string }) {
         <Stat label="Rejected" value={stats?.findings_rejected ?? 0} tone="success" />
         <Stat
           label="Jobs"
-          value={`${stats?.jobs_completed ?? 0}/${(stats?.jobs_completed ?? 0) + (stats?.jobs_queued ?? 0)}`}
-          hint={`${pct(stats?.jobs_completed ?? 0, (stats?.jobs_completed ?? 0) + (stats?.jobs_queued ?? 0))}% done`}
+          value={`${jobsDone}/${jobsTotal}`}
+          hint={`${pct(jobsDone, jobsTotal)}% done${jobsCanceled ? ` · ${jobsCanceled} canceled` : ""}${jobsFailed ? ` · ${jobsFailed} failed` : ""}`}
         />
       </div>
 

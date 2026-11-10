@@ -94,8 +94,11 @@ by `_`. Supported: `deepseek`, `claude` (Anthropic Messages API), `openai`, `cus
 
 `claude` authenticates with `x-api-key` plus `anthropic-version`, not a Bearer
 token; model discovery works through the same `/models` probe, so
-`INDAGO_LLM_MODEL_CLAUDE` (or Settings) selects the model. No model name is
-hardcoded beyond the provider default: names age fast.
+`INDAGO_LLM_MODEL_CLAUDE` (or Settings) selects the model. ChatGPT's OAuth
+`/models` response is parsed separately and exposes only models the account can
+use through the API. Settings loads these version lists when ChatGPT or Claude
+is selected, and the AI advisory panel also has a per-call model picker. No
+model name is hardcoded beyond the provider default: names age fast.
 
 ### ChatGPT via OAuth (`chatgpt`)
 

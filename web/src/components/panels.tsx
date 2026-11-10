@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Download, ExternalLink, FileText, Plus } from "lucide-react";
 import { Badge, SeverityBadge, VerdictBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -230,10 +230,26 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
   const [previewText, setPreviewText] = useState("");
   const [previewError, setPreviewError] = useState("");
   const [aiProvider, setAiProvider] = useState("");
+  const [aiModel, setAiModel] = useState("");
+  const [aiModels, setAiModels] = useState<string[]>([]);
   const providers = useApi<{ providers: { provider: string; label: string; configured: boolean; model?: string }[]; default?: string }>(
     "/api/llm/providers",
   );
   const aiProviders = (providers.data?.providers ?? []).filter((p) => p.configured);
+  const aiEffective = aiProvider || providers.data?.default || aiProviders[0]?.provider || "";
+
+  useEffect(() => {
+    let alive = true;
+    setAiModel("");
+    setAiModels([]);
+    if (!aiEffective) return;
+    api<{ models: string[] }>("/api/llm/models", { method: "POST", body: { provider: aiEffective } })
+      .then((res) => alive && setAiModels(res.models ?? []))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [aiEffective]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [reviewBusy, setReviewBusy] = useState(false);
@@ -263,7 +279,8 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
       if (mode === "selected") body.finding_ids = picked;
       if (ai) {
         body.ai_summary = true;
-        if (aiProvider) body.ai_provider = aiProvider;
+        if (aiEffective) body.ai_provider = aiEffective;
+        if (aiModel) body.ai_model = aiModel;
       }
       await api(`/api/scans/${scanId}/reports`, { method: "POST", body });
       refreshAll();
@@ -280,7 +297,8 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
     setReview(null);
     try {
       const body: Record<string, unknown> = { mode };
-      if (aiProvider) body.provider = aiProvider;
+      if (aiEffective) body.provider = aiEffective;
+      if (aiModel) body.model = aiModel;
       const out = await api<typeof review>(`/api/scans/${scanId}/ai/report-review`, { method: "POST", body });
       setReview(out);
     } catch (e) {
@@ -345,11 +363,12 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
             <Switch checked={ai} onCheckedChange={setAi} /> AI summary
           </label>
           {ai ? (
+            <>
             <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
-              Model
+              Provider
               <select
                 className="h-8 rounded-md border border-border bg-background px-2 text-xs"
-                value={aiProvider || providers.data?.default || aiProviders[0]?.provider || ""}
+                value={aiEffective}
                 onChange={(e) => setAiProvider(e.target.value)}
               >
                 {aiProviders.length === 0 ? <option value="">no provider configured</option> : null}
@@ -361,6 +380,20 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
                 ))}
               </select>
             </label>
+            <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+              Model
+              <select
+                className="h-8 max-w-[16rem] rounded-md border border-border bg-background px-2 text-xs"
+                value={aiModel}
+                onChange={(e) => setAiModel(e.target.value)}
+              >
+                <option value="">provider default</option>
+                {aiModels.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </label>
+            </>
           ) : null}
           <Button size="sm" onClick={create} disabled={busy}>
             <Plus className="size-4" /> {busy ? "Generating…" : "Generate report"}
@@ -889,6 +922,8 @@ export function AIAssistPanel({ scanId }: { scanId: string }) {
   const providers = useApi<ProvidersResponse>("/api/llm/providers");
   const usage = useApi<AIUsageResponse>(`/api/scans/${scanId}/ai/usage`);
   const [provider, setProvider] = useState("");
+  const [model, setModel] = useState("");
+  const [models, setModels] = useState<string[]>([]);
   const [kind, setKind] = useState("prioritize");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -897,13 +932,29 @@ export function AIAssistPanel({ scanId }: { scanId: string }) {
   const usable = (providers.data?.providers ?? []).filter((p) => p.configured);
   const effective = provider || providers.data?.default || usable[0]?.provider || "";
 
+  // Model versions to match the selected provider. ChatGPT and Claude list
+  // these from their own OAuth session; other providers return their /models
+  // list. Empty means "let the provider choose".
+  useEffect(() => {
+    let alive = true;
+    setModels([]);
+    setModel("");
+    if (!effective) return;
+    api<{ models: string[] }>("/api/llm/models", { method: "POST", body: { provider: effective } })
+      .then((res) => alive && setModels(res.models ?? []))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [effective]);
+
   async function run() {
     setBusy(true);
     setError("");
     try {
       const res = await api<{ text: string; provider: string; model: string }>(
         `/api/scans/${scanId}/ai/assist`,
-        { method: "POST", body: { kind, provider: effective } },
+        { method: "POST", body: { kind, provider: effective, model: model || undefined } },
       );
       setResult(res);
       refreshAll();
@@ -944,6 +995,19 @@ export function AIAssistPanel({ scanId }: { scanId: string }) {
                   {p.label}
                   {p.model ? ` · ${p.model}` : ""}
                 </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+            Model
+            <select
+              className="h-8 max-w-[16rem] rounded-md border border-border bg-background px-2 text-xs"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+            >
+              <option value="">provider default</option>
+              {models.map((m) => (
+                <option key={m} value={m}>{m}</option>
               ))}
             </select>
           </label>

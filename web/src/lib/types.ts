@@ -48,6 +48,9 @@ export interface ScanStats {
   parameters_discovered: number;
   jobs_queued: number;
   jobs_completed: number;
+  jobs_failed?: number;
+  jobs_canceled?: number;
+  jobs_total?: number;
   findings_confirmed: number;
   findings_rejected: number;
   findings_inconclusive: number;

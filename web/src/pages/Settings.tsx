@@ -106,17 +106,17 @@ export default function Settings() {
   const [modelBusy, setModelBusy] = useState(false);
   const [modelNote, setModelNote] = useState("");
 
-  // POST /api/llm/models asks the SAVED provider for its model list. The
+  // POST /api/llm/models asks the selected provider for its model list. The
   // endpoint returns {models, error} with 200 even when discovery fails, so
   // the note carries the provider's message instead of throwing.
-  async function discoverModels() {
+  async function discoverModels(providerOverride?: string) {
     setModelBusy(true);
     setModelNote("");
     setErr("");
     try {
       const res = await api<{ models: string[]; error?: string }>("/api/llm/models", {
         method: "POST",
-        body: {},
+        body: { provider: providerOverride ?? form.provider },
       });
       setModels(res.models ?? []);
       if (!res.models?.length) {
@@ -130,6 +130,16 @@ export default function Settings() {
       setModelBusy(false);
     }
   }
+
+  // ChatGPT and Claude expose a versioned model list over their OAuth
+  // sessions. Fetch it as soon as one is selected, so the picker is useful
+  // without making the operator hunt for a Discover button.
+  useEffect(() => {
+    if (form.provider === "chatgpt" || form.provider === "claude" || form.provider === "anthropic") {
+      void discoverModels(form.provider);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.provider]);
 
   useEffect(() => {
     if (!status.data) return;
@@ -306,7 +316,20 @@ export default function Settings() {
                     <select
                       className="h-9 rounded-md border border-border bg-card px-2 text-sm"
                       value={form.provider}
-                      onChange={(e) => setForm({ ...form, provider: e.target.value })}
+                      onChange={(e) => {
+                        const provider = e.target.value;
+                        const def = (status.data?.providers ?? []).find((p) => String(p.id) === provider) as
+                          | { default_base_url?: string }
+                          | undefined;
+                        setModels([]);
+                        setModelNote("");
+                        setForm({
+                          ...form,
+                          provider,
+                          model: provider === form.provider ? form.model : "",
+                          base_url: def?.default_base_url ?? "",
+                        });
+                      }}
                     >
                       <option value="">Select…</option>
                       {providers.map((p) => (
@@ -314,13 +337,13 @@ export default function Settings() {
                       ))}
                     </select>
                   </Field>
-                  <Field label="Model" hint="Empty saves no model; discovery reads the saved provider.">
+                  <Field label="Model" hint="ChatGPT/Claude versions are discovered from the selected provider; empty lets it choose.">
                     <div className="flex gap-2">
                       <Input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={discoverModels}
+                        onClick={() => discoverModels()}
                         disabled={modelBusy}
                         title="Ask the saved provider for its model list"
                       >

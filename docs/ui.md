@@ -103,8 +103,8 @@ server rather than by reading code:
 
 | Capability | Where it lives | Verification |
 | --- | --- | --- |
-| Interactive login (`POST /api/auth/login`) | Scan create → Auth mode → "Login now"; the returned path becomes `auth_state_path` | endpoint returns 400 with the scope message for an out-of-scope URL and for a missing project (request shape accepted) |
-| Model discovery (`POST /api/llm/models`) | Settings → AI Gateway → "Discover" | surfaces the provider message ("LLM provider is not configured") instead of throwing |
+| Interactive login (`POST /api/auth/login`) | Project → Auth sessions → "Login now"; targets inherit the profile, and scans read it from the target | endpoint returns 400 with the scope message for an out-of-scope URL and for a missing project (request shape accepted) |
+| Model discovery (`POST /api/llm/models`) | Settings → AI Gateway → "Discover", or pick ChatGPT/Claude to load versions automatically; AI advisory has a per-call Model picker | ChatGPT returns its OAuth model list and Claude returns its OAuth model list; provider errors are shown in the note instead of throwing |
 | Finding PoC (`GET .../findings/{fid}/poc`) | Finding detail dialog → "download PoC" | `200`, `Content-Disposition: attachment`, 2.1 KB artifact |
 | Selective report (`finding_ids`) | Reports tab → mode "selected findings" + checkbox list | report generated from the UI contains exactly the one selected finding |
 | AI summary (`ai_summary`) | Reports tab → "AI summary" switch | sent in the create body alongside `format`/`mode` |

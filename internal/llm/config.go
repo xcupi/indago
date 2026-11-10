@@ -92,6 +92,7 @@ var providerList = []Provider{
 		ID:             ProviderClaude,
 		Label:          "Claude (Anthropic)",
 		DefaultBaseURL: "https://api.anthropic.com/v1",
+		DefaultModel:   "claude-sonnet-5-5",
 		// An OAuth session is a valid credential, so a key is not required to
 		// save the provider; the gateway falls back to it.
 		RequiresKey: false,
@@ -140,9 +141,11 @@ var providerList = []Provider{
 	{
 		// ChatGPT through the Codex OAuth session (no API key). The model is
 		// discovered from the account's own model list at call time.
-		ID:          ProviderChatGPT,
-		Label:       "ChatGPT (OAuth)",
-		RequiresKey: false,
+		ID:             ProviderChatGPT,
+		Label:          "ChatGPT (OAuth)",
+		DefaultBaseURL: "https://chatgpt.com/backend-api/codex",
+		DefaultModel:   "gpt-6-astra",
+		RequiresKey:    false,
 	},
 }
 
@@ -486,7 +489,14 @@ func (s *Store) Set(req SetRequest) (Config, error) {
 		// silently overwritten — and its key, if any, must not be lost.
 		return Config{}, err
 	}
-	cfg, err := normalize(req, cur.apiKey, cur.AttemptBudget(), cur.Enabled)
+	// A key belongs to the provider it was saved for. Switching to another
+	// provider must not carry the old secret along, where it could be sent to
+	// a different endpoint or silently become the new provider's key.
+	existingKey := cur.apiKey
+	if !strings.EqualFold(cur.Provider, req.Provider) {
+		existingKey = ""
+	}
+	cfg, err := normalize(req, existingKey, cur.AttemptBudget(), cur.Enabled)
 	if err != nil {
 		return Config{}, err
 	}

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -162,6 +163,12 @@ func (s *Server) handleListLLMModels(w http.ResponseWriter, r *http.Request) {
 	if !s.requireLLMStore(w) {
 		return
 	}
+	var req struct {
+		Provider string `json:"provider"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
 	cfg, err := s.llm.Load()
 	if errors.Is(err, llm.ErrNotConfigured) {
 		writeError(w, http.StatusBadRequest, "LLM provider is not configured")
@@ -171,16 +178,28 @@ func (s *Server) handleListLLMModels(w http.ResponseWriter, r *http.Request) {
 		s.writeInternalError(w, "read LLM settings", err)
 		return
 	}
-
+	provider := strings.ToLower(strings.TrimSpace(req.Provider))
+	if provider == "" {
+		provider = cfg.Provider
+	}
+	prober := llm.NewProber(0)
 	var models []string
-	if (cfg.Provider == "claude" || cfg.Provider == "anthropic") && !cfg.HasKey() && s.claudeLogin != nil {
-		models, err = s.claudeLogin.ListModels(r.Context())
+	if provider == llm.ProviderChatGPT {
+		models, err = prober.ChatGPTModels(r.Context(), s.chatgptDir)
 	} else {
-		models, err = llm.NewProber(0).Models(r.Context(), cfg)
+		var cred llm.Credential
+		if s.llmRegistry != nil {
+			cred, err = s.llmRegistry.Resolve(provider, "")
+		}
+		if err == nil && (provider == llm.ProviderClaude || provider == llm.ProviderAnthropic) && !cred.HasKey() && s.claudeLogin != nil {
+			models, err = s.claudeLogin.ListModels(r.Context())
+		} else if err == nil {
+			models, err = prober.Models(r.Context(), cred.Config())
+		}
 	}
 	if err != nil {
 		msg := cfg.Redact(err.Error())
-		s.log.Info("LLM model list unavailable", "provider", cfg.Provider, "err", msg)
+		s.log.Info("LLM model list unavailable", "provider", provider, "err", msg)
 		writeJSON(w, http.StatusOK, map[string]any{"models": []string{}, "error": msg})
 		return
 	}

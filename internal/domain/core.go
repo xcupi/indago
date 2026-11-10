@@ -408,6 +408,13 @@ type ScanStats struct {
 	ParametersDiscovered int `json:"parameters_discovered"`
 	JobsQueued           int `json:"jobs_queued"`
 	JobsCompleted        int `json:"jobs_completed"`
+	JobsFailed           int `json:"jobs_failed"`
+	JobsCanceled         int `json:"jobs_canceled"`
+	// JobsTotal is every job ever queued for the scan, including jobs that
+	// failed, were canceled, or are still pending. Progress uses this fixed
+	// denominator: canceling queued work must not make 1200/1400 jump to
+	// 1200/1200.
+	JobsTotal            int `json:"jobs_total"`
 	FindingsConfirmed    int `json:"findings_confirmed"`
 	FindingsRejected     int `json:"findings_rejected"`
 	FindingsInconclusive int `json:"findings_inconclusive"`

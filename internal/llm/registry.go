@@ -137,6 +137,11 @@ func (r *Registry) Resolve(provider, model string) (Credential, error) {
 			return Credential{}, fmt.Errorf("%w: ChatGPT OAuth session expired — log in from Indago Settings", ErrNoCredential)
 		}
 		m := strings.TrimSpace(os.Getenv(envName(provider, "MODEL")))
+		// A model picked in Settings is part of the provider configuration,
+		// even though ChatGPT's credential itself comes from OAuth.
+		if m == "" && stored.Configured() && stored.Provider == provider {
+			m = strings.TrimSpace(stored.Model)
+		}
 		if strings.TrimSpace(model) != "" {
 			m = strings.TrimSpace(model)
 		}

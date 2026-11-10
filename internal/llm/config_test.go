@@ -196,7 +196,7 @@ func TestStoreValidation(t *testing.T) {
 		name string
 		req  SetRequest
 	}{
-		{"unknown provider", SetRequest{Provider: "chatgpt", APIKey: testKey}},
+		{"unknown provider", SetRequest{Provider: "chatgpt-oauth", APIKey: testKey}},
 		{"deepseek without a key", SetRequest{Provider: ProviderDeepSeek}},
 		{"openai without a key", SetRequest{Provider: ProviderOpenAI}},
 		{"custom without a base url", SetRequest{Provider: ProviderCustom, Model: "m"}},
@@ -298,5 +298,28 @@ func TestMaskKeyNeverRevealsAShortKey(t *testing.T) {
 	long := "sk-abcdefghijklmnop"
 	if got := maskKey(long); got != "****mnop" {
 		t.Errorf("maskKey(long) = %q, want ****mnop", got)
+	}
+}
+
+func TestChatGPTModelSelectionDoesNotCarryAnotherProvidersKey(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "llm"))
+	if _, err := s.Set(SetRequest{
+		Provider: ProviderCustom, Model: "custom-model",
+		BaseURL: "https://example.com/v1", APIKey: "custom-secret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := s.Set(SetRequest{Provider: ProviderChatGPT, Model: "gpt-5.6-sol"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != ProviderChatGPT || cfg.Model != "gpt-5.6-sol" {
+		t.Fatalf("chatgpt config = %+v", cfg)
+	}
+	if cfg.BaseURL != "https://chatgpt.com/backend-api/codex" {
+		t.Fatalf("chatgpt base = %q, want its default", cfg.BaseURL)
+	}
+	if cfg.HasKey() {
+		t.Fatal("switching providers carried the previous provider's key")
 	}
 }

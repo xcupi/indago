@@ -14,7 +14,7 @@ import { api, refreshAll, useApi } from "@/lib/api";
 import type { AuthProfile, Project, Scan, Scope, Target } from "@/lib/types";
 import { navigate } from "@/lib/router";
 import { formatTime, shortId } from "@/lib/utils";
-import { selectedProject } from "@/components/Layout";
+import { selectedProject, setSelectedProject } from "@/components/Layout";
 
 const PROFILES = ["conservative", "balanced", "fast"];
 
@@ -80,7 +80,7 @@ export default function Scans() {
   });
   const [error, setError] = useState("");
   const [projectScope, setProjectScope] = useState<Scope | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<"" | "create" | "start">("");
   const [loginNote, setLoginNote] = useState("");
 
   const filtered = useMemo(() => {
@@ -147,13 +147,13 @@ export default function Scans() {
   const running = filtered.filter((s) => s.state === "running").length;
   const confirmed = filtered.reduce((n, s) => n + (s.stats?.findings_confirmed ?? 0), 0);
 
-  async function create() {
+  async function create(start: boolean) {
     setError("");
     if (!projectId || !form.target_id) {
       setError("Pick a project and a target first.");
       return;
     }
-    setBusy(true);
+    setBusy(start ? "start" : "create");
     try {
       const body: Record<string, unknown> = {
         project_id: projectId,
@@ -207,14 +207,28 @@ export default function Scans() {
         }
       }
       const scan = await api<Scan>("/api/scans", { method: "POST", body });
-      await api(`/api/scans/${scan.id}/start`, { method: "POST" });
+      let startError = "";
+      if (start) {
+        try {
+          await api(`/api/scans/${scan.id}/start`, { method: "POST" });
+        } catch (e) {
+          // The scan was created even if starting it failed. Keep it visible
+          // in the project and on its detail page so the operator can retry
+          // instead of losing it behind the dialog.
+          startError = (e as Error).message;
+        }
+      }
+      // The project picker in the sidebar is global. Selecting the project
+      // used here prevents the list from hiding the scan we just created.
+      setSelectedProject(projectId);
       setOpen(false);
       refreshAll();
       navigate(`/scans/${scan.id}`);
+      if (startError) window.alert(`Scan created, but starting it failed: ${startError}`);
     } catch (e) {
       setError((e as Error).message);
     } finally {
-      setBusy(false);
+      setBusy("");
     }
   }
 
@@ -491,8 +505,16 @@ export default function Scans() {
                   <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
                     Cancel
                   </Button>
-                  <Button size="sm" disabled={busy} onClick={create}>
-                    <Play className="size-4" /> {busy ? "Starting…" : "Create & start"}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={Boolean(busy)}
+                    onClick={() => create(false)}
+                  >
+                    {busy === "create" ? "Creating…" : "Create"}
+                  </Button>
+                  <Button size="sm" disabled={Boolean(busy)} onClick={() => create(true)}>
+                    <Play className="size-4" /> {busy === "start" ? "Starting…" : "Create & scan"}
                   </Button>
                 </div>
               </div>
