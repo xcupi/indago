@@ -132,7 +132,7 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 		eng = eng.WithSessionCookies(cookies)
 	}
 	if c.opts.Preflight {
-		if err := c.preflightTarget(runCtx, eng, target); err != nil {
+		if err := c.preflightTarget(runCtx, eng, target, seedsFor(sc, target)); err != nil {
 			cancel()
 			closeHTTP()
 			return nil, err

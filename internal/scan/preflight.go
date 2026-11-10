@@ -18,11 +18,18 @@ import (
 // A preflight network error is not fatal: the normal discovery path will
 // classify it with the same evidence and existing retry policy. Only a
 // recognised block pauses the scan.
-func (c *Controller) preflightTarget(ctx context.Context, eng httpengine.Engine, target *domain.Target) error {
+func (c *Controller) preflightTarget(ctx context.Context, eng httpengine.Engine, target *domain.Target, seeds []string) error {
 	if target == nil || strings.TrimSpace(target.BaseURL) == "" {
 		return nil
 	}
-	resp, err := eng.Do(ctx, httpengine.GET(target.BaseURL))
+	probe := strings.TrimSpace(target.BaseURL)
+	// The target's base URL can be a redirecting apex while the actual scan
+	// seed is an accessible subdomain (support.cyberghostvpn.com, for example).
+	// Probe what this scan will actually fetch, not the unrelated apex.
+	if len(seeds) > 0 && strings.TrimSpace(seeds[0]) != "" {
+		probe = strings.TrimSpace(seeds[0])
+	}
+	resp, err := eng.Do(ctx, httpengine.GET(probe))
 	if err != nil {
 		c.log.Debug("waf preflight: request failed; leaving classification to discovery", "target", target.ID, "err", err)
 		return nil
