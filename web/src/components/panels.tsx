@@ -630,7 +630,8 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
 export function CoveragePanel({ scanId }: { scanId: string }) {
   const coverage = useApi<Coverage>(`/api/scans/${scanId}/coverage`, [], 5000);
   const data = coverage.data ?? {};
-  const entries = Object.entries(data).filter(([k]) => k !== "scan_id");
+  const capabilities = data.capabilities ?? [];
+  const entries = Object.entries(data).filter(([k]) => k !== "scan_id" && k !== "capabilities");
 
   return (
     <div className="space-y-3">
@@ -645,23 +646,62 @@ export function CoveragePanel({ scanId }: { scanId: string }) {
       </Card>
       {coverage.loading && !coverage.data ? (
         <Loading />
-      ) : entries.length === 0 ? (
+      ) : entries.length === 0 && capabilities.length === 0 ? (
         <Empty>No coverage data yet.</Empty>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {entries.map(([key, value]) => (
-            <div key={key} className="rounded-lg border border-border bg-muted p-3">
-              <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{key.replaceAll("_", " ")}</div>
-              <div className="mt-1 text-sm text-foreground">
-                {typeof value === "object" ? (
-                  <Code className="max-h-40">{JSON.stringify(value, null, 2)}</Code>
-                ) : (
-                  String(value)
-                )}
-              </div>
+        <>
+          {capabilities.length > 0 && (
+            <Card>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Capability</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Tests</TableHead>
+                      <TableHead>Completed</TableHead>
+                      <TableHead>Skipped</TableHead>
+                      <TableHead>Failed</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {capabilities.map((cap) => (
+                      <TableRow key={cap.key}>
+                        <TableCell>
+                          <div className="text-xs text-foreground">{cap.label}</div>
+                          {cap.note && <div className="mt-0.5 text-[10px] text-muted-foreground">{cap.note}</div>}
+                        </TableCell>
+                        <TableCell>
+                          <Badge tone={cap.enabled ? "success" : "neutral"}>{cap.enabled ? "enabled" : "disabled"}</Badge>
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{cap.tests}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{cap.completed}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{cap.skipped}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{cap.failed}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          )}
+          {entries.length > 0 && (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {entries.map(([key, value]) => (
+                <div key={key} className="rounded-lg border border-border bg-muted p-3">
+                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{key.replaceAll("_", " ")}</div>
+                  <div className="mt-1 text-sm text-foreground">
+                    {typeof value === "object" ? (
+                      <Code className="max-h-40">{JSON.stringify(value, null, 2)}</Code>
+                    ) : (
+                      String(value)
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          )}
+        </>
       )}
     </div>
   );

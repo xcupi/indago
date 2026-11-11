@@ -123,15 +123,28 @@ type coverageParams struct {
 	Pending int `json:"pending"`
 }
 
+type coverageCapability struct {
+	Key        string `json:"key"`
+	Label      string `json:"label"`
+	Enabled    bool   `json:"enabled"`
+	Tests      int    `json:"tests"`
+	Completed  int    `json:"completed"`
+	Skipped    int    `json:"skipped"`
+	Failed     int    `json:"failed"`
+	Incomplete int    `json:"incomplete"`
+	Note       string `json:"note,omitempty"`
+}
+
 type scanCoverage struct {
-	ScanID         domain.ID         `json:"scan_id"`
-	State          domain.ScanState  `json:"state"`
-	BrowserEnabled bool              `json:"browser_enabled"`
-	CoverageGaps   bool              `json:"coverage_gaps"`
-	Tests          coverageTests     `json:"tests"`
-	Parameters     coverageParams    `json:"parameters"`
-	Reasons        []coverageReason  `json:"reasons"`
-	Warnings       []coverageWarning `json:"warnings"`
+	ScanID         domain.ID            `json:"scan_id"`
+	State          domain.ScanState     `json:"state"`
+	BrowserEnabled bool                 `json:"browser_enabled"`
+	CoverageGaps   bool                 `json:"coverage_gaps"`
+	Tests          coverageTests        `json:"tests"`
+	Parameters     coverageParams       `json:"parameters"`
+	Capabilities   []coverageCapability `json:"capabilities"`
+	Reasons        []coverageReason     `json:"reasons"`
+	Warnings       []coverageWarning    `json:"warnings"`
 }
 
 const coverageExamples = 3
@@ -155,10 +168,41 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 
 	out := scanCoverage{ScanID: id, State: st.Scan.State, BrowserEnabled: s.caps.BrowserEnabled,
 		Reasons: []coverageReason{}, Warnings: []coverageWarning{}}
+	cfg := st.Scan.Config
+	out.Capabilities = []coverageCapability{
+		{Key: "reflected_xss", Label: "Reflected XSS", Enabled: !cfg.SkipReflectedXSS},
+		{Key: "dom_xss", Label: "DOM XSS", Enabled: !cfg.SkipDOMXSS},
+		{Key: "access_control", Label: "Access control", Enabled: !cfg.SkipAccessControl},
+		{Key: "idor", Label: "IDOR", Enabled: !cfg.SkipIDOR},
+		{Key: "information_disclosure", Label: "Information disclosure", Enabled: !cfg.SkipInfoDisclosure},
+		{Key: "open_redirect", Label: "Open redirect (client-side)", Enabled: !cfg.SkipDOMXSS,
+			Note: "Server-side redirect detection is not implemented."},
+	}
+	capByClass := map[domain.VulnClass]*coverageCapability{
+		domain.VulnReflectedXSS:   &out.Capabilities[0],
+		domain.VulnDOMXSS:         &out.Capabilities[1],
+		domain.VulnAccessControl:  &out.Capabilities[2],
+		domain.VulnIDOR:           &out.Capabilities[3],
+		domain.VulnInfoDisclosure: &out.Capabilities[4],
+		domain.VulnOpenRedirect:   &out.Capabilities[5],
+	}
 	groups := map[string]*coverageReason{}
 	seen := map[string]map[string]bool{}
 	for _, tc := range cases {
 		out.Tests.Total++
+		if cap, ok := capByClass[tc.VulnClass]; ok {
+			cap.Tests++
+			switch {
+			case tc.Status == domain.TestCaseSkipped:
+				cap.Skipped++
+			case tc.Outcome == domain.OutcomeError || tc.Outcome == domain.OutcomeTimeout || tc.Status == domain.TestCaseFailed:
+				cap.Failed++
+			case tc.Status == domain.TestCaseCompleted:
+				cap.Completed++
+			default:
+				cap.Incomplete++
+			}
+		}
 		switch {
 		case tc.Status == domain.TestCaseSkipped:
 			out.Tests.Skipped++

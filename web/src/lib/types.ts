@@ -186,8 +186,26 @@ export interface TestRow {
   finished_at?: string;
 }
 
+export interface CoverageCapability {
+  key: string;
+  label: string;
+  enabled: boolean;
+  tests: number;
+  completed: number;
+  skipped: number;
+  failed: number;
+  incomplete: number;
+  note?: string;
+}
+
 export interface Coverage {
   scan_id?: ID;
+  coverage_gaps?: boolean;
+  tests?: { total?: number; completed?: number; skipped?: number; failed?: number; incomplete?: number };
+  parameters?: { total?: number; tested?: number; skipped?: number; errored?: number; not_run?: number; partial?: number; pending?: number };
+  capabilities?: CoverageCapability[];
+  reasons?: Array<{ code?: string; severity?: string; title?: string; advice?: string; count?: number; examples?: string[] }>;
+  warnings?: Array<{ code?: string; severity?: string; message?: string }>;
   [key: string]: unknown;
 }
 

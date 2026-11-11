@@ -80,6 +80,15 @@ type coverageResp struct {
 	Tests          struct {
 		Total, Completed, Skipped, Failed int
 	} `json:"tests"`
+	Capabilities []struct {
+		Key       string `json:"key"`
+		Label     string `json:"label"`
+		Enabled   bool   `json:"enabled"`
+		Tests     int    `json:"tests"`
+		Completed int    `json:"completed"`
+		Skipped   int    `json:"skipped"`
+		Failed    int    `json:"failed"`
+	} `json:"capabilities"`
 	Reasons []struct {
 		Code     string   `json:"code"`
 		Severity string   `json:"severity"`
@@ -182,6 +191,34 @@ func TestCoverageClassifiesIntentionalWriteAndDownloadSkipsAsInfo(t *testing.T) 
 	}
 	if c.warning("write_endpoints_skipped") || c.warning("download_endpoints_skipped") {
 		t.Fatalf("intentional policy skips should not produce warning banners: %+v", c.Warnings)
+	}
+}
+
+func TestCoverageReportsCapabilityMatrix(t *testing.T) {
+	a, id := coverageAPI(t, web.Capabilities{BrowserEnabled: true})
+	sc, err := a.st.Scans().Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.Config.SkipReflectedXSS = true
+	sc.Config.SkipIDOR = true
+	if err := a.st.Scans().Update(context.Background(), sc); err != nil {
+		t.Fatal(err)
+	}
+	var c coverageResp
+	a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
+	if len(c.Capabilities) != 6 {
+		t.Fatalf("capabilities = %d, want 6", len(c.Capabilities))
+	}
+	byKey := map[string]bool{}
+	for _, cap := range c.Capabilities {
+		byKey[cap.Key] = cap.Enabled
+	}
+	if byKey["reflected_xss"] || byKey["idor"] {
+		t.Fatalf("disabled capabilities reported enabled: %+v", byKey)
+	}
+	if !byKey["dom_xss"] || !byKey["access_control"] || !byKey["information_disclosure"] {
+		t.Fatalf("enabled capabilities reported disabled: %+v", byKey)
 	}
 }
 
