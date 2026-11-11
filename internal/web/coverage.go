@@ -248,6 +248,17 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		out.Warnings = append(out.Warnings, coverageWarning{"reflected_xss_disabled", sevInfo,
 			"Reflected XSS was disabled for this scan; per-parameter reflection probes were intentionally not run. This is a declared coverage choice, not a failed engine."})
 	}
+	anonymous := st.Session == nil || st.Session.Mode == domain.AuthAnonymous
+	if anonymous {
+		if !st.Scan.Config.SkipIDOR {
+			out.Warnings = append(out.Warnings, coverageWarning{"idor_anonymous_only", sevInfo,
+				"IDOR was enabled, but this scan had no caller identity. Object-level authorization is not meaningfully testable until the scan has an authenticated session."})
+		}
+		if !st.Scan.Config.SkipAccessControl {
+			out.Warnings = append(out.Warnings, coverageWarning{"access_control_anonymous_only", sevInfo,
+				"Access control was tested only from the anonymous perspective; missing-auth checks ran, but role-to-role bypass was not exercised."})
+		}
+	}
 	for _, rs := range out.Reasons {
 		if rs.Severity == sevInfo || (rs.Code == "browser_unavailable" && !s.caps.BrowserEnabled) {
 			continue // informational, or already covered by the browser_disabled warning

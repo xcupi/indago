@@ -194,6 +194,18 @@ func TestCoverageClassifiesIntentionalWriteAndDownloadSkipsAsInfo(t *testing.T) 
 	}
 }
 
+func TestCoverageAnonymousScanReportsIdentityLimits(t *testing.T) {
+	a, id := coverageAPI(t, web.Capabilities{BrowserEnabled: true})
+	var c coverageResp
+	a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
+	if !c.warning("idor_anonymous_only") || !c.warning("access_control_anonymous_only") {
+		t.Fatalf("anonymous identity limits not reported: %+v", c.Warnings)
+	}
+	if c.CoverageGaps {
+		t.Fatalf("informational identity limits must not set coverage_gaps: %+v", c.Warnings)
+	}
+}
+
 func TestCoverageReportsCapabilityMatrix(t *testing.T) {
 	a, id := coverageAPI(t, web.Capabilities{BrowserEnabled: true})
 	sc, err := a.st.Scans().Get(context.Background(), id)
@@ -268,8 +280,13 @@ func TestCoverageCleanScanHasNoGaps(t *testing.T) {
 	seedTest(t, a, id, domain.VulnDOMXSS, domain.TestCaseSkipped, "", "http://127.0.0.1:1/x?q=1", "localStorage source not tested: no storage key was present and no getItem key was observed")
 	var c coverageResp
 	a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
-	if c.CoverageGaps || len(c.Warnings) != 0 {
+	if c.CoverageGaps {
 		t.Fatalf("informational skips alone are not gaps: %+v", c)
+	}
+	for _, w := range c.Warnings {
+		if w.Severity != "info" {
+			t.Fatalf("informational skips produced a non-info warning: %+v", c.Warnings)
+		}
 	}
 }
 
