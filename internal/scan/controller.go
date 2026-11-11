@@ -399,9 +399,19 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	if target.ProjectID != p.ProjectID {
 		return nil, errors.New("scan: target does not belong to project")
 	}
+	// Capture intent before the target-profile block can coerce an empty mode
+	// to "existing": an operator who explicitly selected anonymous must not be
+	// silently upgraded to the target's saved session at start.
+	authModeExplicit := strings.TrimSpace(string(p.AuthMode)) != ""
 	profileID := p.AuthProfileID
 	if profileID == "" {
 		profileID = target.AuthProfileID
+	}
+	// Explicit anonymous means no session, even if the target has a profile.
+	// Do not validate or load that profile: its state path is irrelevant and
+	// must not make an anonymous scan fail to start.
+	if authModeExplicit && p.AuthMode == domain.AuthAnonymous {
+		profileID = ""
 	}
 	if profileID != "" {
 		authProfile, err := c.store.AuthProfiles().Get(ctx, profileID)
@@ -493,6 +503,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.HuntingUserAgent = project.HuntingUserAgent
 	cfg.HuntingUserAgentReplace = project.HuntingUserAgentReplace
 	cfg.AuthProfileID = profileID
+	cfg.AuthModeExplicit = authModeExplicit
 	if strings.ContainsAny(cfg.HuntingUserAgent, "\r\n") {
 		return nil, fmt.Errorf("%w: hunting user agent must be a single header value", ErrBadConfig)
 	}
@@ -1200,9 +1211,26 @@ func (c *Controller) loadScope(ctx context.Context, projectID domain.ID) (domain
 
 // inheritTargetAuthProfile upgrades a draft scan to the target's reusable
 // session when the operator assigned one after the scan was created. The
-// target profile is authoritative: a scan without its own profile must not
-// silently keep testing anonymously.
+// target profile is authoritative for a draft that did not choose an auth
+// mode, but an explicit anonymous choice is never upgraded: that is an
+// authorization decision, not a missing profile.
 func (c *Controller) inheritTargetAuthProfile(ctx context.Context, sc *domain.Scan, target *domain.Target) error {
+	// An explicit anonymous choice must be resolved before the target profile
+	// is loaded: the profile is irrelevant to this scan, and an incomplete
+	// profile must not make an anonymous scan fail to start.
+	if sc.Config.AuthModeExplicit {
+		if sc.SessionID.Empty() {
+			return fmt.Errorf("%w: scan has no session row", ErrAuth)
+		}
+		sess, err := c.store.Sessions().Get(ctx, sc.SessionID)
+		if err != nil {
+			return fmt.Errorf("%w: load session: %v", ErrAuth, err)
+		}
+		if sess.Mode == domain.AuthAnonymous {
+			sc.Config.AuthProfileID = ""
+			return nil
+		}
+	}
 	profileID := sc.Config.AuthProfileID
 	if profileID == "" {
 		profileID = target.AuthProfileID

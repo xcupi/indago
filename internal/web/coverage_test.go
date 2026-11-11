@@ -185,6 +185,26 @@ func TestCoverageClassifiesIntentionalWriteAndDownloadSkipsAsInfo(t *testing.T) 
 	}
 }
 
+func TestCoveragePausedScanIsNotClean(t *testing.T) {
+	a, id := coverageAPI(t, web.Capabilities{BrowserEnabled: true})
+	sc, err := a.st.Scans().Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.State = domain.ScanPaused
+	if err := a.st.Scans().Update(context.Background(), sc); err != nil {
+		t.Fatal(err)
+	}
+	var c coverageResp
+	a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
+	if !c.CoverageGaps {
+		t.Fatalf("paused scan must report a coverage gap: %+v", c)
+	}
+	if !c.warning("scan_paused") {
+		t.Fatalf("paused scan must carry a scan_paused warning: %+v", c.Warnings)
+	}
+}
+
 func TestCoverageCleanScanHasNoGaps(t *testing.T) {
 	a, id := coverageAPI(t, web.Capabilities{BrowserEnabled: true})
 	seedTest(t, a, id, domain.VulnReflectedXSS, domain.TestCaseCompleted, domain.OutcomeSuccess, "http://127.0.0.1:1/x?q=1", "not reflected")

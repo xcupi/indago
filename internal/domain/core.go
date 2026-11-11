@@ -200,6 +200,11 @@ type ScanConfig struct {
 	// AuthProfileID records which reusable session supplied this scan's auth,
 	// when it came from a target profile rather than a manual path.
 	AuthProfileID ID `json:"auth_profile_id,omitempty"`
+	// AuthModeExplicit records that the operator chose the auth mode at
+	// scan creation. It distinguishes an explicit "anonymous" scan from a
+	// draft created before a target profile was assigned; the latter may
+	// inherit the target's session at start, the former must not.
+	AuthModeExplicit bool `json:"auth_mode_explicit,omitempty"`
 
 	// SkipGlobalInjection omits the location-agnostic header and cookie
 	// injection points from discovery. Those points are useful on a small

@@ -219,6 +219,9 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 	case domain.ScanCanceled:
 		out.Warnings = append(out.Warnings, coverageWarning{"scan_canceled", sevMedium,
 			"The scan was canceled before it finished. Work that had not run is untested."})
+	case domain.ScanPaused:
+		out.Warnings = append(out.Warnings, coverageWarning{"scan_paused", sevMedium,
+			"The scan is paused before completion. Queued and pending work is untested; do not read zero findings as a clean result."})
 	}
 	if terminal && out.Tests.Incomplete > 0 {
 		out.Warnings = append(out.Warnings, coverageWarning{"tests_incomplete", sevMedium,
@@ -234,7 +237,14 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		out.Parameters = coverageParams{Total: model.Summary.Parameters, Tested: bs[stTested], Skipped: bs[stSkipped],
 			Errored: bs[stErrored], NotRun: bs[stNotRun], Partial: bs[stPartial], Pending: bs[stPending]}
 		// Skipped work is already explained by its skip reason above; these are the
-		// states nothing else accounts for.
+		// states nothing else accounts for. A paused scan has not tested its
+		// pending parameters either, even though it is not terminal.
+		if terminal || st.Scan.State == domain.ScanPaused {
+			if out.Tests.Incomplete == 0 && bs[stPending] > 0 {
+				out.Warnings = append(out.Warnings, coverageWarning{"parameters_pending", sevMedium,
+					strconv.Itoa(bs[stPending]) + " discovered parameter(s) are still pending because the scan is paused."})
+			}
+		}
 		if terminal {
 			if n := bs[stErrored] + bs[stNotRun] + bs[stPartial]; n > 0 {
 				out.Warnings = append(out.Warnings, coverageWarning{"parameters_untested", sevMedium,
