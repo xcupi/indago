@@ -200,6 +200,10 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		out.Warnings = append(out.Warnings, coverageWarning{"dom_xss_disabled", sevInfo,
 			"DOM XSS was disabled for this scan; DOM source probes were intentionally not run. This is a declared coverage choice, not a failed engine."})
 	}
+	if st.Scan.Config.SkipReflectedXSS {
+		out.Warnings = append(out.Warnings, coverageWarning{"reflected_xss_disabled", sevInfo,
+			"Reflected XSS was disabled for this scan; per-parameter reflection probes were intentionally not run. This is a declared coverage choice, not a failed engine."})
+	}
 	for _, rs := range out.Reasons {
 		if rs.Severity == sevInfo || (rs.Code == "browser_unavailable" && !s.caps.BrowserEnabled) {
 			continue // informational, or already covered by the browser_disabled warning
@@ -247,8 +251,13 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		}
 		if terminal {
 			if n := bs[stErrored] + bs[stNotRun] + bs[stPartial]; n > 0 {
-				out.Warnings = append(out.Warnings, coverageWarning{"parameters_untested", sevMedium,
-					strconv.Itoa(n) + " of " + strconv.Itoa(model.Summary.Parameters) + " discovered parameter(s) are not fully tested (errored, never run, or only partly completed). Open the Endpoints tab to see which."})
+				if st.Scan.Config.SkipReflectedXSS {
+					out.Warnings = append(out.Warnings, coverageWarning{"parameters_reflection_disabled", sevInfo,
+						strconv.Itoa(n) + " of " + strconv.Itoa(model.Summary.Parameters) + " discovered parameter(s) have no reflection test because reflected XSS is disabled for this scan."})
+				} else {
+					out.Warnings = append(out.Warnings, coverageWarning{"parameters_untested", sevMedium,
+						strconv.Itoa(n) + " of " + strconv.Itoa(model.Summary.Parameters) + " discovered parameter(s) are not fully tested (errored, never run, or only partly completed). Open the Endpoints tab to see which."})
+				}
 			}
 			ds := model.Summary.DOMByStatus
 			if !st.Scan.Config.SkipDOMXSS {

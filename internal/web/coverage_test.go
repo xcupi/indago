@@ -185,6 +185,26 @@ func TestCoverageClassifiesIntentionalWriteAndDownloadSkipsAsInfo(t *testing.T) 
 	}
 }
 
+func TestCoverageDisabledReflectedCapabilityIsInformational(t *testing.T) {
+	a, id := coverageAPI(t, web.Capabilities{BrowserEnabled: true})
+	sc, err := a.st.Scans().Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.Config.SkipReflectedXSS = true
+	if err := a.st.Scans().Update(context.Background(), sc); err != nil {
+		t.Fatal(err)
+	}
+	var c coverageResp
+	a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
+	if !c.warning("reflected_xss_disabled") {
+		t.Fatalf("missing reflected_xss_disabled info: %+v", c.Warnings)
+	}
+	if c.CoverageGaps {
+		t.Fatalf("a declared capability skip alone must not mark a coverage gap: %+v", c)
+	}
+}
+
 func TestCoveragePausedScanIsNotClean(t *testing.T) {
 	a, id := coverageAPI(t, web.Capabilities{BrowserEnabled: true})
 	sc, err := a.st.Scans().Get(context.Background(), id)
