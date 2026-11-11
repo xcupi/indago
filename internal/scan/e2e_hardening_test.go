@@ -76,8 +76,8 @@ func TestE2E_ConcurrentScansShareBrowserPoolSafely(t *testing.T) {
 				domJobs++
 			}
 		}
-		if want := countDistinctNavigableURLs(eps); domJobs != want {
-			t.Fatalf("DOM jobs = %d, want full endpoint/source workload %d", domJobs, want)
+		if want := countDistinctNavigableEndpoints(eps); domJobs != want {
+			t.Fatalf("DOM jobs = %d, want one endpoint-level job per navigable URL %d", domJobs, want)
 		}
 		// Cancellations are not automatically a gap any more: the XSS early stop
 		// drops redundant work for a parameter that already has a Confirmed

@@ -75,8 +75,28 @@ import (
 // enqueueDOMXSSProbes). The sink is never part of the job: it is
 // discovered during phase 1, not chosen in advance.
 type domXSSJob struct {
-	EndpointID domain.ID              `json:"endpoint_id"`
-	Source     detection.DOMXSSSource `json:"source"`
+	EndpointID domain.ID `json:"endpoint_id"`
+	// Source is retained for jobs created before grouping. New jobs carry
+	// Sources and run every implemented source in one endpoint-level job.
+	Source  detection.DOMXSSSource   `json:"source,omitempty"`
+	Sources []detection.DOMXSSSource `json:"sources,omitempty"`
+}
+
+// sourceList returns the job's sources in deterministic order, accepting the
+// legacy single-source payload used by older scans and retries.
+func (j domXSSJob) sourceList() []detection.DOMXSSSource {
+	out := make([]detection.DOMXSSSource, 0, len(j.Sources)+1)
+	seen := map[detection.DOMXSSSource]bool{}
+	for _, source := range j.Sources {
+		if source.IsValid() && !seen[source] {
+			out = append(out, source)
+			seen[source] = true
+		}
+	}
+	if len(out) == 0 && j.Source.IsValid() {
+		out = append(out, j.Source)
+	}
+	return out
 }
 
 func parseDOMXSSJob(job *domain.TestJob) (domXSSJob, error) {
@@ -87,7 +107,7 @@ func parseDOMXSSJob(job *domain.TestJob) (domXSSJob, error) {
 	if err := json.Unmarshal(job.Payload, &dj); err != nil {
 		return dj, fmt.Errorf("decode dom-xss job payload: %w", err)
 	}
-	if dj.EndpointID.Empty() || !dj.Source.IsValid() {
+	if dj.EndpointID.Empty() || len(dj.sourceList()) == 0 {
 		return dj, errors.New("dom-xss job payload incomplete")
 	}
 	return dj, nil
@@ -189,24 +209,25 @@ func (c *Controller) enqueueDOMXSSProbes(ctx context.Context, scanID domain.ID) 
 	now := time.Now()
 	n := 0
 	for _, ep := range targets {
-		for _, source := range detection.DOMXSSSources {
-			payload, err := json.Marshal(domXSSJob{EndpointID: ep.ID, Source: source})
-			if err != nil {
-				c.log.Warn("dom-xss probes: marshal job", "scan", scanID, "err", err)
-				continue
-			}
-			job := &domain.TestJob{
-				ID: domain.NewID(), ScanID: scanID, Type: domain.JobDOMXSS, State: domain.JobQueued,
-				Priority: 50, Target: domain.JobTarget{EndpointID: ep.ID, URL: ep.URL},
-				Payload: payload, MaxAttempts: 2,
-				AvailableAt: now, CreatedAt: now, UpdatedAt: now,
-			}
-			if err := c.queue.Enqueue(ctx, job); err != nil {
-				c.log.Warn("dom-xss probes: enqueue job", "scan", scanID, "source", source, "err", err)
-				continue
-			}
-			n++
+		// One browser job per endpoint; the handler runs every source inside
+		// it. This keeps the queue and retry surface endpoint-sized instead of
+		// endpoint×source, while preserving one TestCase per source.
+		payload, err := json.Marshal(domXSSJob{EndpointID: ep.ID, Sources: append([]detection.DOMXSSSource(nil), detection.DOMXSSSources...)})
+		if err != nil {
+			c.log.Warn("dom-xss probes: marshal job", "scan", scanID, "err", err)
+			continue
 		}
+		job := &domain.TestJob{
+			ID: domain.NewID(), ScanID: scanID, Type: domain.JobDOMXSS, State: domain.JobQueued,
+			Priority: 50, Target: domain.JobTarget{EndpointID: ep.ID, URL: ep.URL},
+			Payload: payload, MaxAttempts: 2,
+			AvailableAt: now, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := c.queue.Enqueue(ctx, job); err != nil {
+			c.log.Warn("dom-xss probes: enqueue job", "scan", scanID, "err", err)
+			continue
+		}
+		n++
 	}
 	if n > 0 {
 		c.log.Info("dom-xss probes: enqueued", "scan", scanID, "jobs", n, "endpoints", len(targets))
@@ -1615,13 +1636,27 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	}
 
 	if e.browser == nil {
-		tc := e.newTestCase(ctx, job, ep.URL)
-		tc.Status = domain.TestCaseSkipped
-		e.finishTestCase(ctx, tc, nil, "dom-xss probe skipped: no browser configured for this scan")
+		for _, source := range dj.sourceList() {
+			tc := e.newTestCase(ctx, job, ep.URL)
+			tc.Status = domain.TestCaseSkipped
+			e.finishTestCase(ctx, tc, nil, "dom-xss probe skipped: no browser configured for this scan (source "+string(source)+")")
+		}
 		return nil
 	}
+	for _, source := range dj.sourceList() {
+		if err := e.handleDOMXSSSource(ctx, job, ep, source); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-	source := dj.Source
+// handleDOMXSSSource runs one implemented DOM source for an endpoint-level
+// job. The endpoint job carries every source; this helper preserves the
+// per-source TestCase and verdict semantics while removing endpoint×source
+// queue entries.
+func (e *domXSSExecutor) handleDOMXSSSource(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource) error {
+	allow := func(u string) bool { return e.scope.Permits(u).Allowed }
 	// "No DOM here" is the honest answer for a non-HTML response, and it is
 	// decided BEFORE any browser context, selector discovery, or navigation:
 	// the crawler also registers image/asset URLs, and browser-probing those

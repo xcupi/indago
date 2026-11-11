@@ -185,15 +185,15 @@ func TestRestartRecoversAndResumesScan(t *testing.T) {
 	}
 
 	// No duplicated jobs: exactly one per endpoint and per injection point
-	// (PLUS the DOM-XSS engine's own one-time probe pass — one job per
-	// distinct GET/HEAD endpoint URL, see domxss.go — which this
+	// (PLUS the DOM-XSS engine's own one-time probe pass — one endpoint-level
+	// job per distinct GET/HEAD endpoint URL, see domxss.go — which this
 	// after-restart controller runs for real since it uses default
 	// handlers; no browser is configured, so each probe is recorded
 	// skipped but the JOB itself still succeeds, same as
 	// verifyExecutor's own "no browser configured" skip), and every one
 	// completed (including those requeued by recovery).
 	want := done.Discovery.Endpoints + done.Discovery.InjectionPoints
-	want += countDistinctNavigableURLs(eps)
+	want += countDistinctNavigableEndpoints(eps)
 	want += accessBypassJobCount(eps)
 	want += disclosureJobCount(eps)
 	want += errorProbeJobCount(eps)

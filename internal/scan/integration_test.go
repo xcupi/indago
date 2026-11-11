@@ -347,11 +347,11 @@ func TestScanCompletesAfterDiscoveryAndJobs(t *testing.T) {
 	total := done.Discovery.Endpoints + done.Discovery.InjectionPoints
 	// This test's recordingHandlers() handles domain.JobDOMXSS too (see
 	// its doc comment), so the DOM-XSS engine's own one-time probe pass
-	// (one job per distinct GET/HEAD endpoint URL) succeeds right
-	// alongside the ordinary JobTest jobs this test otherwise counts —
+	// (one endpoint-level job per distinct GET/HEAD endpoint URL) succeeds
+	// right alongside the ordinary JobTest jobs this test otherwise counts —
 	// add it to the expected totals rather than treating it as unrelated.
 	eps, _ := st.Endpoints().ListByScan(ctx, sc.ID)
-	total += countDistinctNavigableURLs(eps)
+	total += countDistinctNavigableEndpoints(eps)
 	// Plus the access-control bypass pass: one job per bounded privileged path
 	// per origin (see accesscontrol_bypass.go).
 	total += accessBypassJobCount(eps)

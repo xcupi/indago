@@ -449,6 +449,21 @@ func TestParseDOMXSSJobRoundTrip(t *testing.T) {
 	}
 }
 
+func TestParseDOMXSSJobAcceptsGroupedSources(t *testing.T) {
+	epID := domain.NewID()
+	payload, err := json.Marshal(domXSSJob{EndpointID: epID, Sources: []detection.DOMXSSSource{detection.DOMSourceQuery, detection.DOMSourceHash, detection.DOMSourceHash}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dj, err := parseDOMXSSJob(&domain.TestJob{Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dj.sourceList(); len(got) != 2 || got[0] != detection.DOMSourceQuery || got[1] != detection.DOMSourceHash {
+		t.Fatalf("grouped sources = %v, want query then hash without duplicate", got)
+	}
+}
+
 func TestParseDOMXSSJobRejectsEmptyOrMissingPayload(t *testing.T) {
 	if _, err := parseDOMXSSJob(&domain.TestJob{}); err == nil {
 		t.Fatal("expected an error for a job with no payload")

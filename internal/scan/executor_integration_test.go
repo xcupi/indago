@@ -70,7 +70,7 @@ func TestScanExecutesEveryJobAndPersistsResults(t *testing.T) {
 	_ = accessCases
 	_ = disclosureCases
 	eps, _ := st.Endpoints().ListByScan(ctx, sc.ID)
-	wantDOMXSS := countDistinctNavigableURLs(eps)
+	wantDOMXSS := countDistinctNavigableURLs(eps) // one TestCase per endpoint × source
 	if len(domXSSCases) != wantDOMXSS {
 		t.Fatalf("dom-xss probe test cases = %d, want one per distinct GET/HEAD endpoint (%d)", len(domXSSCases), wantDOMXSS)
 	}
@@ -206,8 +206,9 @@ func TestScanExecutesPostWhenAllowed(t *testing.T) {
 	// of that shape; here just account for the count.
 	eps, _ := st.Endpoints().ListByScan(ctx, sc.ID)
 	wantDOMXSSSkipped := countDistinctNavigableURLs(eps)
-	if done.Tests.Skipped != wantDOMXSSSkipped || done.Tests.Success != done.Jobs.Total()-wantDOMXSSSkipped {
-		t.Fatalf("tests = %+v jobs = %+v (want %d dom-xss skips)", done.Tests, done.Jobs, wantDOMXSSSkipped)
+	wantDOMXSSJobs := countDistinctNavigableEndpoints(eps)
+	if done.Tests.Skipped != wantDOMXSSSkipped || done.Tests.Success != done.Jobs.Total()-wantDOMXSSJobs {
+		t.Fatalf("tests = %+v jobs = %+v (want %d dom-xss skips, %d dom jobs)", done.Tests, done.Jobs, wantDOMXSSSkipped, wantDOMXSSJobs)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -232,13 +233,10 @@ func TestScanExecutesPostWhenAllowed(t *testing.T) {
 	}
 }
 
-// countDistinctNavigableURLs independently re-derives, from the Endpoint
-// registry alone, how many DOM-XSS probe jobs (one per distinct GET/HEAD-
-// navigable endpoint URL, PER IMPLEMENTED SOURCE — see
-// detection.DOMXSSSources and scan.selectDOMXSSEndpoints, unexported)
-// this scan's one-time DOM-XSS pass should have enqueued, so these tests
-// cross-check the real engine's behavior rather than merely trusting it.
-func countDistinctNavigableURLs(eps []*domain.Endpoint) int {
+// countDistinctNavigableEndpoints independently re-derives, from the Endpoint
+// registry alone, how many endpoint-level DOM-XSS jobs the one-time pass
+// enqueues (one per distinct GET/HEAD-navigable URL).
+func countDistinctNavigableEndpoints(eps []*domain.Endpoint) int {
 	seen := map[string]bool{}
 	n := 0
 	for _, ep := range eps {
@@ -253,7 +251,13 @@ func countDistinctNavigableURLs(eps []*domain.Endpoint) int {
 		seen[ep.URL] = true
 		n++
 	}
-	return n * len(detection.DOMXSSSources)
+	return n
+}
+
+// countDistinctNavigableURLs is the TestCase count: one per endpoint per
+// implemented source (the grouped job still records one TestCase per source).
+func countDistinctNavigableURLs(eps []*domain.Endpoint) int {
+	return countDistinctNavigableEndpoints(eps) * len(detection.DOMXSSSources)
 }
 
 // Cancel interrupts an in-flight test request and its CANCELLED result is
