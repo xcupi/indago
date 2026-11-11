@@ -6,6 +6,7 @@ package scan
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -118,6 +119,33 @@ func openScope() domain.Scope { return domain.Scope{IncludeHosts: []string{"127.
 
 func scopedClient(t *testing.T, scope domain.Scope) httpengine.Engine {
 	return newScopedEngine(noFollowClient(t), scope)
+}
+
+func TestExecutorReportsAuthLossOnLoginPage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<form method="post" action="/login"><input type="email" name="email"><input type="password" name="password"><button>Log in</button></form>`)
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+	defer srv.Close()
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/protected", domain.MethodGET)
+	var lost atomic.Bool
+	ex := env.executor(scopedClient(t, openScope()), ExecutorConfig{
+		Authenticated: true,
+		OnAuthLost: func(scanID domain.ID, reason string) {
+			lost.Store(true)
+		},
+	})
+	if err := ex.Handle(context.Background(), env.job(domain.JobTarget{EndpointID: ep.ID, URL: ep.URL})); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if !lost.Load() {
+		t.Fatal("an authenticated request redirected to a password form did not report session loss")
+	}
 }
 
 // --- request construction ---

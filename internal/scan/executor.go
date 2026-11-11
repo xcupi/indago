@@ -22,6 +22,7 @@ import (
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
+	"github.com/indago/indago/internal/idor"
 	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/worker"
@@ -49,6 +50,13 @@ type ExecutorConfig struct {
 	// rejection is deliberately NOT reported here: that is the evidence the
 	// bounded evasion pass is allowed to act on.
 	OnBlock func(scanID domain.ID, reason string)
+	// Authenticated marks a scan whose engine carries saved session cookies.
+	// When such a request lands on a login page, OnAuthLost is called once so
+	// the controller can stop the scan instead of testing anonymously.
+	Authenticated bool
+	// OnAuthLost is called once when an authenticated request is redirected to
+	// a login page. A nil callback keeps the legacy behavior.
+	OnAuthLost func(scanID domain.ID, reason string)
 }
 
 func (c ExecutorConfig) withDefaults() ExecutorConfig {
@@ -77,6 +85,7 @@ type executor struct {
 	log       *slog.Logger
 	baselines *baselineCache // reuses a baseline across an endpoint's injection points
 	blockOnce sync.Once      // reports the first backpressure/CAPTCHA to OnBlock
+	authOnce  sync.Once      // reports the first lost session to OnAuthLost
 	// findingsMu serializes Finding correlation (upsertPendingFinding) against
 	// both other candidates in this executor AND verifyExecutor's
 	// correlateVerification for the same scan — see newExecutor's doc. Never
@@ -142,6 +151,9 @@ func (e *executor) Handle(ctx context.Context, job *domain.TestJob) error {
 	}
 
 	res := e.run(ctx, job, tc)
+	if e.cfg.Authenticated {
+		e.reportAuthLost(job.ScanID, res.resp)
+	}
 
 	// The job context may already be canceled (that is the CANCELLED case), so the
 	// final writes use a detached context with its own bound.
@@ -318,6 +330,36 @@ func (e *executor) reportBlock(scanID domain.ID, reason string) {
 		return
 	}
 	e.blockOnce.Do(func() { e.cfg.OnBlock(scanID, reason) })
+}
+
+// reportAuthLost recognizes an authenticated request that ended on the
+// target's login page. A password form is the signal; a redirect chain alone
+// can be a normal public navigation, so the body is checked as well.
+func (e *executor) reportAuthLost(scanID domain.ID, resp *httpengine.Response) {
+	if e.cfg.OnAuthLost == nil || resp == nil {
+		return
+	}
+	if !looksLikeLoginResponse(resp) {
+		return
+	}
+	e.authOnce.Do(func() {
+		e.cfg.OnAuthLost(scanID, "authenticated request landed on the target login page; session appears expired")
+	})
+}
+
+func looksLikeLoginResponse(resp *httpengine.Response) bool {
+	if resp == nil || resp.FinalURL == "" {
+		return false
+	}
+	u, err := url.Parse(resp.FinalURL)
+	if err != nil {
+		return false
+	}
+	p := strings.ToLower(strings.TrimSuffix(u.Path, "/"))
+	if p != "/login" && p != "/signin" && p != "/sign-in" && !strings.HasSuffix(p, "/login") && !strings.HasSuffix(p, "/signin") {
+		return false
+	}
+	return idor.LooksLikeLoginPage(resp.Body)
 }
 
 // rawQueryAppendCovered reports whether this job is the AUTO-mode raw-query

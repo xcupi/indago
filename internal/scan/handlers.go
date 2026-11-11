@@ -31,14 +31,24 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	if sc != nil {
 		ua = c.huntingUserAgent(sc)
 	}
+	hasSession := false
+	if se, ok := eng.(*scopedEngine); ok && se != nil && len(se.cookies) > 0 {
+		hasSession = true
+	}
 	execCfg := c.opts.Executor
 	if sc != nil {
 		execCfg.SkipWriteEndpoints = sc.Config.SkipWriteEndpoints
 		execCfg.SkipDownloadEndpoints = sc.Config.SkipDownloadEndpoints
 	}
+	execCfg.Authenticated = hasSession
 	if c.opts.AutoPauseOnBlock && execCfg.OnBlock == nil {
 		execCfg.OnBlock = func(scanID domain.ID, reason string) {
 			go c.pauseForBlock(scanID, reason)
+		}
+	}
+	if c.opts.AutoPauseOnBlock && execCfg.OnAuthLost == nil {
+		execCfg.OnAuthLost = func(scanID domain.ID, reason string) {
+			go c.pauseForExpiredSession(context.Background(), scanID)
 		}
 	}
 	h[domain.JobTest] = newExecutor(c.store, eng, c.opts.Evidence, c.queue, execCfg, c.log, findingsMu, tokenMu)
@@ -61,10 +71,6 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	// Access control shares findingsMu too. hasSession decides whether the
 	// anonymous probe gets the non-admin comparison request: a scan with no
 	// saved session can still confirm anonymous access to an admin action.
-	hasSession := false
-	if se, ok := eng.(*scopedEngine); ok && se != nil && len(se.cookies) > 0 {
-		hasSession = true
-	}
 	h[domain.JobAccessControl] = newAccessControlExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log, findingsMu, hasSession)
 	// Disclosure shares findingsMu too: same Findings() rows, disjoint dedup keys.
 	h[domain.JobDisclosure] = newDisclosureExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log, findingsMu)
