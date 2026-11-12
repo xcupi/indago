@@ -660,49 +660,124 @@ func (e *idorExecutor) knownIdentity(ctx context.Context, scanID domain.ID) *ido
 	return nil
 }
 
-// maxIdentityPaths bounds the identity-page probes: four conventional paths
-// plus at most four pages discovery already found on the same origin.
-const maxIdentityPaths = 8
+// maxIdentityPaths bounds the identity-page probes. The list now includes
+// account pages on the seed/auth-profile origin as well as the endpoint origin:
+// an authenticated app commonly keeps the account page on my.example.com while
+// the object endpoint is on www.example.com.
+const maxIdentityPaths = 12
 
-// identityPaths starts with the conventional account pages and adds
-// application-specific profile/account pages the crawler already discovered.
-// A target that calls its account page /profile_user otherwise forced the
-// engine to skip every IDOR probe even though the page was in the scan's own
-// endpoint registry. The additions are read-only GET/HEAD paths, same origin,
-// bounded, and filtered away from admin/write/list surfaces.
-func (e *idorExecutor) identityPaths(ctx context.Context, ep *domain.Endpoint) []string {
-	paths := []string{"/my-account", "/profile", "/account", "/me"}
-	seen := map[string]bool{}
-	for _, p := range paths {
-		seen[p] = true
-	}
+// identityURLs returns bounded, read-only candidate URLs for the caller
+// identity baseline. It starts with conventional account paths, adds pages the
+// crawler already discovered, and finally considers the scan's seed/auth-login
+// origins. A page is only fetched if the engine's scope permits it.
+func (e *idorExecutor) identityURLs(ctx context.Context, ep *domain.Endpoint) []string {
 	origin := originOf(ep.URL)
 	if origin == "" {
-		return paths
+		return nil
 	}
-	endpoints, err := e.store.Endpoints().ListByScan(ctx, ep.ScanID)
-	if err != nil {
-		return paths
+	out := make([]string, 0, maxIdentityPaths)
+	seen := map[string]bool{}
+	add := func(base, path string) bool {
+		path = strings.TrimSpace(path)
+		if path == "" || base == "" {
+			return false
+		}
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		u := base + path
+		if seen[u] {
+			return false
+		}
+		seen[u] = true
+		out = append(out, u)
+		return len(out) >= maxIdentityPaths
 	}
-	for _, candidate := range endpoints {
-		if candidate == nil || (candidate.Method != "" && candidate.Method != domain.MethodGET && candidate.Method != domain.MethodHEAD) {
-			continue
-		}
-		u, err := url.Parse(candidate.URL)
-		if err != nil || u.Scheme+"://"+u.Host != origin {
-			continue
-		}
-		p := strings.TrimSuffix(u.Path, "/")
-		if p == "" || p == "/" || len(p) > 80 || seen[p] || !isIdentityPath(p) {
-			continue
-		}
-		seen[p] = true
-		paths = append(paths, p)
-		if len(paths) >= maxIdentityPaths {
-			break
+	for _, path := range []string{"/my-account", "/profile", "/account", "/me"} {
+		if add(origin, path) {
+			return out
 		}
 	}
-	return paths
+	endpoints, _ := e.store.Endpoints().ListByScan(ctx, ep.ScanID)
+	addDiscovered := func(base string, allow func(string) bool) bool {
+		for _, candidate := range endpoints {
+			if candidate == nil || (candidate.Method != "" && candidate.Method != domain.MethodGET && candidate.Method != domain.MethodHEAD) {
+				continue
+			}
+			u, err := url.Parse(candidate.URL)
+			if err != nil || u.Scheme+"://"+u.Host != base {
+				continue
+			}
+			p := strings.TrimSuffix(u.Path, "/")
+			if p == "" || p == "/" || len(p) > 80 || seen[base+p] || !allow(p) {
+				continue
+			}
+			if add(base, p) {
+				return true
+			}
+		}
+		return false
+	}
+	if addDiscovered(origin, func(p string) bool { return isIdentityPath(p) || isAuthOverviewPath(p) }) {
+		return out
+	}
+	for _, alt := range e.alternateOrigins(ctx, ep.ScanID, origin) {
+		for _, path := range []string{"/overview", "/dashboard", "/my-account", "/profile", "/account", "/me"} {
+			if add(alt, path) {
+				return out
+			}
+		}
+		if addDiscovered(alt, func(p string) bool { return isIdentityPath(p) || isAuthOverviewPath(p) }) {
+			return out
+		}
+	}
+	return out
+}
+
+// alternateOrigins returns in-scope seed and auth-login origins other than the
+// endpoint origin. It never guesses a host: origins come from scan seeds or the
+// configured auth profile's login URL.
+func (e *idorExecutor) alternateOrigins(ctx context.Context, scanID domain.ID, current string) []string {
+	var out []string
+	seen := map[string]bool{current: true}
+	add := func(raw string) {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return
+		}
+		origin := u.Scheme + "://" + u.Host
+		if seen[origin] {
+			return
+		}
+		seen[origin] = true
+		out = append(out, origin)
+	}
+	if sc, err := e.store.Scans().Get(ctx, scanID); err == nil {
+		for _, seed := range sc.SeedURLs {
+			add(seed)
+		}
+		if !sc.Config.AuthProfileID.Empty() {
+			if profile, err := e.store.AuthProfiles().Get(ctx, sc.Config.AuthProfileID); err == nil {
+				add(profile.LoginURL)
+			}
+		}
+	}
+	return out
+}
+
+// isAuthOverviewPath recognizes authenticated landing/overview pages that may
+// expose the signed-in caller even though their path has no profile/account
+// segment (for example /overview on a customer portal).
+func isAuthOverviewPath(path string) bool {
+	p := strings.ToLower(strings.Trim(path, "/"))
+	if p == "" || strings.Contains(p, "//") {
+		return false
+	}
+	switch p {
+	case "overview", "dashboard", "home", "portal":
+		return true
+	}
+	return false
 }
 
 // isIdentityPath recognizes a page that is likely to identify the signed-in
@@ -757,14 +832,10 @@ func (e *idorExecutor) identity(ctx context.Context, scanID domain.ID, ep *domai
 		return e.cached, true
 	}
 
-	origin := originOf(ep.URL)
 	var tried []string
-	for _, path := range e.identityPaths(ctx, ep) {
-		if origin == "" {
-			break
-		}
-		tried = append(tried, path)
-		req := httpengine.GET(origin + path)
+	for _, target := range e.identityURLs(ctx, ep) {
+		tried = append(tried, target)
+		req := httpengine.GET(target)
 		resp, outcome, _, _ := e.send(ctx, req)
 		if outcome != domain.OutcomeSuccess || resp == nil || resp.Status < 200 || resp.Status >= 300 {
 			continue
@@ -773,7 +844,7 @@ func (e *idorExecutor) identity(ctx context.Context, scanID domain.ID, ep *domai
 		if ident.Empty() {
 			continue
 		}
-		e.cached = &idorIdentity{Identity: ident, Source: origin + path}
+		e.cached = &idorIdentity{Identity: ident, Source: target}
 		e.cached.CaseID = e.persistIdentity(ctx, scanID, e.cached, resp)
 		return e.cached, false
 	}

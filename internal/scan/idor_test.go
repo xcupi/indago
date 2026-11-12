@@ -257,6 +257,34 @@ func TestIDORIdentityUsesDiscoveredProfilePage(t *testing.T) {
 	}
 }
 
+func TestIDORIdentityUsesOverviewOnSeedOrigin(t *testing.T) {
+	env, srv := newIDOREnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if r.URL.Path != "/overview" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, `<h1>Overview</h1><p>Your username is <strong>wiener</strong></p>`)
+	}))
+	defer authSrv.Close()
+	env.sc.SeedURLs = []string{authSrv.URL + "/overview"}
+	if err := env.st.Scans().Update(context.Background(), env.sc); err != nil {
+		t.Fatal(err)
+	}
+	ep := env.endpoint(srv.URL+"/object?id=wiener", domain.MethodGET)
+	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, nil, idor.EnumerationOptions{})
+	ident, _ := ex.identity(context.Background(), env.scanID, ep)
+	if ident == nil || ident.Identity.Empty() {
+		t.Fatalf("identity was not established from the seed origin: %+v", ident)
+	}
+	if ident.Source != authSrv.URL+"/overview" {
+		t.Fatalf("identity source = %q, want seed-auth /overview", ident.Source)
+	}
+}
+
 func TestIDORSamePrincipalIsNeverConfirmed(t *testing.T) {
 	env, srv := newIDOREnv(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
