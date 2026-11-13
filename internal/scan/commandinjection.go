@@ -105,7 +105,7 @@ func (e *commandInjectionExecutor) Handle(ctx context.Context, job *domain.TestJ
 		return e.finishUnavailable(ctx, job, started, ep, "state-changing endpoint skipped by policy")
 	}
 
-	params = e.refreshParams(ctx, ep, params, focus)
+	params = fillEmptyCommandParams(e.refreshParams(ctx, ep, params, focus), focus)
 	base, err := buildRequest(ep, params, nil)
 	if err != nil {
 		return fmt.Errorf("build command-injection baseline: %w", err)
@@ -154,7 +154,7 @@ func (e *commandInjectionExecutor) Handle(ctx context.Context, job *domain.TestJ
 			payload += "`"
 		}
 		attempt := commandInjectionAttempt{Payload: truncate(payload, 300), Marker: expected, Kind: "output"}
-		params = e.refreshParams(ctx, ep, params, focus)
+		params = fillEmptyCommandParams(e.refreshParams(ctx, ep, params, focus), focus)
 		req, err := buildRequest(ep, params, &injection{param: focus, value: payload})
 		if err != nil {
 			d.Attempts = append(d.Attempts, attempt)
@@ -187,7 +187,7 @@ func (e *commandInjectionExecutor) Handle(ctx context.Context, job *domain.TestJ
 	// enough because target latency and rate limiting can also be slow.
 	timeConfirmed := 0
 	if d.ConfirmedCount < 2 && baseElapsed < 3*time.Second {
-		for i, seconds := range []int{5, 7} {
+		for i, seconds := range []int{10, 12} {
 			payload := fmt.Sprintf("%s||sleep %d||", baseValue, seconds)
 			attempt := commandInjectionAttempt{Payload: payload, Kind: "time", Marker: fmt.Sprintf("sleep-%d", seconds)}
 			params = e.refreshParams(ctx, ep, params, focus)
@@ -260,6 +260,25 @@ func (e *commandInjectionExecutor) do(ctx context.Context, req *httpengine.Reque
 	default:
 		return nil, domain.OutcomeError, err
 	}
+}
+
+// fillEmptyCommandParams gives blank required-looking fields a harmless value
+// so a form reaches the command sink. The focused parameter is left to the
+// payload builder; CSRF tokens are left to refreshParams.
+func fillEmptyCommandParams(params []*domain.Parameter, focus *domain.Parameter) []*domain.Parameter {
+	out := append([]*domain.Parameter(nil), params...)
+	for i, p := range out {
+		if p == nil || p == focus || strings.TrimSpace(p.Example) != "" {
+			continue
+		}
+		if p.Location == domain.LocationHeader || p.Location == domain.LocationCookie || isDynamicTokenName(p.Name) {
+			continue
+		}
+		cp := *p
+		cp.Example = commandInjectionBaseValue(p.Name)
+		out[i] = &cp
+	}
+	return out
 }
 
 // refreshParams keeps rotating CSRF/session tokens usable. The shared
@@ -423,6 +442,13 @@ func (e *commandInjectionExecutor) finishError(ctx context.Context, job *domain.
 	return fmt.Errorf("command-injection baseline failed: %s", msg)
 }
 
+func commandInjectionSummary(d commandInjectionDetail) string {
+	if d.ConfirmMethod == "time" {
+		return "Two independent sleep payloads delayed the target response; command execution is blind."
+	}
+	return "Two independent arithmetic markers were executed by the target."
+}
+
 func (e *commandInjectionExecutor) correlate(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, focus *domain.Parameter, d commandInjectionDetail) {
 	scan, err := e.store.Scans().Get(ctx, job.ScanID)
 	if err != nil {
@@ -435,7 +461,7 @@ func (e *commandInjectionExecutor) correlate(ctx context.Context, job *domain.Te
 		VulnClass: domain.VulnCommandInjection, Verdict: domain.VerdictConfirmed,
 		Severity: domain.SeverityHigh, Confidence: domain.ConfidenceHigh,
 		Title:      "OS command injection in parameter " + fmt.Sprintf("%q", focus.Name),
-		Summary:    "Two independent arithmetic markers were executed by the target.",
+		Summary:    commandInjectionSummary(d),
 		EndpointID: ep.ID, InjectionPointID: job.Target.InjectionPointID, ParameterID: focus.ID, Location: focus.Location,
 		EvidenceIDs: d.EvidenceIDs, Detail: detail,
 		Provenance: domain.Provenance{Engine: commandInjectionEngine, DiscoverySource: ep.Source, DetectedAt: now},
