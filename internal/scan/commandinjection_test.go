@@ -49,3 +49,31 @@ func TestCommandInjectionConfirmsTwoIndependentMarkers(t *testing.T) {
 		t.Fatalf("finding title = %q, want parameter name", findings[0].Title)
 	}
 }
+
+func TestCommandInjectionRefreshParamsFromParentForm(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/feedback" {
+			fmt.Fprint(w, `<form action="/feedback/submit" method="POST"><input name="csrf" value="fresh-token"><input name="email"></form>`)
+			return
+		}
+		fmt.Fprint(w, "ok")
+	}))
+	defer srv.Close()
+	env := newScanEnv(t)
+	action := env.endpoint(srv.URL+"/feedback/submit", domain.MethodPOST)
+	page := env.endpoint(srv.URL+"/feedback", domain.MethodGET)
+	csrf := env.param(action, "csrf", domain.LocationForm, "stale-token")
+	focus := env.param(action, "email", domain.LocationForm, "x@example.com")
+	ex := newCommandInjectionExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil)
+	got := ex.refreshParams(context.Background(), action, []*domain.Parameter{csrf, focus}, focus)
+	var fresh string
+	for _, p := range got {
+		if p.ID == csrf.ID {
+			fresh = p.Example
+		}
+	}
+	_ = page
+	if fresh != "fresh-token" {
+		t.Fatalf("csrf = %q, want fresh token", fresh)
+	}
+}

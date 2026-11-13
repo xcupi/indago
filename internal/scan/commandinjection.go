@@ -18,10 +18,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/indago/indago/internal/discovery"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
@@ -43,6 +45,7 @@ type commandInjectionExecutor struct {
 	cfg        ExecutorConfig
 	log        *slog.Logger
 	findingsMu *sync.Mutex
+	tokenMu    *sync.Mutex
 }
 
 // NewCommandInjectionExecutorForTest exposes the executor to the external
@@ -55,16 +58,19 @@ func newCommandInjectionExecutor(st store.Store, eng httpengine.Engine, ev evide
 	if findingsMu == nil {
 		findingsMu = &sync.Mutex{}
 	}
-	return &commandInjectionExecutor{store: st, engine: eng, evidence: ev, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu}
+	return &commandInjectionExecutor{store: st, engine: eng, evidence: ev, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu, tokenMu: &sync.Mutex{}}
 }
 
 var _ worker.Handler = (*commandInjectionExecutor)(nil)
 
 type commandInjectionAttempt struct {
-	Payload string `json:"payload"`
-	Marker  string `json:"marker"`
-	Output  bool   `json:"output"`
-	Status  int    `json:"status,omitempty"`
+	Payload   string `json:"payload"`
+	Marker    string `json:"marker,omitempty"`
+	Kind      string `json:"kind,omitempty"` // output or time
+	Output    bool   `json:"output"`
+	Delayed   bool   `json:"delayed,omitempty"`
+	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
+	Status    int    `json:"status,omitempty"`
 }
 
 type commandInjectionDetail struct {
@@ -74,6 +80,7 @@ type commandInjectionDetail struct {
 	BaselineStatus int                       `json:"baseline_status,omitempty"`
 	Attempts       []commandInjectionAttempt `json:"attempts,omitempty"`
 	ConfirmedCount int                       `json:"confirmed_count"`
+	ConfirmMethod  string                    `json:"confirm_method,omitempty"`
 	Verdict        domain.Verdict            `json:"verdict"`
 	Reason         string                    `json:"reason,omitempty"`
 	EvidenceIDs    []domain.ID               `json:"evidence_ids,omitempty"`
@@ -98,11 +105,14 @@ func (e *commandInjectionExecutor) Handle(ctx context.Context, job *domain.TestJ
 		return e.finishUnavailable(ctx, job, started, ep, "state-changing endpoint skipped by policy")
 	}
 
+	params = e.refreshParams(ctx, ep, params, focus)
 	base, err := buildRequest(ep, params, nil)
 	if err != nil {
 		return fmt.Errorf("build command-injection baseline: %w", err)
 	}
+	baseStarted := time.Now()
 	baseResp, baseOutcome, baseErr := e.do(ctx, base)
+	baseElapsed := time.Since(baseStarted)
 	if baseOutcome != domain.OutcomeSuccess || baseResp == nil {
 		return e.finishError(ctx, job, started, ep, focus, baseOutcome, baseErr)
 	}
@@ -114,7 +124,7 @@ func (e *commandInjectionExecutor) Handle(ctx context.Context, job *domain.TestJ
 
 	baseValue := strings.TrimSpace(focus.Example)
 	if baseValue == "" {
-		baseValue = "1"
+		baseValue = commandInjectionBaseValue(focus.Name)
 	}
 	seed := time.Now().UnixNano()
 	// The expression is present in the request, but only the computed result
@@ -143,7 +153,8 @@ func (e *commandInjectionExecutor) Handle(ctx context.Context, job *domain.TestJ
 		if strings.HasSuffix(v.prefix, "`echo ") {
 			payload += "`"
 		}
-		attempt := commandInjectionAttempt{Payload: truncate(payload, 300), Marker: expected}
+		attempt := commandInjectionAttempt{Payload: truncate(payload, 300), Marker: expected, Kind: "output"}
+		params = e.refreshParams(ctx, ep, params, focus)
 		req, err := buildRequest(ep, params, &injection{param: focus, value: payload})
 		if err != nil {
 			d.Attempts = append(d.Attempts, attempt)
@@ -171,12 +182,55 @@ func (e *commandInjectionExecutor) Handle(ctx context.Context, job *domain.TestJ
 		}
 	}
 
+	// Blind time-based fallback: only when output confirmation did not already
+	// succeed. Two distinct delays are required; a single slow response is not
+	// enough because target latency and rate limiting can also be slow.
+	timeConfirmed := 0
+	if d.ConfirmedCount < 2 && baseElapsed < 3*time.Second {
+		for i, seconds := range []int{5, 7} {
+			payload := fmt.Sprintf("%s||sleep %d||", baseValue, seconds)
+			attempt := commandInjectionAttempt{Payload: payload, Kind: "time", Marker: fmt.Sprintf("sleep-%d", seconds)}
+			params = e.refreshParams(ctx, ep, params, focus)
+			req, err := buildRequest(ep, params, &injection{param: focus, value: payload})
+			if err != nil {
+				d.Attempts = append(d.Attempts, attempt)
+				continue
+			}
+			probeStarted := time.Now()
+			resp, outcome, reqErr := e.do(ctx, req)
+			elapsed := time.Since(probeStarted)
+			attempt.ElapsedMS = elapsed.Milliseconds()
+			if resp != nil {
+				attempt.Status = resp.Status
+			}
+			threshold := time.Duration(seconds)*time.Second - time.Second
+			attempt.Delayed = outcome == domain.OutcomeSuccess && elapsed >= threshold && elapsed >= baseElapsed+2*time.Second
+			if outcome == domain.OutcomeSuccess && resp != nil {
+				ev, _ := e.persistEvidence(ctx, job.ScanID, resp, fmt.Sprintf("command-injection time-probe-%d", i+1))
+				d.EvidenceIDs = append(d.EvidenceIDs, ev...)
+			} else if reqErr != nil {
+				attempt.Status = 0
+			}
+			d.Attempts = append(d.Attempts, attempt)
+			if attempt.Delayed {
+				timeConfirmed++
+			}
+		}
+	}
+
 	note := "no server-side command output observed"
 	if d.ConfirmedCount >= 2 {
 		d.Verdict = domain.VerdictConfirmed
+		d.ConfirmMethod = "output"
 		d.Reason = "two independent arithmetic markers were executed by the target"
 		note = "confirmed OS command injection: two independent markers executed"
-	} else if d.ConfirmedCount == 1 {
+	} else if timeConfirmed >= 2 {
+		d.Verdict = domain.VerdictConfirmed
+		d.ConfirmMethod = "time"
+		d.ConfirmedCount = timeConfirmed
+		d.Reason = "two independent sleep payloads delayed the response"
+		note = "confirmed blind time-based OS command injection"
+	} else if d.ConfirmedCount == 1 && timeConfirmed == 0 {
 		d.Verdict = domain.VerdictInconclusive
 		d.Reason = "one marker was observed; a second independent marker is required"
 		note = "one command marker observed; not enough to confirm"
@@ -205,6 +259,85 @@ func (e *commandInjectionExecutor) do(ctx context.Context, req *httpengine.Reque
 		return nil, domain.OutcomeCancelled, ctx.Err()
 	default:
 		return nil, domain.OutcomeError, err
+	}
+}
+
+// refreshParams keeps rotating CSRF/session tokens usable. The shared
+// refreshDynamicParams only re-fetches the endpoint URL itself; a form action
+// such as /feedback/submit often renders its token on the parent page
+// (/feedback). For that common shape, scan discovered pages for a form whose
+// resolved action is this endpoint, then copy the current dynamic fields.
+func (e *commandInjectionExecutor) refreshParams(ctx context.Context, ep *domain.Endpoint, params []*domain.Parameter, focus *domain.Parameter) []*domain.Parameter {
+	if !hasDynamicParam(params, focus) {
+		return params
+	}
+	out := refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus)
+	pages, err := e.store.Endpoints().ListByScan(ctx, ep.ScanID)
+	if err != nil {
+		return out
+	}
+	trace := 0
+	for _, page := range pages {
+		if page == nil || trace >= 10 || (page.Method != "" && page.Method != domain.MethodGET) {
+			continue
+		}
+		if page.ID == ep.ID {
+			continue
+		}
+		pageURL, err := url.Parse(page.URL)
+		if err != nil || pageURL.Scheme+"://"+pageURL.Host != originOf(ep.URL) {
+			continue
+		}
+		trace++
+		resp, outcome, _ := e.do(ctx, httpengine.GET(page.URL))
+		if outcome != domain.OutcomeSuccess || resp == nil || len(resp.Body) == 0 {
+			continue
+		}
+		values := map[string]string{}
+		for _, form := range discovery.ExtractForms(string(resp.Body)) {
+			action := form.Action
+			if action == "" {
+				action = page.URL
+			}
+			ref, err := url.Parse(action)
+			if err != nil {
+				continue
+			}
+			target := pageURL.ResolveReference(ref).String()
+			if strings.TrimSuffix(target, "/") != strings.TrimSuffix(ep.URL, "/") {
+				continue
+			}
+			for _, in := range form.Inputs {
+				values[in.Name] = in.Value
+			}
+		}
+		if len(values) == 0 {
+			continue
+		}
+		for i, p := range out {
+			if p == focus || !isDynamicTokenName(p.Name) {
+				continue
+			}
+			if v, ok := values[p.Name]; ok {
+				cp := *p
+				cp.Example = v
+				out[i] = &cp
+			}
+		}
+		return out
+	}
+	return out
+}
+
+func commandInjectionBaseValue(name string) string {
+	switch {
+	case strings.Contains(strings.ToLower(name), "email"):
+		return "test@example.com"
+	case strings.Contains(strings.ToLower(name), "url"),
+		strings.Contains(strings.ToLower(name), "redirect"):
+		return "https://example.com/"
+	default:
+		return "1"
 	}
 }
 
