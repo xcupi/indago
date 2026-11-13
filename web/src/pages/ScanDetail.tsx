@@ -61,6 +61,7 @@ export default function ScanDetail({ id }: { id: string }) {
     access: true,
     idor: true,
     disclosure: true,
+    command: false,
   });
 
   useEffect(() => {
@@ -83,6 +84,7 @@ export default function ScanDetail({ id }: { id: string }) {
       access: !c.skip_access_control,
       idor: !c.skip_idor,
       disclosure: !c.skip_info_disclosure,
+      command: Boolean(c.enable_command_injection),
     });
   }, [scan.data?.id, scan.data?.updated_at]);
 
@@ -133,6 +135,7 @@ export default function ScanDetail({ id }: { id: string }) {
           skip_access_control: !caps.access,
           skip_idor: !caps.idor,
           skip_info_disclosure: !caps.disclosure,
+          enable_command_injection: caps.command,
         },
       });
       setCapOpen(false);
@@ -363,6 +366,7 @@ export default function ScanDetail({ id }: { id: string }) {
               ["access", "Access control", "Role/flag/field and admin-path checks."],
               ["idor", "IDOR", "Object-family and identifier checks."],
               ["disclosure", "Information disclosure", "Sensitive files, SCM/git exposure and error probes."],
+              ["command", "OS command injection", "Opt-in marker probes; confirms two independent executions."],
             ].map(([key, label, hint]) => (
               <label key={key} className="flex items-start justify-between gap-4 rounded-md border border-border p-3">
                 <span>

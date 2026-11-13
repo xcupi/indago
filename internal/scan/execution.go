@@ -90,6 +90,8 @@ type execution struct {
 	// disclosurePassDone marks the one-time information-disclosure pass
 	// (cases 38/39) for this execution.
 	disclosurePassDone atomic.Bool
+	// commandInjectionPassDone marks the one-time OS command injection pass.
+	commandInjectionPassDone atomic.Bool
 }
 
 // pause routes a scan pause to both the worker pool and discovery.
@@ -569,6 +571,13 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 			// Case 37 rides the same pass: one wrong-typed GET per numeric query
 			// parameter, bounded.
 			c.enqueueDisclosureErrorProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.commandInjectionPassDone.Load() {
+		ex.commandInjectionPassDone.Store(true)
+		if sc.Config.EnableCommandInjection {
+			c.enqueueCommandInjectionProbes(ctx, ex.scanID)
 			passes = true
 		}
 	}

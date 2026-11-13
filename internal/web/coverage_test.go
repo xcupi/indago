@@ -219,8 +219,8 @@ func TestCoverageReportsCapabilityMatrix(t *testing.T) {
 	}
 	var c coverageResp
 	a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
-	if len(c.Capabilities) != 6 {
-		t.Fatalf("capabilities = %d, want 6", len(c.Capabilities))
+	if len(c.Capabilities) != 7 {
+		t.Fatalf("capabilities = %d, want 7", len(c.Capabilities))
 	}
 	byKey := map[string]bool{}
 	for _, cap := range c.Capabilities {

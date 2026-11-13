@@ -177,14 +177,16 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		{Key: "information_disclosure", Label: "Information disclosure", Enabled: !cfg.SkipInfoDisclosure},
 		{Key: "open_redirect", Label: "Open redirect (client-side)", Enabled: !cfg.SkipDOMXSS,
 			Note: "Server-side redirect detection is not implemented."},
+		{Key: "command_injection", Label: "OS command injection", Enabled: cfg.EnableCommandInjection},
 	}
 	capByClass := map[domain.VulnClass]*coverageCapability{
-		domain.VulnReflectedXSS:   &out.Capabilities[0],
-		domain.VulnDOMXSS:         &out.Capabilities[1],
-		domain.VulnAccessControl:  &out.Capabilities[2],
-		domain.VulnIDOR:           &out.Capabilities[3],
-		domain.VulnInfoDisclosure: &out.Capabilities[4],
-		domain.VulnOpenRedirect:   &out.Capabilities[5],
+		domain.VulnReflectedXSS:     &out.Capabilities[0],
+		domain.VulnDOMXSS:           &out.Capabilities[1],
+		domain.VulnAccessControl:    &out.Capabilities[2],
+		domain.VulnIDOR:             &out.Capabilities[3],
+		domain.VulnInfoDisclosure:   &out.Capabilities[4],
+		domain.VulnOpenRedirect:     &out.Capabilities[5],
+		domain.VulnCommandInjection: &out.Capabilities[6],
 	}
 	groups := map[string]*coverageReason{}
 	seen := map[string]map[string]bool{}
@@ -247,6 +249,10 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 	if st.Scan.Config.SkipReflectedXSS {
 		out.Warnings = append(out.Warnings, coverageWarning{"reflected_xss_disabled", sevInfo,
 			"Reflected XSS was disabled for this scan; per-parameter reflection probes were intentionally not run. This is a declared coverage choice, not a failed engine."})
+	}
+	if !st.Scan.Config.EnableCommandInjection {
+		out.Warnings = append(out.Warnings, coverageWarning{"command_injection_disabled", sevInfo,
+			"OS command injection was not enabled for this scan; its bounded marker pass was intentionally not run."})
 	}
 	anonymous := st.Session == nil || st.Session.Mode == domain.AuthAnonymous
 	if anonymous {

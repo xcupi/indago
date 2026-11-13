@@ -82,6 +82,7 @@ export default function Scans() {
     skipAccessControl: false,
     skipIDOR: false,
     skipInfoDisclosure: false,
+    enableCommandInjection: false,
     skipWriteEndpoints: true,
     skipDownloadEndpoints: true,
     maxDOMXSSEndpoints: 25,
@@ -195,6 +196,7 @@ export default function Scans() {
         skip_access_control: form.skipAccessControl,
         skip_idor: form.skipIDOR,
         skip_info_disclosure: form.skipInfoDisclosure,
+        enable_command_injection: form.enableCommandInjection,
         skip_write_endpoints: form.skipWriteEndpoints,
         skip_download_endpoints: form.skipDownloadEndpoints,
         max_dom_xss_endpoints: form.maxDOMXSSEndpoints,
@@ -457,6 +459,18 @@ export default function Scans() {
                       </label>
                     ))}
                   </div>
+                  <label className="mt-2 flex items-start gap-2 border-t border-border pt-2 text-xs text-foreground">
+                    <Switch
+                      checked={form.enableCommandInjection}
+                      onCheckedChange={(v) => setForm({ ...form, enableCommandInjection: v })}
+                    />
+                    <span>
+                      OS command injection (opt-in)
+                      <span className="block text-[10px] text-muted-foreground">
+                        Sends harmless arithmetic echo markers; needs state-changing permission for form endpoints.
+                      </span>
+                    </span>
+                  </label>
                   <label className="mt-2 flex items-start gap-2 border-t border-border pt-2 text-xs text-foreground">
                     <Switch
                       checked={form.skipWriteEndpoints}

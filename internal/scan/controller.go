@@ -367,14 +367,15 @@ type CreateScanParams struct {
 	// SkipStaticAssets drops crawler/browser-discovered static resources.
 	SkipStaticAssets bool
 	// Capability switches; see domain.ScanConfig.
-	SkipReflectedXSS      bool
-	SkipDOMXSS            bool
-	SkipAccessControl     bool
-	SkipIDOR              bool
-	SkipInfoDisclosure    bool
-	SkipWriteEndpoints    bool
-	SkipDownloadEndpoints bool
-	MaxDOMXSSEndpoints    int
+	SkipReflectedXSS       bool
+	SkipDOMXSS             bool
+	SkipAccessControl      bool
+	SkipIDOR               bool
+	SkipInfoDisclosure     bool
+	EnableCommandInjection bool
+	SkipWriteEndpoints     bool
+	SkipDownloadEndpoints  bool
+	MaxDOMXSSEndpoints     int
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -565,6 +566,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.SkipAccessControl = p.SkipAccessControl
 	cfg.SkipIDOR = p.SkipIDOR
 	cfg.SkipInfoDisclosure = p.SkipInfoDisclosure
+	cfg.EnableCommandInjection = p.EnableCommandInjection
 	cfg.SkipWriteEndpoints = p.SkipWriteEndpoints
 	cfg.SkipDownloadEndpoints = p.SkipDownloadEndpoints
 	cfg.MaxDOMXSSEndpoints = p.MaxDOMXSSEndpoints
@@ -1394,7 +1396,7 @@ func (c *Controller) poolConfig(sc *domain.Scan) worker.Config {
 		ScanID: sc.ID,
 		Groups: []worker.GroupSpec{
 			{Name: GroupDiscovery, Types: []domain.JobType{domain.JobDiscovery}, Size: sc.Config.DiscoveryConcurrency},
-			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR, domain.JobAccessControl, domain.JobDisclosure}, Size: sc.Config.HTTPConcurrency},
+			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR, domain.JobAccessControl, domain.JobDisclosure, domain.JobCommandInjection}, Size: sc.Config.HTTPConcurrency},
 			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify, domain.JobDOMXSS}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
 		},
 		LeaseDuration: c.opts.LeaseDuration,

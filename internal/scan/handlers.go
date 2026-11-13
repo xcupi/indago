@@ -74,6 +74,9 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	h[domain.JobAccessControl] = newAccessControlExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log, findingsMu, hasSession)
 	// Disclosure shares findingsMu too: same Findings() rows, disjoint dedup keys.
 	h[domain.JobDisclosure] = newDisclosureExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log, findingsMu)
+	// OS command injection is a bounded raw-HTTP pass. It sends only harmless
+	// arithmetic markers and confirms only two independent executions.
+	h[domain.JobCommandInjection] = newCommandInjectionExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	return h
 }
 
@@ -123,11 +126,12 @@ func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 		})
 	}
 	return map[domain.JobType]worker.Handler{
-		domain.JobDiscovery:     noop(domain.JobDiscovery),
-		domain.JobTest:          noop(domain.JobTest),
-		domain.JobVerify:        noop(domain.JobVerify),
-		domain.JobDOMXSS:        noop(domain.JobDOMXSS),
-		domain.JobIDOR:          noop(domain.JobIDOR),
-		domain.JobAccessControl: noop(domain.JobAccessControl),
+		domain.JobDiscovery:        noop(domain.JobDiscovery),
+		domain.JobTest:             noop(domain.JobTest),
+		domain.JobVerify:           noop(domain.JobVerify),
+		domain.JobDOMXSS:           noop(domain.JobDOMXSS),
+		domain.JobIDOR:             noop(domain.JobIDOR),
+		domain.JobAccessControl:    noop(domain.JobAccessControl),
+		domain.JobCommandInjection: noop(domain.JobCommandInjection),
 	}
 }

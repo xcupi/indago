@@ -29,12 +29,15 @@ const (
 	// (a backup artefact). Decided from response bytes only, never by an LLM.
 	// See docs/disclosure.md.
 	VulnInfoDisclosure VulnClass = "information_disclosure"
+	// VulnCommandInjection is OS command injection: a parameter value reaches a
+	// shell command and a marker command is executed by the server.
+	VulnCommandInjection VulnClass = "command_injection"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection:
 		return true
 	default:
 		return false

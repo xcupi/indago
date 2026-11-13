@@ -262,12 +262,16 @@ const (
 	// decides from the response bodies (see internal/accesscontrol and
 	// internal/scan/accesscontrol.go). Raw HTTP, GET only.
 	JobAccessControl JobType = "access_control"
+	// JobCommandInjection probes one injection point for OS command injection.
+	// It sends harmless echo markers through query/form/JSON/path parameters
+	// and requires two independent markers before confirming.
+	JobCommandInjection JobType = "command_injection"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection:
 		return true
 	default:
 		return false
