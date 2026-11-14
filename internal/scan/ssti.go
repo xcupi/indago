@@ -73,7 +73,16 @@ type sstiVariant struct {
 	suffix   string
 	expr     string
 	expected string
+	family   string
 }
+
+const (
+	sstiFamilyPHP    = "php"
+	sstiFamilyNode   = "node"
+	sstiFamilyJava   = "java"
+	sstiFamilyPython = "python"
+	sstiFamilyRuby   = "ruby"
+)
 
 func sstiVariants() []sstiVariant {
 	// Pairs are deliberate: many engines support only one syntax, so a
@@ -81,23 +90,29 @@ func sstiVariants() []sstiVariant {
 	// inconclusive. Each pair uses different arithmetic results; reflection
 	// alone still cannot produce either computed value.
 	variants := []sstiVariant{
-		{prefix: "<%= ", suffix: " %>", expr: "7*7", expected: "49"},
-		{prefix: "<%= ", suffix: " %>", expr: "11*13", expected: "143"},
-		{prefix: "{{", suffix: "}}", expr: "7*7", expected: "49"},
-		{prefix: "{{", suffix: "}}", expr: "11*13", expected: "143"},
-		{prefix: "${", suffix: "}", expr: "7*7", expected: "49"},
-		{prefix: "${", suffix: "}", expr: "11*13", expected: "143"},
-		{prefix: "#{", suffix: "}", expr: "7*7", expected: "49"},
-		{prefix: "#{", suffix: "}", expr: "11*13", expected: "143"},
-		{prefix: "*{", suffix: "}", expr: "7*7", expected: "49"},
-		{prefix: "*{", suffix: "}", expr: "11*13", expected: "143"},
-		{prefix: "{", suffix: "}", expr: "7*7", expected: "49"},
-		{prefix: "{", suffix: "}", expr: "11*13", expected: "143"},
+		{prefix: "<%= ", suffix: " %>", expr: "7*7", expected: "49", family: sstiFamilyRuby},
+		{prefix: "<%= ", suffix: " %>", expr: "11*13", expected: "143", family: sstiFamilyRuby},
+		{prefix: "<%= ", suffix: " %>", expr: "7*7", expected: "49", family: sstiFamilyNode},
+		{prefix: "<%= ", suffix: " %>", expr: "11*13", expected: "143", family: sstiFamilyNode},
+		{prefix: "{{", suffix: "}}", expr: "7*7", expected: "49", family: sstiFamilyNode},
+		{prefix: "{{", suffix: "}}", expr: "11*13", expected: "143", family: sstiFamilyNode},
+		{prefix: "{{", suffix: "}}", expr: "7*7", expected: "49", family: sstiFamilyPHP},
+		{prefix: "{{", suffix: "}}", expr: "11*13", expected: "143", family: sstiFamilyPHP},
+		{prefix: "{{", suffix: "}}", expr: "7*7", expected: "49", family: sstiFamilyPython},
+		{prefix: "{{", suffix: "}}", expr: "11*13", expected: "143", family: sstiFamilyPython},
+		{prefix: "${", suffix: "}", expr: "7*7", expected: "49", family: sstiFamilyJava},
+		{prefix: "${", suffix: "}", expr: "11*13", expected: "143", family: sstiFamilyJava},
+		{prefix: "#{", suffix: "}", expr: "7*7", expected: "49", family: sstiFamilyJava},
+		{prefix: "#{", suffix: "}", expr: "11*13", expected: "143", family: sstiFamilyJava},
+		{prefix: "*{", suffix: "}", expr: "7*7", expected: "49", family: sstiFamilyJava},
+		{prefix: "*{", suffix: "}", expr: "11*13", expected: "143", family: sstiFamilyJava},
+		{prefix: "{", suffix: "}", expr: "7*7", expected: "49", family: sstiFamilyPHP},
+		{prefix: "{", suffix: "}", expr: "11*13", expected: "143", family: sstiFamilyPHP},
 		// Velocity uses a statement followed by a reference, not a bare
 		// expression; keep the two probes distinct so a reflected payload
 		// cannot supply both values.
-		{prefix: "#set($indago=", suffix: ")$indago", expr: "7*7", expected: "49"},
-		{prefix: "#set($indago=", suffix: ")$indago", expr: "11*13", expected: "143"},
+		{prefix: "#set($indago=", suffix: ")$indago", expr: "7*7", expected: "49", family: sstiFamilyJava},
+		{prefix: "#set($indago=", suffix: ")$indago", expr: "11*13", expected: "143", family: sstiFamilyJava},
 	}
 	return variants
 }
@@ -113,13 +128,75 @@ func sstiContextVariants(baseValue string) []sstiVariant {
 		return nil
 	}
 	return []sstiVariant{
-		{prefix: baseValue + "}}{{", suffix: "}}", expr: "7*7", expected: "49"},
-		{prefix: baseValue + "}}{{", suffix: "}}", expr: "11*13", expected: "143"},
-		{prefix: baseValue + "}${", suffix: "}", expr: "7*7", expected: "49"},
-		{prefix: baseValue + "}${", suffix: "}", expr: "11*13", expected: "143"},
-		{prefix: baseValue + " %><%= ", suffix: " %>", expr: "7*7", expected: "49"},
-		{prefix: baseValue + " %><%= ", suffix: " %>", expr: "11*13", expected: "143"},
+		{prefix: baseValue + "}}{{", suffix: "}}", expr: "7*7", expected: "49", family: sstiFamilyNode},
+		{prefix: baseValue + "}}{{", suffix: "}}", expr: "11*13", expected: "143", family: sstiFamilyNode},
+		{prefix: baseValue + "}${", suffix: "}", expr: "7*7", expected: "49", family: sstiFamilyJava},
+		{prefix: baseValue + "}${", suffix: "}", expr: "11*13", expected: "143", family: sstiFamilyJava},
+		{prefix: baseValue + " %><%= ", suffix: " %>", expr: "7*7", expected: "49", family: sstiFamilyRuby},
+		{prefix: baseValue + " %><%= ", suffix: " %>", expr: "11*13", expected: "143", family: sstiFamilyRuby},
 	}
+}
+
+// sstiSupportedFamilies is a passive applicability gate. It only returns
+// families when the baseline response carries a technology fingerprint that
+// makes a template engine plausible. An unknown stack is skipped rather than
+// sprayed with template syntax; the user explicitly asked for that behavior.
+func sstiSupportedFamilies(resp *httpengine.Response) map[string]string {
+	supported := map[string]string{}
+	if resp == nil {
+		return supported
+	}
+	h := resp.Headers
+	powered := strings.ToLower(h.Get("X-Powered-By"))
+	server := strings.ToLower(h.Get("Server"))
+	cookies := strings.ToLower(strings.Join(h.Values("Set-Cookie"), "\n"))
+	body := strings.ToLower(string(resp.Body))
+	add := func(family, evidence string) {
+		if _, ok := supported[family]; !ok {
+			supported[family] = evidence
+		}
+	}
+	if strings.Contains(powered, "php") || strings.Contains(cookies, "phpsessid") ||
+		strings.Contains(cookies, "laravel_session") || strings.Contains(body, "laravel") {
+		add(sstiFamilyPHP, "PHP application fingerprint")
+	}
+	if strings.Contains(powered, "express") || strings.Contains(cookies, "connect.sid") {
+		add(sstiFamilyNode, "Express/Node application fingerprint")
+	}
+	if strings.Contains(server, "tomcat") || strings.Contains(server, "jetty") ||
+		strings.Contains(server, "coyote") || strings.Contains(server, "undertow") ||
+		strings.Contains(cookies, "jsessionid") || strings.Contains(powered, "servlet") {
+		add(sstiFamilyJava, "Java servlet application fingerprint")
+	}
+	if strings.Contains(server, "werkzeug") || strings.Contains(server, "gunicorn") ||
+		strings.Contains(server, "uvicorn") || strings.Contains(powered, "python") ||
+		strings.Contains(cookies, "csrftoken") || strings.Contains(body, "csrfmiddlewaretoken") {
+		add(sstiFamilyPython, "Python web application fingerprint")
+	}
+	if strings.Contains(server, "passenger") || strings.Contains(server, "webrick") ||
+		strings.Contains(cookies, "_session_id") || strings.Contains(cookies, "_rails") {
+		add(sstiFamilyRuby, "Ruby/Rails application fingerprint")
+	}
+	return supported
+}
+
+func sstiFilteredVariants(variants []sstiVariant, supported map[string]string) []sstiVariant {
+	out := make([]sstiVariant, 0, len(variants))
+	for _, v := range variants {
+		if !v.familyAllowed(supported) {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+func (v sstiVariant) familyAllowed(supported map[string]string) bool {
+	if v.family == "" {
+		return true
+	}
+	_, ok := supported[v.family]
+	return ok
 }
 
 func (e *sstiExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
@@ -159,9 +236,14 @@ func (e *sstiExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	baseEvidence, _ := e.persistEvidence(ctx, job.ScanID, baseResp, "ssti baseline")
 	d.EvidenceIDs = append(d.EvidenceIDs, baseEvidence...)
 	baseBody := string(baseResp.Body)
+	supported := sstiSupportedFamilies(baseResp)
+	if len(supported) == 0 {
+		return e.finishSSTIUnavailable(ctx, job, started, ep, "no supported template stack fingerprint")
+	}
+	variants := sstiFilteredVariants(sstiVariants(), supported)
 
 	confirmedValues := map[string]bool{}
-	for _, v := range sstiVariants() {
+	for _, v := range variants {
 		key := v.prefix + v.expected
 		if _, already := confirmedValues[key]; already {
 			continue
@@ -200,7 +282,7 @@ func (e *sstiExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	}
 
 	if len(confirmedValues) < 2 {
-		for _, v := range sstiContextVariants(baseValue) {
+		for _, v := range sstiFilteredVariants(sstiContextVariants(baseValue), supported) {
 			key := v.prefix + v.expected
 			if _, already := confirmedValues[key]; already {
 				continue

@@ -75,6 +75,9 @@ func classifySkip(note string) skipReason {
 	case strings.Contains(n, "browser verification supports") || strings.Contains(n, "not supported for browser document replay"):
 		return skipReason{"verification_unsupported", sevMedium, "Browser verification does not support this request shape",
 			"Candidates were not confirmed in a browser. Verify these endpoints manually."}
+	case strings.Contains(n, "no supported template stack fingerprint"):
+		return skipReason{"ssti_not_applicable", sevInfo, "SSTI skipped: no supported template stack fingerprint",
+			"The baseline response did not identify a template-engine stack (for example PHP/Twig, Java/Spring, Express, Django/Flask, or Rails). The engine intentionally sent no template payloads to an unknown stack."}
 	case strings.Contains(n, "source not tested:"):
 		return skipReason{"source_not_applicable", sevInfo, "DOM source had nothing to test on this endpoint",
 			"No query parameter, storage key or other input of that kind was found on the endpoint. Usually expected."}

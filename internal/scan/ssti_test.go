@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/indago/indago/internal/domain"
@@ -13,6 +14,7 @@ import (
 
 func TestSSTIConfirmsTwoIndependentTemplateExpressions(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Powered-By", "PHP/8.2")
 		value := r.URL.Query().Get("q")
 		switch {
 		case strings.Contains(value, "<%= 7*7 %>"):
@@ -21,6 +23,8 @@ func TestSSTIConfirmsTwoIndependentTemplateExpressions(t *testing.T) {
 			fmt.Fprint(w, "rendered 143")
 		case strings.Contains(value, "{{7*7}}"):
 			fmt.Fprint(w, "rendered 49")
+		case strings.Contains(value, "{{11*13}}"):
+			fmt.Fprint(w, "rendered 143")
 		case strings.Contains(value, "${11*13}"):
 			fmt.Fprint(w, "rendered 143")
 		default:
@@ -53,6 +57,7 @@ func TestSSTIConfirmsTwoIndependentTemplateExpressions(t *testing.T) {
 
 func TestSSTIConfirmsCodeContextBreakout(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Powered-By", "Express")
 		value := r.URL.Query().Get("q")
 		switch {
 		case strings.Contains(value, "}}{{7*7}}"):
@@ -84,8 +89,45 @@ func TestSSTIConfirmsCodeContextBreakout(t *testing.T) {
 	}
 }
 
+func TestSSTIUnknownStackIsSkippedWithoutPayloads(t *testing.T) {
+	var templateRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		if strings.Contains(q, "{{") || strings.Contains(q, "${") || strings.Contains(q, "<%") {
+			templateRequests.Add(1)
+		}
+		fmt.Fprint(w, "plain page")
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/page?q=hello", domain.MethodGET)
+	focus := env.param(ep, "q", domain.LocationQuery, "hello")
+	ip := env.injection(ep, focus)
+	ex := newSSTIExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil)
+	job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobSSTI,
+		Target: domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID, URL: ep.URL}, Attempts: 1, MaxAttempts: 2}
+	if err := ex.Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if got := templateRequests.Load(); got != 0 {
+		t.Fatalf("unknown stack received %d template payloads, want 0", got)
+	}
+	cases, err := env.st.TestCases().ListByScan(context.Background(), env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cases) != 1 || cases[0].VulnClass != domain.VulnSSTI || cases[0].Status != domain.TestCaseSkipped {
+		t.Fatalf("cases = %+v, want one skipped SSTI case", cases)
+	}
+	if !strings.Contains(cases[0].Note, "no supported template stack fingerprint") {
+		t.Fatalf("skip note = %q", cases[0].Note)
+	}
+}
+
 func TestSSTIReflectionIsNotConfirmed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Powered-By", "PHP/8.2")
 		fmt.Fprintf(w, "echo %s", r.URL.Query().Get("q"))
 	}))
 	defer srv.Close()
