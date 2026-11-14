@@ -70,6 +70,7 @@ export interface ScanConfig {
   skip_idor?: boolean;
   skip_info_disclosure?: boolean;
   enable_command_injection?: boolean;
+  enable_ssti?: boolean;
   skip_write_endpoints?: boolean;
   skip_download_endpoints?: boolean;
   max_dom_xss_endpoints?: number;

@@ -266,12 +266,16 @@ const (
 	// It sends harmless echo markers through query/form/JSON/path parameters
 	// and requires two independent markers before confirming.
 	JobCommandInjection JobType = "command_injection"
+	// JobSSTI probes one injection point for server-side template injection.
+	// It sends only arithmetic template expressions and requires two
+	// independent computed results before confirming.
+	JobSSTI JobType = "ssti"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI:
 		return true
 	default:
 		return false

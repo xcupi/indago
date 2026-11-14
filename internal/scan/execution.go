@@ -92,6 +92,8 @@ type execution struct {
 	disclosurePassDone atomic.Bool
 	// commandInjectionPassDone marks the one-time OS command injection pass.
 	commandInjectionPassDone atomic.Bool
+	// sstiPassDone marks the one-time server-side template injection pass.
+	sstiPassDone atomic.Bool
 }
 
 // pause routes a scan pause to both the worker pool and discovery.
@@ -578,6 +580,13 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		ex.commandInjectionPassDone.Store(true)
 		if sc.Config.EnableCommandInjection {
 			c.enqueueCommandInjectionProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.sstiPassDone.Load() {
+		ex.sstiPassDone.Store(true)
+		if sc.Config.EnableSSTI {
+			c.enqueueSSTIProbes(ctx, ex.scanID)
 			passes = true
 		}
 	}

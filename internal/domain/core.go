@@ -229,6 +229,10 @@ type ScanConfig struct {
 	SkipIDOR               bool `json:"skip_idor,omitempty"`
 	SkipInfoDisclosure     bool `json:"skip_info_disclosure,omitempty"`
 	EnableCommandInjection bool `json:"enable_command_injection,omitempty"`
+	// EnableSSTI opts into the server-side template injection engine. It is
+	// separate from command injection because the confirmation evidence is a
+	// template-evaluated result, not a shell-expanded marker.
+	EnableSSTI bool `json:"enable_ssti,omitempty"`
 	// CommandInjectionCallbackURL is an operator-provided HTTP callback used
 	// for blind out-of-band command injection. The poll URL, when set, is the
 	// endpoint that lists received requests (webhook.site-compatible).

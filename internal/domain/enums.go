@@ -32,12 +32,15 @@ const (
 	// VulnCommandInjection is OS command injection: a parameter value reaches a
 	// shell command and a marker command is executed by the server.
 	VulnCommandInjection VulnClass = "command_injection"
+	// VulnSSTI is server-side template injection: a parameter value is
+	// evaluated by a template engine rather than returned literally.
+	VulnSSTI VulnClass = "ssti"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI:
 		return true
 	default:
 		return false

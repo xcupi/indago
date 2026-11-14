@@ -178,6 +178,7 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		{Key: "open_redirect", Label: "Open redirect (client-side)", Enabled: !cfg.SkipDOMXSS,
 			Note: "Server-side redirect detection is not implemented."},
 		{Key: "command_injection", Label: "OS command injection", Enabled: cfg.EnableCommandInjection},
+		{Key: "ssti", Label: "Server-side template injection", Enabled: cfg.EnableSSTI},
 	}
 	capByClass := map[domain.VulnClass]*coverageCapability{
 		domain.VulnReflectedXSS:     &out.Capabilities[0],
@@ -187,6 +188,7 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		domain.VulnInfoDisclosure:   &out.Capabilities[4],
 		domain.VulnOpenRedirect:     &out.Capabilities[5],
 		domain.VulnCommandInjection: &out.Capabilities[6],
+		domain.VulnSSTI:             &out.Capabilities[7],
 	}
 	groups := map[string]*coverageReason{}
 	seen := map[string]map[string]bool{}

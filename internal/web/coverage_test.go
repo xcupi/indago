@@ -219,8 +219,8 @@ func TestCoverageReportsCapabilityMatrix(t *testing.T) {
 	}
 	var c coverageResp
 	a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
-	if len(c.Capabilities) != 7 {
-		t.Fatalf("capabilities = %d, want 7", len(c.Capabilities))
+	if len(c.Capabilities) != 8 {
+		t.Fatalf("capabilities = %d, want 8", len(c.Capabilities))
 	}
 	byKey := map[string]bool{}
 	for _, cap := range c.Capabilities {
@@ -229,7 +229,7 @@ func TestCoverageReportsCapabilityMatrix(t *testing.T) {
 	if byKey["reflected_xss"] || byKey["idor"] {
 		t.Fatalf("disabled capabilities reported enabled: %+v", byKey)
 	}
-	if !byKey["dom_xss"] || !byKey["access_control"] || !byKey["information_disclosure"] {
+	if !byKey["dom_xss"] || !byKey["access_control"] || !byKey["information_disclosure"] || byKey["ssti"] {
 		t.Fatalf("enabled capabilities reported disabled: %+v", byKey)
 	}
 }

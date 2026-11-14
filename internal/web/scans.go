@@ -291,6 +291,7 @@ type createScanReq struct {
 	SkipIDOR                        bool   `json:"skip_idor"`
 	SkipInfoDisclosure              bool   `json:"skip_info_disclosure"`
 	EnableCommandInjection          bool   `json:"enable_command_injection"`
+	EnableSSTI                      bool   `json:"enable_ssti"`
 	CommandInjectionCallbackURL     string `json:"command_injection_callback_url"`
 	CommandInjectionCallbackPollURL string `json:"command_injection_callback_poll_url"`
 	SkipWriteEndpoints              bool   `json:"skip_write_endpoints"`
@@ -388,6 +389,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		SkipIDOR:                        req.SkipIDOR,
 		SkipInfoDisclosure:              req.SkipInfoDisclosure,
 		EnableCommandInjection:          req.EnableCommandInjection,
+		EnableSSTI:                      req.EnableSSTI,
 		CommandInjectionCallbackURL:     req.CommandInjectionCallbackURL,
 		CommandInjectionCallbackPollURL: req.CommandInjectionCallbackPollURL,
 		SkipWriteEndpoints:              req.SkipWriteEndpoints,
@@ -471,6 +473,7 @@ type capabilitiesReq struct {
 	SkipIDOR               bool `json:"skip_idor"`
 	SkipInfoDisclosure     bool `json:"skip_info_disclosure"`
 	EnableCommandInjection bool `json:"enable_command_injection"`
+	EnableSSTI             bool `json:"enable_ssti"`
 }
 
 // handleUpdateScanCapabilities edits the attack selection of a draft scan.
@@ -500,6 +503,7 @@ func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Req
 	sc.Config.SkipIDOR = req.SkipIDOR
 	sc.Config.SkipInfoDisclosure = req.SkipInfoDisclosure
 	sc.Config.EnableCommandInjection = req.EnableCommandInjection
+	sc.Config.EnableSSTI = req.EnableSSTI
 	sc.UpdatedAt = time.Now()
 	if err := s.store.Scans().Update(r.Context(), sc); err != nil {
 		s.writeInternalError(w, "update scan capabilities", err)

@@ -83,6 +83,7 @@ export default function Scans() {
     skipIDOR: false,
     skipInfoDisclosure: false,
     enableCommandInjection: false,
+    enableSSTI: false,
     skipWriteEndpoints: true,
     skipDownloadEndpoints: true,
     maxDOMXSSEndpoints: 25,
@@ -197,6 +198,7 @@ export default function Scans() {
         skip_idor: form.skipIDOR,
         skip_info_disclosure: form.skipInfoDisclosure,
         enable_command_injection: form.enableCommandInjection,
+        enable_ssti: form.enableSSTI,
         skip_write_endpoints: form.skipWriteEndpoints,
         skip_download_endpoints: form.skipDownloadEndpoints,
         max_dom_xss_endpoints: form.maxDOMXSSEndpoints,
@@ -468,6 +470,18 @@ export default function Scans() {
                       OS command injection (opt-in)
                       <span className="block text-[10px] text-muted-foreground">
                         Sends harmless arithmetic echo markers; needs state-changing permission for form endpoints.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="mt-2 flex items-start gap-2 border-t border-border pt-2 text-xs text-foreground">
+                    <Switch
+                      checked={form.enableSSTI}
+                      onCheckedChange={(v) => setForm({ ...form, enableSSTI: v })}
+                    />
+                    <span>
+                      Server-side template injection (opt-in)
+                      <span className="block text-[10px] text-muted-foreground">
+                        Sends harmless arithmetic template expressions; confirms two independent evaluations.
                       </span>
                     </span>
                   </label>
