@@ -80,7 +80,7 @@ func sstiVariants() []sstiVariant {
 	// single probe per family would make a real ERB/Jinja/Freemarker target
 	// inconclusive. Each pair uses different arithmetic results; reflection
 	// alone still cannot produce either computed value.
-	return []sstiVariant{
+	variants := []sstiVariant{
 		{prefix: "<%= ", suffix: " %>", expr: "7*7", expected: "49"},
 		{prefix: "<%= ", suffix: " %>", expr: "11*13", expected: "143"},
 		{prefix: "{{", suffix: "}}", expr: "7*7", expected: "49"},
@@ -93,6 +93,27 @@ func sstiVariants() []sstiVariant {
 		{prefix: "*{", suffix: "}", expr: "11*13", expected: "143"},
 		{prefix: "{", suffix: "}", expr: "7*7", expected: "49"},
 		{prefix: "{", suffix: "}", expr: "11*13", expected: "143"},
+	}
+	return variants
+}
+
+// sstiContextVariants handles the second SSTI shape: the parameter is placed
+// inside an existing template expression, e.g. engine.render("Hello {{"+name+"}}").
+// In that shape a plain "{{7*7}}" is just part of the variable name. Reusing the
+// operator's observed value and closing the surrounding expression produces
+// "{{value}}{{7*7}}" (and the equivalent shapes for other engines).
+func sstiContextVariants(baseValue string) []sstiVariant {
+	baseValue = strings.TrimSpace(baseValue)
+	if baseValue == "" {
+		return nil
+	}
+	return []sstiVariant{
+		{prefix: baseValue + "}}{{", suffix: "}}", expr: "7*7", expected: "49"},
+		{prefix: baseValue + "}}{{", suffix: "}}", expr: "11*13", expected: "143"},
+		{prefix: baseValue + "}${", suffix: "}", expr: "7*7", expected: "49"},
+		{prefix: baseValue + "}${", suffix: "}", expr: "11*13", expected: "143"},
+		{prefix: baseValue + " %><%= ", suffix: " %>", expr: "7*7", expected: "49"},
+		{prefix: baseValue + " %><%= ", suffix: " %>", expr: "11*13", expected: "143"},
 	}
 }
 
@@ -170,6 +191,44 @@ func (e *sstiExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 		}
 		if len(confirmedValues) >= 2 {
 			break
+		}
+	}
+
+	if len(confirmedValues) < 2 {
+		for _, v := range sstiContextVariants(baseValue) {
+			key := v.prefix + v.expected
+			if _, already := confirmedValues[key]; already {
+				continue
+			}
+			if strings.Contains(baseBody, v.expected) {
+				continue
+			}
+			payload := v.prefix + v.expr + v.suffix
+			attempt := sstiAttempt{Payload: truncate(payload, 200), Expected: v.expected, Kind: "template-context"}
+			params = e.refreshParams(ctx, ep, params, focus)
+			req, err := buildRequest(ep, params, &injection{param: focus, value: payload})
+			if err != nil {
+				attempt.Status = 0
+				d.Attempts = append(d.Attempts, attempt)
+				continue
+			}
+			resp, respOutcome, _ := e.do(ctx, req)
+			if resp != nil {
+				attempt.Status = resp.Status
+			}
+			if respOutcome == domain.OutcomeSuccess && resp != nil {
+				body := string(resp.Body)
+				attempt.Output = strings.Contains(body, v.expected) && !strings.Contains(body, payload)
+				ev, _ := e.persistEvidence(ctx, job.ScanID, resp, "ssti-context "+v.expr)
+				d.EvidenceIDs = append(d.EvidenceIDs, ev...)
+			}
+			d.Attempts = append(d.Attempts, attempt)
+			if attempt.Output {
+				confirmedValues[key] = true
+			}
+			if len(confirmedValues) >= 2 {
+				break
+			}
 		}
 	}
 
