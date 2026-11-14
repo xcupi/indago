@@ -367,15 +367,17 @@ type CreateScanParams struct {
 	// SkipStaticAssets drops crawler/browser-discovered static resources.
 	SkipStaticAssets bool
 	// Capability switches; see domain.ScanConfig.
-	SkipReflectedXSS       bool
-	SkipDOMXSS             bool
-	SkipAccessControl      bool
-	SkipIDOR               bool
-	SkipInfoDisclosure     bool
-	EnableCommandInjection bool
-	SkipWriteEndpoints     bool
-	SkipDownloadEndpoints  bool
-	MaxDOMXSSEndpoints     int
+	SkipReflectedXSS                bool
+	SkipDOMXSS                      bool
+	SkipAccessControl               bool
+	SkipIDOR                        bool
+	SkipInfoDisclosure              bool
+	EnableCommandInjection          bool
+	CommandInjectionCallbackURL     string
+	CommandInjectionCallbackPollURL string
+	SkipWriteEndpoints              bool
+	SkipDownloadEndpoints           bool
+	MaxDOMXSSEndpoints              int
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -567,6 +569,8 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.SkipIDOR = p.SkipIDOR
 	cfg.SkipInfoDisclosure = p.SkipInfoDisclosure
 	cfg.EnableCommandInjection = p.EnableCommandInjection
+	cfg.CommandInjectionCallbackURL = p.CommandInjectionCallbackURL
+	cfg.CommandInjectionCallbackPollURL = p.CommandInjectionCallbackPollURL
 	cfg.SkipWriteEndpoints = p.SkipWriteEndpoints
 	cfg.SkipDownloadEndpoints = p.SkipDownloadEndpoints
 	cfg.MaxDOMXSSEndpoints = p.MaxDOMXSSEndpoints

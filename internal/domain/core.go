@@ -229,6 +229,11 @@ type ScanConfig struct {
 	SkipIDOR               bool `json:"skip_idor,omitempty"`
 	SkipInfoDisclosure     bool `json:"skip_info_disclosure,omitempty"`
 	EnableCommandInjection bool `json:"enable_command_injection,omitempty"`
+	// CommandInjectionCallbackURL is an operator-provided HTTP callback used
+	// for blind out-of-band command injection. The poll URL, when set, is the
+	// endpoint that lists received requests (webhook.site-compatible).
+	CommandInjectionCallbackURL     string `json:"command_injection_callback_url,omitempty"`
+	CommandInjectionCallbackPollURL string `json:"command_injection_callback_poll_url,omitempty"`
 
 	// SkipWriteEndpoints keeps payload-bearing engines away from endpoints
 	// that look like writes: non-GET/HEAD/OPTIONS methods, Laravel-style

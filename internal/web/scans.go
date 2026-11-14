@@ -285,15 +285,17 @@ type createScanReq struct {
 	// SkipStaticAssets drops crawler/browser-discovered static resources.
 	SkipStaticAssets bool `json:"skip_static_assets"`
 	// Capability switches; true omits that engine's jobs.
-	SkipReflectedXSS       bool `json:"skip_reflected_xss"`
-	SkipDOMXSS             bool `json:"skip_dom_xss"`
-	SkipAccessControl      bool `json:"skip_access_control"`
-	SkipIDOR               bool `json:"skip_idor"`
-	SkipInfoDisclosure     bool `json:"skip_info_disclosure"`
-	EnableCommandInjection bool `json:"enable_command_injection"`
-	SkipWriteEndpoints     bool `json:"skip_write_endpoints"`
-	SkipDownloadEndpoints  bool `json:"skip_download_endpoints"`
-	MaxDOMXSSEndpoints     int  `json:"max_dom_xss_endpoints"`
+	SkipReflectedXSS                bool   `json:"skip_reflected_xss"`
+	SkipDOMXSS                      bool   `json:"skip_dom_xss"`
+	SkipAccessControl               bool   `json:"skip_access_control"`
+	SkipIDOR                        bool   `json:"skip_idor"`
+	SkipInfoDisclosure              bool   `json:"skip_info_disclosure"`
+	EnableCommandInjection          bool   `json:"enable_command_injection"`
+	CommandInjectionCallbackURL     string `json:"command_injection_callback_url"`
+	CommandInjectionCallbackPollURL string `json:"command_injection_callback_poll_url"`
+	SkipWriteEndpoints              bool   `json:"skip_write_endpoints"`
+	SkipDownloadEndpoints           bool   `json:"skip_download_endpoints"`
+	MaxDOMXSSEndpoints              int    `json:"max_dom_xss_endpoints"`
 }
 
 func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
@@ -363,32 +365,34 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		MaxEndpoints:          req.MaxEndpoints,
 		ReconLevel:            req.ReconLevel,
 
-		CandidateProfile:          req.CandidateProfile,
-		MaxCandidates:             req.MaxCandidates,
-		EnableEvasion:             req.EnableEvasion,
-		RawQueryInjection:         req.RawQueryInjection,
-		ProxyPool:                 cleanList(req.ProxyPool),
-		RandomizeTLSFingerprint:   req.RandomizeTLSFingerprint,
-		IDORCandidates:            req.IDORCandidates,
-		EnableIDOREnumeration:     req.EnableIDOREnumeration,
-		IDOREnumerationNeighbours: req.IDOREnumerationNeighbours,
-		EnableRoleParam:           req.EnableRoleParam,
-		EnableAccessControlPages:  req.EnableAccessControlPages,
-		EnableRoleWrite:           req.EnableRoleWrite,
-		EnableAdminStepProbe:      req.EnableAdminStepProbe,
-		EnableObjectFamilyProbe:   req.EnableObjectFamilyProbe,
-		EnableXSSLibrary:          req.EnableXSSLibrary,
-		SkipGlobalInjection:       req.SkipGlobalInjection,
-		SkipStaticAssets:          req.SkipStaticAssets,
-		SkipReflectedXSS:          req.SkipReflectedXSS,
-		SkipDOMXSS:                req.SkipDOMXSS,
-		SkipAccessControl:         req.SkipAccessControl,
-		SkipIDOR:                  req.SkipIDOR,
-		SkipInfoDisclosure:        req.SkipInfoDisclosure,
-		EnableCommandInjection:    req.EnableCommandInjection,
-		SkipWriteEndpoints:        req.SkipWriteEndpoints,
-		SkipDownloadEndpoints:     req.SkipDownloadEndpoints,
-		MaxDOMXSSEndpoints:        req.MaxDOMXSSEndpoints,
+		CandidateProfile:                req.CandidateProfile,
+		MaxCandidates:                   req.MaxCandidates,
+		EnableEvasion:                   req.EnableEvasion,
+		RawQueryInjection:               req.RawQueryInjection,
+		ProxyPool:                       cleanList(req.ProxyPool),
+		RandomizeTLSFingerprint:         req.RandomizeTLSFingerprint,
+		IDORCandidates:                  req.IDORCandidates,
+		EnableIDOREnumeration:           req.EnableIDOREnumeration,
+		IDOREnumerationNeighbours:       req.IDOREnumerationNeighbours,
+		EnableRoleParam:                 req.EnableRoleParam,
+		EnableAccessControlPages:        req.EnableAccessControlPages,
+		EnableRoleWrite:                 req.EnableRoleWrite,
+		EnableAdminStepProbe:            req.EnableAdminStepProbe,
+		EnableObjectFamilyProbe:         req.EnableObjectFamilyProbe,
+		EnableXSSLibrary:                req.EnableXSSLibrary,
+		SkipGlobalInjection:             req.SkipGlobalInjection,
+		SkipStaticAssets:                req.SkipStaticAssets,
+		SkipReflectedXSS:                req.SkipReflectedXSS,
+		SkipDOMXSS:                      req.SkipDOMXSS,
+		SkipAccessControl:               req.SkipAccessControl,
+		SkipIDOR:                        req.SkipIDOR,
+		SkipInfoDisclosure:              req.SkipInfoDisclosure,
+		EnableCommandInjection:          req.EnableCommandInjection,
+		CommandInjectionCallbackURL:     req.CommandInjectionCallbackURL,
+		CommandInjectionCallbackPollURL: req.CommandInjectionCallbackPollURL,
+		SkipWriteEndpoints:              req.SkipWriteEndpoints,
+		SkipDownloadEndpoints:           req.SkipDownloadEndpoints,
+		MaxDOMXSSEndpoints:              req.MaxDOMXSSEndpoints,
 	})
 	if err != nil {
 		s.writeScanError(w, err)

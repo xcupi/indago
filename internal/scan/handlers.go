@@ -76,7 +76,11 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	h[domain.JobDisclosure] = newDisclosureExecutor(c.store, eng, c.opts.Evidence, c.opts.Executor, c.log, findingsMu)
 	// OS command injection is a bounded raw-HTTP pass. It sends only harmless
 	// arithmetic markers and confirms only two independent executions.
-	h[domain.JobCommandInjection] = newCommandInjectionExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	commandInjection := newCommandInjectionExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	if sc != nil {
+		commandInjection.withCallback(sc.Config.CommandInjectionCallbackURL, sc.Config.CommandInjectionCallbackPollURL)
+	}
+	h[domain.JobCommandInjection] = commandInjection
 	return h
 }
 
