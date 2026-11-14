@@ -218,6 +218,17 @@ func (e *commandInjectionExecutor) Handle(ctx context.Context, job *domain.TestJ
 		}
 	}
 
+	if timeConfirmed >= 2 {
+		if e.tryOutputRedirection(ctx, job, ep, focus, baseValue, &d) {
+			d.Verdict = domain.VerdictConfirmed
+			d.ConfirmMethod = "redirect"
+			d.Reason = "two time delays confirmed execution and a web-readable file returned the marker"
+			e.persistCase(ctx, job, ep, focus, d, domain.TestCaseCompleted, domain.OutcomeSuccess, "confirmed blind OS command injection via output redirection")
+			e.correlate(ctx, job, ep, focus, d)
+			return nil
+		}
+	}
+
 	note := "no server-side command output observed"
 	if d.ConfirmedCount >= 2 {
 		d.Verdict = domain.VerdictConfirmed
@@ -442,7 +453,92 @@ func (e *commandInjectionExecutor) finishError(ctx context.Context, job *domain.
 	return fmt.Errorf("command-injection baseline failed: %s", msg)
 }
 
+// tryOutputRedirection turns blind execution into observable evidence when the
+// target serves a writable directory through an image/file endpoint. The
+// command writes a computed marker (not the raw payload) to a randomized file,
+// then the engine fetches that file through the discovered endpoint. This is
+// deliberately attempted only after two independent time delays have already
+// confirmed command execution.
+func (e *commandInjectionExecutor) tryOutputRedirection(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, focus *domain.Parameter, baseValue string, d *commandInjectionDetail) bool {
+	pages, err := e.store.Endpoints().ListByScan(ctx, ep.ScanID)
+	if err != nil {
+		return false
+	}
+	var reader *domain.Endpoint
+	var readerParam *domain.Parameter
+	for _, page := range pages {
+		if page == nil || page.Method != domain.MethodGET || originOf(page.URL) != originOf(ep.URL) {
+			continue
+		}
+		params, err := e.store.Parameters().ListByEndpoint(ctx, page.ID)
+		if err != nil {
+			continue
+		}
+		for _, p := range params {
+			if p == nil {
+				continue
+			}
+			name := strings.ToLower(p.Name)
+			if (name == "filename" || name == "file" || name == "path") && strings.Contains(strings.ToLower(page.URL), "image") {
+				reader, readerParam = page, p
+				break
+			}
+		}
+		if reader != nil {
+			break
+		}
+	}
+	if reader == nil || readerParam == nil {
+		return false
+	}
+	seed := time.Now().UnixNano()
+	name := fmt.Sprintf("indago-%d.txt", seed%1000000000)
+	expr := fmt.Sprintf("indago%d", (seed/17)%1000000)
+	marker := fmt.Sprintf("%s$((17*23))", expr)
+	expected := fmt.Sprintf("%s%d", expr, 17*23)
+	payload := fmt.Sprintf("%s||echo %s>/var/www/images/%s||", baseValue, marker, name)
+	params, err := e.store.Parameters().ListByEndpoint(ctx, ep.ID)
+	if err != nil {
+		return false
+	}
+	params = fillEmptyCommandParams(e.refreshParams(ctx, ep, params, focus), focus)
+	writeReq, err := buildRequest(ep, params, &injection{param: focus, value: payload})
+	if err != nil {
+		return false
+	}
+	writeResp, outcome, _ := e.do(ctx, writeReq)
+	if writeResp != nil {
+		ev, _ := e.persistEvidence(ctx, job.ScanID, writeResp, "command-injection output-redirection write")
+		d.EvidenceIDs = append(d.EvidenceIDs, ev...)
+	}
+	if outcome != domain.OutcomeSuccess {
+		return false
+	}
+	readParams, err := e.store.Parameters().ListByEndpoint(ctx, reader.ID)
+	if err != nil {
+		return false
+	}
+	readReq, err := buildRequest(reader, readParams, &injection{param: readerParam, value: name})
+	if err != nil {
+		return false
+	}
+	readResp, readOutcome, _ := e.do(ctx, readReq)
+	if readResp == nil || readOutcome != domain.OutcomeSuccess {
+		return false
+	}
+	ev, _ := e.persistEvidence(ctx, job.ScanID, readResp, "command-injection output-redirection read")
+	d.EvidenceIDs = append(d.EvidenceIDs, ev...)
+	if !strings.Contains(string(readResp.Body), expected) {
+		return false
+	}
+	d.ConfirmedCount = 2
+	return true
+}
+
 func commandInjectionSummary(d commandInjectionDetail) string {
+	if d.ConfirmMethod == "redirect" {
+		return "Blind command execution was confirmed and the command output was retrieved from a web-readable file."
+	}
 	if d.ConfirmMethod == "time" {
 		return "Two independent sleep payloads delayed the target response; command execution is blind."
 	}
