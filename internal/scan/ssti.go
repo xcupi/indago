@@ -93,6 +93,11 @@ func sstiVariants() []sstiVariant {
 		{prefix: "*{", suffix: "}", expr: "11*13", expected: "143"},
 		{prefix: "{", suffix: "}", expr: "7*7", expected: "49"},
 		{prefix: "{", suffix: "}", expr: "11*13", expected: "143"},
+		// Velocity uses a statement followed by a reference, not a bare
+		// expression; keep the two probes distinct so a reflected payload
+		// cannot supply both values.
+		{prefix: "#set($indago=", suffix: ")$indago", expr: "7*7", expected: "49"},
+		{prefix: "#set($indago=", suffix: ")$indago", expr: "11*13", expected: "143"},
 	}
 	return variants
 }
