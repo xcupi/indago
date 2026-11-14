@@ -75,6 +75,9 @@ func classifySkip(note string) skipReason {
 	case strings.Contains(n, "browser verification supports") || strings.Contains(n, "not supported for browser document replay"):
 		return skipReason{"verification_unsupported", sevMedium, "Browser verification does not support this request shape",
 			"Candidates were not confirmed in a browser. Verify these endpoints manually."}
+	case strings.Contains(n, "xxe skipped:"):
+		return skipReason{"xxe_not_applicable", sevInfo, "XXE skipped: no observed XML input or callback",
+			"XXE was enabled, but discovery had no XML request body for this endpoint or no collaborator callback was configured. The engine intentionally did not guess an XML parser or send an XML payload."}
 	case strings.Contains(n, "no supported template stack fingerprint"):
 		return skipReason{"ssti_not_applicable", sevInfo, "SSTI skipped: no supported template stack fingerprint",
 			"The baseline response did not identify a template-engine stack (for example PHP/Twig, Java/Spring, Express, Django/Flask, or Rails). The engine intentionally sent no template payloads to an unknown stack."}
@@ -182,6 +185,7 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 			Note: "Server-side redirect detection is not implemented."},
 		{Key: "command_injection", Label: "OS command injection", Enabled: cfg.EnableCommandInjection},
 		{Key: "ssti", Label: "Server-side template injection", Enabled: cfg.EnableSSTI},
+		{Key: "xxe", Label: "XML external entity", Enabled: cfg.EnableXXE},
 	}
 	capByClass := map[domain.VulnClass]*coverageCapability{
 		domain.VulnReflectedXSS:     &out.Capabilities[0],
@@ -192,6 +196,7 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		domain.VulnOpenRedirect:     &out.Capabilities[5],
 		domain.VulnCommandInjection: &out.Capabilities[6],
 		domain.VulnSSTI:             &out.Capabilities[7],
+		domain.VulnXXE:              &out.Capabilities[8],
 	}
 	groups := map[string]*coverageReason{}
 	seen := map[string]map[string]bool{}
@@ -258,6 +263,10 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 	if !st.Scan.Config.EnableCommandInjection {
 		out.Warnings = append(out.Warnings, coverageWarning{"command_injection_disabled", sevInfo,
 			"OS command injection was not enabled for this scan; its bounded marker pass was intentionally not run."})
+	}
+	if !st.Scan.Config.EnableXXE {
+		out.Warnings = append(out.Warnings, coverageWarning{"xxe_disabled", sevInfo,
+			"XXE was not enabled for this scan; its XML-body callback pass was intentionally not run."})
 	}
 	anonymous := st.Session == nil || st.Session.Mode == domain.AuthAnonymous
 	if anonymous {

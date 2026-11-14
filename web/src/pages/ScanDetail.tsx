@@ -63,6 +63,7 @@ export default function ScanDetail({ id }: { id: string }) {
     disclosure: true,
     command: false,
     ssti: false,
+    xxe: false,
   });
 
   useEffect(() => {
@@ -87,6 +88,7 @@ export default function ScanDetail({ id }: { id: string }) {
       disclosure: !c.skip_info_disclosure,
       command: Boolean(c.enable_command_injection),
       ssti: Boolean(c.enable_ssti),
+      xxe: Boolean(c.enable_xxe),
     });
   }, [scan.data?.id, scan.data?.updated_at]);
 
@@ -139,6 +141,7 @@ export default function ScanDetail({ id }: { id: string }) {
           skip_info_disclosure: !caps.disclosure,
           enable_command_injection: caps.command,
           enable_ssti: caps.ssti,
+          enable_xxe: caps.xxe,
         },
       });
       setCapOpen(false);
@@ -371,6 +374,7 @@ export default function ScanDetail({ id }: { id: string }) {
               ["disclosure", "Information disclosure", "Sensitive files, SCM/git exposure and error probes."],
               ["command", "OS command injection", "Opt-in marker probes; confirms two independent executions."],
               ["ssti", "Server-side template injection", "Opt-in arithmetic template probes; confirms two independent evaluations."],
+              ["xxe", "XML external entity", "Opt-in XML-body probes; only observed XML endpoints with a callback."],
             ].map(([key, label, hint]) => (
               <label key={key} className="flex items-start justify-between gap-4 rounded-md border border-border p-3">
                 <span>

@@ -522,7 +522,11 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			if !method.IsValid() {
 				method = domain.MethodGET
 			}
-			if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: ev.URL, Method: method, Source: domain.SourceBrowserNetwork, ContentType: ev.ContentType}); err != nil {
+			body := ""
+			if isXMLContentType(ev.ContentType) {
+				body = ev.PostData
+			}
+			if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: ev.URL, Method: method, Source: domain.SourceBrowserNetwork, ContentType: ev.ContentType, RequestBody: body}); err != nil {
 				if errors.Is(err, ErrLimitReached) {
 					return nil
 				}
@@ -563,6 +567,15 @@ func isJSONContentType(raw string) bool {
 	}
 	mediaType = strings.ToLower(mediaType)
 	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+}
+
+func isXMLContentType(raw string) bool {
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return false
+	}
+	mediaType = strings.ToLower(mediaType)
+	return mediaType == "application/xml" || mediaType == "text/xml" || strings.HasSuffix(mediaType, "+xml")
 }
 
 // ---------------------------------------------------------------------------

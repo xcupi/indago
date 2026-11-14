@@ -82,6 +82,11 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	}
 	h[domain.JobCommandInjection] = commandInjection
 	h[domain.JobSSTI] = newSSTIExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	xxe := newXXEExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	if sc != nil {
+		xxe.withCallback(sc.Config.XXECallbackURL, sc.Config.XXECallbackPollURL)
+	}
+	h[domain.JobXXE] = xxe
 	return h
 }
 
@@ -139,5 +144,6 @@ func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 		domain.JobAccessControl:    noop(domain.JobAccessControl),
 		domain.JobCommandInjection: noop(domain.JobCommandInjection),
 		domain.JobSSTI:             noop(domain.JobSSTI),
+		domain.JobXXE:              noop(domain.JobXXE),
 	}
 }

@@ -1,0 +1,1 @@
+ALTER TABLE endpoints ADD COLUMN request_body TEXT NOT NULL DEFAULT '';

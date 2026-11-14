@@ -35,12 +35,15 @@ const (
 	// VulnSSTI is server-side template injection: a parameter value is
 	// evaluated by a template engine rather than returned literally.
 	VulnSSTI VulnClass = "ssti"
+	// VulnXXE is XML external entity processing: an XML parser resolves a
+	// user-supplied external entity.
+	VulnXXE VulnClass = "xxe"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnXXE:
 		return true
 	default:
 		return false

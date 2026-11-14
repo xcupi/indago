@@ -337,6 +337,7 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 		Method:      method,
 		Source:      ep.Source,
 		ContentType: ep.ContentType,
+		RequestBody: capEndpointRequestBody(ep.RequestBody),
 		Fingerprint: key,
 		CreatedAt:   now,
 	}
@@ -580,4 +581,13 @@ func (c *Collector) enqueueJob(ctx context.Context, target domain.JobTarget) err
 	c.jobCount++
 	c.mu.Unlock()
 	return nil
+}
+
+const maxEndpointRequestBody = 8192
+
+func capEndpointRequestBody(body string) string {
+	if len(body) <= maxEndpointRequestBody {
+		return body
+	}
+	return body[:maxEndpointRequestBody]
 }

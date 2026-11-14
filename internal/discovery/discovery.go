@@ -43,6 +43,9 @@ type EndpointCandidate struct {
 	Method      domain.HTTPMethod
 	Source      domain.DiscoverySource
 	ContentType string
+	// RequestBody is populated only for observed XML requests. The collector
+	// caps it and never logs or exposes it through the API.
+	RequestBody string
 	// Provenance is set only for endpoints guessed by a wordlist (recon): it
 	// says which list and which level produced the guess, so a record can
 	// distinguish "linked" (crawler) from "guessed" (wordlist). Nil for every

@@ -270,12 +270,14 @@ const (
 	// It sends only arithmetic template expressions and requires two
 	// independent computed results before confirming.
 	JobSSTI JobType = "ssti"
+	// JobXXE probes one XML request body for external-entity processing.
+	JobXXE JobType = "xxe"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobXXE:
 		return true
 	default:
 		return false

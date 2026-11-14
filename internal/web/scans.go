@@ -292,6 +292,9 @@ type createScanReq struct {
 	SkipInfoDisclosure              bool   `json:"skip_info_disclosure"`
 	EnableCommandInjection          bool   `json:"enable_command_injection"`
 	EnableSSTI                      bool   `json:"enable_ssti"`
+	EnableXXE                       bool   `json:"enable_xxe"`
+	XXECallbackURL                  string `json:"xxe_callback_url"`
+	XXECallbackPollURL              string `json:"xxe_callback_poll_url"`
 	CommandInjectionCallbackURL     string `json:"command_injection_callback_url"`
 	CommandInjectionCallbackPollURL string `json:"command_injection_callback_poll_url"`
 	SkipWriteEndpoints              bool   `json:"skip_write_endpoints"`
@@ -390,6 +393,9 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		SkipInfoDisclosure:              req.SkipInfoDisclosure,
 		EnableCommandInjection:          req.EnableCommandInjection,
 		EnableSSTI:                      req.EnableSSTI,
+		EnableXXE:                       req.EnableXXE,
+		XXECallbackURL:                  req.XXECallbackURL,
+		XXECallbackPollURL:              req.XXECallbackPollURL,
 		CommandInjectionCallbackURL:     req.CommandInjectionCallbackURL,
 		CommandInjectionCallbackPollURL: req.CommandInjectionCallbackPollURL,
 		SkipWriteEndpoints:              req.SkipWriteEndpoints,
@@ -467,13 +473,16 @@ type reconfigureReq struct {
 // the scan's current config and overlays only the four runtime fields, so the
 // crawl-extent controls set at creation are never clobbered.
 type capabilitiesReq struct {
-	SkipReflectedXSS       bool `json:"skip_reflected_xss"`
-	SkipDOMXSS             bool `json:"skip_dom_xss"`
-	SkipAccessControl      bool `json:"skip_access_control"`
-	SkipIDOR               bool `json:"skip_idor"`
-	SkipInfoDisclosure     bool `json:"skip_info_disclosure"`
-	EnableCommandInjection bool `json:"enable_command_injection"`
-	EnableSSTI             bool `json:"enable_ssti"`
+	SkipReflectedXSS       bool   `json:"skip_reflected_xss"`
+	SkipDOMXSS             bool   `json:"skip_dom_xss"`
+	SkipAccessControl      bool   `json:"skip_access_control"`
+	SkipIDOR               bool   `json:"skip_idor"`
+	SkipInfoDisclosure     bool   `json:"skip_info_disclosure"`
+	EnableCommandInjection bool   `json:"enable_command_injection"`
+	EnableSSTI             bool   `json:"enable_ssti"`
+	EnableXXE              bool   `json:"enable_xxe"`
+	XXECallbackURL         string `json:"xxe_callback_url"`
+	XXECallbackPollURL     string `json:"xxe_callback_poll_url"`
 }
 
 // handleUpdateScanCapabilities edits the attack selection of a draft scan.
@@ -504,6 +513,9 @@ func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Req
 	sc.Config.SkipInfoDisclosure = req.SkipInfoDisclosure
 	sc.Config.EnableCommandInjection = req.EnableCommandInjection
 	sc.Config.EnableSSTI = req.EnableSSTI
+	sc.Config.EnableXXE = req.EnableXXE
+	sc.Config.XXECallbackURL = req.XXECallbackURL
+	sc.Config.XXECallbackPollURL = req.XXECallbackPollURL
 	sc.UpdatedAt = time.Now()
 	if err := s.store.Scans().Update(r.Context(), sc); err != nil {
 		s.writeInternalError(w, "update scan capabilities", err)

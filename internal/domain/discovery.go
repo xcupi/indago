@@ -12,6 +12,10 @@ type Endpoint struct {
 	Method      HTTPMethod      `json:"method"`
 	Source      DiscoverySource `json:"source"`
 	ContentType string          `json:"content_type,omitempty"`
+	// RequestBody is a capped copy of the XML request body observed from the
+	// browser network. It is deliberately not serialized in API responses;
+	// it is used only by the XXE engine after an applicability check.
+	RequestBody string `json:"-"`
 	// Fingerprint is a stable hash used to de-duplicate endpoints (set by the
 	// discovery layer in later phases; empty in Phase 0).
 	Fingerprint string    `json:"fingerprint,omitempty"`

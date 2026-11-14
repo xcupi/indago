@@ -402,19 +402,19 @@ func (r *scanRepo) Delete(ctx context.Context, id domain.ID) error {
 
 type endpointRepo struct{ db *sql.DB }
 
-const endpointCols = `id, scan_id, url, method, source, content_type, fingerprint, created_at`
+const endpointCols = `id, scan_id, url, method, source, content_type, request_body, fingerprint, created_at`
 
 func (r *endpointRepo) Create(ctx context.Context, e *domain.Endpoint) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO endpoints (`+endpointCols+`) VALUES (?,?,?,?,?,?,?,?)`,
-		e.ID, e.ScanID, e.URL, e.Method, e.Source, e.ContentType, e.Fingerprint, ts(e.CreatedAt))
+		`INSERT INTO endpoints (`+endpointCols+`) VALUES (?,?,?,?,?,?,?,?,?)`,
+		e.ID, e.ScanID, e.URL, e.Method, e.Source, e.ContentType, e.RequestBody, e.Fingerprint, ts(e.CreatedAt))
 	return err
 }
 
 func scanEndpoint(sc scanner) (*domain.Endpoint, error) {
 	var e domain.Endpoint
 	var created string
-	if err := sc.Scan(&e.ID, &e.ScanID, &e.URL, &e.Method, &e.Source, &e.ContentType, &e.Fingerprint, &created); err != nil {
+	if err := sc.Scan(&e.ID, &e.ScanID, &e.URL, &e.Method, &e.Source, &e.ContentType, &e.RequestBody, &e.Fingerprint, &created); err != nil {
 		return nil, err
 	}
 	e.CreatedAt, _ = parseTS(created)

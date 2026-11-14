@@ -233,6 +233,11 @@ type ScanConfig struct {
 	// separate from command injection because the confirmation evidence is a
 	// template-evaluated result, not a shell-expanded marker.
 	EnableSSTI bool `json:"enable_ssti,omitempty"`
+	// EnableXXE opts into XML external-entity probing. It only runs against
+	// observed XML request bodies and requires an operator callback.
+	EnableXXE          bool   `json:"enable_xxe,omitempty"`
+	XXECallbackURL     string `json:"xxe_callback_url,omitempty"`
+	XXECallbackPollURL string `json:"xxe_callback_poll_url,omitempty"`
 	// CommandInjectionCallbackURL is an operator-provided HTTP callback used
 	// for blind out-of-band command injection. The poll URL, when set, is the
 	// endpoint that lists received requests (webhook.site-compatible).

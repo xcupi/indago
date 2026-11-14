@@ -374,6 +374,9 @@ type CreateScanParams struct {
 	SkipInfoDisclosure              bool
 	EnableCommandInjection          bool
 	EnableSSTI                      bool
+	EnableXXE                       bool
+	XXECallbackURL                  string
+	XXECallbackPollURL              string
 	CommandInjectionCallbackURL     string
 	CommandInjectionCallbackPollURL string
 	SkipWriteEndpoints              bool
@@ -571,6 +574,9 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.SkipInfoDisclosure = p.SkipInfoDisclosure
 	cfg.EnableCommandInjection = p.EnableCommandInjection
 	cfg.EnableSSTI = p.EnableSSTI
+	cfg.EnableXXE = p.EnableXXE
+	cfg.XXECallbackURL = p.XXECallbackURL
+	cfg.XXECallbackPollURL = p.XXECallbackPollURL
 	cfg.CommandInjectionCallbackURL = p.CommandInjectionCallbackURL
 	cfg.CommandInjectionCallbackPollURL = p.CommandInjectionCallbackPollURL
 	cfg.SkipWriteEndpoints = p.SkipWriteEndpoints
@@ -1402,7 +1408,7 @@ func (c *Controller) poolConfig(sc *domain.Scan) worker.Config {
 		ScanID: sc.ID,
 		Groups: []worker.GroupSpec{
 			{Name: GroupDiscovery, Types: []domain.JobType{domain.JobDiscovery}, Size: sc.Config.DiscoveryConcurrency},
-			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR, domain.JobAccessControl, domain.JobDisclosure, domain.JobCommandInjection, domain.JobSSTI}, Size: sc.Config.HTTPConcurrency},
+			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR, domain.JobAccessControl, domain.JobDisclosure, domain.JobCommandInjection, domain.JobSSTI, domain.JobXXE}, Size: sc.Config.HTTPConcurrency},
 			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify, domain.JobDOMXSS}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
 		},
 		LeaseDuration: c.opts.LeaseDuration,
