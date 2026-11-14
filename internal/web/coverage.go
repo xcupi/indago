@@ -267,6 +267,9 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 	if !st.Scan.Config.EnableXXE {
 		out.Warnings = append(out.Warnings, coverageWarning{"xxe_disabled", sevInfo,
 			"XXE was not enabled for this scan; its XML-body callback pass was intentionally not run."})
+	} else if len(out.Capabilities) > 8 && out.Capabilities[8].Tests == 0 {
+		out.Warnings = append(out.Warnings, coverageWarning{"xxe_no_applicable_endpoints", sevInfo,
+			"XXE was enabled, but discovery captured no XML request body; no XML parser was guessed or attacked."})
 	}
 	anonymous := st.Session == nil || st.Session.Mode == domain.AuthAnonymous
 	if anonymous {
