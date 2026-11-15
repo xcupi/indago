@@ -650,7 +650,7 @@ func newPage(c *Context, ph pageHandle) (*Page, error) {
 		}
 		if len(ev.PostData) > 0 {
 			bodyBytes := len(ev.PostData)
-			if !isJSONRequestContentType(ev.ContentType) || p.networkJSONBodyEvents >= maxObservedJSONBodyEventsPerPage || p.networkJSONBodyBytes+bodyBytes > maxObservedJSONBodyBytesPerPage {
+			if !isCapturedRequestBodyContentType(ev.ContentType) || p.networkJSONBodyEvents >= maxObservedJSONBodyEventsPerPage || p.networkJSONBodyBytes+bodyBytes > maxObservedJSONBodyBytesPerPage {
 				ev.PostData = ""
 			} else {
 				p.networkJSONBodyEvents++
