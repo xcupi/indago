@@ -66,6 +66,11 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	dom.userAgent = ua
 	dom.limiter = limiter
 	dom.proxyPool = append([]string(nil), proxyPool...)
+	// The SAME scope-enforcing engine every other job uses, so the DOM pass's
+	// content-type preflight is rate-limited, carries the scan's session, and is
+	// scope-checked exactly like its browser navigations are. nil is tolerated
+	// (tests pass nil): the preflight then simply does not run.
+	dom.httpEngine = eng
 	h[domain.JobDOMXSS] = dom
 	// IDOR shares findingsMu for the same reason: its correlation reads and
 	// writes the SAME Findings() rows. It is a raw-HTTP engine (GET/HEAD

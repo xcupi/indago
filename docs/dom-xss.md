@@ -283,7 +283,20 @@ honest gates now exist:
   media type (`image/*`, `application/json`, `application/xml`, `text/plain`,
   `application/pdf`, …) records one **skipped** TestCase saying the source is not
   applicable and makes no navigation. An empty/unknown content type is still
-  probed — an unrecorded type is not evidence of "no DOM here".
+  probed — an unrecorded type is not evidence of "no DOM here" — but an endpoint
+  discovered by `browser_network` or `robots` routinely has no recorded type even
+  when it serves JSON, plain text, a script or an image, and probing those
+  through a real browser meant a browser context plus 5-7 navigations per
+  non-document endpoint (enough to burn a large scan's whole job budget). One
+  bounded preflight therefore settles an unknown type first
+  (`resolveDOMXSSContentType`): a **HEAD** through the scan's own scope-enforcing
+  engine, with a single **GET** retry only when HEAD was refused (405/501) or
+  answered without a trustworthy type. Only a 2xx/3xx response may decide the
+  skip (an error page's own media type describes the error), the URL is
+  scope-checked before the request is sent, and the resolved type is kept on that
+  job's `Endpoint` — `store.EndpointRepo` has no `Update`, so it is deliberately
+  not persisted. Every source then takes the not-applicable skip path without a
+  browser ever being opened.
 - `postMessageScript` attaches its opaque-origin sender to `document.body ||
   documentElement` (a frameset document has no body but does have a root) and
   resolves a distinct no-root status when neither exists. That status maps to

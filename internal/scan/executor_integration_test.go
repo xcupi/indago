@@ -46,10 +46,13 @@ func TestScanExecutesEveryJobAndPersistsResults(t *testing.T) {
 	// separate from the Reflected-XSS JobTest/JobVerify pipeline this test
 	// otherwise exercises — no browser is configured in this test's
 	// scan.Options, so every one of those probes is recorded Skipped (the
-	// SAME "no browser configured" skip verifyExecutor already uses).
-	// Split them out before applying the pre-existing, Reflected-XSS-only
-	// assertions below, and cross-check their count independently against
-	// the endpoint registry.
+	// SAME "no browser configured" skip verifyExecutor already uses). A probe
+	// whose endpoint had no recorded content type is settled first by ONE
+	// bounded HTTP preflight, so a non-document endpoint (this site's
+	// /sitemap.xml) records the more specific "not applicable" skip instead —
+	// either way no browser was opened. Split them out before applying the
+	// pre-existing, Reflected-XSS-only assertions below, and cross-check their
+	// count independently against the endpoint registry.
 	var domXSSCases, accessCases, disclosureCases, otherCases []*domain.TestCase
 	for _, tc := range cases {
 		switch tc.VulnClass {
@@ -75,8 +78,15 @@ func TestScanExecutesEveryJobAndPersistsResults(t *testing.T) {
 		t.Fatalf("dom-xss probe test cases = %d, want one per distinct GET/HEAD endpoint (%d)", len(domXSSCases), wantDOMXSS)
 	}
 	for _, tc := range domXSSCases {
-		if tc.Status != domain.TestCaseSkipped || !strings.Contains(tc.Note, "no browser configured") {
+		// Two legitimate skip reasons, neither of which opened a browser: the
+		// endpoint's document status is unknown (or it IS a document) and no
+		// browser is configured, or the content-type preflight established
+		// that the response is not a document at all.
+		if tc.Status != domain.TestCaseSkipped {
 			t.Fatalf("dom-xss probe without a configured browser should be skipped, not run: %+v", tc)
+		}
+		if !strings.Contains(tc.Note, "no browser configured") && !strings.Contains(tc.Note, "not applicable") {
+			t.Fatalf("dom-xss probe skip note must name one of the two skip reasons: %+v", tc)
 		}
 	}
 	cases = otherCases
@@ -224,6 +234,12 @@ func TestScanExecutesPostWhenAllowed(t *testing.T) {
 			sawMutated = true // mutated: the marker, injected into msg only
 		case b == "GET ":
 			// the GET endpoint discovery registers for the form's action URL
+		case b == "HEAD ":
+			// the DOM-XSS content-type preflight for that same GET endpoint.
+			// The DOM pass only enqueues GET/HEAD-navigable endpoints, and a
+			// HEAD is strictly less traffic than the browser navigation it
+			// replaces, so it is the one method this test may see beyond the
+			// GET and the two POSTs.
 		default:
 			t.Fatalf("unexpected request %q", b)
 		}

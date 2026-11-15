@@ -49,6 +49,7 @@ import (
 	"github.com/indago/indago/internal/ratelimit"
 	"html"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
@@ -61,6 +62,7 @@ import (
 	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
+	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/verification"
 	"github.com/indago/indago/internal/worker"
@@ -1595,6 +1597,12 @@ type domXSSExecutor struct {
 	// read). One loader per scan is what makes the total-byte ceiling and the
 	// "same script analysed once" property hold across endpoints and workers.
 	scripts *detection.DOMXSSScriptLoader
+	// httpEngine is the scan's scope-enforcing HTTP engine, used for ONE cheap
+	// content-type preflight per endpoint whose discovered ContentType is
+	// unknown (see resolveDOMXSSContentType). nil is a supported value — every
+	// test and any caller that constructs the executor without attaching an
+	// engine keeps the old "unknown type, so probe it" behavior.
+	httpEngine httpengine.Engine
 }
 
 func newDOMXSSExecutor(st store.Store, mgr *browser.Manager, ev evidence.Store, scope domain.Scope, log *slog.Logger, findingsMu *sync.Mutex) *domXSSExecutor {
@@ -1610,6 +1618,99 @@ func (e *domXSSExecutor) nextProxy() string {
 		return ""
 	}
 	return e.proxyPool[(e.proxyNext.Add(1)-1)%uint64(len(e.proxyPool))]
+}
+
+// withHTTP attaches the scan's HTTP engine for the content-type preflight. It is
+// a setter rather than a seventh constructor parameter so every existing caller
+// (and every test) keeps compiling unchanged; a nil engine simply disables the
+// preflight.
+func (e *domXSSExecutor) withHTTP(eng httpengine.Engine) *domXSSExecutor {
+	e.httpEngine = eng
+	return e
+}
+
+// domXSSContentTypeProbeTimeout bounds the preflight request. It is deliberately
+// far below the browser's navigation timeout: the probe exists to SAVE time, so
+// a slow or hanging endpoint must fall through to the old "unknown, probe it
+// with the browser" behavior quickly instead of adding its own delay.
+const domXSSContentTypeProbeTimeout = 5 * time.Second
+
+// domXSSContentTypeProbe is one preflight answer: the response status and the
+// media type it declared (empty when it declared none).
+type domXSSContentTypeProbe struct {
+	Status      int
+	ContentType string
+}
+
+// trustworthy reports whether this answer may DECIDE the DOM-XSS skip. Only a
+// successfully served response that actually declared a type qualifies: a
+// 4xx/5xx page's own media type describes the error (a JSON API answering 405 to
+// HEAD says nothing about the document it serves), and a missing header says
+// nothing at all — in both cases the endpoint stays "unknown" and is probed
+// exactly as before.
+func (p domXSSContentTypeProbe) trustworthy() bool {
+	return p.ContentType != "" && p.Status >= 200 && p.Status < 400
+}
+
+// fetchDOMXSSContentType runs ONE bounded preflight request and returns what it
+// answered. Every error, cancellation and malformed response is reported as an
+// empty probe: a preflight is best-effort and can never fail the job.
+func (e *domXSSExecutor) fetchDOMXSSContentType(ctx context.Context, method, rawURL string) domXSSContentTypeProbe {
+	pctx, cancel := context.WithTimeout(ctx, domXSSContentTypeProbeTimeout)
+	defer cancel()
+	req := httpengine.NewRequest(method, rawURL)
+	// Bounded inside Do as well, so the client's own (long) timeout cannot
+	// outlive the probe's budget.
+	req.Timeout = domXSSContentTypeProbeTimeout
+	resp, err := e.httpEngine.Do(pctx, req)
+	if err != nil || resp == nil {
+		return domXSSContentTypeProbe{}
+	}
+	return domXSSContentTypeProbe{Status: resp.Status, ContentType: strings.TrimSpace(resp.Headers.Get("Content-Type"))}
+}
+
+// resolveDOMXSSContentType fills in an endpoint's MISSING content type before any
+// browser work, so a non-document endpoint takes the existing not-applicable skip
+// path instead of opening a browser context and running 5-7 navigations against a
+// resource that can never host a DOM.
+//
+// Why this exists: `domXSSContentTypeAllowsDOM("")` is true on purpose — an
+// unrecorded type is not evidence of "no DOM here". But endpoints registered by
+// browser_network or robots often carry no type at all even when they serve
+// JSON, plain text, a script or an image, so every one of them was treated as a
+// candidate HTML document and probe-driven through a real browser. That is what
+// turned large scans into 300s timeouts.
+//
+// The probe is bounded and conservative:
+//   - only when the endpoint's recorded type is empty (a recorded type is never
+//     second-guessed) and an engine is attached;
+//   - the endpoint URL must pass the same scope gate every other request does,
+//     before a single request is sent;
+//   - HEAD first (no body transferred), with ONE GET retry only when HEAD was
+//     refused or answered without a trustworthy type — that is exactly the case
+//     a 405/501-only server, or one that omits representation headers on HEAD,
+//     needs;
+//   - the request goes through the scan's own engine (its rate limiter, cookies
+//     and scope enforcement), so it introduces no new network path.
+//
+// The resolved type is set on this job's Endpoint copy, which every source in the
+// job shares. It is not persisted: store.EndpointRepo has no Update, so keeping
+// it job-local is the honest option (a later job re-probes one cheap HEAD).
+func (e *domXSSExecutor) resolveDOMXSSContentType(ctx context.Context, ep *domain.Endpoint) {
+	if ep == nil || e.httpEngine == nil || strings.TrimSpace(ep.ContentType) != "" {
+		return
+	}
+	if ctx.Err() != nil || !e.scope.Permits(ep.URL).Allowed {
+		return
+	}
+	probe := e.fetchDOMXSSContentType(ctx, http.MethodHead, ep.URL)
+	if !probe.trustworthy() && ctx.Err() == nil {
+		probe = e.fetchDOMXSSContentType(ctx, http.MethodGet, ep.URL)
+	}
+	if !probe.trustworthy() {
+		return
+	}
+	ep.ContentType = probe.ContentType
 }
 
 var _ worker.Handler = (*domXSSExecutor)(nil)
@@ -1635,15 +1736,32 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 		return fmt.Errorf("%w: endpoint is out of scope", worker.ErrPermanent)
 	}
 
-	if e.browser == nil {
-		for _, source := range dj.sourceList() {
+	// Settle an UNKNOWN content type with one bounded HTTP request before any
+	// source runs. A discovered endpoint from browser_network or robots often
+	// has no recorded type even when it serves JSON, plain text, a script or an
+	// image; treating that as "might be HTML" (domXSSContentTypeAllowsDOM) made
+	// every source below open a browser context and run its own navigations
+	// against a resource that can never host a DOM. The resolved type is set on
+	// this job's Endpoint, so each source hits the not-applicable skip path and
+	// no browser is ever opened.
+	e.resolveDOMXSSContentType(ctx, ep)
+
+	for _, source := range dj.sourceList() {
+		// "No DOM here" outranks "no browser configured": a non-document
+		// endpoint can never host a DOM whichever browser is around, and this
+		// decision is taken before any browser object is touched. Both answers
+		// are recorded per source, so coverage reporting stays one TestCase per
+		// source and a browserless scan keeps its existing skip semantics.
+		if !domXSSContentTypeAllowsDOM(strings.TrimSpace(ep.ContentType)) {
+			e.skipDOMXSSNotApplicable(ctx, job, ep, source)
+			continue
+		}
+		if e.browser == nil {
 			tc := e.newTestCase(ctx, job, ep.URL)
 			tc.Status = domain.TestCaseSkipped
 			e.finishTestCase(ctx, tc, nil, "dom-xss probe skipped: no browser configured for this scan (source "+string(source)+")")
+			continue
 		}
-		return nil
-	}
-	for _, source := range dj.sourceList() {
 		if err := e.handleDOMXSSSource(ctx, job, ep, source); err != nil {
 			if isBrowserScopeBlocked(err) {
 				// The browser scope gate aborted a navigation (often an
@@ -1658,6 +1776,18 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	return nil
 }
 
+// skipDOMXSSNotApplicable records the one skipped TestCase that says a source
+// does not apply to this endpoint because its response is not a document. It is
+// shared by Handle (the decision taken before any browser work) and
+// handleDOMXSSSource (the same boundary for a direct caller), so the predicate
+// and the wording cannot drift apart.
+func (e *domXSSExecutor) skipDOMXSSNotApplicable(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource) {
+	ct := strings.TrimSpace(ep.ContentType)
+	tc := e.newTestCase(ctx, job, ep.URL)
+	tc.Status = domain.TestCaseSkipped
+	e.finishTestCase(ctx, tc, nil, fmt.Sprintf("DOM-XSS %s probe not applicable: endpoint content type %q is not an HTML document, so there is no DOM for a client-side source to reach; not a clean negative, and no browser navigation was made", source, ct))
+}
+
 // handleDOMXSSSource runs one implemented DOM source for an endpoint-level
 // job. The endpoint job carries every source; this helper preserves the
 // per-source TestCase and verdict semantics while removing endpoint×source
@@ -1668,11 +1798,10 @@ func (e *domXSSExecutor) handleDOMXSSSource(ctx context.Context, job *domain.Tes
 	// decided BEFORE any browser context, selector discovery, or navigation:
 	// the crawler also registers image/asset URLs, and browser-probing those
 	// used to error (and retry into a dead job) instead of recording that the
-	// source simply does not apply.
-	if ct := strings.TrimSpace(ep.ContentType); !domXSSContentTypeAllowsDOM(ct) {
-		tc := e.newTestCase(ctx, job, ep.URL)
-		tc.Status = domain.TestCaseSkipped
-		e.finishTestCase(ctx, tc, nil, fmt.Sprintf("DOM-XSS %s probe not applicable: endpoint content type %q is not an HTML document, so there is no DOM for a client-side source to reach; not a clean negative, and no browser navigation was made", source, ct))
+	// source simply does not apply. Handle already takes this decision before
+	// it would touch a browser; this is the same boundary for a direct caller.
+	if !domXSSContentTypeAllowsDOM(strings.TrimSpace(ep.ContentType)) {
+		e.skipDOMXSSNotApplicable(ctx, job, ep, source)
 		return nil
 	}
 
