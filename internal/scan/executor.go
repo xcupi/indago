@@ -1019,8 +1019,15 @@ func capturedFrom(req *httpengine.Request, resp *httpengine.Response) *httpengin
 }
 
 // dumpRequest renders the request as an HTTP/1.1 message.
+//
+// Authorization is redacted unconditionally. The scanner now carries SPA
+// bearer tokens at the HTTP layer, and evidence is persisted, exported and
+// attached to reports: a request dump must never turn the evidence store into
+// a credential store. The header name is kept so the flow stays reproducible.
 func dumpRequest(c *httpengine.CapturedRequest) []byte {
 	var b bytes.Buffer
+	headers := c.Headers.Clone()
+	redactAuthorizationHeader(headers)
 	target := c.URL
 	host := ""
 	if u, err := url.Parse(c.URL); err == nil {
@@ -1031,13 +1038,26 @@ func dumpRequest(c *httpengine.CapturedRequest) []byte {
 	if host != "" {
 		fmt.Fprintf(&b, "Host: %s\r\n", host)
 	}
-	writeHeaders(&b, c.Headers)
+	writeHeaders(&b, headers)
 	b.WriteString("\r\n")
 	b.Write(c.Body)
 	return b.Bytes()
 }
 
 // dumpResponse renders the response as an HTTP/1.1 message.
+func redactAuthorizationHeader(h http.Header) {
+	for _, name := range []string{"Authorization", "Proxy-Authorization"} {
+		values := h.Values(name)
+		if len(values) == 0 {
+			continue
+		}
+		h.Del(name)
+		for range values {
+			h.Add(name, "<redacted>")
+		}
+	}
+}
+
 func dumpResponse(r *httpengine.Response) []byte {
 	var b bytes.Buffer
 	proto := r.Proto
