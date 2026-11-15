@@ -69,9 +69,12 @@ func TestIDOREnumerationNumericSetIsExact(t *testing.T) {
 	if len(env.findings()) != 0 {
 		t.Fatalf("same-principal enumeration created a finding: %+v", env.findings())
 	}
-	// identity + own baseline + five enumerated candidates.
-	if len(eng.seen()) != 7 {
-		t.Fatalf("requests = %v, want identity + baseline + 5 candidates", eng.seen())
+	// Every conventional identity path is probed (the fixture page names the
+	// caller by username only, so the bounded identity search is incomplete and
+	// runs to the end of the list), then the own baseline and five enumerated
+	// candidates.
+	if want := len(identityPaths) + 1 + 5; len(eng.seen()) != want {
+		t.Fatalf("requests = %v, want %d (identity paths + baseline + 5 candidates)", eng.seen(), want)
 	}
 	if d.ProbesLeft != maxIDORProbesPerScan-5 {
 		t.Fatalf("ProbesLeft = %d, want %d", d.ProbesLeft, maxIDORProbesPerScan-5)
@@ -145,9 +148,9 @@ func TestIDOREnumerationRespectsSharedBudget(t *testing.T) {
 	if !d.BudgetExhausted || d.ProbesLeft != 0 {
 		t.Fatalf("budget state = exhausted:%v left:%d, want exhausted with none left", d.BudgetExhausted, d.ProbesLeft)
 	}
-	// identity + baseline + exactly 3 candidate requests, never 7.
-	if len(eng.seen()) != 5 {
-		t.Fatalf("requests = %v, want identity + baseline + 3 budgeted candidates", eng.seen())
+	// identity paths + baseline + exactly 3 candidate requests, never 7.
+	if want := len(identityPaths) + 1 + 3; len(eng.seen()) != want {
+		t.Fatalf("requests = %v, want %d (identity paths + baseline + 3 budgeted candidates)", eng.seen(), want)
 	}
 }
 
@@ -217,10 +220,10 @@ func TestIDORLoginPageIsReportedOncePerScan(t *testing.T) {
 	if !strings.Contains(second.Reason, "already reported") {
 		t.Fatalf("site 2 must reference the scan's single report: %q", second.Reason)
 	}
-	// identity + baseline + ONE candidate for site 1, then identity is cached
-	// so site 2 costs baseline + ONE candidate.
-	if len(eng.seen()) != 5 {
-		t.Fatalf("requests = %v, want site1(identity+baseline+1) + site2(baseline+1)", eng.seen())
+	// identity paths + baseline + ONE candidate for site 1, then identity is
+	// cached so site 2 costs baseline + ONE candidate.
+	if want := len(identityPaths) + 2 + 2; len(eng.seen()) != want {
+		t.Fatalf("requests = %v, want %d (site1 identity paths+baseline+1, site2 baseline+1)", eng.seen(), want)
 	}
 }
 
