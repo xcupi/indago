@@ -273,9 +273,12 @@ func (c *Collector) Counts() (endpoints, params, jobs int) {
 }
 
 // AllowFetch implements fetchGuard: on an authenticated scan a discovered URL
-// that looks like it ends the session must be neither registered nor
-// requested. An operator-provided seed is explicit intent and always allowed;
-// an unauthenticated scan has no session to lose.
+// that names a session-termination action must be neither registered nor
+// requested. The guard (logout_guard.go) covers the action in the path
+// (/logout, /auth/sign-out), in a query parameter (?logout=1, ?action=logout)
+// and in an SPA route fragment (#/logout). An operator-provided seed is
+// explicit intent and always allowed; an unauthenticated scan has no session
+// to lose.
 func (c *Collector) AllowFetch(rawURL string, source domain.DiscoverySource) bool {
 	return !(c.authenticated && source != domain.SourceUserProvided && looksSessionTerminating(rawURL))
 }
@@ -311,17 +314,19 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 
 	// An authenticated scan's crawler-style sources (crawler, forms, browser
 	// network capture, sitemap, robots, content discovery) must not follow a
-	// link that looks like it logs the session out — e.g. a "Logout" link
-	// present in the nav of almost every authenticated page. Doing so would
-	// silently end the session mid-scan: every test after that point runs
-	// unauthenticated and the scan never finds anything behind the login it
-	// was specifically given a session to get past. An operator-provided
-	// seed URL is NEVER skipped here, even if it happens to match — that is
-	// explicit intent (e.g. deliberately testing the logout endpoint
-	// itself), not an accidental link-follow. Unauthenticated scans have no
-	// session to lose, so nothing is skipped for them either.
+	// link that logs the session out — e.g. a "Logout" link present in the
+	// nav of almost every authenticated page, a ?action=logout query, or an
+	// SPA route such as #/logout. Doing so would silently end the session
+	// mid-scan: every test after that point runs unauthenticated and the scan
+	// never finds anything behind the login it was specifically given a
+	// session to get past. An operator-provided seed URL is NEVER skipped
+	// here, even if it happens to match — that is explicit intent (e.g.
+	// deliberately testing the logout endpoint itself), not an accidental
+	// link-follow. Unauthenticated scans have no session to lose, so nothing
+	// is skipped for them either.
 	if !c.AllowFetch(info.Canonical, ep.Source) {
-		c.log.Debug("discovery: skipping likely session-terminating link", "url", info.Canonical, "source", ep.Source)
+		c.log.Debug("discovery: skipping session-terminating link",
+			"url", info.Canonical, "source", ep.Source, "reason", sessionTerminationReason(info.Canonical))
 		return "", nil
 	}
 

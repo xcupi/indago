@@ -285,11 +285,20 @@ type createScanReq struct {
 	// SkipStaticAssets drops crawler/browser-discovered static resources.
 	SkipStaticAssets bool `json:"skip_static_assets"`
 	// Capability switches; true omits that engine's jobs.
-	SkipReflectedXSS                bool   `json:"skip_reflected_xss"`
-	SkipDOMXSS                      bool   `json:"skip_dom_xss"`
-	SkipAccessControl               bool   `json:"skip_access_control"`
-	SkipIDOR                        bool   `json:"skip_idor"`
-	SkipInfoDisclosure              bool   `json:"skip_info_disclosure"`
+	SkipReflectedXSS   bool `json:"skip_reflected_xss"`
+	SkipDOMXSS         bool `json:"skip_dom_xss"`
+	SkipAccessControl  bool `json:"skip_access_control"`
+	SkipIDOR           bool `json:"skip_idor"`
+	SkipInfoDisclosure bool `json:"skip_info_disclosure"`
+	// Wave-1 engine switches: the four Skip* flags turn off passes that run
+	// by default; SSRFCallbackURL/SSRFCallbackPollURL are the operator's own
+	// OAST collaborator for the SSRF engine (engine-validated at use time).
+	SkipSSRF                        bool   `json:"skip_ssrf"`
+	SkipCORS                        bool   `json:"skip_cors"`
+	SkipOpenRedirect                bool   `json:"skip_open_redirect"`
+	SkipGraphQL                     bool   `json:"skip_graphql"`
+	SSRFCallbackURL                 string `json:"ssrf_callback_url"`
+	SSRFCallbackPollURL             string `json:"ssrf_callback_poll_url"`
 	EnableCommandInjection          bool   `json:"enable_command_injection"`
 	EnableSSTI                      bool   `json:"enable_ssti"`
 	EnableXXE                       bool   `json:"enable_xxe"`
@@ -393,6 +402,12 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		SkipAccessControl:               req.SkipAccessControl,
 		SkipIDOR:                        req.SkipIDOR,
 		SkipInfoDisclosure:              req.SkipInfoDisclosure,
+		SkipSSRF:                        req.SkipSSRF,
+		SkipCORS:                        req.SkipCORS,
+		SkipOpenRedirect:                req.SkipOpenRedirect,
+		SkipGraphQL:                     req.SkipGraphQL,
+		SSRFCallbackURL:                 req.SSRFCallbackURL,
+		SSRFCallbackPollURL:             req.SSRFCallbackPollURL,
 		EnableCommandInjection:          req.EnableCommandInjection,
 		EnableSSTI:                      req.EnableSSTI,
 		EnableXXE:                       req.EnableXXE,

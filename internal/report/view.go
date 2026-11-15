@@ -12,8 +12,10 @@ package report
 // internal/scan or internal/detection.
 
 import (
+	"bytes"
 	"encoding/json"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/indago/indago/internal/domain"
@@ -89,6 +91,17 @@ func VerifiedAtLabel(v domain.Verdict) string {
 	return "Verification run"
 }
 
+// CVSSLabel names a finding's CVSS line. The vector is a CLASS-LEVEL baseline
+// either way (see Classification), but on a finding that was not confirmed it
+// must not read as the score of a confirmed vulnerability — the same reason
+// SeverityLabel qualifies its own label.
+func CVSSLabel(v domain.Verdict) string {
+	if v == domain.VerdictConfirmed {
+		return "CVSS v3.1 (class baseline)"
+	}
+	return "CVSS v3.1 (class baseline — this finding is NOT confirmed)"
+}
+
 // EvidenceView is evidence METADATA with its role — never content or the blob
 // path. Baseline evidence is the unmodified request/response kept for
 // comparison; it is labelled so a value in it (q=hello) is never mistaken for
@@ -144,6 +157,26 @@ type AttemptView struct {
 	Evidence         []EvidenceView    `json:"evidence,omitempty"`
 }
 
+// FindingPoC is one runnable curl command reproduced from the finding's own
+// stored HTTP request evidence. It exists so a reader can copy the exact
+// request out of a report instead of rebuilding it by hand.
+//
+// The credential rule is not optional: the command carries auth values as shell
+// variables ($INDAGO_TOKEN / $INDAGO_COOKIE), so a report, ticket or bug-bounty
+// form can be shared without leaking the session it was tested with. See
+// CurlOptions.IncludeCredentials for the explicit (and deliberately unused
+// here) opt-out.
+type FindingPoC struct {
+	// EvidenceID names the stored request the command was reproduced from, so
+	// the reader can open the exact artifact.
+	EvidenceID domain.ID `json:"evidence_id"`
+	// Command is the curl invocation (may span lines for readability).
+	Command string `json:"curl"`
+	// Note is a one-line caveat rendered with the command, e.g. that the
+	// credentials are shell variables the reader must export first.
+	Note string `json:"note,omitempty"`
+}
+
 // FindingView is a finding as presented: its section, the candidate whose
 // browser verification succeeded (confirmed findings only), every attempt kept
 // as a child diagnostic, and role-ordered evidence.
@@ -151,6 +184,18 @@ type FindingView struct {
 	Section   Section `json:"section"`
 	Method    string  `json:"method,omitempty"`
 	ParamName string  `json:"parameter_name,omitempty"`
+	// Classification is this finding's class-level CWE + CVSS v3.1 baseline
+	// (see Classify), nil for a class the table does not know — an unknown
+	// class is reported as unclassified, never given an invented weakness or
+	// score. The vector is a documented BASELINE, not a measurement of this
+	// target's impact; Classification.Note says so and ships with it.
+	Classification *Classification `json:"classification,omitempty"`
+	// CurlPoC reproduces the finding's stored HTTP request evidence as one
+	// runnable curl command with credentials redacted to shell variables.
+	// Nil when the caller supplied no request blob content (Data.
+	// RequestEvidence) or the finding has no request evidence of its own —
+	// a PoC is never synthesized from a response or a candidate value.
+	CurlPoC *FindingPoC `json:"curl_poc,omitempty"`
 	// ReviewReason is set only when Section is needs_review BECAUSE a Rejected
 	// verdict's own candidates give reason to doubt the negative is clean (see
 	// findingReviewReason) — empty for every other case, including the
@@ -347,9 +392,32 @@ func FindingSection(f *domain.Finding) Section {
 
 // NewFindingView derives the presentation of f. evidence resolves evidence IDs
 // to their metadata; an ID that does not resolve is skipped, never invented.
+//
+// It cannot render a curl PoC: that needs the stored request BLOB content,
+// which this package never reads itself. Callers holding the blobs use
+// NewFindingViewWithRequests instead.
 func NewFindingView(f *domain.Finding, evidence map[domain.ID]*domain.Evidence) FindingView {
+	return newFindingView(f, evidence, nil)
+}
+
+// NewFindingViewWithRequests is NewFindingView plus the stored HTTP request
+// messages (message/http blobs, keyed by evidence ID) the PoC is reproduced
+// from. Passing nil requests is exactly NewFindingView.
+//
+// The map is data the caller already holds, so this stays a pure derivation:
+// no I/O, no network, no clock. A blob that is missing, unparseable or not
+// actually a request is skipped — the view then simply carries no PoC rather
+// than a made-up one.
+func NewFindingViewWithRequests(f *domain.Finding, evidence map[domain.ID]*domain.Evidence, requests map[domain.ID][]byte) FindingView {
+	return newFindingView(f, evidence, requests)
+}
+
+func newFindingView(f *domain.Finding, evidence map[domain.ID]*domain.Evidence, requests map[domain.ID][]byte) FindingView {
 	d := decodeDetail(f.Detail)
 	v := FindingView{Section: FindingSection(f), Method: d.Method, ParamName: d.ParameterName, Combined: d.Combined, ParamNameB: d.ParameterBName}
+	if c, ok := Classify(f.VulnClass); ok {
+		v.Classification = &c
+	}
 	if reason, ok := findingReviewReason(f.Verdict, d); ok {
 		v.ReviewReason = reason
 		v.ReviewReasonLabel = reason.Label()
@@ -404,7 +472,92 @@ func NewFindingView(f *domain.Finding, evidence map[domain.ID]*domain.Evidence) 
 		}
 	}
 	v.Evidence = evidenceFor(f.EvidenceIDs)
+	v.CurlPoC = curlPoCFor(v, requests)
 	return v
+}
+
+// curlPoCFor reproduces the finding's stored HTTP request evidence as one curl
+// command, or returns nil when no request blob was supplied.
+//
+// Preference order is what makes the command a PoC for THIS finding: the
+// verified attempt's own request first (the exact request the browser
+// replayed), then another attempt's, then the finding's remaining evidence.
+// Baseline evidence is excluded on purpose — it is the UNMODIFIED request, so a
+// command reproduced from it would not reproduce the finding.
+func curlPoCFor(v FindingView, requests map[domain.ID][]byte) *FindingPoC {
+	if len(requests) == 0 {
+		return nil
+	}
+	for _, id := range pocRequestIDs(v) {
+		raw, ok := requests[id]
+		if !ok || len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+		// Default options: credentials are shell variables, never literal
+		// secrets, and redirects are not followed so the reader sees the
+		// response the evidence recorded.
+		opts := CurlOptions{Scheme: pocScheme(v)}
+		cmd, err := CurlPoCFromEvidence(raw, opts)
+		if err != nil {
+			// Not a reproducible request: try the next candidate rather
+			// than emit a broken command.
+			continue
+		}
+		note := ""
+		defaults := opts.withDefaults()
+		if strings.Contains(cmd, "$"+defaults.TokenVar) || strings.Contains(cmd, "$"+defaults.CookieVar) {
+			note = "credentials are shell variables ($" + defaults.TokenVar + " / $" + defaults.CookieVar + ") — export them before running; no literal secret is stored in this report"
+		}
+		if note != "" {
+			cmd = "# " + note + "\n" + cmd
+		}
+		return &FindingPoC{EvidenceID: id, Command: cmd, Note: note}
+	}
+	return nil
+}
+
+// pocRequestIDs lists the request-kind evidence IDs to try, most specific
+// first, skipping the baseline reference (see curlPoCFor).
+func pocRequestIDs(v FindingView) []domain.ID {
+	var out []domain.ID
+	seen := map[domain.ID]bool{}
+	add := func(evs []EvidenceView) {
+		for _, e := range evs {
+			if e.Kind != domain.EvidenceRequest || e.Role == domain.RoleBaseline || seen[e.ID] {
+				continue
+			}
+			seen[e.ID] = true
+			out = append(out, e.ID)
+		}
+	}
+	if v.Verified != nil {
+		add(v.Verified.Evidence)
+	}
+	for _, a := range v.Attempts {
+		add(a.Evidence)
+	}
+	add(v.Evidence)
+	return out
+}
+
+// pocScheme is the scheme to assume for a stored request whose target is
+// origin-form: the scheme of any absolute URL this finding recorded, else
+// https. Without it a plain-HTTP lab target would get a https command that
+// cannot connect.
+func pocScheme(v FindingView) string {
+	urls := []string{}
+	if v.Verified != nil {
+		urls = append(urls, v.Verified.URL)
+	}
+	for _, a := range v.Attempts {
+		urls = append(urls, a.URL)
+	}
+	for _, u := range urls {
+		if strings.HasPrefix(strings.ToLower(u), "http://") {
+			return "http"
+		}
+	}
+	return "https"
 }
 
 // sortEvidence orders by what matters when reading a finding: the browser

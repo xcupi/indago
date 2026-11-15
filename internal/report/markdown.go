@@ -107,7 +107,7 @@ func (MarkdownGenerator) Generate(w io.Writer, data Data) error {
 		}
 		for _, f := range inSec {
 			n++
-			writeFinding(&b, n, f, NewFindingView(f, idx))
+			writeFinding(&b, n, f, NewFindingViewWithRequests(f, idx, data.RequestEvidence))
 		}
 	}
 
@@ -146,6 +146,15 @@ func writeFinding(b *strings.Builder, n int, f *domain.Finding, v FindingView) {
 	fmt.Fprintf(b, "- **%s:** %s\n", SeverityLabel(f.Verdict), f.Severity)
 	fmt.Fprintf(b, "- **Confidence:** %s\n", f.Confidence)
 	fmt.Fprintf(b, "- **Vulnerability class:** %s\n", f.VulnClass)
+	if c := v.Classification; c != nil {
+		fmt.Fprintf(b, "- **CWE:** %s — <%s>\n", c.CWE, c.CWE.URL())
+		fmt.Fprintf(b, "- **%s:** %s\n", CVSSLabel(f.Verdict), c.CVSS.String())
+		if c.Note != "" {
+			fmt.Fprintf(b, "- **CVSS caveat:** %s\n", c.Note)
+		}
+	} else {
+		fmt.Fprintf(b, "- **CWE / CVSS:** not classified — this vulnerability class has no baseline in Indago's table; no score is invented.\n")
+	}
 	if f.EndpointID != "" {
 		fmt.Fprintf(b, "- **Endpoint:** `%s`\n", f.EndpointID)
 	}
@@ -206,6 +215,11 @@ func writeFinding(b *strings.Builder, n int, f *domain.Finding, v FindingView) {
 		for _, c := range v.Candidates {
 			writeFence(b, c.Value)
 		}
+	}
+
+	if p := v.CurlPoC; p != nil {
+		fmt.Fprintf(b, "**Reproducible curl PoC** (reproduced from stored request evidence `%s`):\n\n", p.EvidenceID)
+		writeCodeFence(b, "sh", p.Command)
 	}
 
 	if others := otherAttempts(v); len(others) > 0 {
@@ -298,7 +312,12 @@ func shortHash(h string) string {
 
 // writeFence writes s as a fenced code block whose fence is longer than any
 // backtick run inside s, so a candidate value can never break out of the block.
-func writeFence(b *strings.Builder, s string) {
+func writeFence(b *strings.Builder, s string) { writeCodeFence(b, "", s) }
+
+// writeCodeFence is writeFence with a language tag (e.g. "sh"), so a rendered
+// curl command gets syntax highlighting without a value being able to escape
+// the block: the fence still grows past any backtick run inside s.
+func writeCodeFence(b *strings.Builder, lang, s string) {
 	longest, run := 0, 0
 	for _, r := range s {
 		if r == '`' {
@@ -315,7 +334,7 @@ func writeFence(b *strings.Builder, s string) {
 		n = 3
 	}
 	fence := strings.Repeat("`", n)
-	fmt.Fprintf(b, "%s\n%s\n%s\n\n", fence, s, fence)
+	fmt.Fprintf(b, "%s%s\n%s\n%s\n\n", fence, lang, s, fence)
 }
 
 // mdCell renders s inside a table cell: inline code with the pipe and any

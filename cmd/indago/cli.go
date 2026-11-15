@@ -529,6 +529,20 @@ func (c *cli) scanCreate(args []string) error {
 	enableAdminStep := fs.Bool("admin-step-probe", false, "opt in to the cases 35/36 admin-action probes: call the role-change endpoint with a NON-EXISTENT username, once with confirmed=true and once with the administrative Referer, and confirm ONLY when the caller is refused on the ordinary request while the variant reaches the handler and the anonymous control is refused; requires an authenticated session, cannot change any role — OFF by default (see docs/access-control.md)")
 	enableObjectFamily := fs.Bool("object-family-probe", false, "opt in to the case 34 object-family slice: read the page's own scripts for the endpoint that CREATES an object and the field that carries it, submit this scan's own marker, read the object the server names, and probe the two neighbouring ids; confirmed ONLY when a sibling differs from the caller's own document and discloses a credential; requires an authenticated session and POSTs a document the scan authored — OFF by default (see docs/idor.md)")
 	enableXSSLibrary := fs.Bool("xss-library", false, "opt in to the cheat-sheet library families (media source errors, autofocus handlers, details ontoggle, srcdoc, form javascript: actions) planned ON TOP OF the canonical candidates; still capped by the candidate profile and still confirmed only by a browser execution signal — OFF by default (see internal/detection/library.go)")
+	// Wave-1 engines. Command injection / SSTI / XXE are opt-in (their evidence
+	// is a server-side execution signal); SSRF, CORS, open redirect and GraphQL
+	// run by default and are switched OFF with their own -skip-* flag.
+	enableCommandInjection := fs.Bool("enable-command-injection", false, "opt in to the bounded OS command-injection pass: harmless arithmetic markers are sent into likely command sinks and a finding is confirmed only by two independent executions — OFF by default")
+	enableSSTI := fs.Bool("enable-ssti", false, "opt in to the server-side template-injection pass: a bounded template expression marker is evaluated and a finding is confirmed only by the COMPUTED result appearing in the response — OFF by default")
+	enableXXE := fs.Bool("enable-xxe", false, "opt in to the XML external-entity pass, which only runs against OBSERVED XML request bodies; it needs -xxe-callback and -xxe-poll (without them the engine records a clean skip, never a failure) — OFF by default")
+	skipSSRF := fs.Bool("skip-ssrf", false, "omit the SSRF pass (ON by default): URL-like parameters are probed with an operator-supplied OAST canary and confirmed only by a marker-bearing callback, never by a blind internal fetch")
+	skipCORS := fs.Bool("skip-cors", false, "omit the CORS misconfiguration pass (ON by default): a permissive policy is confirmed only when cross-origin credentials are actually readable")
+	skipOpenRedirect := fs.Bool("skip-open-redirect", false, "omit the open-redirect pass (ON by default): a redirect is confirmed only by an actual cross-origin Location — this is the SERVER-side redirect engine")
+	skipGraphQL := fs.Bool("skip-graphql", false, "omit the GraphQL introspection/exposure pass (ON by default)")
+	ssrfCallback := fs.String("ssrf-callback", "", "operator OAST collaborator base URL the target is asked to request, e.g. https://abc123.oast.example (absolute http(s); the engine refuses a loopback/private/instance-metadata callback and never substitutes one)")
+	ssrfPoll := fs.String("ssrf-poll", "", "where Indago READS the collaborator's received requests, e.g. your poll endpoint (absolute http(s)); required for OAST confirmation, and refused if it points at an instance-metadata address")
+	xxeCallback := fs.String("xxe-callback", "", "operator OAST collaborator base URL for the XXE entity, absolute http(s) (required with -enable-xxe for the pass to do anything)")
+	xxePoll := fs.String("xxe-poll", "", "where Indago READS the XXE collaborator's received requests, absolute http(s) (required together with -xxe-callback)")
 	var proxyPool stringList
 	fs.Var(&proxyPool, "proxy", "proxy to route this scan's traffic through — raw HTTP and browser verification alike (repeatable, round-robin; http://host:port, https://host:port, or socks5://host:port, optionally with embedded user:pass@ creds); operator-supplied infrastructure only, off by default (see AGENTS.md §2.3)")
 	randomizeTLS := fs.Bool("randomize-tls-fingerprint", false, "randomize the raw HTTP engine's TLS ClientHello (JA3) via uTLS instead of Go's own default — OFF by default (see AGENTS.md §2.3); MUTUALLY EXCLUSIVE with -proxy (Go's transport never consults a custom TLS dialer for a proxied connection); has no effect on browser verification, which already uses a real browser's own TLS stack")
@@ -543,7 +557,7 @@ func (c *cli) scanCreate(args []string) error {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-cors] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
@@ -568,6 +582,48 @@ func (c *cli) scanCreate(args []string) error {
 	}
 	if *enableXSSLibrary {
 		req["enable_xss_library"] = true
+	}
+	// Wave-1 engine selection. Only the non-default values are sent, so an
+	// omitted flag keeps the server's own default (SSRF/CORS/redirect/GraphQL
+	// ON, command injection/SSTI/XXE OFF).
+	if *enableCommandInjection {
+		req["enable_command_injection"] = true
+	}
+	if *enableSSTI {
+		req["enable_ssti"] = true
+	}
+	if *enableXXE {
+		req["enable_xxe"] = true
+	}
+	if *skipSSRF {
+		req["skip_ssrf"] = true
+	}
+	if *skipCORS {
+		req["skip_cors"] = true
+	}
+	if *skipOpenRedirect {
+		req["skip_open_redirect"] = true
+	}
+	if *skipGraphQL {
+		req["skip_graphql"] = true
+	}
+	// OAST collaborators come in pairs: the callback is the URL the target is
+	// asked to request, the poll URL is where Indago reads what arrived. One
+	// without the other can never confirm anything, so it is refused here
+	// instead of silently running a pass that cannot produce evidence.
+	if (*ssrfCallback == "") != (*ssrfPoll == "") {
+		return errors.New("-ssrf-callback and -ssrf-poll go together: the callback is the URL the target requests, -ssrf-poll is where Indago reads the received requests")
+	}
+	if *ssrfCallback != "" {
+		req["ssrf_callback_url"] = *ssrfCallback
+		req["ssrf_callback_poll_url"] = *ssrfPoll
+	}
+	if (*xxeCallback == "") != (*xxePoll == "") {
+		return errors.New("-xxe-callback and -xxe-poll go together: the callback is the URL the XML entity requests, -xxe-poll is where Indago reads the received requests")
+	}
+	if *xxeCallback != "" {
+		req["xxe_callback_url"] = *xxeCallback
+		req["xxe_callback_poll_url"] = *xxePoll
 	}
 	if *enableIDOREnum {
 		req["idor_enumerate"] = true

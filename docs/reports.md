@@ -9,7 +9,7 @@ never read as "the target is clean".
 
 | Format | Content | Use |
 | --- | --- | --- |
-| `json` | findings + presentation (verified candidate, attempts, role-labelled evidence) | machine consumers, re-processing |
+| `json` | findings + presentation (verified candidate, attempts, role-labelled evidence, CWE/CVSS classification, curl PoC) | machine consumers, re-processing |
 | `markdown` | the selected template as text | tickets, wikis, PRs |
 | `html` | the selected template as one self-contained page | viewing in a browser |
 | `pdf` | the `html` page printed by headless Chromium | client delivery, bounty submissions |
@@ -63,6 +63,37 @@ Class context (CWE, impact wording, remediation, references) is a fixed mapping
 per vulnerability class in `internal/report/templates.go`. The finding's own
 verdict, severity, confidence and evidence remain authoritative; the templates
 add framing, not new claims.
+
+## CWE/CVSS and reproducible curl PoC (technical layout)
+
+The technical `json`, `markdown` and `html` layouts carry two extra fields per
+finding, both derived from data the scan already stored:
+
+- **`classification`** — `{class, cwe{id,name}, cvss{vector,base_score,severity}, note}`
+  from `report.Classify(finding.VulnClass)`. The base score is COMPUTED from the
+  vector (CVSS v3.1 Roundup), never hand-typed, so the number and the vector
+  cannot disagree. It is a class-level BASELINE, not a measurement of this
+  target's impact: `note` says so and ships with every classification. A class
+  the table does not know renders as "not classified" — no weakness or score is
+  invented.
+- **`curl_poc`** — `{evidence_id, curl, note}`, one runnable command reproduced
+  from the finding's own stored HTTP request evidence (`message/http`). The
+  verified attempt's request is preferred, then any other attempt's, then the
+  finding's remaining request evidence. **Baseline evidence is never used**: it
+  is the unmodified request and could not reproduce the finding. When no request
+  blob is available the field is absent — a PoC is never synthesized from a
+  response or a candidate value.
+
+Credentials are redacted by default: `Authorization`/`Cookie`/API-key header
+values become shell variables (`-H "Authorization: Bearer $INDAGO_TOKEN"`,
+`-b "$INDAGO_COOKIE"`), and the command carries a leading comment saying to
+export them. A report is a document people forward, so no literal secret is
+written into it. The origin-form stored request target is resolved against the
+finding's own recorded URL scheme, so a plain-HTTP lab target gets an `http://`
+command rather than a `https://` one that cannot connect.
+
+The server reads at most 200 request blobs of at most 512 KiB each per report;
+a blob that cannot be read or is oversized simply omits that finding's PoC.
 
 ## PDF requirements
 

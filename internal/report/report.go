@@ -27,6 +27,13 @@ type Data struct {
 	// reference. Optional: without it a report lists evidence IDs only and
 	// cannot label roles or the verified candidate's artifacts.
 	Evidence []*domain.Evidence
+	// RequestEvidence carries the CONTENT of the stored HTTP request messages
+	// (message/http evidence blobs) keyed by evidence ID, so a finding can be
+	// rendered with a reproducible curl PoC. Optional and caller-supplied: the
+	// generators never read the evidence store themselves, so a report stays a
+	// pure function of its input. Missing entries simply mean that finding gets
+	// no PoC; nothing is ever synthesized from a response or a candidate value.
+	RequestEvidence map[domain.ID][]byte
 	// Selection and ScanFindings describe how Findings was chosen from the
 	// scan (zero values: unspecified — older callers). Every generator states
 	// them, so a "confirmed only" report can never be mistaken for the whole
@@ -216,7 +223,7 @@ func (JSONGenerator) Generate(w io.Writer, data Data) error {
 	idx := EvidenceIndex(data.Evidence)
 	out := make([]jsonFinding, 0, len(findings))
 	for _, f := range findings {
-		out = append(out, jsonFinding{Finding: f, FindingView: NewFindingView(f, idx)})
+		out = append(out, jsonFinding{Finding: f, FindingView: NewFindingViewWithRequests(f, idx, data.RequestEvidence)})
 	}
 	cov := coverageFor(data)
 	rep := jsonReport{

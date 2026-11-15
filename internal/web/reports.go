@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -150,6 +151,9 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Request CONTENT (not metadata) for the reproducible curl PoC, bounded:
+	// see requestEvidenceFor.
+	reqEvidence := s.requestEvidenceFor(lookup, findings)
 
 	endpoints, err := s.store.Endpoints().ListByScan(r.Context(), scanID)
 	if err != nil {
@@ -172,18 +176,19 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 	}
 	var buf bytes.Buffer
 	data := report.Data{
-		Project:      *proj,
-		Scan:         *sc,
-		Findings:     findings,
-		Evidence:     evMeta,
-		GeneratedAt:  now,
-		ToolVersion:  s.version,
-		Selection:    mode,
-		ScanFindings: len(all),
-		Completeness: coverage,
-		AISummary:    aiSummary,
-		Template:     tmpl,
-		Endpoints:    endpointURLs,
+		Project:         *proj,
+		Scan:            *sc,
+		Findings:        findings,
+		Evidence:        evMeta,
+		RequestEvidence: reqEvidence,
+		GeneratedAt:     now,
+		ToolVersion:     s.version,
+		Selection:       mode,
+		ScanFindings:    len(all),
+		Completeness:    coverage,
+		AISummary:       aiSummary,
+		Template:        tmpl,
+		Endpoints:       endpointURLs,
 	}
 	if format == domain.ReportPDF {
 		// Render the chosen template as HTML, then print it. The HTML is
@@ -410,6 +415,66 @@ func (s *Server) scanCompleteness(ctx context.Context, scanID domain.ID, state d
 		}
 	}
 	return c, nil
+}
+
+// Bounds on the request content a single report loads for its curl PoCs: a
+// report is a document, not an export, and a stored request message is small.
+const (
+	maxReportRequestBlobBytes = 512 << 10 // one request message
+	maxReportRequestBlobs     = 200       // requests read per report
+)
+
+// requestEvidenceFor reads the stored HTTP request messages the report's
+// findings reference, so the report can render a reproducible curl PoC per
+// finding. Only REQUEST blobs are read — a response can never be a PoC — and
+// only when an evidence store is configured. A blob that cannot be opened, is
+// larger than the bound, or is not actually a request is skipped: the report
+// then simply omits that finding's PoC rather than failing or embedding a
+// truncated command.
+//
+// The result is exactly report.Data.RequestEvidence, so the generators stay
+// pure: this handler reads the store, they only render what they are given.
+func (s *Server) requestEvidenceFor(lookup *evidenceLookup, findings []*domain.Finding) map[domain.ID][]byte {
+	if s.evidence == nil || lookup == nil {
+		return nil
+	}
+	out := make(map[domain.ID][]byte, len(findings))
+	attempts := 0
+	for _, f := range findings {
+		for _, ev := range lookup.metadata(f) {
+			if ev.Kind != domain.EvidenceRequest || ev.BlobPath == "" {
+				continue
+			}
+			if _, seen := out[ev.ID]; seen {
+				continue
+			}
+			if attempts >= maxReportRequestBlobs {
+				return out
+			}
+			attempts++
+			body, ok := s.readEvidenceBlob(ev)
+			if !ok {
+				continue
+			}
+			out[ev.ID] = body
+		}
+	}
+	return out
+}
+
+// readEvidenceBlob reads one blob up to maxReportRequestBlobBytes; ok is false
+// when it cannot be opened or exceeds the bound.
+func (s *Server) readEvidenceBlob(ev *domain.Evidence) ([]byte, bool) {
+	rc, err := s.evidence.Open(ev.BlobPath)
+	if err != nil {
+		return nil, false
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(io.LimitReader(rc, maxReportRequestBlobBytes+1))
+	if err != nil || len(body) > maxReportRequestBlobBytes {
+		return nil, false
+	}
+	return body, true
 }
 
 // selectionSummary is the report summary plus how its findings were chosen.

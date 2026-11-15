@@ -54,19 +54,32 @@ type htmlFinding struct {
 	VerifiedAtLabel string
 	Confidence      string
 	VulnClass       string
-	EndpointID      string
-	InjPointID      string
-	Location        string
-	Parameter       string
-	Combined        bool
-	ParameterB      string
-	Method          string
-	Discovery       string
-	AIAssisted      bool
-	DetectedAt      string
-	VerifiedAt      string
-	Summary         string
-	ReviewReason    string
+	// CWE / CVSS are the class-level baseline classification (see
+	// FindingView.Classification); CVSSLabel qualifies the CVSS line for a
+	// non-confirmed finding, and CVSSNote is the baseline caveat. Empty when
+	// the finding's class is not classified — the template then says "not
+	// classified" rather than inventing a score.
+	CWE       string
+	CVSS      string
+	CVSSLabel string
+	CVSSNote  string
+	// CurlPoC / CurlPoCNote reproduce the stored request evidence as one
+	// runnable command, credentials as shell variables.
+	CurlPoC      string
+	CurlPoCNote  string
+	EndpointID   string
+	InjPointID   string
+	Location     string
+	Parameter    string
+	Combined     bool
+	ParameterB   string
+	Method       string
+	Discovery    string
+	AIAssisted   bool
+	DetectedAt   string
+	VerifiedAt   string
+	Summary      string
+	ReviewReason string
 
 	// Verified candidate (confirmed findings with a recorded confirming attempt).
 	HasVerified      bool
@@ -156,7 +169,7 @@ func (HTMLGenerator) Generate(w io.Writer, data Data) error {
 				continue
 			}
 			n++
-			hs.Findings = append(hs.Findings, toHTMLFinding(n, f, NewFindingView(f, idx)))
+			hs.Findings = append(hs.Findings, toHTMLFinding(n, f, NewFindingViewWithRequests(f, idx, data.RequestEvidence)))
 		}
 		if len(hs.Findings) > 0 {
 			view.Sections = append(view.Sections, hs)
@@ -196,6 +209,16 @@ func toHTMLFinding(n int, f *domain.Finding, v FindingView) htmlFinding {
 		AIAssisted:      f.Provenance.AIAssisted,
 		Summary:         f.Summary,
 		ReviewReason:    v.ReviewReasonLabel,
+	}
+	if c := v.Classification; c != nil {
+		hf.CWE = c.CWE.String()
+		hf.CVSS = c.CVSS.String()
+		hf.CVSSLabel = CVSSLabel(f.Verdict)
+		hf.CVSSNote = c.Note
+	}
+	if p := v.CurlPoC; p != nil {
+		hf.CurlPoC = p.Command
+		hf.CurlPoCNote = p.Note
 	}
 	if !f.Provenance.DetectedAt.IsZero() {
 		hf.DetectedAt = f.Provenance.DetectedAt.UTC().Format("2006-01-02T15:04:05Z")
@@ -275,6 +298,7 @@ const htmlTemplateSrc = `<!doctype html>
   .meta { color: #57606a; font-size: 0.9em; }
   code { background: #f6f8fa; padding: 0.1rem 0.3rem; border-radius: 4px; }
   pre.payload { background: #f6f8fa; border: 1px solid #d0d7de; border-left: 4px solid #b42318; border-radius: 4px; padding: 0.6rem 0.8rem; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.3rem 0 0.8rem; }
+  pre.poc { background: #f6f8fa; border: 1px solid #d0d7de; border-left: 4px solid #0b3d91; border-radius: 4px; padding: 0.6rem 0.8rem; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.3rem 0 0.8rem; }
   .note { color: #57606a; font-style: italic; }
   .baseline { color: #57606a; }
   .ai-summary { background: #fff8e6; border: 1px solid #d4a72c; border-radius: 6px; padding: 0.8rem 1rem; margin: 0.5rem 0 1.5rem; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -351,6 +375,8 @@ const htmlTemplateSrc = `<!doctype html>
     <li><strong>{{.SeverityLabel}}:</strong> {{.Severity}}</li>
     <li><strong>Confidence:</strong> {{.Confidence}}</li>
     <li><strong>Vulnerability class:</strong> {{.VulnClass}}</li>
+    {{if .CWE}}<li><strong>CWE:</strong> {{.CWE}}</li>{{end}}
+    {{if .CVSS}}<li><strong>{{.CVSSLabel}}:</strong> {{.CVSS}}{{if .CVSSNote}}<br><span class="note">{{.CVSSNote}}</span>{{end}}</li>{{else}}<li><strong>CWE / CVSS:</strong> not classified — no baseline exists for this class, so no score is invented</li>{{end}}
     {{if .EndpointID}}<li><strong>Endpoint:</strong> <code>{{.EndpointID}}</code></li>{{end}}
     {{if .InjPointID}}<li><strong>Injection point:</strong> <code>{{.InjPointID}}</code></li>{{end}}
     {{if .Location}}<li><strong>Location:</strong> {{.Location}}</li>{{end}}
@@ -363,6 +389,8 @@ const htmlTemplateSrc = `<!doctype html>
     {{if .Summary}}<li><strong>Notes:</strong> {{.Summary}}</li>{{end}}
     {{if .ReviewReason}}<li><strong>Why this needs manual review (not a clean negative):</strong> {{.ReviewReason}}</li>{{end}}
   </ul>
+  {{if .CurlPoC}}<p><strong>Reproducible curl PoC</strong>{{if .CurlPoCNote}} <span class="note">({{.CurlPoCNote}})</span>{{end}}:</p>
+  <pre class="poc">{{.CurlPoC}}</pre>{{end}}
   {{if .Others}}<p><strong>{{.OthersLabel}}:</strong></p>
   <table><tr><th>Candidate</th><th>Verdict</th></tr>
   {{range .Others}}<tr><td><code>{{.Candidate}}</code></td><td class="verdict-{{.VerdictLower}}">{{.Verdict}}</td></tr>{{end}}</table>{{end}}

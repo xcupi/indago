@@ -223,8 +223,8 @@ type ScanConfig struct {
 	// behavior for every existing scan); true omits that engine's jobs while
 	// leaving discovery and the other engines intact. OMIT the DOM switch to
 	// also omit the client-side open-redirect probe, which rides that pass.
-	SkipReflectedXSS       bool `json:"skip_reflected_xss,omitempty"`
-	SkipDOMXSS             bool `json:"skip_dom_xss,omitempty"`
+	SkipReflectedXSS       bool   `json:"skip_reflected_xss,omitempty"`
+	SkipDOMXSS             bool   `json:"skip_dom_xss,omitempty"`
 	SkipAccessControl      bool   `json:"skip_access_control,omitempty"`
 	SkipIDOR               bool   `json:"skip_idor,omitempty"`
 	SkipInfoDisclosure     bool   `json:"skip_info_disclosure,omitempty"`

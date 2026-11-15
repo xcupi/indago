@@ -94,6 +94,13 @@ func TestCollectorSkipsLogoutLinkOnAuthenticatedScan(t *testing.T) {
 		"http://example.com/auth/sign-out",
 		"http://example.com/user/log_off",
 		"http://example.com/LOGOUT",
+		// The action does not have to live in the path: /session/destroy and
+		// ?action=logout are just as session-fatal when followed.
+		"http://example.com/session/destroy",
+		"http://example.com/api/v1/auth/token/revoke",
+		"http://example.com/account?action=logout",
+		"http://example.com/account?logout=1",
+		"http://example.com/account?do=sign-out",
 	} {
 		id, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{URL: u, Method: domain.MethodGET, Source: domain.SourceCrawler})
 		if err != nil {
@@ -108,6 +115,19 @@ func TestCollectorSkipsLogoutLinkOnAuthenticatedScan(t *testing.T) {
 	id, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{URL: "http://example.com/vulnerabilities/xss_r/", Method: domain.MethodGET, Source: domain.SourceCrawler})
 	if err != nil || id == "" {
 		t.Fatalf("an ordinary crawled link should not be skipped: id=%q err=%v", id, err)
+	}
+
+	// The guard stays narrow: an unrelated path containing the letters
+	// ("/blog/out") and a data-carrying redirect target ("?next=/logout")
+	// are ordinary test surfaces, not logout actions.
+	for _, u := range []string{
+		"http://example.com/blog/out",
+		"http://example.com/login?next=%2Flogout",
+	} {
+		id, err := c.AddEndpoint(ctx, discovery.EndpointCandidate{URL: u, Method: domain.MethodGET, Source: domain.SourceCrawler})
+		if err != nil || id == "" {
+			t.Fatalf("AddEndpoint(%q) should not be skipped: id=%q err=%v", u, id, err)
+		}
 	}
 }
 

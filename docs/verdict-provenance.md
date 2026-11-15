@@ -122,25 +122,39 @@ covers an instrumentation mismatch such as a Playwright wrapper change.
 ## Authenticated discovery never requests session-terminating URLs
 
 `Collector.AllowFetch(url, source)` is the single policy: on an authenticated
-scan a discovered URL that looks like logout/sign-out is neither registered nor
-requested. Sources ask before sending a request they initiate:
+scan a discovered URL that names a logout/sign-out/session-destroy action is
+neither registered nor requested. `internal/discovery/logout_guard.go`
+(`looksSessionTerminating`) matches, word-bounded, three shapes: the action in
+the path (`/logout`, `/logout.php`, `/auth/sign-out`, `/user_logout`,
+`/session/destroy`, `/api/v1/auth/token/revoke`), a query parameter that is or
+carries the action (`?logout=1`, `?action=logout`, `?op=sign-out`), and an SPA
+route fragment (`#/logout`, `#/session/destroy`). A query value that merely
+mentions the word (`?q=logout`, `?next=/logout`) and an unrelated path
+(`/blog/out`, `/catalog/outlet`) are not affected.
+
+Sources ask before sending a request they initiate:
 
 - the crawler before queueing a link for the next level (a queued link is
   requested by `fetchPage` before the sink sees it, so refusing registration
   alone still sent the request), and it no longer follows a link the sink refused;
 - content discovery before probing a candidate path;
 - the sitemap source before requesting a nested sitemap URL listed in a sitemap
-  index. That URL is document content, so it is also checked against scope.
+  index. That URL is document content, so it is also checked against scope;
+- the browser network source before rendering an SPA route or an observed API
+  URL (`#/logout` is never requested as its own URL, but rendering it under the
+  seed page still performs the logout).
 
 An operator-provided seed is explicit intent and is still requested.
 Unauthenticated scans skip nothing. The top-level `/sitemap.xml` and
 `/robots.txt` are fixed paths under the seed origin; URLs they list are
-registered through the same collector check. Not covered: requests made by the
-browser network-capture source while it renders a page, a link that looks
-harmless but redirects to a logout endpoint, a logout triggered through the
-query string (`?action=logout`; the check is path-only on purpose), and
-CamelCase names such as `LogoutServlet`. `looksSessionTerminating` is a name
-heuristic, with `_` and `-` treated as separators (`user_logout` is matched). The session monitor still checks that the state file exists, not
+registered through the same collector check. Not covered: a link that looks
+harmless but redirects to a logout endpoint; requests the page's own JavaScript
+fires while it renders (the guard vetoes a navigation the source initiates, not
+one the page initiates); CamelCase names such as `LogoutServlet`; non-English
+logout wording; and method-only session destruction (`DELETE /session`), since
+the check is name-based. `looksSessionTerminating` treats `-`, `_` and spaces
+as separators (`user_logout` is matched, `blog/out` is not). The session
+monitor still checks that the state file exists, not
 that the target still considers the session valid.
 
 ## Query CSRF token refresh

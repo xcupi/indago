@@ -385,9 +385,21 @@ type CreateScanParams struct {
 	XXEBody                         string
 	CommandInjectionCallbackURL     string
 	CommandInjectionCallbackPollURL string
-	SkipWriteEndpoints              bool
-	SkipDownloadEndpoints           bool
-	MaxDOMXSSEndpoints              int
+	// SSRF/CORS/OpenRedirect/GraphQL are the Wave-1 engines' switches. The
+	// four Skip* flags are the ONLY way to turn those passes off (they are on
+	// by default); the SSRF callback pair is the operator's own OAST
+	// collaborator, validated by the engine at use time (a callback host that
+	// resolves to loopback/private/metadata space is refused, never
+	// substituted).
+	SkipSSRF              bool
+	SkipCORS              bool
+	SkipOpenRedirect      bool
+	SkipGraphQL           bool
+	SSRFCallbackURL       string
+	SSRFCallbackPollURL   string
+	SkipWriteEndpoints    bool
+	SkipDownloadEndpoints bool
+	MaxDOMXSSEndpoints    int
 }
 
 // Crawl-extent upper bounds, so an operator typo cannot ask the crawler to go
@@ -578,6 +590,14 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.SkipAccessControl = p.SkipAccessControl
 	cfg.SkipIDOR = p.SkipIDOR
 	cfg.SkipInfoDisclosure = p.SkipInfoDisclosure
+	cfg.SkipSSRF = p.SkipSSRF
+	cfg.SkipCORS = p.SkipCORS
+	cfg.SkipOpenRedirect = p.SkipOpenRedirect
+	cfg.SkipGraphQL = p.SkipGraphQL
+	// The SSRF engine reads its OAST collaborator from these two fields and
+	// validates the hosts itself at use time; creation only carries them.
+	cfg.SSRFCallbackURL = strings.TrimSpace(p.SSRFCallbackURL)
+	cfg.SSRFCallbackPollURL = strings.TrimSpace(p.SSRFCallbackPollURL)
 	cfg.EnableCommandInjection = p.EnableCommandInjection
 	cfg.EnableSSTI = p.EnableSSTI
 	cfg.EnableXXE = p.EnableXXE
