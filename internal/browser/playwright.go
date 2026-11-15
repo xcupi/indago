@@ -635,12 +635,22 @@ func isJSONRequestContentType(raw string) bool {
 	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
 }
 
+func isCapturedRequestBodyContentType(raw string) bool {
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return false
+	}
+	mediaType = strings.ToLower(mediaType)
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") ||
+		mediaType == "application/xml" || mediaType == "text/xml" || strings.HasSuffix(mediaType, "+xml")
+}
+
 func mayInspectJSONRequest(method, contentType, rawURL string, allow func(string) bool) bool {
 	method = strings.ToUpper(strings.TrimSpace(method))
 	if method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" {
 		return false
 	}
-	return isJSONRequestContentType(contentType) && isNetworkURL(rawURL) && (allow == nil || allow(rawURL))
+	return isCapturedRequestBodyContentType(contentType) && isNetworkURL(rawURL) && (allow == nil || allow(rawURL))
 }
 
 func boundedJSONRequestBodySize(bodySize int) bool {

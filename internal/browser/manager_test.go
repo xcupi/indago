@@ -339,6 +339,8 @@ func TestShouldCaptureJSONRequestBodyRequiresBoundedInScopeSize(t *testing.T) {
 		{"safe method", "GET", "application/json", "http://in-scope.test/api", 8, false},
 		{"options has no JSON body discovery", "OPTIONS", "application/json", "http://in-scope.test/api", 8, false},
 		{"non-JSON type", "POST", "text/plain", "http://in-scope.test/api", 8, false},
+		{"bounded XML", "POST", "application/xml; charset=utf-8", "http://in-scope.test/api", 64, true},
+		{"XML vendor type", "PUT", "application/soap+xml", "http://in-scope.test/api", 64, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := shouldCaptureJSONRequestBody(tc.method, tc.contentType, tc.bodySize, tc.url, allowInScope); got != tc.want {
