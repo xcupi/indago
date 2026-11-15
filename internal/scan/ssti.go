@@ -7,6 +7,15 @@ package scan
 // template expression is harmless: the request contains e.g. "{{7*7}}" while
 // a vulnerable server evaluates it and returns "49".
 //
+// Every probe appends a per-run random marker to the expression, so the string
+// the engine looks for is "<computed value><marker>" (e.g. "49indago9f3a…").
+// That makes confirmation independent of the baseline page's own numbers: a
+// dashboard that already renders "49", a JSON counter, a price list or an ID
+// column can no longer (a) suppress a probe because its bare result already
+// appears in the baseline, or (b) be mistaken for template evaluation because
+// a response happens to contain the expected digits. The marker also cannot be
+// produced by reflecting the payload, which still carries the expression.
+//
 // A verdict is CONFIRMED only when two independent expressions produce their
 // own computed result and neither the raw payload nor the result was already
 // present in the baseline response. Reflection, a single marker, transport
@@ -52,6 +61,7 @@ type sstiDetail struct {
 	// baseline response. It drives which payload shape is probed first and is
 	// recorded so a reader can see why that order was chosen.
 	TemplateEngines []string       `json:"template_engines,omitempty"`
+	Marker          string         `json:"marker,omitempty"`
 	Attempts        []sstiAttempt  `json:"attempts,omitempty"`
 	ConfirmedCount  int            `json:"confirmed_count"`
 	Verdict         domain.Verdict `json:"verdict"`
@@ -75,12 +85,16 @@ func newSSTIExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, c
 
 var _ worker.Handler = (*sstiExecutor)(nil)
 
+// sstiVariant is one template expression in one engine syntax. families lists
+// every engine family that really uses that syntax, so a Node/Express target
+// running Pug is offered Pug's "#{…}" and a PHP target running Twig is offered
+// "{{…}}": gating on a single family per syntax silently dropped real engines.
 type sstiVariant struct {
 	prefix   string
 	suffix   string
 	expr     string
 	expected string
-	family   string
+	families []string
 }
 
 const (
@@ -97,29 +111,29 @@ func sstiVariants() []sstiVariant {
 	// inconclusive. Each pair uses different arithmetic results; reflection
 	// alone still cannot produce either computed value.
 	variants := []sstiVariant{
-		{prefix: "<%= ", suffix: " %>", expr: "7*7", expected: "49", family: sstiFamilyRuby},
-		{prefix: "<%= ", suffix: " %>", expr: "11*13", expected: "143", family: sstiFamilyRuby},
-		{prefix: "<%= ", suffix: " %>", expr: "7*7", expected: "49", family: sstiFamilyNode},
-		{prefix: "<%= ", suffix: " %>", expr: "11*13", expected: "143", family: sstiFamilyNode},
-		{prefix: "{{", suffix: "}}", expr: "7*7", expected: "49", family: sstiFamilyNode},
-		{prefix: "{{", suffix: "}}", expr: "11*13", expected: "143", family: sstiFamilyNode},
-		{prefix: "{{", suffix: "}}", expr: "7*7", expected: "49", family: sstiFamilyPHP},
-		{prefix: "{{", suffix: "}}", expr: "11*13", expected: "143", family: sstiFamilyPHP},
-		{prefix: "{{", suffix: "}}", expr: "7*7", expected: "49", family: sstiFamilyPython},
-		{prefix: "{{", suffix: "}}", expr: "11*13", expected: "143", family: sstiFamilyPython},
-		{prefix: "${", suffix: "}", expr: "7*7", expected: "49", family: sstiFamilyJava},
-		{prefix: "${", suffix: "}", expr: "11*13", expected: "143", family: sstiFamilyJava},
-		{prefix: "#{", suffix: "}", expr: "7*7", expected: "49", family: sstiFamilyJava},
-		{prefix: "#{", suffix: "}", expr: "11*13", expected: "143", family: sstiFamilyJava},
-		{prefix: "*{", suffix: "}", expr: "7*7", expected: "49", family: sstiFamilyJava},
-		{prefix: "*{", suffix: "}", expr: "11*13", expected: "143", family: sstiFamilyJava},
-		{prefix: "{", suffix: "}", expr: "7*7", expected: "49", family: sstiFamilyPHP},
-		{prefix: "{", suffix: "}", expr: "11*13", expected: "143", family: sstiFamilyPHP},
+		// ERB (Ruby) and EJS/Underscore (Node).
+		{prefix: "<%= ", suffix: " %>", expr: "7*7", expected: "49", families: []string{sstiFamilyRuby, sstiFamilyNode}},
+		{prefix: "<%= ", suffix: " %>", expr: "11*13", expected: "143", families: []string{sstiFamilyRuby, sstiFamilyNode}},
+		// Twig/Laravel (PHP), Jinja2 (Python) and Nunjucks (Node).
+		{prefix: "{{", suffix: "}}", expr: "7*7", expected: "49", families: []string{sstiFamilyPHP, sstiFamilyPython, sstiFamilyNode}},
+		{prefix: "{{", suffix: "}}", expr: "11*13", expected: "143", families: []string{sstiFamilyPHP, sstiFamilyPython, sstiFamilyNode}},
+		// JSP EL / Spring (Java) and Freemarker (Java).
+		{prefix: "${", suffix: "}", expr: "7*7", expected: "49", families: []string{sstiFamilyJava}},
+		{prefix: "${", suffix: "}", expr: "11*13", expected: "143", families: []string{sstiFamilyJava}},
+		// Pug (Node) and Spring EL (Java).
+		{prefix: "#{", suffix: "}", expr: "7*7", expected: "49", families: []string{sstiFamilyNode, sstiFamilyJava}},
+		{prefix: "#{", suffix: "}", expr: "11*13", expected: "143", families: []string{sstiFamilyNode, sstiFamilyJava}},
+		// Thymeleaf selection-style expressions (Java).
+		{prefix: "*{", suffix: "}", expr: "7*7", expected: "49", families: []string{sstiFamilyJava}},
+		{prefix: "*{", suffix: "}", expr: "11*13", expected: "143", families: []string{sstiFamilyJava}},
+		// Bare-brace template dialects (Smarty-style, PHP ecosystems).
+		{prefix: "{", suffix: "}", expr: "7*7", expected: "49", families: []string{sstiFamilyPHP}},
+		{prefix: "{", suffix: "}", expr: "11*13", expected: "143", families: []string{sstiFamilyPHP}},
 		// Velocity uses a statement followed by a reference, not a bare
 		// expression; keep the two probes distinct so a reflected payload
 		// cannot supply both values.
-		{prefix: "#set($indago=", suffix: ")$indago", expr: "7*7", expected: "49", family: sstiFamilyJava},
-		{prefix: "#set($indago=", suffix: ")$indago", expr: "11*13", expected: "143", family: sstiFamilyJava},
+		{prefix: "#set($indago=", suffix: ")$indago", expr: "7*7", expected: "49", families: []string{sstiFamilyJava}},
+		{prefix: "#set($indago=", suffix: ")$indago", expr: "11*13", expected: "143", families: []string{sstiFamilyJava}},
 	}
 	return variants
 }
@@ -135,12 +149,12 @@ func sstiContextVariants(baseValue string) []sstiVariant {
 		return nil
 	}
 	return []sstiVariant{
-		{prefix: baseValue + "}}{{", suffix: "}}", expr: "7*7", expected: "49", family: sstiFamilyNode},
-		{prefix: baseValue + "}}{{", suffix: "}}", expr: "11*13", expected: "143", family: sstiFamilyNode},
-		{prefix: baseValue + "}${", suffix: "}", expr: "7*7", expected: "49", family: sstiFamilyJava},
-		{prefix: baseValue + "}${", suffix: "}", expr: "11*13", expected: "143", family: sstiFamilyJava},
-		{prefix: baseValue + " %><%= ", suffix: " %>", expr: "7*7", expected: "49", family: sstiFamilyRuby},
-		{prefix: baseValue + " %><%= ", suffix: " %>", expr: "11*13", expected: "143", family: sstiFamilyRuby},
+		{prefix: baseValue + "}}{{", suffix: "}}", expr: "7*7", expected: "49", families: []string{sstiFamilyNode, sstiFamilyPHP, sstiFamilyPython}},
+		{prefix: baseValue + "}}{{", suffix: "}}", expr: "11*13", expected: "143", families: []string{sstiFamilyNode, sstiFamilyPHP, sstiFamilyPython}},
+		{prefix: baseValue + "}${", suffix: "}", expr: "7*7", expected: "49", families: []string{sstiFamilyJava}},
+		{prefix: baseValue + "}${", suffix: "}", expr: "11*13", expected: "143", families: []string{sstiFamilyJava}},
+		{prefix: baseValue + " %><%= ", suffix: " %>", expr: "7*7", expected: "49", families: []string{sstiFamilyRuby, sstiFamilyNode}},
+		{prefix: baseValue + " %><%= ", suffix: " %>", expr: "11*13", expected: "143", families: []string{sstiFamilyRuby, sstiFamilyNode}},
 	}
 }
 
@@ -166,7 +180,8 @@ func sstiSupportedFamilies(resp *httpengine.Response) map[string]string {
 		}
 	}
 	if strings.Contains(powered, "php") || strings.Contains(cookies, "phpsessid") ||
-		strings.Contains(cookies, "laravel_session") || strings.Contains(body, "laravel") {
+		strings.Contains(cookies, "laravel_session") || strings.Contains(body, "laravel") ||
+		strings.Contains(cookies, "symfony") || strings.Contains(body, "__twig") {
 		add(sstiFamilyPHP, "PHP application fingerprint")
 	}
 	if strings.Contains(powered, "express") || strings.Contains(cookies, "connect.sid") {
@@ -401,11 +416,42 @@ func sstiFilteredVariants(variants []sstiVariant, supported map[string]string) [
 }
 
 func (v sstiVariant) familyAllowed(supported map[string]string) bool {
-	if v.family == "" {
+	if len(v.families) == 0 {
 		return true
 	}
-	_, ok := supported[v.family]
-	return ok
+	for _, f := range v.families {
+		if _, ok := supported[f]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// sstiProbe returns the payload to send and the exact string the response must
+// contain for the probe to count as evaluated. The marker is appended OUTSIDE
+// the template expression, so an engine that evaluates the expression renders
+// "<result><marker>" while a page that merely reflects the payload returns
+// "<expression><marker>" — which can never contain the expected string.
+func sstiProbe(v sstiVariant, marker string) (payload, expected string) {
+	return v.prefix + v.expr + v.suffix + marker, v.expected + marker
+}
+
+// sstiObservedValue returns the parameter's observed value as plain text. A
+// browser-network JSON example is stored as a serialized JSON literal
+// (`"alice"` including the quotes), so using it verbatim would inject the JSON
+// quoting into a breakout payload and change the template syntax around it.
+// Only a JSON STRING literal is unquoted; numbers, booleans and null keep their
+// exact observed spelling.
+func sstiObservedValue(p *domain.Parameter) string {
+	raw := strings.TrimSpace(p.Example)
+	if p.Location != domain.LocationJSON || !strings.HasPrefix(raw, `"`) {
+		return raw
+	}
+	var decoded string
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return raw
+	}
+	return strings.TrimSpace(decoded)
 }
 
 func (e *sstiExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
@@ -427,7 +473,7 @@ func (e *sstiExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 		return e.finishSSTIUnavailable(ctx, job, started, ep, "state-changing endpoint skipped by policy")
 	}
 
-	baseValue := strings.TrimSpace(focus.Example)
+	baseValue := sstiObservedValue(focus)
 	if baseValue == "" {
 		baseValue = commandInjectionBaseValue(focus.Name)
 	}
@@ -455,85 +501,22 @@ func (e *sstiExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 		return e.finishSSTIUnavailable(ctx, job, started, ep, "no template probe shape for the detected stack")
 	}
 
-	confirmedValues := map[string]bool{}
-	for _, v := range variants {
-		key := v.prefix + v.expected
-		if _, already := confirmedValues[key]; already {
-			continue
-		}
-		// A page that already renders this number in its baseline is not
-		// evidence of template evaluation for this parameter.
-		if strings.Contains(baseBody, v.expected) {
-			continue
-		}
-		payload := v.prefix + v.expr + v.suffix
-		attempt := sstiAttempt{Payload: truncate(payload, 200), Expected: v.expected, Kind: "template"}
-		params = e.refreshParams(ctx, ep, params, focus)
-		req, err := buildRequest(ep, params, &injection{param: focus, value: payload})
-		if err != nil {
-			attempt.Status = 0
-			d.Attempts = append(d.Attempts, attempt)
-			continue
-		}
-		resp, respOutcome, _ := e.do(ctx, req)
-		if resp != nil {
-			attempt.Status = resp.Status
-		}
-		if respOutcome == domain.OutcomeSuccess && resp != nil {
-			body := string(resp.Body)
-			attempt.Output = strings.Contains(body, v.expected) && !strings.Contains(body, payload)
-			ev, _ := e.persistEvidence(ctx, job.ScanID, resp, "ssti "+v.expr)
-			d.EvidenceIDs = append(d.EvidenceIDs, ev...)
-		}
-		d.Attempts = append(d.Attempts, attempt)
-		if attempt.Output {
-			confirmedValues[key] = true
-		}
-		if len(confirmedValues) >= 2 {
-			break
-		}
+	// One marker per job: every probe of this job expects "<result><marker>", so
+	// two DIFFERENT results still prove two independent evaluations, and the
+	// dedupe key below keeps identical expressions from being sent twice.
+	d.Marker = markerToken("indago")
+	p := &sstiProber{
+		e: e, job: job, ep: ep, focus: focus, params: params,
+		baseBody: baseBody, marker: d.Marker, d: &d,
+		confirmed: map[string]bool{},
 	}
-
-	if len(confirmedValues) < 2 {
+	p.run(ctx, variants, "template")
+	if len(p.confirmed) < 2 {
 		contextVariants := sstiPrioritizedVariants(sstiFilteredVariants(sstiContextVariants(baseValue), stack.families), stack.engines)
-		for _, v := range contextVariants {
-			key := v.prefix + v.expected
-			if _, already := confirmedValues[key]; already {
-				continue
-			}
-			if strings.Contains(baseBody, v.expected) {
-				continue
-			}
-			payload := v.prefix + v.expr + v.suffix
-			attempt := sstiAttempt{Payload: truncate(payload, 200), Expected: v.expected, Kind: "template-context"}
-			params = e.refreshParams(ctx, ep, params, focus)
-			req, err := buildRequest(ep, params, &injection{param: focus, value: payload})
-			if err != nil {
-				attempt.Status = 0
-				d.Attempts = append(d.Attempts, attempt)
-				continue
-			}
-			resp, respOutcome, _ := e.do(ctx, req)
-			if resp != nil {
-				attempt.Status = resp.Status
-			}
-			if respOutcome == domain.OutcomeSuccess && resp != nil {
-				body := string(resp.Body)
-				attempt.Output = strings.Contains(body, v.expected) && !strings.Contains(body, payload)
-				ev, _ := e.persistEvidence(ctx, job.ScanID, resp, "ssti-context "+v.expr)
-				d.EvidenceIDs = append(d.EvidenceIDs, ev...)
-			}
-			d.Attempts = append(d.Attempts, attempt)
-			if attempt.Output {
-				confirmedValues[key] = true
-			}
-			if len(confirmedValues) >= 2 {
-				break
-			}
-		}
+		p.run(ctx, contextVariants, "template-context")
 	}
 
-	d.ConfirmedCount = len(confirmedValues)
+	d.ConfirmedCount = len(p.confirmed)
 	if d.ConfirmedCount >= 2 {
 		d.Verdict = domain.VerdictConfirmed
 		d.Reason = "two independent template expressions were evaluated by the server"
@@ -551,6 +534,61 @@ func (e *sstiExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	}
 	e.persistSSTICase(ctx, job, ep, focus, d, domain.TestCaseCompleted, domain.OutcomeSuccess, note)
 	return nil
+}
+
+// sstiProber carries the per-job state of one probe pass, so the plain and the
+// code-context variant sets share exactly one implementation.
+type sstiProber struct {
+	e         *sstiExecutor
+	job       *domain.TestJob
+	ep        *domain.Endpoint
+	focus     *domain.Parameter
+	params    []*domain.Parameter
+	baseBody  string
+	marker    string
+	d         *sstiDetail
+	confirmed map[string]bool
+}
+
+// run sends each variant once, in the order the planner produced them, and stops
+// as soon as two independent results are confirmed.
+func (p *sstiProber) run(ctx context.Context, variants []sstiVariant, kind string) {
+	for _, v := range variants {
+		payload, expected := sstiProbe(v, p.marker)
+		key := v.prefix + expected
+		if _, already := p.confirmed[key]; already {
+			continue
+		}
+		// A page that already renders this exact value is not evidence of
+		// template evaluation for this parameter.
+		if strings.Contains(p.baseBody, expected) {
+			continue
+		}
+		attempt := sstiAttempt{Payload: truncate(payload, 200), Expected: expected, Kind: kind}
+		p.params = p.e.refreshParams(ctx, p.ep, p.params, p.focus)
+		req, err := buildRequest(p.ep, p.params, &injection{param: p.focus, value: payload})
+		if err != nil {
+			p.d.Attempts = append(p.d.Attempts, attempt)
+			continue
+		}
+		resp, respOutcome, _ := p.e.do(ctx, req)
+		if resp != nil {
+			attempt.Status = resp.Status
+		}
+		if respOutcome == domain.OutcomeSuccess && resp != nil {
+			body := string(resp.Body)
+			attempt.Output = strings.Contains(body, expected) && !strings.Contains(body, payload)
+			ev, _ := p.e.persistEvidence(ctx, p.job.ScanID, resp, "ssti "+v.expr)
+			p.d.EvidenceIDs = append(p.d.EvidenceIDs, ev...)
+		}
+		p.d.Attempts = append(p.d.Attempts, attempt)
+		if attempt.Output {
+			p.confirmed[key] = true
+		}
+		if len(p.confirmed) >= 2 {
+			return
+		}
+	}
 }
 
 func isSSTILocation(loc domain.ParamLocation) bool {
