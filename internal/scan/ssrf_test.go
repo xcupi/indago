@@ -325,12 +325,12 @@ func TestSSRFForbiddenCanaryHosts(t *testing.T) {
 		"anything.localhost",
 	}
 	for _, host := range forbidden {
-		if reason, bad := ssrfForbiddenCanaryHost(host); !bad {
+		if reason, bad := ssrfForbiddenCanaryHost(host, false); !bad {
 			t.Errorf("ssrfForbiddenCanaryHost(%q) allowed it, want refused (%s)", host, reason)
 		}
 	}
 	for _, host := range []string{"oast.example.com", "8.8.8.8", "203.0.113.10", "collab.oast.pro"} {
-		if reason, bad := ssrfForbiddenCanaryHost(host); bad {
+		if reason, bad := ssrfForbiddenCanaryHost(host, false); bad {
 			t.Errorf("ssrfForbiddenCanaryHost(%q) refused it (%s), want allowed", host, reason)
 		}
 	}
@@ -348,11 +348,11 @@ func TestSSRFOASTCanaryRefusesInternalCallback(t *testing.T) {
 		"ftp://oast.example.com/cb",
 		"",
 	} {
-		if _, err := ssrfOASTCanary(raw); err == nil {
+		if _, err := ssrfOASTCanary(raw, false); err == nil {
 			t.Errorf("ssrfOASTCanary(%q) returned a canary, want a refusal", raw)
 		}
 	}
-	c, err := ssrfOASTCanary("https://oast.example.com/hook/abc?x=1#frag")
+	c, err := ssrfOASTCanary("https://oast.example.com/hook/abc?x=1#frag", false)
 	if err != nil {
 		t.Fatalf("public collaborator refused: %v", err)
 	}
@@ -363,6 +363,245 @@ func TestSSRFOASTCanaryRefusesInternalCallback(t *testing.T) {
 		t.Fatalf("canary = %q, want the operator's query/fragment stripped", c.URL)
 	}
 }
+
+// TestSSRFForbiddenCanaryHostsAllowPrivateOptIn covers the one rule the
+// AllowPrivateOAST opt-in relaxes (a literal RFC 1918/ULA lab collaborator) and
+// proves it relaxes nothing else.
+func TestSSRFForbiddenCanaryHostsAllowPrivateOptIn(t *testing.T) {
+	privateLab := []string{
+		"192.168.103.1", // the QA/QC lab listener
+		"10.0.0.5",
+		"172.16.4.9",
+		"fc00::1",
+		"fd00::1",
+	}
+	for _, host := range privateLab {
+		if reason, bad := ssrfForbiddenCanaryHost(host, false); !bad {
+			t.Errorf("ssrfForbiddenCanaryHost(%q, false) allowed it, want refused (%s)", host, reason)
+		}
+		if reason, bad := ssrfForbiddenCanaryHost(host, true); bad {
+			t.Errorf("ssrfForbiddenCanaryHost(%q, true) refused it (%s), want allowed", host, reason)
+		}
+	}
+
+	alwaysForbidden := []string{
+		"127.0.0.1", "127.1.2.3", "::1", "[::1]", "0.0.0.0",
+		"169.254.169.254", "fe80::1", "100.100.100.200", "224.0.0.1",
+		"localhost", "printer.local", "collab.internal", "anything.localhost",
+		"metadata.google.internal", "metadata",
+	}
+	for _, host := range alwaysForbidden {
+		if reason, bad := ssrfForbiddenCanaryHost(host, true); !bad {
+			t.Errorf("ssrfForbiddenCanaryHost(%q, true) allowed it, want refused even with the opt-in (%s)", host, reason)
+		}
+	}
+
+	for _, host := range []string{"oast.example.com", "203.0.113.10", "collab.oast.pro"} {
+		if reason, bad := ssrfForbiddenCanaryHost(host, true); bad {
+			t.Errorf("ssrfForbiddenCanaryHost(%q, true) refused a public host (%s)", host, reason)
+		}
+	}
+}
+
+func TestSSRFOASTCanaryPrivateLabOptIn(t *testing.T) {
+	const base = "http://192.168.103.1:8751/hook"
+	if _, err := ssrfOASTCanary(base, false); err == nil {
+		t.Fatal("a private-LAN collaborator was accepted without the opt-in")
+	}
+	c, err := ssrfOASTCanary(base, true)
+	if err != nil {
+		t.Fatalf("private-LAN collaborator refused with the opt-in: %v", err)
+	}
+	if !strings.HasPrefix(c.URL, base+"/"+c.Token) {
+		t.Fatalf("canary = %q, want the lab base + token", c.URL)
+	}
+	if !c.Private {
+		t.Fatal("the canary must be labelled private, so the evidence says where it pointed")
+	}
+	// The opt-in never reaches loopback, link-local/metadata, unspecified or
+	// CGNAT: those stay refused for a canary even when it is set.
+	for _, raw := range []string{
+		"http://127.0.0.1:8751/hook",
+		"http://[::1]/hook",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://0.0.0.0/hook",
+		"http://100.100.100.200/hook",
+		"http://metadata.google.internal/x",
+		"http://localhost/hook",
+	} {
+		if _, err := ssrfOASTCanary(raw, true); err == nil {
+			t.Errorf("ssrfOASTCanary(%q, true) returned a canary, want a refusal", raw)
+		}
+	}
+	if pub, err := ssrfOASTCanary("https://oast.example.com/hook", true); err != nil || pub.Private {
+		t.Fatalf("public canary = (%+v, %v), want it accepted and not labelled private", pub, err)
+	}
+}
+
+// TestSSRFPrivateOASTCollaboratorNeedsOptIn runs the engine end to end: without
+// the opt-in the lab callback is recorded as refused and never substituted;
+// with it, the exact private canary reaches the target.
+func TestSSRFPrivateOASTCollaboratorNeedsOptIn(t *testing.T) {
+	const labBase = "http://192.168.103.1:8751/hook"
+	collab := ssrfCollaborator(t) // never sees a hit: the lab host is not this test's
+
+	run := func(t *testing.T, cfg ExecutorConfig) (ssrfDetail, []string, []*domain.Finding) {
+		t.Helper()
+		var mu sync.Mutex
+		var seen []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			value := ssrfTargetValue(r)
+			mu.Lock()
+			seen = append(seen, value)
+			mu.Unlock()
+			fmt.Fprint(w, "<html>fetched</html>")
+		}))
+		defer srv.Close()
+
+		env := newScanEnv(t)
+		ep := env.endpoint(srv.URL+"/fetch", domain.MethodGET)
+		focus := env.param(ep, "url", domain.LocationQuery, "https://example.com/a.png")
+		ip := env.injection(ep, focus)
+		ex := newSSRFExecutor(env.st, scopedClient(t, openScope()), env.ev, cfg, execLog(), nil)
+		ex.pollAttempts, ex.pollInterval = 2, time.Millisecond
+		ex.withCallback(labBase, collab.URL)
+		job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: ssrfJobKind,
+			Target: domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID, URL: ep.URL}, Attempts: 1, MaxAttempts: 2}
+		if err := ex.Handle(context.Background(), job); err != nil {
+			t.Fatalf("handle: %v", err)
+		}
+		cases, err := env.st.TestCases().ListByScan(context.Background(), env.scanID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cases) != 1 {
+			t.Fatalf("test cases = %d, want 1", len(cases))
+		}
+		findings, err := env.st.Findings().ListByScan(context.Background(), env.scanID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return ssrfDetailOf(t, cases[0]), append([]string(nil), seen...), findings
+	}
+
+	t.Run("refused without the opt-in", func(t *testing.T) {
+		d, seen, findings := run(t, ExecutorConfig{})
+		if d.CallbackNote == "" || !strings.Contains(d.CallbackNote, "private") {
+			t.Fatalf("callback_note = %q, want the private-host refusal", d.CallbackNote)
+		}
+		if d.CallbackMode != ssrfModeDifferential {
+			t.Fatalf("callback_mode = %q, want differential after the refusal", d.CallbackMode)
+		}
+		if d.PrivateCanary {
+			t.Fatal("detail claims a private canary although the collaborator was refused")
+		}
+		for _, value := range seen {
+			if strings.Contains(value, "192.168.103.1") {
+				t.Fatalf("target received a private canary %q without the opt-in", value)
+			}
+		}
+		if len(findings) != 0 {
+			t.Fatalf("findings = %d, want none", len(findings))
+		}
+	})
+
+	t.Run("allowed with the opt-in", func(t *testing.T) {
+		d, seen, findings := run(t, ExecutorConfig{AllowPrivateOAST: true})
+		if d.CallbackNote != "" {
+			t.Fatalf("callback_note = %q, want no refusal with the opt-in", d.CallbackNote)
+		}
+		if d.CallbackMode != ssrfConfirmOAST {
+			t.Fatalf("callback_mode = %q, want oast", d.CallbackMode)
+		}
+		if !d.PrivateCanary {
+			t.Fatal("detail does not record that the canary pointed at a private address")
+		}
+		if len(d.Attempts) == 0 || d.Attempts[0].Kind != ssrfConfirmOAST {
+			t.Fatalf("attempts = %+v, want the oast canary as the first probe", d.Attempts)
+		}
+		sawLab := false
+		for _, value := range seen {
+			if strings.HasPrefix(value, labBase+"/indago-ssrf-") {
+				sawLab = true
+			}
+		}
+		if !sawLab {
+			t.Fatalf("target received %v, want the exact lab canary %s/<token>", seen, labBase)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("findings = %d, want none: the collaborator never received a hit", len(findings))
+		}
+	})
+}
+
+// TestOASTWiringPrivateLabCollaboratorNeedsOptIn covers the built-in listener
+// path: a collaborator bound to a private LAN address is left unwired (with a
+// reason naming the flag) unless the server opted in.
+func TestOASTWiringPrivateLabCollaboratorNeedsOptIn(t *testing.T) {
+	collab := fakeOASTCollaborator{
+		base:   "http://192.168.103.1:8751",
+		poll:   "http://127.0.0.1:8751/api/requests",
+		listen: "192.168.103.1:8751",
+	}
+
+	off := deriveOASTWiring(collab, execLog(), false)
+	if off == nil {
+		t.Fatal("no wiring derived for a configured collaborator")
+	}
+	if off.SSRFCanaryURL != "" {
+		t.Fatalf("ssrf canary = %q, want none for a private collaborator without the opt-in", off.SSRFCanaryURL)
+	}
+	if !strings.Contains(off.SSRFNote, "-allow-private-oast") {
+		t.Fatalf("ssrf note = %q, want it to name -allow-private-oast", off.SSRFNote)
+	}
+
+	on := deriveOASTWiring(collab, execLog(), true)
+	if on == nil {
+		t.Fatal("no wiring derived with the opt-in")
+	}
+	if on.SSRFCanaryURL != collab.base {
+		t.Fatalf("ssrf canary = %q, want the lab base URL %q", on.SSRFCanaryURL, collab.base)
+	}
+	if _, err := ssrfOASTCanary(on.SSRFCanaryURL, true); err != nil {
+		t.Fatalf("the wired lab canary is refused by the engine: %v", err)
+	}
+	// The scanner's own poll read path is loopback, and stays allowed.
+	if _, err := ssrfPollURL(on.PollURL); err != nil {
+		t.Fatalf("the wired lab poll URL is refused: %v", err)
+	}
+
+	// The controller takes the opt-in from Options.Executor...
+	env := newScanEnv(t)
+	noOpt := &Controller{store: env.st, log: execLog(), opts: Options{OAST: collab}}
+	if got := noOpt.oastCollaborator().SSRFCanaryURL; got != "" {
+		t.Fatalf("controller wired %q without the opt-in", got)
+	}
+	withOpt := &Controller{store: env.st, log: execLog(), opts: Options{OAST: collab, Executor: ExecutorConfig{AllowPrivateOAST: true}}}
+	if got := withOpt.oastCollaborator().SSRFCanaryURL; got != collab.base {
+		t.Fatalf("controller wired %q, want %q", got, collab.base)
+	}
+
+	// ...and a single scan can grant it for its own operator-supplied pair.
+	if !ssrfConfig(ExecutorConfig{}, &domain.Scan{Config: domain.ScanConfig{AllowPrivateOAST: true}}).AllowPrivateOAST {
+		t.Fatal("the per-scan opt-in did not reach the SSRF executor config")
+	}
+	if ssrfConfig(ExecutorConfig{}, &domain.Scan{Config: domain.ScanConfig{}}).AllowPrivateOAST {
+		t.Fatal("the SSRF executor config allows a private collaborator by default")
+	}
+	if ssrfConfig(ExecutorConfig{}, nil).AllowPrivateOAST {
+		t.Fatal("a nil scan enabled the private opt-in")
+	}
+}
+
+// fakeOASTCollaborator stands in for a built-in listener bound to a lab
+// address: the wiring rules only need its URLs, never a live socket.
+type fakeOASTCollaborator struct{ base, poll, listen string }
+
+func (f fakeOASTCollaborator) BaseURL() string          { return f.base }
+func (f fakeOASTCollaborator) PollURL() (string, error) { return f.poll, nil }
+func (f fakeOASTCollaborator) ListenAddr() string       { return f.listen }
 
 // TestSSRFNeverSendsForbiddenTargets is the core safety assertion: even with a
 // callback misconfigured to an instance-metadata address, nothing the target
@@ -517,6 +756,157 @@ func TestSSRFSingleIndicatorIsInconclusive(t *testing.T) {
 	}
 	if len(run.findings) != 0 {
 		t.Fatalf("findings = %d, want none for an inconclusive result", len(run.findings))
+	}
+}
+
+// ssrfExerciseServer runs one SSRF job (GET, "url" query parameter) against an
+// arbitrary test server and returns the recorded detail plus the findings.
+func ssrfExerciseServer(t *testing.T, srv *httptest.Server, cfg ExecutorConfig, tune func(*ssrfExecutor)) (ssrfDetail, []*domain.Finding) {
+	t.Helper()
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/preview", domain.MethodGET)
+	focus := env.param(ep, "url", domain.LocationQuery, "https://example.com/feed.xml")
+	ip := env.injection(ep, focus)
+	ex := newSSRFExecutor(env.st, scopedClient(t, openScope()), env.ev, cfg, execLog(), nil)
+	ex.pollAttempts, ex.pollInterval = 2, time.Millisecond
+	if tune != nil {
+		tune(ex)
+	}
+	job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: ssrfJobKind,
+		Target: domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID, URL: ep.URL}, Attempts: 1, MaxAttempts: 2}
+	if err := ex.Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	cases, err := env.st.TestCases().ListByScan(context.Background(), env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cases) != 1 {
+		t.Fatalf("test cases = %d, want 1", len(cases))
+	}
+	findings, err := env.st.Findings().ListByScan(context.Background(), env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ssrfDetailOf(t, cases[0]), findings
+}
+
+// TestSSRFDifferentialConfirmsNonEchoingServerError is the QA/QC case: the
+// target answers a generic 502 "Could not connect to external stock check
+// service" and NEVER echoes the injected URL. Only the status transition plus
+// the connectivity text separates it from the clean baseline, and two
+// independent canaries are still required for a verdict.
+func TestSSRFDifferentialConfirmsNonEchoingServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(ssrfTargetValue(r), "indago-ssrf-") {
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(w, "Could not connect to external stock check service")
+			return
+		}
+		fmt.Fprint(w, `{"status":"ok"}`)
+	}))
+	defer srv.Close()
+
+	d, findings := ssrfExerciseServer(t, srv, ExecutorConfig{}, nil)
+
+	if d.Verdict != domain.VerdictConfirmed || d.ConfirmMethod != ssrfConfirmDifferential {
+		t.Fatalf("detail = %+v, want confirmed via %s (%s)", d, ssrfConfirmDifferential, d.Reason)
+	}
+	if d.BaselineStatus != http.StatusOK {
+		t.Fatalf("baseline_status = %d, want 200", d.BaselineStatus)
+	}
+	if d.AttributedCount != 0 {
+		t.Fatalf("attributed_count = %d, want 0: this target never echoes the token, and the confirmation must not depend on it", d.AttributedCount)
+	}
+	if d.NewFailureCount < maxSSRFDifferentialProbes {
+		t.Fatalf("new_failure_count = %d, want >= %d", d.NewFailureCount, maxSSRFDifferentialProbes)
+	}
+	if len(d.Attempts) != maxSSRFDifferentialProbes {
+		t.Fatalf("attempts = %d, want %d independent canaries", len(d.Attempts), maxSSRFDifferentialProbes)
+	}
+	for _, a := range d.Attempts {
+		if a.Status != http.StatusBadGateway {
+			t.Fatalf("attempt %+v: status = %d, want the generic 502", a, a.Status)
+		}
+		if a.Indicator != "could not connect" {
+			t.Fatalf("attempt %+v: indicator = %q, want the generic connectivity phrase", a, a.Indicator)
+		}
+		if !a.NewFailure {
+			t.Fatalf("attempt %+v: not recorded as a NEW failure over the baseline", a)
+		}
+		if a.Attributed {
+			t.Fatalf("attempt %+v: attributed to a token the target never echoes", a)
+		}
+	}
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(findings))
+	}
+	if f := findings[0]; f.Verdict != domain.VerdictConfirmed || f.Confidence != domain.ConfidenceMedium {
+		t.Fatalf("finding = %+v, want a confirmed medium-confidence ssrf finding", f)
+	}
+}
+
+// TestSSRFOneNonEchoingFailureIsInconclusive keeps the "two independent
+// canaries" rule intact for the non-echoing form: one 502 is not a finding.
+func TestSSRFOneNonEchoingFailureIsInconclusive(t *testing.T) {
+	var canaries atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(ssrfTargetValue(r), "indago-ssrf-") && canaries.Add(1) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(w, "Could not connect to external stock check service")
+			return
+		}
+		fmt.Fprint(w, `{"status":"ok"}`)
+	}))
+	defer srv.Close()
+
+	d, findings := ssrfExerciseServer(t, srv, ExecutorConfig{}, nil)
+
+	if d.Verdict != domain.VerdictInconclusive {
+		t.Fatalf("verdict = %q, want inconclusive (%s)", d.Verdict, d.Reason)
+	}
+	if d.NewFailureCount != 1 || d.ConfirmedCount != 1 {
+		t.Fatalf("new_failure_count = %d / confirmed_count = %d, want 1/1", d.NewFailureCount, d.ConfirmedCount)
+	}
+	if !strings.Contains(d.Reason, "second independent canary") {
+		t.Fatalf("reason = %q, want the two-canary requirement", d.Reason)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("findings = %d, want none", len(findings))
+	}
+}
+
+// TestSSRFDifferentialRequiresCleanBaseline is the false-positive guard for the
+// non-echoing form: an endpoint that already answers 5xx to everything must not
+// be "confirmed" just because a canary makes it answer a DIFFERENT 5xx.
+func TestSSRFDifferentialRequiresCleanBaseline(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(ssrfTargetValue(r), "indago-ssrf-") {
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(w, "Could not connect to external stock check service")
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "upstream service error")
+	}))
+	defer srv.Close()
+
+	d, findings := ssrfExerciseServer(t, srv, ExecutorConfig{}, nil)
+
+	if d.Verdict != domain.VerdictInconclusive {
+		t.Fatalf("verdict = %q, want inconclusive: the baseline was already 5xx (%s)", d.Verdict, d.Reason)
+	}
+	if d.BaselineStatus != http.StatusInternalServerError {
+		t.Fatalf("baseline_status = %d, want 500", d.BaselineStatus)
+	}
+	if d.NewFailureCount < maxSSRFDifferentialProbes {
+		t.Fatalf("new_failure_count = %d, want the differential to have run and found two new failures", d.NewFailureCount)
+	}
+	if !strings.Contains(d.Reason, "baseline") {
+		t.Fatalf("reason = %q, want it to name the baseline guard", d.Reason)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("findings = %d, want none", len(findings))
 	}
 }
 

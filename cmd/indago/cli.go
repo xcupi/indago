@@ -539,8 +539,9 @@ func (c *cli) scanCreate(args []string) error {
 	skipCORS := fs.Bool("skip-cors", false, "omit the CORS misconfiguration pass (ON by default): a permissive policy is confirmed only when cross-origin credentials are actually readable")
 	skipOpenRedirect := fs.Bool("skip-open-redirect", false, "omit the open-redirect pass (ON by default): a redirect is confirmed only by an actual cross-origin Location — this is the SERVER-side redirect engine")
 	skipGraphQL := fs.Bool("skip-graphql", false, "omit the GraphQL introspection/exposure pass (ON by default)")
-	ssrfCallback := fs.String("ssrf-callback", "", "operator OAST collaborator base URL the target is asked to request, e.g. https://abc123.oast.example (absolute http(s); the engine refuses a loopback/private/instance-metadata callback and never substitutes one)")
+	ssrfCallback := fs.String("ssrf-callback", "", "operator OAST collaborator base URL the target is asked to request, e.g. https://abc123.oast.example (absolute http(s); the engine refuses a loopback/instance-metadata callback, and a private one unless -allow-private-oast, and never substitutes a refused one)")
 	ssrfPoll := fs.String("ssrf-poll", "", "where Indago READS the collaborator's received requests, e.g. your poll endpoint (absolute http(s)); required for OAST confirmation, and refused if it points at an instance-metadata address")
+	allowPrivateOAST := fs.Bool("allow-private-oast", false, "allow the SSRF engine to use an OAST collaborator on a literal private (RFC 1918/ULA) address, e.g. a lab listener at 192.168.103.1:8751 for a target at 192.168.103.20 — OFF by default; loopback, link-local/instance-metadata, unspecified, multicast and CGNAT collaborators stay refused")
 	xxeCallback := fs.String("xxe-callback", "", "operator OAST collaborator base URL for the XXE entity, absolute http(s) (required with -enable-xxe for the pass to do anything)")
 	xxePoll := fs.String("xxe-poll", "", "where Indago READS the XXE collaborator's received requests, absolute http(s) (required together with -xxe-callback)")
 	var proxyPool stringList
@@ -557,7 +558,7 @@ func (c *cli) scanCreate(args []string) error {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-cors] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-cors] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
@@ -617,6 +618,9 @@ func (c *cli) scanCreate(args []string) error {
 	if *ssrfCallback != "" {
 		req["ssrf_callback_url"] = *ssrfCallback
 		req["ssrf_callback_poll_url"] = *ssrfPoll
+	}
+	if *allowPrivateOAST {
+		req["allow_private_oast"] = true
 	}
 	if (*xxeCallback == "") != (*xxePoll == "") {
 		return errors.New("-xxe-callback and -xxe-poll go together: the callback is the URL the XML entity requests, -xxe-poll is where Indago reads the received requests")

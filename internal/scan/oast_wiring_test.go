@@ -265,7 +265,7 @@ func TestOASTWiringPublicBaseURLWiresSSRF(t *testing.T) {
 	}
 	// Both halves must survive the engine's own validation, or the wiring is
 	// cosmetic: the canary would be refused and the poll never fetched.
-	canary, err := ssrfOASTCanary(ssrf.callbackURL)
+	canary, err := ssrfOASTCanary(ssrf.callbackURL, false)
 	if err != nil {
 		t.Fatalf("the wired canary is refused by the engine: %v", err)
 	}

@@ -98,7 +98,7 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	xxeCallbackURL, xxePollURL = oastCollab.callbackPair(xxeCallbackURL, xxePollURL)
 	xxe.withCallback(xxeCallbackURL, xxePollURL)
 	h[domain.JobXXE] = xxe
-	ssrf := newSSRFExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	ssrf := newSSRFExecutor(c.store, eng, c.opts.Evidence, ssrfConfig(execCfg, sc), c.log, findingsMu)
 	var ssrfCallbackURL, ssrfPollURL string
 	if sc != nil {
 		ssrfCallbackURL, ssrfPollURL = sc.Config.SSRFCallbackURL, sc.Config.SSRFCallbackPollURL
@@ -115,6 +115,19 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	h[domain.JobOpenRedirect] = newOpenRedirectExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobGraphQL] = newGraphQLExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	return h
+}
+
+// ssrfConfig returns the executor config the SSRF engine should use: the
+// server's own ExecutorConfig plus this scan's private-LAN opt-in
+// (allow_private_oast), which grants that one scan the right to use an
+// operator-supplied collaborator on an RFC 1918/ULA address. The built-in
+// collaborator is a server-level listener, so its eligibility is decided once,
+// in oastCollaborator.
+func ssrfConfig(cfg ExecutorConfig, sc *domain.Scan) ExecutorConfig {
+	if sc != nil && sc.Config.AllowPrivateOAST {
+		cfg.AllowPrivateOAST = true
+	}
+	return cfg
 }
 
 // browserManager returns the concrete *browser.Manager this scan's

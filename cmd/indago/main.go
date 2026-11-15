@@ -206,6 +206,8 @@ func cmdServe(args []string) error {
 		"URL a TARGET can reach for -oast-addr (a tunnel or reverse proxy, e.g. https://abc.example-tunnel.net). Without it the callback base URL is the loopback listener, which only a target on this host can reach and which SSRF refuses as a canary")
 	oastAllowExternalBind := fs.Bool("oast-allow-external-bind", false,
 		"allow -oast-addr to bind a non-loopback address; the callback listener is then reachable beyond this host (readily flooded — see docs/oast.md)")
+	allowPrivateOAST := fs.Bool("allow-private-oast", false,
+		"let the SSRF engine use an OAST collaborator on a literal private (RFC 1918/ULA) address, e.g. a lab listener at 192.168.103.1:8751 for a target at 192.168.103.20. OFF by default: a canary there asks the target to request the operator's own LAN. Loopback, link-local/instance-metadata, unspecified, multicast and CGNAT collaborators stay refused regardless")
 	_ = fs.Parse(args)
 	setFlags := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
@@ -300,13 +302,16 @@ func cmdServe(args []string) error {
 		HTTP:             eng,
 		HTTPConfig:       httpCfg,
 		Evidence:         evStore,
-		Executor:         scan.ExecutorConfig{AllowStateChanging: *allowUnsafe},
+		Executor:         scan.ExecutorConfig{AllowStateChanging: *allowUnsafe, AllowPrivateOAST: *allowPrivateOAST},
 		SessionsDir:      cfg.SessionsDir(),
 		Preflight:        true,
 		AutoPauseOnBlock: true,
 	}
 	if *allowUnsafe {
 		log.Warn("state-changing methods (POST/PUT/PATCH/DELETE) will be executed against in-scope targets")
+	}
+	if *allowPrivateOAST {
+		log.Warn("SSRF may use an OAST collaborator on a private (RFC 1918/ULA) address; loopback, link-local/instance-metadata, unspecified, multicast and CGNAT collaborators stay refused")
 	}
 	// Built-in OAST collaborator. One listener + one loopback poll API for the
 	// whole process: the scan controller hands their URLs to every engine that

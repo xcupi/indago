@@ -56,11 +56,23 @@ Rules, in order:
 2. **Otherwise the built-in collaborator is used** — the manager's `BaseURL()`
    for the target, its poll API for the scanner.
 3. **SSRF additionally needs a canary its own rules accept.** `ssrfOASTCanary`
-   refuses a loopback/private/instance-metadata host, because asking a target to
-   fetch `127.0.0.1` is the canonical *internal* probe, not a collaborator. A
-   loopback-only listener therefore leaves SSRF on its existing
-   response-differential path (logged at startup). Set `-oast-public-url` to
-   wire it.
+   refuses a loopback/instance-metadata host, because asking a target to fetch
+   `127.0.0.1` is the canonical *internal* probe, not a collaborator, and it
+   refuses a private (RFC 1918/ULA) host too unless the operator opted in with
+   `-allow-private-oast` (`allow_private_oast` on a scan) — that flag is the
+   explicit statement that a lab listener on the target's own private network,
+   e.g. `192.168.103.1:8751` for a target at `192.168.103.20`, is the intended
+   deployment. The opt-in never relaxes loopback, link-local/metadata,
+   unspecified, multicast or CGNAT. A loopback-only listener therefore leaves
+   SSRF on its existing response-differential path (logged at startup). Set
+   `-oast-public-url` to wire it.
+
+   That differential no longer requires the response to echo the canary: over a
+   **clean 2xx baseline**, two independent canaries that each turn the endpoint
+   into a resolver/dial/fetch failure (a generic 500/502/504 or a generic
+   "could not connect …" message included) are enough for a Medium-confidence
+   confirmation. A baseline that already failed, was not 2xx, or a 3xx/4xx
+   canary response never confirms.
 
 Each engine keeps its own correlation marker (it was written against an external
 webhook service), so the manager's job here is the listener, the retained
@@ -120,6 +132,7 @@ server defers at shutdown.
 | `TestOASTWiringLoopbackWiresXXEAndCommandInjection` | one listener + one loopback poll URL reach XXE and command injection; SSRF is deliberately left unwired, with a reason |
 | `TestOASTWiringOperatorOverrideWins`, `…HalfConfiguredPairIsNotMixed` | operator configuration wins and is never mixed |
 | `TestOASTWiringPublicBaseURLWiresSSRF` | a published base URL is accepted by both `ssrfOASTCanary` and `ssrfPollURL` |
+| `TestOASTWiringPrivateLabCollaboratorNeedsOptIn` | a private-LAN listener is left unwired (reason names `-allow-private-oast`) until the server opts in, and the per-scan opt-in reaches the SSRF executor config |
 | `TestOASTWiringXXEEndToEnd`, `…CommandInjectionEndToEnd`, `…SSRFEndToEnd` | target → manager listener → poll API → `VerdictConfirmed` + finding, through the real handlers |
 | `TestOASTWiringXXEOperatorBodyIsRegistered` | an operator XML body is registered as an endpoint when the built-in collaborator can confirm it (and not otherwise) |
 | `TestOASTWiringPoll*` (oast) | loopback-only, stable, secret path, hits reported verbatim, no line forgery, stops with the manager, safe under concurrent callbacks |

@@ -44,6 +44,16 @@ type ExecutorConfig struct {
 	// SkipDownloadEndpoints omits export/download routes from payload jobs:
 	// they tend to stream a large file or stall a worker.
 	SkipDownloadEndpoints bool
+	// AllowPrivateOAST lets the SSRF engine use an OAST collaborator whose host
+	// is a literal RFC 1918/ULA address — a local lab listener such as
+	// 192.168.103.1:8751 for a target at 192.168.103.20. Off by default: a
+	// canary there asks the target to request the operator's own LAN, which is
+	// only acceptable when the operator says that LAN IS the lab. It never
+	// relaxes anything else: loopback (127.0.0.0/8, ::1), link-local/instance
+	// metadata (169.254.0.0/16), unspecified, multicast and CGNAT
+	// (100.64.0.0/10) collaborator hosts stay refused, and the collaborator
+	// poll URL rules are unchanged (see ssrfForbiddenCanaryHost).
+	AllowPrivateOAST bool
 	// OnBlock is called once when a request reports 429/503 backpressure or a
 	// newly appearing CAPTCHA. The controller uses it to pause the scan rather
 	// than continuing to spend requests into a block. A 403/406 filter

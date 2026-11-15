@@ -16,11 +16,14 @@ package scan
 //     pair; a half-configured pair is passed through untouched (never mixed with
 //     a poll API that cannot see that service's hits).
 //   - SSRF only gets a canary the engine itself will accept. ssrfOASTCanary
-//     refuses a loopback/private/instance-metadata host by design — asking a
-//     target to fetch the scanner's own loopback address is the canonical
-//     internal probe, not a collaborator — so a loopback-only listener leaves
-//     SSRF on its existing response-differential path, and publishing the
-//     listener (-oast-public-url) is what makes it eligible.
+//     refuses a loopback/instance-metadata host by design — asking a target to
+//     fetch the scanner's own loopback address is the canonical internal probe,
+//     not a collaborator — so a loopback-only listener leaves SSRF on its
+//     existing response-differential path, and publishing the listener
+//     (-oast-public-url) is what makes it eligible. A collaborator bound to a
+//     private LAN address (a lab listener at 192.168.103.1 for a target at
+//     192.168.103.20) is eligible only with the explicit -allow-private-oast
+//     opt-in; without it the wiring records the reason and leaves SSRF alone.
 //   - Nothing else changes when no collaborator is configured: with Options.OAST
 //     nil the engines receive exactly the values they received before.
 //   - A hit is evidence, never a verdict: these are the same URLs the engines
@@ -72,14 +75,20 @@ type oastWiring struct {
 
 // oastCollaborator returns this controller's wiring, deriving it on first use.
 // A nil result means "no built-in collaborator", which is the default.
+//
+// The controller-level AllowPrivateOAST decides whether a collaborator bound to
+// a private LAN address may be used as an SSRF canary: the listener is a
+// server-level object, so its eligibility is a server-level decision (a
+// per-scan allow_private_oast still governs an operator-supplied callback
+// pair, which oastWiring passes through untouched).
 func (c *Controller) oastCollaborator() *oastWiring {
 	c.oastOnce.Do(func() {
-		c.oastCollab = deriveOASTWiring(c.opts.OAST, c.log)
+		c.oastCollab = deriveOASTWiring(c.opts.OAST, c.log, c.opts.Executor.AllowPrivateOAST)
 	})
 	return c.oastCollab
 }
 
-func deriveOASTWiring(mgr OASTCollaborator, log *slog.Logger) *oastWiring {
+func deriveOASTWiring(mgr OASTCollaborator, log *slog.Logger, allowPrivateOAST bool) *oastWiring {
 	if mgr == nil {
 		return nil
 	}
@@ -104,9 +113,13 @@ func deriveOASTWiring(mgr OASTCollaborator, log *slog.Logger) *oastWiring {
 		PollURL:     strings.TrimSpace(poll),
 		ListenAddr:  mgr.ListenAddr(),
 	}
-	if u, perr := url.Parse(base); perr != nil || u.Hostname() == "" {
+	host := ""
+	if u, perr := url.Parse(base); perr == nil {
+		host = u.Hostname()
+	}
+	if host == "" {
 		w.SSRFNote = "the collaborator base URL has no parsable host"
-	} else if reason, forbidden := ssrfForbiddenCanaryHost(u.Hostname()); forbidden {
+	} else if reason, forbidden := ssrfForbiddenCanaryHost(host, allowPrivateOAST); forbidden {
 		w.SSRFNote = "the collaborator host is " + reason +
 			"; SSRF needs a target-reachable collaborator (set -oast-public-url)"
 	} else {
@@ -114,7 +127,7 @@ func deriveOASTWiring(mgr OASTCollaborator, log *slog.Logger) *oastWiring {
 	}
 	log.Info("oast collaborator wired",
 		"callback", w.CallbackURL, "poll", w.PollURL, "listen", w.ListenAddr,
-		"ssrf", w.SSRFCanaryURL != "")
+		"ssrf", w.SSRFCanaryURL != "", "ssrf_private_canary", allowPrivateOAST && ssrfHostIsPrivate(host))
 	if w.SSRFCanaryURL == "" {
 		log.Info("oast: SSRF collaborator not wired; the engine keeps its response-differential confirmation", "reason", w.SSRFNote)
 	}

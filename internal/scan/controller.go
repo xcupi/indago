@@ -406,13 +406,18 @@ type CreateScanParams struct {
 	// by default); the SSRF callback pair is the operator's own OAST
 	// collaborator, validated by the engine at use time (a callback host that
 	// resolves to loopback/private/metadata space is refused, never
-	// substituted).
-	SkipSSRF              bool
-	SkipCORS              bool
-	SkipOpenRedirect      bool
-	SkipGraphQL           bool
-	SSRFCallbackURL       string
-	SSRFCallbackPollURL   string
+	// substituted, unless AllowPrivateOAST grants a literal RFC 1918/ULA lab
+	// address).
+	SkipSSRF            bool
+	SkipCORS            bool
+	SkipOpenRedirect    bool
+	SkipGraphQL         bool
+	SSRFCallbackURL     string
+	SSRFCallbackPollURL string
+	// AllowPrivateOAST opts this scan into using an OAST collaborator on a
+	// literal RFC 1918/ULA address (a lab listener on the target's own private
+	// network). See domain.ScanConfig.AllowPrivateOAST.
+	AllowPrivateOAST      bool
 	SkipWriteEndpoints    bool
 	SkipDownloadEndpoints bool
 	MaxDOMXSSEndpoints    int
@@ -614,6 +619,10 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	// validates the hosts itself at use time; creation only carries them.
 	cfg.SSRFCallbackURL = strings.TrimSpace(p.SSRFCallbackURL)
 	cfg.SSRFCallbackPollURL = strings.TrimSpace(p.SSRFCallbackPollURL)
+	// The private-LAN collaborator opt-in, carried, never inferred: the
+	// engine's canary rules still decide at use time whether the configured
+	// host is acceptable (see ssrfForbiddenCanaryHost).
+	cfg.AllowPrivateOAST = p.AllowPrivateOAST
 	cfg.EnableCommandInjection = p.EnableCommandInjection
 	cfg.EnableSSTI = p.EnableSSTI
 	cfg.EnableXXE = p.EnableXXE

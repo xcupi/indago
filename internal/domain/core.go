@@ -223,18 +223,24 @@ type ScanConfig struct {
 	// behavior for every existing scan); true omits that engine's jobs while
 	// leaving discovery and the other engines intact. OMIT the DOM switch to
 	// also omit the client-side open-redirect probe, which rides that pass.
-	SkipReflectedXSS       bool   `json:"skip_reflected_xss,omitempty"`
-	SkipDOMXSS             bool   `json:"skip_dom_xss,omitempty"`
-	SkipAccessControl      bool   `json:"skip_access_control,omitempty"`
-	SkipIDOR               bool   `json:"skip_idor,omitempty"`
-	SkipInfoDisclosure     bool   `json:"skip_info_disclosure,omitempty"`
-	SkipSSRF               bool   `json:"skip_ssrf,omitempty"`
-	SkipCORS               bool   `json:"skip_cors,omitempty"`
-	SkipOpenRedirect       bool   `json:"skip_open_redirect,omitempty"`
-	SkipGraphQL            bool   `json:"skip_graphql,omitempty"`
-	SSRFCallbackURL        string `json:"ssrf_callback_url,omitempty"`
-	SSRFCallbackPollURL    string `json:"ssrf_callback_poll_url,omitempty"`
-	EnableCommandInjection bool   `json:"enable_command_injection,omitempty"`
+	SkipReflectedXSS    bool   `json:"skip_reflected_xss,omitempty"`
+	SkipDOMXSS          bool   `json:"skip_dom_xss,omitempty"`
+	SkipAccessControl   bool   `json:"skip_access_control,omitempty"`
+	SkipIDOR            bool   `json:"skip_idor,omitempty"`
+	SkipInfoDisclosure  bool   `json:"skip_info_disclosure,omitempty"`
+	SkipSSRF            bool   `json:"skip_ssrf,omitempty"`
+	SkipCORS            bool   `json:"skip_cors,omitempty"`
+	SkipOpenRedirect    bool   `json:"skip_open_redirect,omitempty"`
+	SkipGraphQL         bool   `json:"skip_graphql,omitempty"`
+	SSRFCallbackURL     string `json:"ssrf_callback_url,omitempty"`
+	SSRFCallbackPollURL string `json:"ssrf_callback_poll_url,omitempty"`
+	// AllowPrivateOAST lets THIS scan's SSRF engine use an OAST collaborator
+	// whose host is a literal RFC 1918/ULA address — a lab listener on the
+	// target's own private network (192.168.103.1 for a target at
+	// 192.168.103.20). Off by default; it never relaxes loopback, link-local/
+	// instance-metadata, unspecified, multicast or CGNAT collaborators.
+	AllowPrivateOAST       bool `json:"allow_private_oast,omitempty"`
+	EnableCommandInjection bool `json:"enable_command_injection,omitempty"`
 	// EnableSSTI opts into the server-side template injection engine. It is
 	// separate from command injection because the confirmation evidence is a
 	// template-evaluated result, not a shell-expanded marker.

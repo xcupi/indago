@@ -299,6 +299,7 @@ type createScanReq struct {
 	SkipGraphQL                     bool   `json:"skip_graphql"`
 	SSRFCallbackURL                 string `json:"ssrf_callback_url"`
 	SSRFCallbackPollURL             string `json:"ssrf_callback_poll_url"`
+	AllowPrivateOAST                bool   `json:"allow_private_oast"`
 	EnableCommandInjection          bool   `json:"enable_command_injection"`
 	EnableSSTI                      bool   `json:"enable_ssti"`
 	EnableXXE                       bool   `json:"enable_xxe"`
@@ -408,6 +409,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		SkipGraphQL:                     req.SkipGraphQL,
 		SSRFCallbackURL:                 req.SSRFCallbackURL,
 		SSRFCallbackPollURL:             req.SSRFCallbackPollURL,
+		AllowPrivateOAST:                req.AllowPrivateOAST,
 		EnableCommandInjection:          req.EnableCommandInjection,
 		EnableSSTI:                      req.EnableSSTI,
 		EnableXXE:                       req.EnableXXE,

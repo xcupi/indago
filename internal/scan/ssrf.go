@@ -21,23 +21,37 @@ package scan
 //     unique correlation token appended, or a host under the RFC 2606 reserved
 //     ".invalid" TLD, which is permanently unresolvable. Nothing is reached
 //     through the latter.
-//   - Cloud instance-metadata endpoints, loopback, link-local, private/CGNAT
-//     ranges, unspecified/multicast addresses and mDNS/private host suffixes
-//     are REFUSED even when an operator configured them as the callback. Such
-//     a canary would ask the target to request its own host or the operator's
-//     LAN — exactly the internal-network probe (and cloud-metadata read) this
-//     engine must never perform. A refused callback is recorded as a skip
-//     reason, never substituted.
+//   - Cloud instance-metadata endpoints, loopback, link-local, unspecified/
+//     multicast addresses, CGNAT and mDNS/private host suffixes are REFUSED
+//     even when an operator configured them as the callback. Such a canary
+//     would ask the target to request its own host or the operator's LAN —
+//     exactly the internal-network probe (and cloud-metadata read) this engine
+//     must never perform. A refused callback is recorded as a skip reason,
+//     never substituted.
+//   - A literal RFC 1918/ULA collaborator address (a lab OAST listener such as
+//     192.168.103.1:8751 for a target at 192.168.103.20) is refused too UNLESS
+//     the operator opts in with ExecutorConfig.AllowPrivateOAST
+//     (`-allow-private-oast` on `indago serve`, or allow_private_oast on a
+//     scan): a collaborator on the target's own private network is a
+//     deliberate authorized lab deployment, and the one case where "the
+//     operator's LAN" IS the thing under test. That opt-in relaxes nothing
+//     else — loopback, link-local/metadata, unspecified, multicast and CGNAT
+//     stay refused (see ssrfForbiddenCanaryHost).
 //   - No file read, no cloud API call, no payload beyond a URL, and no
 //     state-changing request without the scan's explicit opt-in.
 //
 // A verdict is CONFIRMED only on evidence the TARGET produced:
 //   - OAST: the collaborator received the exact token of the canary this probe
 //     sent. Only a request made by the target can put that token there.
-//   - Response differential: TWO independent canary tokens each made the
-//     response carry a resolver/dial failure the baseline did not, and at
-//     least one of them is attributable to our canary (the response names the
-//     token). A single indicator is INCONCLUSIVE.
+//   - Error differential: over a clean 2xx baseline, TWO independent canary
+//     tokens each made the response report a resolver/dial/fetch failure the
+//     baseline did not have. Naming the injected token is the stronger form
+//     and is conclusive on its own, but it is not required: a target that
+//     answers a generic 500/502/504 or a generic connectivity message
+//     ("Could not connect to external stock check service") without ever
+//     echoing the URL is still confirmed, because neither canary can make an
+//     otherwise-working endpoint start failing. One indicator, or any
+//     differential over a baseline that was not a clean 2xx, is INCONCLUSIVE.
 //
 // Reflection of the canary, an ordinary redirect, a URL-validation complaint,
 // one indicator or a transport error are never promoted to a finding.
@@ -103,12 +117,21 @@ var (
 	// language runtime) emits when IT failed to resolve or connect to a URL the
 	// request supplied. Only these can confirm: each implies the server itself
 	// ran a resolver or dialer on our canary.
+	//
+	// The last group is deliberately generic connectivity wording: many
+	// applications wrap the client error in their own message ("Could not
+	// connect to external stock check service") and never echo the URL. Such a
+	// phrase is weak ON ITS OWN — decideSSRF only accepts it as a differential
+	// over a clean 2xx baseline, from two independent canaries — but without it
+	// a genuine non-echoing SSRF was reported inconclusive.
 	ssrfFetchFailureIndicators = []string{
+		// Resolver-level failures: the name could not be looked up at all.
 		"no such host",
 		"name or service not known",
 		"nodename nor servname provided",
 		"temporary failure in name resolution",
 		"could not resolve host",
+		"could not be resolved",
 		"failed to resolve",
 		"unable to resolve",
 		"unknown host",
@@ -116,9 +139,23 @@ var (
 		"eai_again",
 		"enotfound",
 		"dns lookup",
+		// Dial-level failures: the name resolved (or was not needed) and the
+		// connection itself failed.
 		"dial tcp",
 		"connection refused",
+		"connection failed",
 		"network is unreachable",
+		"no route to host",
+		"host unreachable",
+		// Generic connectivity wording (weak on its own; see above).
+		"could not connect",
+		"couldn't connect",
+		"failed to connect",
+		"unable to connect",
+		"could not be reached",
+		"failed to fetch",
+		"could not fetch",
+		"unable to fetch",
 	}
 
 	// ssrfURLParsingIndicators are weaker: they show the value reached a URL
@@ -181,6 +218,10 @@ type ssrfCanary struct {
 	// Kind is ssrfConfirmOAST or ssrfModeDifferential — which evidence channel
 	// canary can produce.
 	Kind string
+	// Private records that URL's host is a literal RFC 1918/ULA address, which
+	// only happens with the AllowPrivateOAST opt-in. Carried into the case
+	// detail so a lab-confirmed finding is identifiable as such.
+	Private bool
 }
 
 type ssrfAttempt struct {
@@ -191,6 +232,11 @@ type ssrfAttempt struct {
 	Callback   bool   `json:"callback"`
 	Indicator  string `json:"indicator,omitempty"`
 	Attributed bool   `json:"attributed,omitempty"`
+	// NewFailure records a fetch-failure indicator the untouched baseline did
+	// not have, in a shape the differential may treat as canary-induced (see
+	// ssrfNewFetchFailure). Without it a target that answers a generic
+	// 500/502/504 — without echoing the URL — could never be confirmed.
+	NewFailure bool `json:"new_failure,omitempty"`
 	// ParsedURL records that the response complained about the value's URL
 	// syntax. Triage only: it never contributes to a verdict.
 	ParsedURL bool `json:"parsed_url,omitempty"`
@@ -204,14 +250,18 @@ type ssrfDetail struct {
 	BaselineFailure string               `json:"baseline_indicator,omitempty"`
 	CallbackMode    string               `json:"callback_mode,omitempty"`
 	CallbackNote    string               `json:"callback_note,omitempty"`
-	Attempts        []ssrfAttempt        `json:"attempts,omitempty"`
-	SentCount       int                  `json:"sent_count"`
-	ConfirmedCount  int                  `json:"confirmed_count"`
-	AttributedCount int                  `json:"attributed_count,omitempty"`
-	ConfirmMethod   string               `json:"confirm_method,omitempty"`
-	Verdict         domain.Verdict       `json:"verdict"`
-	Reason          string               `json:"reason,omitempty"`
-	EvidenceIDs     []domain.ID          `json:"evidence_ids,omitempty"`
+	// PrivateCanary records that the OAST canary pointed at a literal private
+	// (RFC 1918/ULA) collaborator, i.e. the AllowPrivateOAST opt-in was used.
+	PrivateCanary   bool           `json:"private_canary,omitempty"`
+	Attempts        []ssrfAttempt  `json:"attempts,omitempty"`
+	SentCount       int            `json:"sent_count"`
+	ConfirmedCount  int            `json:"confirmed_count"`
+	NewFailureCount int            `json:"new_failure_count,omitempty"`
+	AttributedCount int            `json:"attributed_count,omitempty"`
+	ConfirmMethod   string         `json:"confirm_method,omitempty"`
+	Verdict         domain.Verdict `json:"verdict"`
+	Reason          string         `json:"reason,omitempty"`
+	EvidenceIDs     []domain.ID    `json:"evidence_ids,omitempty"`
 }
 
 type ssrfExecutor struct {
@@ -250,8 +300,9 @@ func newSSRFExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, c
 // withCallback sets the operator's OAST collaborator: callbackURL is the base
 // the target is asked to request, pollURL is where this engine reads received
 // requests. Both are required for OAST mode. A callback host that resolves to
-// loopback, a private range or an instance-metadata alias is refused at use
-// time and never substituted (see ssrfOASTCanary).
+// loopback, an instance-metadata alias, or (without the AllowPrivateOAST
+// opt-in) a private range is refused at use time and never substituted (see
+// ssrfOASTCanary).
 func (e *ssrfExecutor) withCallback(callbackURL, pollURL string) {
 	e.callbackURL = strings.TrimSpace(callbackURL)
 	e.callbackPollURL = strings.TrimSpace(pollURL)
@@ -310,7 +361,7 @@ func (e *ssrfExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	// naming our token is conclusive on its own: the token exists only in the
 	// value the target itself was asked to fetch.
 	if e.callbackURL != "" && e.callbackPollURL != "" {
-		canary, canaryErr := ssrfOASTCanary(e.callbackURL)
+		canary, canaryErr := ssrfOASTCanary(e.callbackURL, e.cfg.AllowPrivateOAST)
 		poll, pollErr := ssrfPollURL(e.callbackPollURL)
 		switch {
 		case canaryErr != nil:
@@ -327,6 +378,7 @@ func (e *ssrfExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 			e.log.Warn("ssrf: collaborator poll refused", "scan", job.ScanID, "err", pollErr)
 		default:
 			d.CallbackMode = ssrfConfirmOAST
+			d.PrivateCanary = canary.Private
 			attempt, sent := e.probe(ctx, job, ep, params, focus, canary, &d)
 			if sent {
 				d.SentCount++
@@ -358,7 +410,11 @@ func (e *ssrfExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 					d.SentCount++
 				}
 				if sent && attempt.Indicator != "" {
+					attempt.NewFailure = ssrfNewFetchFailure(attempt, d.BaselineStatus, baseBody)
 					d.ConfirmedCount++
+					if attempt.NewFailure {
+						d.NewFailureCount++
+					}
 					if attempt.Attributed {
 						d.AttributedCount++
 					}
@@ -379,6 +435,23 @@ func (e *ssrfExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 }
 
 // decideSSRF fills d.Verdict and d.Reason from the attempts already recorded.
+//
+// The differential arm has two strengths. A response that NAMES the injected
+// token is conclusive by itself. Without it, the arm still confirms when the
+// untouched baseline was a clean 2xx and every independent canary turned the
+// endpoint into a fetch failure the baseline did not report: applications that
+// merely echo a generic error ("Could not connect to external stock check
+// service") never name our token, and requiring the echo reported real
+// non-echoing SSRF as inconclusive. The guards that keep that honest live in
+// ssrfNewFetchFailure and ssrfBaselineSucceeded — a single indicator, a 3xx/4xx
+// canary response, a baseline that already failed, or a baseline that was not
+// 2xx all stay inconclusive.
+//
+// The non-echoing form is inherently weaker than an echoed token: an
+// application that answers ANY value it cannot reach with the same generic
+// connectivity message looks identical this way, which is why a differential
+// confirmation stays Medium confidence and the OAST path (a callback only the
+// target itself can produce) remains the authoritative one.
 func (e *ssrfExecutor) decideSSRF(d *ssrfDetail) {
 	switch {
 	case d.ConfirmMethod == ssrfConfirmOAST:
@@ -393,9 +466,20 @@ func (e *ssrfExecutor) decideSSRF(d *ssrfDetail) {
 		d.Verdict = domain.VerdictConfirmed
 		d.ConfirmMethod = ssrfConfirmDifferential
 		d.Reason = "two independent canaries each produced a resolver/dial failure the baseline did not, attributable to the injected value"
+	case d.NewFailureCount >= maxSSRFDifferentialProbes && ssrfBaselineSucceeded(*d):
+		// The non-echoing form: the URL never comes back in the response, but
+		// two independent canaries each turned a clean 2xx baseline into a
+		// server error / fetch failure it did not have before.
+		d.Verdict = domain.VerdictConfirmed
+		d.ConfirmMethod = ssrfConfirmDifferential
+		d.Reason = "two independent canaries each made a clean baseline report a resolver/dial/fetch failure it did not have before; the endpoint fetches the injected URL"
 	case d.ConfirmedCount >= maxSSRFDifferentialProbes:
 		d.Verdict = domain.VerdictInconclusive
-		d.Reason = "two canaries produced a resolver/dial failure, but the response never names the injected value; out-of-band confirmation is required"
+		if !ssrfBaselineSucceeded(*d) {
+			d.Reason = fmt.Sprintf("two canaries produced a resolver/dial failure, but the baseline answered %d instead of a clean 2xx, so the failure cannot be attributed to the canary; out-of-band confirmation is required", d.BaselineStatus)
+		} else {
+			d.Reason = "two canaries produced a resolver/dial failure, but not as a new failure over the clean baseline (the canary response was not a server error), and the response never names the injected value; out-of-band confirmation is required"
+		}
 	case d.ConfirmedCount == 1:
 		d.Verdict = domain.VerdictInconclusive
 		d.Reason = "one canary produced a resolver/dial failure; a second independent canary is required"
@@ -409,6 +493,40 @@ func (e *ssrfExecutor) decideSSRF(d *ssrfDetail) {
 		d.Reason = "no request attributable to a canary was observed"
 	}
 }
+
+// ssrfNewFetchFailure reports whether one canary attempt produced a
+// fetch-failure signal the untouched baseline did not have, in a shape the
+// differential may treat as canary-induced: the response carries a resolver/
+// dial indicator that is absent from the baseline body, and either the
+// endpoint moved to a server-error status (the generic 500/502/504 a
+// non-echoing target returns) or it kept a success status while now carrying
+// the failure text.
+//
+// A 3xx/4xx canary response never qualifies: that is the application
+// rejecting the value, not its HTTP client failing to reach it.
+func ssrfNewFetchFailure(a ssrfAttempt, baselineStatus int, baselineBody string) bool {
+	indicator := strings.ToLower(strings.TrimSpace(a.Indicator))
+	if indicator == "" {
+		return false
+	}
+	if strings.Contains(strings.ToLower(baselineBody), indicator) {
+		return false
+	}
+	if a.Status >= 500 {
+		return true
+	}
+	return ssrfSuccessStatus(a.Status) && ssrfSuccessStatus(baselineStatus)
+}
+
+// ssrfBaselineSucceeded reports whether the untouched baseline was a clean 2xx
+// with no fetch-failure indicator — the only shape in which a canary-induced
+// server error can be attributed to the canary rather than to the endpoint's
+// normal error behaviour.
+func ssrfBaselineSucceeded(d ssrfDetail) bool {
+	return d.BaselineFailure == "" && ssrfSuccessStatus(d.BaselineStatus)
+}
+
+func ssrfSuccessStatus(status int) bool { return status >= 200 && status < 300 }
 
 func ssrfNote(d ssrfDetail) string {
 	switch {
@@ -684,9 +802,12 @@ func ssrfDifferentialCanary() (ssrfCanary, error) {
 }
 
 // ssrfOASTCanary builds a canary from the operator's collaborator, refusing any
-// base whose host is a loopback/private/metadata address — a canary there would
-// turn the target into a probe of its own host or the operator's LAN.
-func ssrfOASTCanary(callbackURL string) (ssrfCanary, error) {
+// base whose host is a loopback/instance-metadata address — a canary there
+// would turn the target into a probe of its own host. A private (RFC 1918/ULA)
+// host is refused too unless allowPrivate (ExecutorConfig.AllowPrivateOAST) is
+// set, which is the explicit opt-in for a lab collaborator on the target's own
+// private network.
+func ssrfOASTCanary(callbackURL string, allowPrivate bool) (ssrfCanary, error) {
 	raw := strings.TrimSpace(callbackURL)
 	if raw == "" {
 		return ssrfCanary{}, errors.New("no OAST callback configured")
@@ -702,7 +823,7 @@ func ssrfOASTCanary(callbackURL string) (ssrfCanary, error) {
 	if host == "" {
 		return ssrfCanary{}, fmt.Errorf("OAST callback %q has no host", truncate(raw, 120))
 	}
-	if reason, forbidden := ssrfForbiddenCanaryHost(host); forbidden {
+	if reason, forbidden := ssrfForbiddenCanaryHost(host, allowPrivate); forbidden {
 		return ssrfCanary{}, fmt.Errorf("OAST callback host %q is %s; refusing to make the target request it", host, reason)
 	}
 	token, err := ssrfNewToken()
@@ -712,13 +833,23 @@ func ssrfOASTCanary(callbackURL string) (ssrfCanary, error) {
 	u.User = nil // never leak operator credentials into a value the target sees
 	u.Path = strings.TrimRight(u.Path, "/") + "/" + token
 	u.RawQuery, u.Fragment, u.RawFragment = "", "", ""
-	return ssrfCanary{URL: u.String(), Token: token, Kind: ssrfConfirmOAST}, nil
+	return ssrfCanary{URL: u.String(), Token: token, Kind: ssrfConfirmOAST, Private: ssrfHostIsPrivate(host)}, nil
 }
 
 // ssrfForbiddenCanaryHost reports whether host must never be used as a canary,
 // and why. It is deliberately purely syntactic: resolving a name here would
 // itself be a network probe, and the refusal has to be deterministic.
-func ssrfForbiddenCanaryHost(host string) (string, bool) {
+//
+// allowPrivate is ExecutorConfig.AllowPrivateOAST. It relaxes exactly ONE rule:
+// a literal RFC 1918/ULA address is accepted, because a lab OAST listener on
+// the target's own private network (192.168.103.1 for a target at
+// 192.168.103.20) is a deliberate authorized deployment — the operator says the
+// LAN IS the lab. Everything else stays absolute, with or without the opt-in:
+// instance-metadata names and addresses, loopback (127.0.0.0/8, ::1), link-local
+// (169.254.0.0/16, fe80::/10), unspecified, multicast, 0.0.0.0/8, CGNAT
+// (100.64.0.0/10 — where Alibaba's metadata service lives) and the
+// mDNS/private host suffixes (.local/.internal/.localhost/.home.arpa).
+func ssrfForbiddenCanaryHost(host string, allowPrivate bool) (string, bool) {
 	h := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
 	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[") // [::1] -> ::1
 	if h == "" {
@@ -747,7 +878,9 @@ func ssrfForbiddenCanaryHost(host string) (string, bool) {
 	case ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast():
 		return "a link-local/instance-metadata address", true
 	case ip.IsPrivate():
-		return "a private (RFC 1918/ULA) address", true
+		if !allowPrivate {
+			return "a private (RFC 1918/ULA) address (set -allow-private-oast for a lab collaborator on that network)", true
+		}
 	case ip.IsMulticast():
 		return "a multicast address", true
 	}
@@ -761,6 +894,16 @@ func ssrfForbiddenCanaryHost(host string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// ssrfHostIsPrivate reports whether host is a literal RFC 1918/ULA address —
+// the case AllowPrivateOAST exists for. Used to LABEL evidence (a finding
+// confirmed through a lab collaborator), never to decide a verdict.
+func ssrfHostIsPrivate(host string) bool {
+	h := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsPrivate()
 }
 
 // ssrfPollURL validates the collaborator's read API. This URL is fetched by the
@@ -937,7 +1080,7 @@ func ssrfSummary(d ssrfDetail) string {
 	case ssrfConfirmOAST:
 		return "The server requested an operator-supplied canary URL: the collaborator received a request carrying the unique correlation token injected into the parameter."
 	case ssrfConfirmDifferential:
-		return "Two independent canary URLs each produced a resolver/dial failure that the baseline did not, showing the server attempted a request to an attacker-controlled URL."
+		return "Two independent canary URLs each produced a resolver/dial/fetch failure that a clean baseline did not (the response need not echo the URL), showing the server attempted a request to an attacker-controlled URL."
 	default:
 		return "Evidence is insufficient for a verdict."
 	}
