@@ -110,6 +110,9 @@ func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpen
 
 	for hop := 0; ; hop++ {
 		if d := s.scope.Permits(cur.URL); !d.Allowed {
+			if hop > 0 {
+				return nil, fmt.Errorf("%w: %s", ErrOutOfScopeRedirect, d.Reason)
+			}
 			return nil, fmt.Errorf("%w: %s", ErrOutOfScope, d.Reason)
 		}
 		// Pace AFTER the scope check (an out-of-scope request takes no permit)

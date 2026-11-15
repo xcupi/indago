@@ -54,10 +54,14 @@ var (
 	ErrScopeRequired = errors.New("scan: explicit scope required before scanning")
 	ErrScopeEmpty    = errors.New("scan: scope is empty (fails closed)")
 	ErrOutOfScope    = errors.New("scan: target is out of scope")
-	ErrNotRunning    = errors.New("scan: not running")
-	ErrBadState      = errors.New("scan: illegal state transition")
-	ErrShutdown      = errors.New("scan: controller is shut down")
-	ErrInvalidSeed   = errors.New("scan: invalid seed URL")
+	// ErrOutOfScopeRedirect is a redirect hop (not the initial request) that
+	// leaves scope. It is a coverage boundary for the endpoint, not a permanent
+	// failure of the scanner; it wraps ErrOutOfScope for existing callers.
+	ErrOutOfScopeRedirect = fmt.Errorf("%w: redirect target is out of scope", ErrOutOfScope)
+	ErrNotRunning         = errors.New("scan: not running")
+	ErrBadState           = errors.New("scan: illegal state transition")
+	ErrShutdown           = errors.New("scan: controller is shut down")
+	ErrInvalidSeed        = errors.New("scan: invalid seed URL")
 	// ErrBadConfig reports an out-of-range scan configuration value (e.g. a
 	// crawl depth/limit beyond its cap). Operator-fixable input.
 	ErrBadConfig = errors.New("scan: invalid configuration")

@@ -154,6 +154,11 @@ func (e *executor) Handle(ctx context.Context, job *domain.TestJob) error {
 	if e.cfg.Authenticated {
 		e.reportAuthLost(job.ScanID, res.resp)
 	}
+	if res.outcome == domain.OutcomeError && isOutOfScopeRedirectError(res.err) {
+		res.skipped = true
+		res.err = nil
+		res.note = "request skipped: redirect target is outside the scan scope"
+	}
 	if res.outcome == domain.OutcomeError && isTLSRedirectMismatch(res.err) {
 		res.skipped = true
 		res.err = nil
@@ -515,6 +520,14 @@ func resolveJobTarget(ctx context.Context, st store.Store, job *domain.TestJob) 
 }
 
 // finish persists the attempt's result and its request/response evidence.
+// isOutOfScopeRedirectError recognizes a redirect hop that left scope. The
+// initial request for an out-of-scope endpoint is still a hard error (existing
+// callers and tests rely on that); only a redirect from an in-scope request is
+// a coverage boundary.
+func isOutOfScopeRedirectError(err error) bool {
+	return err != nil && errors.Is(err, ErrOutOfScopeRedirect)
+}
+
 // isTLSRedirectMismatch recognizes a real-world redirect that lands on an
 // HTTPS URL where the service is still speaking plain HTTP (or vice versa).
 // The target is not vulnerable to the tested class in that state; retrying the

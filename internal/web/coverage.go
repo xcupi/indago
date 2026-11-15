@@ -75,6 +75,9 @@ func classifySkip(note string) skipReason {
 	case strings.Contains(n, "browser verification supports") || strings.Contains(n, "not supported for browser document replay"):
 		return skipReason{"verification_unsupported", sevMedium, "Browser verification does not support this request shape",
 			"Candidates were not confirmed in a browser. Verify these endpoints manually."}
+	case strings.Contains(n, "redirect target is outside the scan scope"):
+		return skipReason{"out_of_scope_redirect", sevInfo, "Redirect target is outside the scan scope",
+			"The endpoint redirected away from authorized scope. The endpoint remains untested; this is a coverage boundary, not a negative result."}
 	case strings.Contains(n, "http/https redirect") || strings.Contains(n, "does not speak tls"):
 		return skipReason{"tls_redirect_mismatch", sevInfo, "HTTP/HTTPS redirect could not be followed on this port",
 			"The site redirects to a scheme the service does not serve on that port. The endpoint remains untested; this is a coverage gap, not a negative result."}
