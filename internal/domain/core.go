@@ -245,6 +245,11 @@ type ScanConfig struct {
 	// separate from command injection because the confirmation evidence is a
 	// template-evaluated result, not a shell-expanded marker.
 	EnableSSTI bool `json:"enable_ssti,omitempty"`
+	// EnableSQLi opts into the SQL-injection engine: quote-breaking probes
+	// for a NEW database error signature and boolean true/false pairs. It is
+	// separate from every other engine because its evidence is the database's
+	// own reply, never a computed marker.
+	EnableSQLi bool `json:"enable_sqli,omitempty"`
 	// EnableXXE opts into XML external-entity probing. It only runs against
 	// observed (or operator-supplied) XML request bodies. In-band
 	// document-internal entity expansion is confirmed without a collaborator;

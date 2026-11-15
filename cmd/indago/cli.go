@@ -534,6 +534,7 @@ func (c *cli) scanCreate(args []string) error {
 	// run by default and are switched OFF with their own -skip-* flag.
 	enableCommandInjection := fs.Bool("enable-command-injection", false, "opt in to the bounded OS command-injection pass: harmless arithmetic markers are sent into likely command sinks and a finding is confirmed only by two independent executions — OFF by default")
 	enableSSTI := fs.Bool("enable-ssti", false, "opt in to the server-side template-injection pass: a bounded template expression marker is evaluated and a finding is confirmed only by the COMPUTED result appearing in the response — OFF by default")
+	enableSQLi := fs.Bool("enable-sqli", false, "opt in to the bounded SQL-injection pass: harmless quote-breaking probes look for a database error signature the baseline did not produce, and true/false boolean pairs must diverge consistently; a finding is confirmed only by two independent signals — OFF by default")
 	enableXXE := fs.Bool("enable-xxe", false, "opt in to the XML external-entity pass, which only runs against OBSERVED XML request bodies; it needs -xxe-callback and -xxe-poll (without them the engine records a clean skip, never a failure) — OFF by default")
 	skipSSRF := fs.Bool("skip-ssrf", false, "omit the SSRF pass (ON by default): URL-like parameters are probed with an operator-supplied OAST canary and confirmed only by a marker-bearing callback, never by a blind internal fetch")
 	skipCORS := fs.Bool("skip-cors", false, "omit the CORS misconfiguration pass (ON by default): a permissive policy is confirmed only when cross-origin credentials are actually readable")
@@ -558,7 +559,7 @@ func (c *cli) scanCreate(args []string) error {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-cors] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-sqli] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-cors] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
@@ -592,6 +593,9 @@ func (c *cli) scanCreate(args []string) error {
 	}
 	if *enableSSTI {
 		req["enable_ssti"] = true
+	}
+	if *enableSQLi {
+		req["enable_sqli"] = true
 	}
 	if *enableXXE {
 		req["enable_xxe"] = true

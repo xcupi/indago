@@ -95,6 +95,10 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	commandInjection.withCallback(cmdCallbackURL, cmdPollURL)
 	h[domain.JobCommandInjection] = commandInjection
 	h[domain.JobSSTI] = newSSTIExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	// SQL injection is a bounded raw-HTTP pass too. It sends only
+	// quote-breaking and boolean-differential probes and confirms only two
+	// independent signals, one of which must be new relative to the baseline.
+	h[domain.JobSQLi] = newSQLiExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	xxe := newXXEExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	var xxeCallbackURL, xxePollURL string
 	if sc != nil {
@@ -189,6 +193,7 @@ func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 		domain.JobAccessControl:    noop(domain.JobAccessControl),
 		domain.JobCommandInjection: noop(domain.JobCommandInjection),
 		domain.JobSSTI:             noop(domain.JobSSTI),
+		domain.JobSQLi:             noop(domain.JobSQLi),
 		domain.JobXXE:              noop(domain.JobXXE),
 		domain.JobSSRF:             noop(domain.JobSSRF),
 		domain.JobCORS:             noop(domain.JobCORS),

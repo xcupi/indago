@@ -94,6 +94,8 @@ type execution struct {
 	commandInjectionPassDone atomic.Bool
 	// sstiPassDone marks the one-time server-side template injection pass.
 	sstiPassDone atomic.Bool
+	// sqliPassDone marks the one-time SQL injection pass.
+	sqliPassDone atomic.Bool
 	// xxePassDone marks the one-time XML external entity pass.
 	xxePassDone atomic.Bool
 	// ssrfPassDone marks the one-time non-destructive SSRF pass.
@@ -605,6 +607,13 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		ex.sstiPassDone.Store(true)
 		if sc.Config.EnableSSTI {
 			c.enqueueSSTIProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.sqliPassDone.Load() {
+		ex.sqliPassDone.Store(true)
+		if sc.Config.EnableSQLi {
+			c.enqueueSQLiProbes(ctx, ex.scanID)
 			passes = true
 		}
 	}

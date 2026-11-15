@@ -394,6 +394,7 @@ type CreateScanParams struct {
 	SkipInfoDisclosure              bool
 	EnableCommandInjection          bool
 	EnableSSTI                      bool
+	EnableSQLi                      bool
 	EnableXXE                       bool
 	XXECallbackURL                  string
 	XXECallbackPollURL              string
@@ -625,6 +626,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.AllowPrivateOAST = p.AllowPrivateOAST
 	cfg.EnableCommandInjection = p.EnableCommandInjection
 	cfg.EnableSSTI = p.EnableSSTI
+	cfg.EnableSQLi = p.EnableSQLi
 	cfg.EnableXXE = p.EnableXXE
 	cfg.XXECallbackURL = p.XXECallbackURL
 	cfg.XXECallbackPollURL = p.XXECallbackPollURL
@@ -1493,7 +1495,7 @@ func (c *Controller) poolConfig(sc *domain.Scan) worker.Config {
 		ScanID: sc.ID,
 		Groups: []worker.GroupSpec{
 			{Name: GroupDiscovery, Types: []domain.JobType{domain.JobDiscovery}, Size: sc.Config.DiscoveryConcurrency},
-			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR, domain.JobAccessControl, domain.JobDisclosure, domain.JobCommandInjection, domain.JobSSTI, domain.JobXXE, domain.JobSSRF, domain.JobCORS, domain.JobOpenRedirect, domain.JobGraphQL}, Size: sc.Config.HTTPConcurrency},
+			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR, domain.JobAccessControl, domain.JobDisclosure, domain.JobCommandInjection, domain.JobSSTI, domain.JobSQLi, domain.JobXXE, domain.JobSSRF, domain.JobCORS, domain.JobOpenRedirect, domain.JobGraphQL}, Size: sc.Config.HTTPConcurrency},
 			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify, domain.JobDOMXSS}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
 		},
 		LeaseDuration: c.opts.LeaseDuration,

@@ -270,6 +270,11 @@ const (
 	// It sends only arithmetic template expressions and requires two
 	// independent computed results before confirming.
 	JobSSTI JobType = "ssti"
+	// JobSQLi probes one injection point for SQL injection. It sends only
+	// harmless quote-breaking and boolean-differential probes and requires
+	// two independent signals (a new database error signature or a stable
+	// true/false divergence) before confirming.
+	JobSQLi JobType = "sqli"
 	// JobXXE probes one XML request body for external-entity processing.
 	JobXXE JobType = "xxe"
 	// JobSSRF probes one injection point for server-side request forgery using
@@ -286,7 +291,7 @@ const (
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL:
 		return true
 	default:
 		return false

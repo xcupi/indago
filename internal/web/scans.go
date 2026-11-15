@@ -302,6 +302,7 @@ type createScanReq struct {
 	AllowPrivateOAST                bool   `json:"allow_private_oast"`
 	EnableCommandInjection          bool   `json:"enable_command_injection"`
 	EnableSSTI                      bool   `json:"enable_ssti"`
+	EnableSQLi                      bool   `json:"enable_sqli"`
 	EnableXXE                       bool   `json:"enable_xxe"`
 	XXECallbackURL                  string `json:"xxe_callback_url"`
 	XXECallbackPollURL              string `json:"xxe_callback_poll_url"`
@@ -412,6 +413,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		AllowPrivateOAST:                req.AllowPrivateOAST,
 		EnableCommandInjection:          req.EnableCommandInjection,
 		EnableSSTI:                      req.EnableSSTI,
+		EnableSQLi:                      req.EnableSQLi,
 		EnableXXE:                       req.EnableXXE,
 		XXECallbackURL:                  req.XXECallbackURL,
 		XXECallbackPollURL:              req.XXECallbackPollURL,
@@ -501,6 +503,7 @@ type capabilitiesReq struct {
 	SkipInfoDisclosure     bool   `json:"skip_info_disclosure"`
 	EnableCommandInjection bool   `json:"enable_command_injection"`
 	EnableSSTI             bool   `json:"enable_ssti"`
+	EnableSQLi             bool   `json:"enable_sqli"`
 	EnableXXE              bool   `json:"enable_xxe"`
 	XXECallbackURL         string `json:"xxe_callback_url"`
 	XXECallbackPollURL     string `json:"xxe_callback_poll_url"`
@@ -534,6 +537,7 @@ func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Req
 	sc.Config.SkipInfoDisclosure = req.SkipInfoDisclosure
 	sc.Config.EnableCommandInjection = req.EnableCommandInjection
 	sc.Config.EnableSSTI = req.EnableSSTI
+	sc.Config.EnableSQLi = req.EnableSQLi
 	sc.Config.EnableXXE = req.EnableXXE
 	sc.Config.XXECallbackURL = req.XXECallbackURL
 	sc.Config.XXECallbackPollURL = req.XXECallbackPollURL

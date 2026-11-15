@@ -32,7 +32,7 @@ func TestCLIScanCreateWiresWave1EngineFlags(t *testing.T) {
 	target := idFrom(t, out)
 
 	err := run("scan", "create", "-project", project, "-target", target,
-		"-enable-command-injection", "-enable-ssti",
+		"-enable-command-injection", "-enable-ssti", "-enable-sqli",
 		"-enable-xxe", "-xxe-callback", "https://oast.example.test/hook", "-xxe-poll", "https://oast.example.test/poll",
 		"-skip-ssrf", "-skip-cors", "-skip-open-redirect", "-skip-graphql",
 		"-ssrf-callback", "https://oast.example.test/ssrf", "-ssrf-poll", "https://oast.example.test/ssrf-poll",
@@ -53,6 +53,7 @@ func TestCLIScanCreateWiresWave1EngineFlags(t *testing.T) {
 	}{
 		{"enable_command_injection", cfg.EnableCommandInjection},
 		{"enable_ssti", cfg.EnableSSTI},
+		{"enable_sqli", cfg.EnableSQLi},
 		{"enable_xxe", cfg.EnableXXE},
 		{"skip_ssrf", cfg.SkipSSRF},
 		{"skip_cors", cfg.SkipCORS},
@@ -107,7 +108,7 @@ func TestCLIScanCreateDefaultsLeaveWave1EnginesAlone(t *testing.T) {
 	if cfg.SkipSSRF || cfg.SkipCORS || cfg.SkipOpenRedirect || cfg.SkipGraphQL {
 		t.Errorf("an omitted -skip-* flag must not disable a default engine: %+v", cfg)
 	}
-	if cfg.EnableCommandInjection || cfg.EnableSSTI || cfg.EnableXXE {
+	if cfg.EnableCommandInjection || cfg.EnableSSTI || cfg.EnableSQLi || cfg.EnableXXE {
 		t.Errorf("an omitted -enable-* flag must not opt an engine in: %+v", cfg)
 	}
 	if cfg.SSRFCallbackURL != "" || cfg.SSRFCallbackPollURL != "" || cfg.XXECallbackURL != "" || cfg.XXECallbackPollURL != "" {

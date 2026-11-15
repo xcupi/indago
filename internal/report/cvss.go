@@ -339,6 +339,7 @@ var (
 	cweDisclosure       = CWE{200, "Exposure of Sensitive Information to an Unauthorized Actor"}
 	cweCORS             = CWE{942, "Permissive Cross-domain Policy with Untrusted Domains"}
 	cweSSTI             = CWE{1336, "Improper Neutralization of Special Elements Used in a Template Engine"}
+	cweSQLi             = CWE{89, "Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"}
 )
 
 // classTable is the deterministic mapping. Order is documentation order and is
@@ -356,6 +357,11 @@ var classTable = []Classification{
 	// high on all three impact metrics.
 	{Class: domain.VulnSSTI, CWE: cweSSTI, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), Note: ClassificationNote},
 	{Class: domain.VulnCommandInjection, CWE: cweCommandInjection, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), Note: ClassificationNote},
+
+	// SQL injection reaches the database directly: the attacker reads and
+	// writes stored data, so all three impact metrics are high and no victim
+	// interaction is needed.
+	{Class: domain.VulnSQLi, CWE: cweSQLi, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), Note: ClassificationNote},
 
 	// XXE as a file-read/SSRF primitive: high confidentiality, no integrity or
 	// availability impact.
