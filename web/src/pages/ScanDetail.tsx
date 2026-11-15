@@ -61,8 +61,13 @@ export default function ScanDetail({ id }: { id: string }) {
     access: true,
     idor: true,
     disclosure: true,
+    ssrf: true,
+    cors: true,
+    openRedirect: true,
+    graphql: true,
     command: false,
     ssti: false,
+    sqli: false,
     xxe: false,
   });
 
@@ -86,8 +91,13 @@ export default function ScanDetail({ id }: { id: string }) {
       access: !c.skip_access_control,
       idor: !c.skip_idor,
       disclosure: !c.skip_info_disclosure,
+      ssrf: !c.skip_ssrf,
+      cors: !c.skip_cors,
+      openRedirect: !c.skip_open_redirect,
+      graphql: !c.skip_graphql,
       command: Boolean(c.enable_command_injection),
       ssti: Boolean(c.enable_ssti),
+      sqli: Boolean(c.enable_sqli),
       xxe: Boolean(c.enable_xxe),
     });
   }, [scan.data?.id, scan.data?.updated_at]);
@@ -139,8 +149,13 @@ export default function ScanDetail({ id }: { id: string }) {
           skip_access_control: !caps.access,
           skip_idor: !caps.idor,
           skip_info_disclosure: !caps.disclosure,
+          skip_ssrf: !caps.ssrf,
+          skip_cors: !caps.cors,
+          skip_open_redirect: !caps.openRedirect,
+          skip_graphql: !caps.graphql,
           enable_command_injection: caps.command,
           enable_ssti: caps.ssti,
+          enable_sqli: caps.sqli,
           enable_xxe: caps.xxe,
         },
       });
@@ -372,8 +387,13 @@ export default function ScanDetail({ id }: { id: string }) {
               ["access", "Access control", "Role/flag/field and admin-path checks."],
               ["idor", "IDOR", "Object-family and identifier checks."],
               ["disclosure", "Information disclosure", "Sensitive files, SCM/git exposure and error probes."],
+              ["ssrf", "SSRF", "URL-like parameters probed with an OAST canary; confirmed only by a marker-bearing callback."],
+              ["cors", "CORS", "Origin-reflection checks on cross-origin responses."],
+              ["openRedirect", "Open redirect", "Redirect targets that leave the site's own origin."],
+              ["graphql", "GraphQL", "Introspection and field-level authorization probes on GraphQL endpoints."],
               ["command", "OS command injection", "Opt-in marker probes; confirms two independent executions."],
               ["ssti", "Server-side template injection", "Opt-in arithmetic template probes; confirms two independent evaluations."],
+              ["sqli", "SQL injection", "Opt-in quote-breaking and boolean pairs; confirmed by the database's own error signature."],
               ["xxe", "XML external entity", "Opt-in XML-body probes; confirms in-band entity expansion, and uses your callback when one is set."],
             ].map(([key, label, hint]) => (
               <label key={key} className="flex items-start justify-between gap-4 rounded-md border border-border p-3">

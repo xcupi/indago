@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Play, Plus } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,7 @@ import { StateBadge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Alert, Empty, Loading, Stat } from "@/components/ui/misc";
 import { api, refreshAll, useApi } from "@/lib/api";
-import type { AuthProfile, Project, Scan, Scope, Target } from "@/lib/types";
+import type { AuthProfile, Capabilities, Project, Scan, Scope, Target } from "@/lib/types";
 import { navigate } from "@/lib/router";
 import { formatTime, shortId } from "@/lib/utils";
 import { selectedProject, setSelectedProject } from "@/components/Layout";
@@ -52,6 +52,10 @@ export default function Scans() {
   }, [projectId, projects.data]);
   const targets = useApi<Target[]>(projectId ? `/api/projects/${projectId}/targets` : null, [projectId]);
   const authProfiles = useApi<AuthProfile[]>(projectId ? `/api/projects/${projectId}/auth-profiles` : null, [projectId]);
+  // Server capabilities decide what the dialog can honestly offer: the built-in
+  // OAST collaborator is opt-in at serve time, and a private (RFC 1918/ULA)
+  // callback is a separate, server-wide default.
+  const caps = useApi<Capabilities>("/api/capabilities");
 
   const [open, setOpen] = useState(Boolean(targetQuery));
   const [form, setForm] = useState({
@@ -82,9 +86,15 @@ export default function Scans() {
     skipAccessControl: false,
     skipIDOR: false,
     skipInfoDisclosure: false,
+    skipSSRF: false,
+    skipCORS: false,
+    skipOpenRedirect: false,
+    skipGraphQL: false,
     enableCommandInjection: false,
     enableSSTI: false,
+    enableSQLi: false,
     enableXXE: false,
+    allowPrivateOAST: false,
     skipWriteEndpoints: true,
     skipDownloadEndpoints: true,
     maxDOMXSSEndpoints: 25,
@@ -100,8 +110,14 @@ export default function Scans() {
   });
   const [error, setError] = useState("");
   const [projectScope, setProjectScope] = useState<Scope | null>(null);
-  const [busy, setBusy] = useState<"" | "create" | "start">("");
+  const [busy, setBusy] = useState<"create" | "start" | "">("");
   const [loginNote, setLoginNote] = useState("");
+  // Auto-scope is a convenience, never a silent widening: the switch is visible
+  // and only merges THIS target host into the project's include list.
+  const [autoScope, setAutoScope] = useState(true);
+  // Default the OAST opt-in from the server once capabilities arrive, then let
+  // the operator own it (a background refresh must not undo a toggle).
+  const oastDefaulted = useRef(false);
 
   const filtered = useMemo(() => {
     const list = scans.data ?? [];
@@ -133,6 +149,12 @@ export default function Scans() {
       alive = false;
     };
   }, [projectId]);
+
+  useEffect(() => {
+    if (oastDefaulted.current || !caps.data) return;
+    oastDefaulted.current = true;
+    setForm((f) => ({ ...f, allowPrivateOAST: Boolean(caps.data?.allow_private_oast) }));
+  }, [caps.data]);
 
   const selectedTarget = (targets.data ?? []).find((t) => t.id === form.target_id);
   const selectedProfile = (authProfiles.data ?? []).find((p) => p.id === selectedTarget?.auth_profile_id);
@@ -175,6 +197,25 @@ export default function Scans() {
     }
     setBusy(start ? "start" : "create");
     try {
+      // The scan can only ever test hosts the project scope includes, so a
+      // target outside it would create a run that silently refuses every
+      // request. Merging just this target's host (when the operator left the
+      // switch on) preserves every other scope list verbatim.
+      if (selectedTarget && !scopeCoversTarget && autoScope && targetHost) {
+        const current = projectScope;
+        const include = Array.from(new Set([...(current?.include_hosts ?? []), targetHost]));
+        const scope = await api<Scope>(`/api/projects/${projectId}/scope`, {
+          method: "PUT",
+          body: {
+            include_hosts: include,
+            exclude_hosts: current?.exclude_hosts ?? [],
+            include_path_prefixes: current?.include_path_prefixes ?? [],
+            exclude_path_prefixes: current?.exclude_path_prefixes ?? [],
+            allow_subdomains: Boolean(current?.allow_subdomains),
+          },
+        });
+        setProjectScope(scope);
+      }
       const body: Record<string, unknown> = {
         project_id: projectId,
         target_id: form.target_id,
@@ -198,9 +239,15 @@ export default function Scans() {
         skip_access_control: form.skipAccessControl,
         skip_idor: form.skipIDOR,
         skip_info_disclosure: form.skipInfoDisclosure,
+        skip_ssrf: form.skipSSRF,
+        skip_cors: form.skipCORS,
+        skip_open_redirect: form.skipOpenRedirect,
+        skip_graphql: form.skipGraphQL,
         enable_command_injection: form.enableCommandInjection,
         enable_ssti: form.enableSSTI,
+        enable_sqli: form.enableSQLi,
         enable_xxe: form.enableXXE,
+        allow_private_oast: form.allowPrivateOAST,
         skip_write_endpoints: form.skipWriteEndpoints,
         skip_download_endpoints: form.skipDownloadEndpoints,
         max_dom_xss_endpoints: form.maxDOMXSSEndpoints,
@@ -328,9 +375,25 @@ export default function Scans() {
                       </button>
                     </div>
                     {selectedTarget && !scopeCoversTarget ? (
-                      <p className="mt-1 text-amber-700 dark:text-amber-400">
-                        {targetHost} is not inside this project scope; the scan will refuse every request to it.
-                      </p>
+                      <div className="mt-1 space-y-1">
+                        <p className="text-amber-700 dark:text-amber-400">
+                          {targetHost} is not inside this project scope; the scan will refuse every request to it.
+                        </p>
+                        <label className="flex items-start gap-2 text-[11px] text-foreground">
+                          <Switch checked={autoScope} onCheckedChange={setAutoScope} />
+                          <span>
+                            Auto-include {targetHost} in project scope before creating scan
+                            <span className="block text-[10px] text-muted-foreground">
+                              Adds only this host to include hosts; every other scope list is kept as-is.
+                            </span>
+                            {projectScope?.exclude_hosts?.some((h) => h.toLowerCase() === targetHost) ? (
+                              <span className="block text-[10px] text-amber-700 dark:text-amber-400">
+                                {targetHost} is also listed in exclude hosts — remove it there too, or the scope still denies it.
+                              </span>
+                            ) : null}
+                          </span>
+                        </label>
+                      </div>
                     ) : null}
                   </div>
                 ) : null}
@@ -453,6 +516,10 @@ export default function Scans() {
                       ["skipAccessControl", "Access control"],
                       ["skipIDOR", "IDOR"],
                       ["skipInfoDisclosure", "Information disclosure"],
+                      ["skipSSRF", "SSRF"],
+                      ["skipCORS", "CORS"],
+                      ["skipOpenRedirect", "Open redirect"],
+                      ["skipGraphQL", "GraphQL"],
                     ].map(([key, label]) => (
                       <label key={key} className="flex items-center gap-2 text-xs text-foreground">
                         <Switch
@@ -489,6 +556,19 @@ export default function Scans() {
                   </label>
                   <label className="mt-2 flex items-start gap-2 border-t border-border pt-2 text-xs text-foreground">
                     <Switch
+                      checked={form.enableSQLi}
+                      onCheckedChange={(v) => setForm({ ...form, enableSQLi: v })}
+                    />
+                    <span>
+                      SQL injection (opt-in)
+                      <span className="block text-[10px] text-muted-foreground">
+                        Sends quote-breaking probes and boolean true/false pairs; confirmed by the database's own error
+                        signature, never a computed marker.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="mt-2 flex items-start gap-2 border-t border-border pt-2 text-xs text-foreground">
+                    <Switch
                       checked={form.enableXXE}
                       onCheckedChange={(v) => setForm({ ...form, enableXXE: v })}
                     />
@@ -499,6 +579,45 @@ export default function Scans() {
                       </span>
                     </span>
                   </label>
+                  <div className="mt-2 rounded-md border border-border bg-background/40 p-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">OAST collaborator</span>
+                      <span
+                        className={
+                          caps.data?.oast_enabled
+                            ? "text-[10px] text-emerald-700 dark:text-emerald-400"
+                            : "text-[10px] text-muted-foreground"
+                        }
+                      >
+                        {caps.data?.oast_enabled ? "active" : "off"}
+                      </span>
+                    </div>
+                    {caps.data?.oast_enabled ? (
+                      <p className="mt-1 text-[10px] text-emerald-700 dark:text-emerald-400">
+                        Built-in OAST collaborator active — SSRF/XXE/CMDi callbacks wired automatically
+                        {caps.data?.oast_callback_url ? ` (${caps.data.oast_callback_url})` : ""}.
+                      </p>
+                    ) : (
+                      <p className="mt-1 text-[10px] text-muted-foreground">
+                        No collaborator on this server: start{" "}
+                        <span className="mono">indago serve -oast-addr …</span> to confirm blind SSRF/XXE/CMDi by
+                        callback. Without it those engines only use in-band evidence.
+                      </p>
+                    )}
+                    <label className="mt-2 flex items-start gap-2 border-t border-border pt-2 text-xs text-foreground">
+                      <Switch
+                        checked={form.allowPrivateOAST}
+                        onCheckedChange={(v) => setForm({ ...form, allowPrivateOAST: v })}
+                      />
+                      <span>
+                        Allow private OAST (RFC 1918 lab)
+                        <span className="block text-[10px] text-muted-foreground">
+                          Lets this scan use a collaborator on a private lab address (e.g. 192.168.103.1). Loopback,
+                          link-local/metadata and CGNAT callbacks stay refused.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
                   <label className="mt-2 flex items-start gap-2 border-t border-border pt-2 text-xs text-foreground">
                     <Switch
                       checked={form.skipWriteEndpoints}

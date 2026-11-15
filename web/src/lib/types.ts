@@ -69,9 +69,15 @@ export interface ScanConfig {
   skip_access_control?: boolean;
   skip_idor?: boolean;
   skip_info_disclosure?: boolean;
+  skip_ssrf?: boolean;
+  skip_cors?: boolean;
+  skip_open_redirect?: boolean;
+  skip_graphql?: boolean;
   enable_command_injection?: boolean;
   enable_ssti?: boolean;
+  enable_sqli?: boolean;
   enable_xxe?: boolean;
+  allow_private_oast?: boolean;
   skip_write_endpoints?: boolean;
   skip_download_endpoints?: boolean;
   max_dom_xss_endpoints?: number;
@@ -214,6 +220,16 @@ export interface Coverage {
 
 export interface Capabilities {
   version?: string;
+  browser_enabled?: boolean;
+  browser_sandbox?: boolean;
+  state_changing_allowed?: boolean;
+  interactive_login?: boolean;
+  /** A built-in OAST collaborator is listening; SSRF/XXE/CMDi share it. */
+  oast_enabled?: boolean;
+  /** Base URL the target can reach for callbacks (absent when OAST is off). */
+  oast_callback_url?: string;
+  /** Server default: private (RFC 1918/ULA) OAST collaborators are allowed. */
+  allow_private_oast?: boolean;
   [key: string]: unknown;
 }
 

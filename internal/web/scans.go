@@ -501,6 +501,10 @@ type capabilitiesReq struct {
 	SkipAccessControl      bool   `json:"skip_access_control"`
 	SkipIDOR               bool   `json:"skip_idor"`
 	SkipInfoDisclosure     bool   `json:"skip_info_disclosure"`
+	SkipSSRF               bool   `json:"skip_ssrf"`
+	SkipCORS               bool   `json:"skip_cors"`
+	SkipOpenRedirect       bool   `json:"skip_open_redirect"`
+	SkipGraphQL            bool   `json:"skip_graphql"`
 	EnableCommandInjection bool   `json:"enable_command_injection"`
 	EnableSSTI             bool   `json:"enable_ssti"`
 	EnableSQLi             bool   `json:"enable_sqli"`
@@ -535,6 +539,10 @@ func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Req
 	sc.Config.SkipAccessControl = req.SkipAccessControl
 	sc.Config.SkipIDOR = req.SkipIDOR
 	sc.Config.SkipInfoDisclosure = req.SkipInfoDisclosure
+	sc.Config.SkipSSRF = req.SkipSSRF
+	sc.Config.SkipCORS = req.SkipCORS
+	sc.Config.SkipOpenRedirect = req.SkipOpenRedirect
+	sc.Config.SkipGraphQL = req.SkipGraphQL
 	sc.Config.EnableCommandInjection = req.EnableCommandInjection
 	sc.Config.EnableSSTI = req.EnableSSTI
 	sc.Config.EnableSQLi = req.EnableSQLi
