@@ -75,6 +75,9 @@ func classifySkip(note string) skipReason {
 	case strings.Contains(n, "browser verification supports") || strings.Contains(n, "not supported for browser document replay"):
 		return skipReason{"verification_unsupported", sevMedium, "Browser verification does not support this request shape",
 			"Candidates were not confirmed in a browser. Verify these endpoints manually."}
+	case strings.Contains(n, "http/https redirect") || strings.Contains(n, "does not speak tls"):
+		return skipReason{"tls_redirect_mismatch", sevInfo, "HTTP/HTTPS redirect could not be followed on this port",
+			"The site redirects to a scheme the service does not serve on that port. The endpoint remains untested; this is a coverage gap, not a negative result."}
 	case strings.Contains(n, "xxe skipped:"):
 		return skipReason{"xxe_not_applicable", sevInfo, "XXE skipped: no observed XML input or callback",
 			"XXE was enabled, but discovery had no XML request body for this endpoint or no collaborator callback was configured. The engine intentionally did not guess an XML parser or send an XML payload."}

@@ -376,6 +376,9 @@ func (e *sstiExecutor) finishSSTIUnavailable(ctx context.Context, job *domain.Te
 }
 
 func (e *sstiExecutor) finishSSTIError(ctx context.Context, job *domain.TestJob, started time.Time, ep *domain.Endpoint, focus *domain.Parameter, outcome domain.TestOutcome, reqErr error) error {
+	if isTLSRedirectMismatch(reqErr) {
+		return e.finishSSTIUnavailable(ctx, job, started, ep, "HTTP/HTTPS redirect points at a service that does not speak TLS on this port")
+	}
 	now := time.Now()
 	msg := "request failed"
 	if reqErr != nil {

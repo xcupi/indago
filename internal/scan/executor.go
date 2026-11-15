@@ -154,6 +154,11 @@ func (e *executor) Handle(ctx context.Context, job *domain.TestJob) error {
 	if e.cfg.Authenticated {
 		e.reportAuthLost(job.ScanID, res.resp)
 	}
+	if res.outcome == domain.OutcomeError && isTLSRedirectMismatch(res.err) {
+		res.skipped = true
+		res.err = nil
+		res.note = "request skipped: HTTP/HTTPS redirect points at a service that does not speak TLS on this port"
+	}
 
 	// The job context may already be canceled (that is the CANCELLED case), so the
 	// final writes use a detached context with its own bound.
@@ -510,6 +515,20 @@ func resolveJobTarget(ctx context.Context, st store.Store, job *domain.TestJob) 
 }
 
 // finish persists the attempt's result and its request/response evidence.
+// isTLSRedirectMismatch recognizes a real-world redirect that lands on an
+// HTTPS URL where the service is still speaking plain HTTP (or vice versa).
+// The target is not vulnerable to the tested class in that state; retrying the
+// same request only burns attempts and turns a coverage gap into a dead job.
+func isTLSRedirectMismatch(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "http response to https client") ||
+		strings.Contains(s, "server gave http response to https client") ||
+		(strings.Contains(s, "tls") && strings.Contains(s, "handshake"))
+}
+
 func (e *executor) finish(ctx context.Context, tc *domain.TestCase, r result) {
 	now := time.Now()
 	tc.FinishedAt, tc.UpdatedAt = &now, now
