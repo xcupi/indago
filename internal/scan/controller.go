@@ -377,6 +377,8 @@ type CreateScanParams struct {
 	EnableXXE                       bool
 	XXECallbackURL                  string
 	XXECallbackPollURL              string
+	XXEBodyURL                      string
+	XXEBody                         string
 	CommandInjectionCallbackURL     string
 	CommandInjectionCallbackPollURL string
 	SkipWriteEndpoints              bool
@@ -577,6 +579,26 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.EnableXXE = p.EnableXXE
 	cfg.XXECallbackURL = p.XXECallbackURL
 	cfg.XXECallbackPollURL = p.XXECallbackPollURL
+	cfg.XXEBodyURL = strings.TrimSpace(p.XXEBodyURL)
+	cfg.XXEBody = strings.TrimSpace(p.XXEBody)
+	if cfg.XXEBodyURL != "" || cfg.XXEBody != "" {
+		if !cfg.EnableXXE {
+			return nil, fmt.Errorf("%w: xxe_body_url/xxe_body require enable_xxe", ErrBadConfig)
+		}
+		if cfg.XXEBodyURL == "" || cfg.XXEBody == "" {
+			return nil, fmt.Errorf("%w: xxe_body_url and xxe_body must be supplied together", ErrBadConfig)
+		}
+		u, err := url.Parse(cfg.XXEBodyURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("%w: xxe_body_url must be an absolute http(s) URL", ErrBadConfig)
+		}
+		if len(cfg.XXEBody) > 8192 || !strings.Contains(cfg.XXEBody, "<") {
+			return nil, fmt.Errorf("%w: xxe_body must be a bounded XML body (max 8192 bytes)", ErrBadConfig)
+		}
+		if d := scope.Permits(cfg.XXEBodyURL); !d.Allowed {
+			return nil, fmt.Errorf("%w: xxe_body_url is outside scope: %s", ErrBadConfig, d.Reason)
+		}
+	}
 	cfg.CommandInjectionCallbackURL = p.CommandInjectionCallbackURL
 	cfg.CommandInjectionCallbackPollURL = p.CommandInjectionCallbackPollURL
 	cfg.SkipWriteEndpoints = p.SkipWriteEndpoints

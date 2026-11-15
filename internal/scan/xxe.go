@@ -312,6 +312,38 @@ func (c *Controller) enqueueXXEProbes(ctx context.Context, scanID domain.ID) {
 	if err != nil {
 		return
 	}
+	// An operator-supplied XML body is an explicit override for an endpoint
+	// whose body is not visible during page load (typically a form that only
+	// submits XML after a click). It is never inferred and never used instead
+	// of an observed body; the normal observed-body candidates below still run.
+	if sc.Config.XXEBodyURL != "" && sc.Config.XXEBody != "" &&
+		sc.Config.XXECallbackURL != "" && sc.Config.XXECallbackPollURL != "" {
+		found := false
+		for _, ep := range eps {
+			if ep != nil && ep.URL == sc.Config.XXEBodyURL && ep.Method == domain.MethodPOST && isXMLBodyEndpoint(ep) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			now := time.Now()
+			ep := &domain.Endpoint{
+				ID:          domain.NewID(),
+				ScanID:      scanID,
+				URL:         sc.Config.XXEBodyURL,
+				Method:      domain.MethodPOST,
+				Source:      domain.SourceUserProvided,
+				ContentType: "application/xml",
+				RequestBody: sc.Config.XXEBody,
+				CreatedAt:   now,
+			}
+			if err := c.store.Endpoints().Create(ctx, ep); err != nil {
+				c.log.Warn("xxe: persist operator XML body", "scan", scanID, "err", err)
+			} else {
+				eps = append(eps, ep)
+			}
+		}
+	}
 	for _, ep := range eps {
 		if !isXMLBodyEndpoint(ep) {
 			continue

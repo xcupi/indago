@@ -295,6 +295,8 @@ type createScanReq struct {
 	EnableXXE                       bool   `json:"enable_xxe"`
 	XXECallbackURL                  string `json:"xxe_callback_url"`
 	XXECallbackPollURL              string `json:"xxe_callback_poll_url"`
+	XXEBodyURL                      string `json:"xxe_body_url"`
+	XXEBody                         string `json:"xxe_body"`
 	CommandInjectionCallbackURL     string `json:"command_injection_callback_url"`
 	CommandInjectionCallbackPollURL string `json:"command_injection_callback_poll_url"`
 	SkipWriteEndpoints              bool   `json:"skip_write_endpoints"`
@@ -396,6 +398,8 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		EnableXXE:                       req.EnableXXE,
 		XXECallbackURL:                  req.XXECallbackURL,
 		XXECallbackPollURL:              req.XXECallbackPollURL,
+		XXEBodyURL:                      req.XXEBodyURL,
+		XXEBody:                         req.XXEBody,
 		CommandInjectionCallbackURL:     req.CommandInjectionCallbackURL,
 		CommandInjectionCallbackPollURL: req.CommandInjectionCallbackPollURL,
 		SkipWriteEndpoints:              req.SkipWriteEndpoints,

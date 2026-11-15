@@ -238,6 +238,14 @@ type ScanConfig struct {
 	EnableXXE          bool   `json:"enable_xxe,omitempty"`
 	XXECallbackURL     string `json:"xxe_callback_url,omitempty"`
 	XXECallbackPollURL string `json:"xxe_callback_poll_url,omitempty"`
+	// XXEBodyURL and XXEBody are an explicit operator override for an XML
+	// endpoint whose request body is not visible during page load (for example
+	// a form that submits XML only after a click). They are never inferred:
+	// the operator supplies the exact URL and raw body, the URL must remain in
+	// scan scope, and the body is still capped and policy-checked. Without the
+	// override the engine only tests an XML body observed by discovery.
+	XXEBodyURL string `json:"xxe_body_url,omitempty"`
+	XXEBody    string `json:"xxe_body,omitempty"`
 	// CommandInjectionCallbackURL is an operator-provided HTTP callback used
 	// for blind out-of-band command injection. The poll URL, when set, is the
 	// endpoint that lists received requests (webhook.site-compatible).
