@@ -1716,6 +1716,11 @@ func (e *domXSSExecutor) handleDOMXSSSource(ctx context.Context, job *domain.Tes
 		selectors, err = e.queryParamSelectors(ctx, ep.ID)
 		if err != nil {
 			tc := e.newTestCase(ctx, job, ep.URL)
+			if isBrowserScopeBlocked(err) {
+				tc.Status = domain.TestCaseSkipped
+				e.finishTestCase(ctx, tc, nil, "browser scope gate blocked query-string DOM-XSS discovery; endpoint is untested, not a clean negative")
+				return nil
+			}
 			e.finishTestCase(ctx, tc, err, "query-string DOM-XSS parameter discovery")
 			return err
 		}
@@ -1759,6 +1764,11 @@ func (e *domXSSExecutor) handleDOMXSSSource(ctx context.Context, job *domain.Tes
 		names, err := e.discoverStorageKeys(ctx, bctx, source, ep.URL)
 		if err != nil {
 			tc := e.newTestCase(ctx, job, ep.URL)
+			if isBrowserScopeBlocked(err) {
+				tc.Status = domain.TestCaseSkipped
+				e.finishTestCase(ctx, tc, nil, "browser scope gate blocked storage key discovery; endpoint is untested, not a clean negative")
+				return nil
+			}
 			e.finishTestCase(ctx, tc, err, "storage key discovery")
 			return err
 		}

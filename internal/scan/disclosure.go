@@ -82,8 +82,13 @@ func (e *disclosureExecutor) Handle(ctx context.Context, job *domain.TestJob) er
 	now := time.Now()
 	tc.FinishedAt, tc.UpdatedAt = &now, now
 	if err != nil {
-		tc.Status, tc.Outcome = domain.TestCaseFailed, domain.OutcomeError
-		tc.Error = truncate(err.Error(), 1024)
+		if isOutOfScopeRedirectError(err) {
+			tc.Status, tc.Outcome = domain.TestCaseSkipped, ""
+			tc.Note = "disclosure probe skipped: redirect target is outside the scan scope"
+		} else {
+			tc.Status, tc.Outcome = domain.TestCaseFailed, domain.OutcomeError
+			tc.Error = truncate(err.Error(), 1024)
+		}
 		_ = e.store.TestCases().Update(ctx, tc)
 		return nil
 	}
