@@ -28,6 +28,7 @@ import (
 
 	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/store"
 )
 
 // maxCombinedPairsPerEndpoint is the hard ceiling on how many combined
@@ -45,6 +46,11 @@ type reflectedSite struct {
 	location         domain.ParamLocation
 	context          detection.Context
 	contextSub       string
+	// formGroup is the form the parameter belongs to (empty for a non-form
+	// parameter). Two parameters from DIFFERENT forms can never be submitted
+	// in the same request, so pairing them would test a request the target
+	// cannot produce — see formGroupOnly.
+	formGroup string
 }
 
 // combinedPair is two reflectedSites sharing the same context, selected to
@@ -84,7 +90,7 @@ func (c *Controller) enqueueCombinedCandidates(ctx context.Context, scanID domai
 		if len(epFindings) == 0 || endpointHasConfirmed(epFindings) {
 			continue // requirement: fallback only where single-param testing did NOT confirm
 		}
-		pairs := selectCombinedPairs(reflectedSitesFor(epFindings))
+		pairs := selectCombinedPairs(sitesWithFormGroups(ctx, c.store, ep.ID, reflectedSitesFor(epFindings)))
 		for _, pr := range pairs {
 			c.enqueueOneCombinedCandidate(ctx, scanID, ep, pr)
 			n++
@@ -93,6 +99,24 @@ func (c *Controller) enqueueCombinedCandidates(ctx context.Context, scanID domai
 	if n > 0 {
 		c.log.Info("combined candidates: enqueued", "scan", scanID, "pairs", n)
 	}
+}
+
+// sitesWithFormGroups fills in each site's form group from the endpoint's
+// persisted parameters. A combined pair is ONE request, and one request carries
+// one form's fields: pairing a parameter from form A with one from form B would
+// test a request the target can never receive. Best-effort — if the parameters
+// cannot be loaded, the groups stay empty and pairing behaves as before.
+func sitesWithFormGroups(ctx context.Context, st store.Store, endpointID domain.ID, sites []reflectedSite) []reflectedSite {
+	params, err := st.Parameters().ListByEndpoint(ctx, endpointID)
+	if err != nil {
+		return sites
+	}
+	for i := range sites {
+		if p := findParamByNameLocation(params, sites[i].parameterName, sites[i].location); p != nil {
+			sites[i].formGroup = p.FormGroup
+		}
+	}
+	return sites
 }
 
 // endpointHasConfirmed reports whether any (non-combined or combined)
@@ -177,6 +201,9 @@ func selectCombinedPairs(sites []reflectedSite) []combinedPair {
 				if grp[i].injectionPointID == grp[j].injectionPointID {
 					continue // never pair a site with itself
 				}
+				if !sameFormGroup(grp[i], grp[j]) {
+					continue // two forms can never be submitted in one request
+				}
 				pairs = append(pairs, combinedPair{a: grp[i], b: grp[j], context: detection.Context(cn)})
 			}
 		}
@@ -194,6 +221,15 @@ func selectCombinedPairs(sites []reflectedSite) []combinedPair {
 		pairs = pairs[:maxCombinedPairsPerEndpoint]
 	}
 	return pairs
+}
+
+// sameFormGroup reports whether two reflected sites can appear in one request.
+// Parameters from two DIFFERENT forms cannot: one submission carries one form's
+// fields (see paramsForFocus). A site with no group (query, JSON, header, …) is
+// not a form field, so it stays pairable — cross-location pairs are a
+// deliberate part of this probe.
+func sameFormGroup(a, b reflectedSite) bool {
+	return a.formGroup == "" || b.formGroup == "" || a.formGroup == b.formGroup
 }
 
 // enqueueOneCombinedCandidate plans the combined candidate for pr (pure,
@@ -244,6 +280,23 @@ func (c *Controller) enqueueOneCombinedCandidate(ctx context.Context, scanID dom
 func findParamByNameLocation(params []*domain.Parameter, name string, loc domain.ParamLocation) *domain.Parameter {
 	for _, p := range params {
 		if p.Name == name && p.Location == loc {
+			return p
+		}
+	}
+	return nil
+}
+
+// findParamByID finds a parameter by its identity. Preferred over a
+// name+location lookup whenever an ID is available: one endpoint can carry the
+// same field name twice, once per form group (two forms posting to one action
+// that both submit a `token`, say), and only the exact row is the parameter
+// that was actually tested.
+func findParamByID(params []*domain.Parameter, id domain.ID) *domain.Parameter {
+	if id.Empty() {
+		return nil
+	}
+	for _, p := range params {
+		if p.ID == id {
 			return p
 		}
 	}

@@ -48,7 +48,7 @@ func (c *Collector) registerHeaderInjectionPoints(ctx context.Context, endpointI
 		return
 	}
 	for _, name := range defaultHeaderInjectionNames {
-		c.registerParam(ctx, endpointID, method, info, name, domain.LocationHeader, "", source)
+		c.registerParam(ctx, endpointID, method, info, name, domain.LocationHeader, "", source, "")
 	}
 }
 
@@ -66,7 +66,7 @@ func (c *Collector) registerCookieInjectionPoints(ctx context.Context, endpointI
 		if ck == nil || ck.Name == "" || isSessionCookieName(ck.Name) {
 			continue
 		}
-		c.registerParam(ctx, endpointID, method, info, ck.Name, domain.LocationCookie, ck.Value, source)
+		c.registerParam(ctx, endpointID, method, info, ck.Name, domain.LocationCookie, ck.Value, source, "")
 	}
 }
 
@@ -79,6 +79,6 @@ func (c *Collector) registerCookieInjectionPoints(ctx context.Context, endpointI
 // segment.
 func (c *Collector) registerPathInjectionPoints(ctx context.Context, endpointID domain.ID, method domain.HTTPMethod, info URLInfo, source domain.DiscoverySource) {
 	for _, m := range QualifyingPathSegments(info.Path) {
-		c.registerParam(ctx, endpointID, method, info, PathSegmentParamName(m.Index), domain.LocationPath, m.Value, source)
+		c.registerParam(ctx, endpointID, method, info, PathSegmentParamName(m.Index), domain.LocationPath, m.Value, source, "")
 	}
 }

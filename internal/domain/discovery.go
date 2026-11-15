@@ -32,6 +32,16 @@ type Parameter struct {
 	Name       string        `json:"name"`
 	Location   ParamLocation `json:"location"`
 	Example    string        `json:"example,omitempty"` // sample/observed value; browser-network JSON examples store a serialized JSON literal
+	// FormGroup identifies which <form> element this field was discovered in
+	// (see discovery.FormGroupKey). One page can hold several forms posting to
+	// the SAME action — bWAPP's /commandi.php has three — and their fields are
+	// distinct request shapes, not one parameter list: sending a second form's
+	// fields (its submit button in particular) makes the target run the wrong
+	// handler. A request built for a parameter therefore carries only the
+	// parameters of that parameter's form group, plus the empty-group ones
+	// (query string, JSON body, header, cookie, path) that belong to the whole
+	// endpoint. Empty for every non-form parameter.
+	FormGroup string `json:"form_group,omitempty"`
 	// Examples holds every DISTINCT value the crawl observed for this
 	// parameter, capped (see discovery.MaxObservedExamples). Endpoint dedup
 	// collapses /blogs?userId=A and /blogs?userId=B into ONE endpoint, so

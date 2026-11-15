@@ -56,6 +56,15 @@ var dynamicTokenName = regexp.MustCompile(`(?i)token|csrf|xsrf|nonce`)
 
 func isDynamicTokenName(name string) bool { return dynamicTokenName.MatchString(name) }
 
+// formGroupOf is focus.FormGroup, nil-safe: the token-refresh helpers are
+// shared and must tolerate a caller that resolved no focused parameter.
+func formGroupOf(focus *domain.Parameter) string {
+	if focus == nil {
+		return ""
+	}
+	return focus.FormGroup
+}
+
 // hasDynamicParam reports whether any parameter OTHER than focus looks like
 // a rotating token — the shared test both refreshDynamicParams (skip the
 // fetch) and withDynamicTokenLock (skip the lock) use to leave ordinary,
@@ -120,7 +129,7 @@ func refreshDynamicParams(ctx context.Context, eng httpengine.Engine, timeout ti
 		return params
 	}
 
-	fresh := currentFormValues(string(resp.Body))
+	fresh := currentFormValues(string(resp.Body), formGroupOf(focus))
 	if len(fresh) == 0 {
 		return params
 	}
@@ -139,12 +148,32 @@ func refreshDynamicParams(ctx context.Context, eng httpengine.Engine, timeout ti
 	return out
 }
 
-// currentFormValues flattens every form field on a page into name→value,
-// last form wins on a name collision (good enough for picking out a single
-// named token field; not a general form model).
-func currentFormValues(body string) map[string]string {
+// currentFormValues flattens form fields on a page into name→value for the
+// token refresh above.
+//
+// group is the focus parameter's form group. When it is set, only the form(s)
+// belonging to that group are read: the page can hold several forms (bWAPP's
+// /commandi.php holds three), and copying a token from a DIFFERENT form would
+// put a value in this request that the receiving form never issued. If no form
+// on the page belongs to the group — the token may be rendered by a page the
+// group was never derived from — every form is read, which is exactly what
+// this helper has always done; the field is identified by NAME either way, and
+// a stale token only costs a rejected probe, never a false verdict.
+func currentFormValues(body, group string) map[string]string {
+	forms := discovery.ExtractForms(body)
+	if group != "" {
+		var matched []discovery.Form
+		for _, f := range forms {
+			if f.Group == group {
+				matched = append(matched, f)
+			}
+		}
+		if len(matched) > 0 {
+			forms = matched
+		}
+	}
 	out := map[string]string{}
-	for _, f := range discovery.ExtractForms(body) {
+	for _, f := range forms {
 		for _, in := range f.Inputs {
 			out[in.Name] = in.Value
 		}

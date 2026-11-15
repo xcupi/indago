@@ -535,7 +535,41 @@ func resolveJobTarget(ctx context.Context, st store.Store, job *domain.TestJob) 
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("list parameters: %w", err)
 	}
-	return ep, params, focus, nil
+	return ep, paramsForFocus(params, focus), focus, nil
+}
+
+// paramsForFocus narrows an endpoint's parameters to the ones a request aimed
+// at focus may carry.
+//
+// A page can hold several <form> elements posting to the SAME action — bWAPP's
+// /commandi.php has three, one per tool on the page — so an endpoint's
+// parameters are not one interchangeable pool. Discovery records which form
+// each field came from (domain.Parameter.FormGroup), and one form submission
+// can only ever carry one form's fields: sending another form's fields, its
+// submit button in particular, makes the target run the WRONG handler (the
+// three bWAPP submits together always select the first form and answer with a
+// redirect), which silently masks the behaviour of the form actually under
+// test.
+//
+// So a parameter with a form group only travels with its own group. Parameters
+// without a group (query string, JSON body, header, cookie, path) belong to
+// the endpoint as a whole and are always kept; a focus without a group (every
+// non-form parameter) keeps the full list, exactly as before.
+func paramsForFocus(params []*domain.Parameter, focus *domain.Parameter) []*domain.Parameter {
+	if focus == nil || focus.FormGroup == "" {
+		return params
+	}
+	out := make([]*domain.Parameter, 0, len(params))
+	for _, p := range params {
+		if p == nil {
+			continue
+		}
+		if p.FormGroup != "" && p.FormGroup != focus.FormGroup {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // finish persists the attempt's result and its request/response evidence.

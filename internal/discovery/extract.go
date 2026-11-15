@@ -1,6 +1,10 @@
 package discovery
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -22,6 +26,10 @@ type Form struct {
 	ActionFromHandler bool   // target derived from an inline submit handler
 	Method            domain.HTTPMethod
 	Inputs            []FormField
+	// Group identifies the set of fields THIS form submits (see FormGroupKey).
+	// Two forms on one page can share an action URL, and their fields must
+	// never be merged into one request.
+	Group string
 }
 
 // URL-bearing attributes by element, used for link extraction.
@@ -149,7 +157,43 @@ func parseForm(form *html.Node) Form {
 	if f.ActionFromHandler {
 		f.Method = domain.MethodPOST
 	}
+	f.Group = FormGroupKey(f.Action, f.Method, f.Inputs)
 	return f
+}
+
+// FormGroupKey derives the stable identity of ONE <form> element's submission:
+// exactly which fields travel together. Discovery records it on every
+// parameter a form contributes (domain.Parameter.FormGroup), so a request
+// built for one field carries that form's fields only.
+//
+// It is derived from the form's own DECLARED shape — action, method, and the
+// set of named fields — not from the page that contained it, so the same form
+// rendered on several pages (a login box in a shared header, say) resolves to
+// one group and its parameters deduplicate instead of piling up. Including the
+// submit buttons is deliberate: a form whose submit control differs is a
+// different submission even when the other fields match.
+func FormGroupKey(action string, method domain.HTTPMethod, fields []FormField) string {
+	names := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f.Name != "" {
+			names = append(names, f.Name)
+		}
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	write := func(part string) {
+		// Length-prefixed so no two field/action combinations can collide by
+		// concatenation ("ab"+"c" vs "a"+"bc").
+		h.Write([]byte(strconv.Itoa(len(part))))
+		h.Write([]byte{':'})
+		h.Write([]byte(part))
+	}
+	write(string(method))
+	write(action)
+	for _, name := range names {
+		write(name)
+	}
+	return "fg:" + hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 func attrValue(n *html.Node, key string) (string, bool) {

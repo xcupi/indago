@@ -39,6 +39,16 @@ Cardinality notes:
 - **Endpoint**, **Parameter**, **InjectionPoint** form the discovery registry,
   scoped to a scan. An **InjectionPoint** couples an endpoint with a parameter
   and is the generic unit of testing.
+- A **Parameter** discovered inside an HTML form carries the **form group** it
+  came from (`domain.Parameter.FormGroup`, derived by
+  `discovery.FormGroupKey`). One page can hold several forms posting to the
+  SAME action — bWAPP's `/commandi.php` has three — and their fields are
+  separate request shapes, not one interchangeable parameter list. A request
+  built for a parameter therefore carries only that parameter's form group
+  (`scan.paramsForFocus`), plus the group-less parameters (query, JSON body,
+  header, cookie, path) that belong to the endpoint as a whole. Without this,
+  every form's submit button was sent together and the target ran the wrong
+  handler.
 - A **TestJob** is a unit of queue work (`discovery` / `test` / `verify`). A
   **TestCase** is a concrete test produced while exercising an injection point.
 - A **Finding** is a candidate or verified vulnerability with a **Verdict**; it

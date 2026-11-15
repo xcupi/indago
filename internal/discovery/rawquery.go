@@ -230,7 +230,7 @@ func (c *Collector) registerRawQueryInjectionPoints(ctx context.Context, endpoin
 		c.rawQueryProbes++
 		c.mu.Unlock()
 
-		if c.registerParam(ctx, endpointID, method, info, shape.name, domain.LocationRawQuery, "", source) {
+		if c.registerParam(ctx, endpointID, method, info, shape.name, domain.LocationRawQuery, "", source, "") {
 			c.log.Debug("discovery: raw-query injection point recorded",
 				"endpoint", info.Canonical, "shape", shape.name, "request", "/?"+shape.prefix+"<payload>")
 			continue

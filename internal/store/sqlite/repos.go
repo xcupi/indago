@@ -453,19 +453,19 @@ func (r *endpointRepo) Delete(ctx context.Context, id domain.ID) error {
 
 type parameterRepo struct{ db *sql.DB }
 
-const parameterCols = `id, scan_id, endpoint_id, name, location, example, examples, source, created_at`
+const parameterCols = `id, scan_id, endpoint_id, name, location, example, examples, source, created_at, form_group`
 
 func (r *parameterRepo) Create(ctx context.Context, p *domain.Parameter) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO parameters (`+parameterCols+`) VALUES (?,?,?,?,?,?,?,?,?)`,
-		p.ID, p.ScanID, p.EndpointID, p.Name, p.Location, p.Example, encodeStrings(p.Examples), p.Source, ts(p.CreatedAt))
+		`INSERT INTO parameters (`+parameterCols+`) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.ScanID, p.EndpointID, p.Name, p.Location, p.Example, encodeStrings(p.Examples), p.Source, ts(p.CreatedAt), p.FormGroup)
 	return err
 }
 
 func scanParameter(sc scanner) (*domain.Parameter, error) {
 	var p domain.Parameter
 	var created, examples string
-	if err := sc.Scan(&p.ID, &p.ScanID, &p.EndpointID, &p.Name, &p.Location, &p.Example, &examples, &p.Source, &created); err != nil {
+	if err := sc.Scan(&p.ID, &p.ScanID, &p.EndpointID, &p.Name, &p.Location, &p.Example, &examples, &p.Source, &created, &p.FormGroup); err != nil {
 		return nil, err
 	}
 	p.Examples = decodeStrings(examples)

@@ -216,3 +216,24 @@ func EndpointKey(method domain.HTTPMethod, info URLInfo) string {
 func ParamKey(method domain.HTTPMethod, info URLInfo, name string, loc domain.ParamLocation) string {
 	return EndpointKey(method, info) + "#" + string(loc) + ":" + name
 }
+
+// FormParamKey is ParamKey refined by the form group a field belongs to (see
+// FormGroupKey). Two forms posting to the same action contribute separate
+// parameters even when they use the same field name — they are different
+// request shapes, and one form's submit button must never ride along with
+// another's field. An empty group keeps the plain ParamKey, so every
+// non-form parameter keeps its existing identity.
+func FormParamKey(method domain.HTTPMethod, info URLInfo, name string, loc domain.ParamLocation, group string) string {
+	key := ParamKey(method, info, name, loc)
+	return key + FormGroupSuffix(group)
+}
+
+// FormGroupSuffix is the part FormParamKey appends for a form group. Hydrate
+// rebuilds a parameter's dedup key from its persisted endpoint fingerprint
+// instead of a URLInfo, so it needs the same suffix as a standalone value.
+func FormGroupSuffix(group string) string {
+	if group == "" {
+		return ""
+	}
+	return "#" + group
+}

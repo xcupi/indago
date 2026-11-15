@@ -252,6 +252,22 @@ func testDiscoveryChain(t *testing.T, f Factory) {
 		t.Fatalf("discovery chain counts: ep=%d param=%d ip=%d", len(eps), len(pmsByEp), len(ips))
 	}
 
+	// A form field's group is part of the parameter's identity (two forms
+	// posting to the SAME action are separate submissions — see
+	// domain.Parameter.FormGroup), so it must survive a persist/load round trip
+	// as its own row alongside the same field name from another form.
+	pmForm := &domain.Parameter{
+		ID: domain.NewID(), ScanID: scanID, EndpointID: ep.ID, Name: "q",
+		Location: domain.LocationForm, Source: domain.SourceForm,
+		FormGroup: "fg:one", CreatedAt: time.Now(),
+	}
+	must(t, s.Parameters().Create(ctx, pmForm))
+	loaded, err := s.Parameters().Get(ctx, pmForm.ID)
+	must(t, err)
+	if loaded.FormGroup != "fg:one" || loaded.Location != domain.LocationForm {
+		t.Fatalf("form parameter round-trip = %+v, want location form group fg:one", loaded)
+	}
+
 	// AppendExamples keeps DISTINCT observed values in order and honours the
 	// cap; a duplicate value is a no-op write, not an error.
 	must(t, s.Parameters().AppendExamples(ctx, pm.ID, []string{"a", "b", "a", " "}, 3))

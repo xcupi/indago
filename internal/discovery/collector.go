@@ -205,7 +205,7 @@ func (c *Collector) Hydrate(ctx context.Context) error {
 			// persisted rows are the authority on what was already sent.
 			c.rawQueryProbes++
 		}
-		key := fp + "#" + string(p.Location) + ":" + p.Name
+		key := fp + "#" + string(p.Location) + ":" + p.Name + FormGroupSuffix(p.FormGroup)
 		if _, dup := c.seenParams[key]; !dup {
 			c.seenParams[key] = p.ID
 			c.paramCount++
@@ -269,10 +269,10 @@ func (c *Collector) reconcile(ctx context.Context, endpoints []*domain.Endpoint,
 		// registerParam skips any already hydrated, so only the missing ones
 		// are created (each with its injection point and job).
 		for _, name := range info.ParamNames {
-			c.registerParam(ctx, e.ID, e.Method, info, name, domain.LocationQuery, info.Query.Get(name), e.Source)
+			c.registerParam(ctx, e.ID, e.Method, info, name, domain.LocationQuery, info.Query.Get(name), e.Source, "")
 		}
 		for _, name := range info.FragmentParams {
-			c.registerParam(ctx, e.ID, e.Method, info, name, domain.LocationFragment, "", e.Source)
+			c.registerParam(ctx, e.ID, e.Method, info, name, domain.LocationFragment, "", e.Source, "")
 		}
 		// Header/Cookie/Path registration is also reconciled on every Hydrate
 		// pass — registerParam's own dedup makes this a no-op for anything
@@ -472,13 +472,13 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 
 	// Query-string parameters are injection points — register them immediately.
 	for _, name := range info.ParamNames {
-		c.registerParam(ctx, id, method, info, name, domain.LocationQuery, info.Query.Get(name), ep.Source)
+		c.registerParam(ctx, id, method, info, name, domain.LocationQuery, info.Query.Get(name), ep.Source, "")
 	}
 	// Fragment route parameters are DOM-only selectors. Register them at the
 	// endpoint boundary so crawler-discovered links and operator seeds behave
 	// identically; registerParam deliberately creates no HTTP injection point.
 	for _, name := range info.FragmentParams {
-		c.registerParam(ctx, id, method, info, name, domain.LocationFragment, "", ep.Source)
+		c.registerParam(ctx, id, method, info, name, domain.LocationFragment, "", ep.Source, "")
 	}
 	// Header/Cookie/Path injection points (see extra_locations.go /
 	// path_segments.go) — location-agnostic coverage alongside Query/Form/JSON.
@@ -582,7 +582,7 @@ func (c *Collector) AddParameter(ctx context.Context, p ParamCandidate) error {
 	if loc == "" {
 		loc = domain.LocationQuery
 	}
-	c.registerParam(ctx, endpointID, method, info, p.Name, loc, p.Example, p.Source)
+	c.registerParam(ctx, endpointID, method, info, p.Name, loc, p.Example, p.Source, p.FormGroup)
 	c.noteRecon(p.Provenance)
 	return nil
 }
@@ -591,7 +591,12 @@ func (c *Collector) AddParameter(ctx context.Context, p ParamCandidate) error {
 // deduplicating by parameter key. It reports whether a NEW parameter was
 // persisted (false for a duplicate), which the raw-query registrar needs to
 // charge its per-scan budget only for real probes.
-func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, method domain.HTTPMethod, info URLInfo, name string, loc domain.ParamLocation, example string, source domain.DiscoverySource) bool {
+//
+// group is the originating form's group (domain.Parameter.FormGroup) and is
+// part of the dedup key: the same field name from two forms posting to one
+// action is two parameters, each with its own value and injection point,
+// because each belongs to a different submission.
+func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, method domain.HTTPMethod, info URLInfo, name string, loc domain.ParamLocation, example string, source domain.DiscoverySource, group string) bool {
 	if name == "" {
 		return false
 	}
@@ -602,7 +607,7 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 	if loc == domain.LocationQuery && source != domain.SourceUserProvided && isTableControlParam(name) {
 		return false
 	}
-	pkey := ParamKey(method, info, name, loc)
+	pkey := FormParamKey(method, info, name, loc, group)
 
 	c.mu.Lock()
 	if existing, ok := c.seenParams[pkey]; ok {
@@ -621,6 +626,7 @@ func (c *Collector) registerParam(ctx context.Context, endpointID domain.ID, met
 		Name:       name,
 		Location:   loc,
 		Example:    example,
+		FormGroup:  group,
 		// Seed the observed-value list with the first value so a later
 		// duplicate is recognised and the list is the complete record.
 		Examples:  firstExample(example),

@@ -250,6 +250,7 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 				Location:       loc,
 				Example:        field.Value,
 				Source:         domain.SourceForm,
+				FormGroup:      f.Group,
 			}); err != nil {
 				return nil, err
 			}
@@ -921,7 +922,7 @@ func (n *networkSource) emitForms(ctx context.Context, in Input, sink Sink, base
 			if err := sink.AddParameter(ctx, ParamCandidate{
 				EndpointURL: info.Canonical, EndpointMethod: method,
 				Name: field.Name, Location: loc, Example: field.Value,
-				Source: domain.SourceBrowserNetwork,
+				Source: domain.SourceBrowserNetwork, FormGroup: form.Group,
 			}); err != nil {
 				return err
 			}

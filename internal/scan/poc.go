@@ -126,10 +126,18 @@ func GeneratePoC(ctx context.Context, st store.Store, findingID domain.ID) (*PoC
 		return nil, fmt.Errorf("list parameters: %w", err)
 	}
 
-	focusA := findParamByNameLocation(params, cand.Parameter, cand.Location)
+	// A request is one form submission, so only the focused parameter's own
+	// form group travels with it — see scan/executor.go's paramsForFocus. This
+	// matters for the PoC too: a generated artifact must not carry another
+	// form's submit button.
+	focusA := findParamByID(params, f.ParameterID)
+	if focusA == nil {
+		focusA = findParamByNameLocation(params, cand.Parameter, cand.Location)
+	}
 	if focusA == nil {
 		return nil, fmt.Errorf("poc: parameter %q (%s) is no longer present on this endpoint", cand.Parameter, cand.Location)
 	}
+	params = paramsForFocus(params, focusA)
 	var focusB *domain.Parameter
 	if cand.Combined {
 		focusB = findParamByNameLocation(params, cand.ParameterB, cand.LocationB)

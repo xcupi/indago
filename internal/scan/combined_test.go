@@ -165,6 +165,38 @@ func TestEndpointHasConfirmed(t *testing.T) {
 	}
 }
 
+// TestSelectCombinedPairs_NeverPairsDifferentForms: two parameters held by
+// different <form> elements can never be submitted together, so pairing them
+// would test a request the target cannot receive. A group-less site (query,
+// JSON, header, …) stays pairable with anything.
+func TestSelectCombinedPairs_NeverPairsDifferentForms(t *testing.T) {
+	formA := siteAt(domain.NewID(), "a", detection.CtxHTMLAttrValue, "double_quoted")
+	formA.formGroup, formA.location = "fg:one", domain.LocationForm
+	formB := siteAt(domain.NewID(), "b", detection.CtxHTMLAttrValue, "double_quoted")
+	formB.formGroup, formB.location = "fg:two", domain.LocationForm
+	sameForm := siteAt(domain.NewID(), "c", detection.CtxHTMLAttrValue, "double_quoted")
+	sameForm.formGroup, sameForm.location = "fg:one", domain.LocationForm
+	query := siteAt(domain.NewID(), "q", detection.CtxHTMLAttrValue, "double_quoted")
+
+	if pairs := selectCombinedPairs([]reflectedSite{formA, formB}); len(pairs) != 0 {
+		t.Fatalf("pairs = %d, want 0: the two sites belong to different forms", len(pairs))
+	}
+	pairs := selectCombinedPairs([]reflectedSite{formA, formB, sameForm, query})
+	// Same-form and group-less pairings are allowed (b is a form field, q is
+	// not, and one request can carry a form body AND a query string); a+b and
+	// b+c cross two different forms and must not appear.
+	want := map[string]bool{"a+c": true, "a+q": true, "b+q": true, "c+q": true}
+	if len(pairs) != len(want) {
+		t.Fatalf("pairs = %d, want %d (%v)", len(pairs), len(want), want)
+	}
+	for _, p := range pairs {
+		key := p.a.parameterName + "+" + p.b.parameterName
+		if !want[key] {
+			t.Fatalf("unexpected pair %q (different forms must never pair)", key)
+		}
+	}
+}
+
 // --- findParamByNameLocation ---
 
 func TestFindParamByNameLocation(t *testing.T) {

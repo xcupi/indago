@@ -63,6 +63,12 @@ type ParamCandidate struct {
 	Location       domain.ParamLocation
 	Example        string
 	Source         domain.DiscoverySource
+	// FormGroup carries the originating <form>'s group (FormGroupKey) for a
+	// field discovered inside a form. It is part of the parameter's identity:
+	// the same field name submitted by two different forms on one page is two
+	// parameters, because each belongs to a different request shape. Empty for
+	// parameters that are not form fields.
+	FormGroup string
 	// Provenance is set for parameters found by wordlist mining (recon).
 	Provenance *ReconProvenance
 }

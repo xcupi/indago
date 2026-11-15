@@ -343,6 +343,7 @@ func (e *commandInjectionExecutor) refreshParams(ctx context.Context, ep *domain
 			continue
 		}
 		values := map[string]string{}
+		var actionForms []discovery.Form
 		for _, form := range discovery.ExtractForms(string(resp.Body)) {
 			action := form.Action
 			if action == "" {
@@ -356,6 +357,24 @@ func (e *commandInjectionExecutor) refreshParams(ctx context.Context, ep *domain
 			if strings.TrimSuffix(target, "/") != strings.TrimSuffix(ep.URL, "/") {
 				continue
 			}
+			actionForms = append(actionForms, form)
+		}
+		// Prefer the form the focused parameter belongs to: this page can hold
+		// several forms posting to the same action, and only one of them issued
+		// this request's token. Falls back to every matching form when the group
+		// is not on this page (see currentFormValues for the same reasoning).
+		if group := formGroupOf(focus); group != "" {
+			var grouped []discovery.Form
+			for _, form := range actionForms {
+				if form.Group == group {
+					grouped = append(grouped, form)
+				}
+			}
+			if len(grouped) > 0 {
+				actionForms = grouped
+			}
+		}
+		for _, form := range actionForms {
 			for _, in := range form.Inputs {
 				values[in.Name] = in.Value
 			}
@@ -480,7 +499,7 @@ func (e *commandInjectionExecutor) tryOutOfBand(ctx context.Context, job *domain
 	if err != nil {
 		return false
 	}
-	params = fillEmptyCommandParams(e.refreshParams(ctx, ep, params, focus), focus)
+	params = fillEmptyCommandParams(e.refreshParams(ctx, ep, paramsForFocus(params, focus), focus), focus)
 	req, err := buildRequest(ep, params, &injection{param: focus, value: payload})
 	if err != nil {
 		return false
@@ -572,7 +591,7 @@ func (e *commandInjectionExecutor) tryOutputRedirection(ctx context.Context, job
 	if err != nil {
 		return false
 	}
-	params = fillEmptyCommandParams(e.refreshParams(ctx, ep, params, focus), focus)
+	params = fillEmptyCommandParams(e.refreshParams(ctx, ep, paramsForFocus(params, focus), focus), focus)
 	writeReq, err := buildRequest(ep, params, &injection{param: focus, value: payload})
 	if err != nil {
 		return false
@@ -589,7 +608,7 @@ func (e *commandInjectionExecutor) tryOutputRedirection(ctx context.Context, job
 	if err != nil {
 		return false
 	}
-	readReq, err := buildRequest(reader, readParams, &injection{param: readerParam, value: name})
+	readReq, err := buildRequest(reader, paramsForFocus(readParams, readerParam), &injection{param: readerParam, value: name})
 	if err != nil {
 		return false
 	}
