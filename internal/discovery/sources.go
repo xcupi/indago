@@ -7,6 +7,7 @@ import (
 	"mime"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -637,9 +638,9 @@ func extractSPARoutes(body string) []string {
 
 // maxSPARouteAPIProbes bounds the JSON endpoints inspected for route links.
 // The lesson-menu shape is common in SPA frameworks, but an arbitrary JSON API
-// can be large and expensive to render; four is enough to catch a menu payload
-// without turning discovery into a second crawler.
-const maxSPARouteAPIProbes = 8
+// can be large and expensive to probe; the cap keeps discovery bounded while
+// covering a menu and its neighboring bootstrap endpoints.
+const maxSPARouteAPIProbes = 16
 
 // harvestRouteAPIs renders a small number of observed dynamic GET endpoints in
 // the authenticated browser context and extracts route-like hash links from
@@ -647,20 +648,45 @@ const maxSPARouteAPIProbes = 8
 // through an API response, never in the initial HTML. Request events do not
 // reliably carry the response MIME type, so the bounded probe uses path/scope
 // filters and the rendered body rather than guessing from the request headers.
+func routeAPIProbeScore(rawURL string) int {
+	info, err := Normalize(rawURL)
+	if err != nil {
+		return 0
+	}
+	p := strings.ToLower(info.Path)
+	score := 1
+	for _, hint := range []string{"menu", "navigation", "nav", "route", "lesson", "sitemap"} {
+		if strings.Contains(p, hint) {
+			score += 4
+		}
+	}
+	if strings.Contains(p, "service") || strings.Contains(p, "api") {
+		score += 2
+	}
+	return score
+}
+
 func (n *networkSource) harvestRouteAPIs(ctx context.Context, in Input, base string, network []browser.NetworkEvent) []string {
 	var out []string
 	seen := make(map[string]struct{})
-	probes := 0
+	candidates := make([]browser.NetworkEvent, 0, len(network))
 	for _, ev := range network {
-		if probes >= maxSPARouteAPIProbes {
-			break
-		}
 		if !strings.EqualFold(strings.TrimSpace(ev.Method), "GET") || !in.Scope.Permits(ev.URL).Allowed {
 			continue
 		}
 		info, err := Normalize(ev.URL)
 		if err != nil || IsStaticAssetPath(info.Path) || strings.EqualFold(info.Canonical, base) {
 			continue
+		}
+		candidates = append(candidates, ev)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return routeAPIProbeScore(candidates[i].URL) > routeAPIProbeScore(candidates[j].URL)
+	})
+	probes := 0
+	for _, ev := range candidates {
+		if probes >= maxSPARouteAPIProbes {
+			break
 		}
 		if err := in.wait(ctx); err != nil {
 			return out
