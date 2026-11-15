@@ -532,6 +532,12 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			}
 			return err
 		}
+		if err := n.emitForms(ctx, in, sink, info.Canonical, res.HTML); err != nil {
+			if errors.Is(err, ErrLimitReached) {
+				return nil
+			}
+			return err
+		}
 		routes := extractSPARoutes(res.HTML)
 		routes = append(routes, n.harvestRouteAPIs(ctx, in, sink, info.Canonical, res.Network)...)
 		if err := n.renderSPARoutes(ctx, in, sink, info.Canonical, routes); err != nil {
@@ -789,6 +795,53 @@ func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink
 		rendered++
 		if err := n.emitNetwork(ctx, in, sink, res.Network); err != nil {
 			return err
+		}
+		if err := n.emitForms(ctx, in, sink, routeURL, res.HTML); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// emitForms registers forms present in a browser-rendered document, not just
+// forms in the initial HTML. SPA routes often construct their forms after
+// JavaScript runs, so the HTTP crawler alone cannot see them. Registration is
+// passive: no form is submitted here.
+func (n *networkSource) emitForms(ctx context.Context, in Input, sink Sink, base, body string) error {
+	for _, form := range ExtractForms(body) {
+		action := strings.TrimSpace(form.Action)
+		if action == "" {
+			action = base
+		}
+		info, err := NormalizeRef(base, action)
+		if err != nil || !in.Scope.Permits(info.Canonical).Allowed ||
+			!allowFetch(sink, info.Canonical, domain.SourceBrowserNetwork) {
+			continue
+		}
+		method := form.Method
+		if method == "" {
+			method = domain.MethodGET
+		}
+		if _, err := sink.AddEndpoint(ctx, EndpointCandidate{
+			URL: info.Canonical, Method: method, Source: domain.SourceBrowserNetwork,
+		}); err != nil {
+			return err
+		}
+		loc := domain.LocationQuery
+		if method == domain.MethodPOST {
+			loc = domain.LocationForm
+		}
+		for _, field := range form.Inputs {
+			if err := in.wait(ctx); err != nil {
+				return err
+			}
+			if err := sink.AddParameter(ctx, ParamCandidate{
+				EndpointURL: info.Canonical, EndpointMethod: method,
+				Name: field.Name, Location: loc, Example: field.Value,
+				Source: domain.SourceBrowserNetwork,
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
