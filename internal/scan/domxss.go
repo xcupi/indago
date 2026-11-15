@@ -1645,6 +1645,13 @@ func (e *domXSSExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	}
 	for _, source := range dj.sourceList() {
 		if err := e.handleDOMXSSSource(ctx, job, ep, source); err != nil {
+			if isBrowserScopeBlocked(err) {
+				// The browser scope gate aborted a navigation (often an
+				// in-page link to a separate loopback tool). The endpoint is
+				// not testable within this scan's authorization boundary; do
+				// not retry the job to death.
+				return nil
+			}
 			return err
 		}
 	}
@@ -2195,6 +2202,11 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 		navErr = requireDOMXSSProvenance(obs1)
 	}
 	if navErr != nil {
+		if isBrowserScopeBlocked(navErr) {
+			reachTC.Status = domain.TestCaseSkipped
+			e.finishTestCase(ctx, reachTC, nil, "browser scope gate blocked navigation for "+label+"; endpoint is untested, not a clean negative")
+			return nil
+		}
 		e.finishTestCase(ctx, reachTC, navErr, "reachability probe for "+label)
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -3457,6 +3469,14 @@ func (e *domXSSExecutor) newTestCase(ctx context.Context, job *domain.TestJob, u
 // finishTestCase persists tc's outcome. probeErr nil means success (or,
 // for the skip path, the caller already set tc.Status to Skipped before
 // calling this).
+func isBrowserScopeBlocked(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "err_blocked_by_client") || strings.Contains(s, "blocked by client")
+}
+
 func (e *domXSSExecutor) finishTestCase(ctx context.Context, tc *domain.TestCase, probeErr error, note string) {
 	now := time.Now()
 	tc.FinishedAt, tc.UpdatedAt = &now, now
