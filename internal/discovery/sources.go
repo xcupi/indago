@@ -29,7 +29,7 @@ func NewRealRegistry(engine httpengine.Engine, b browser.Browser, cfg Config) *R
 	r.Register(NewWellKnownSource(engine, cfg))
 	r.Register(NewArchiveSource(cfg))
 	if b != nil {
-		r.Register(NewNetworkSource(b, cfg))
+		r.Register(NewNetworkSourceWithEngine(b, engine, cfg))
 	}
 	return r
 }
@@ -470,12 +470,24 @@ func cleanRobotsPath(p string) string {
 type networkSource struct {
 	browser browser.Browser
 	cfg     Config
+	// engine is optional. When present, route-menu JSON responses are fetched
+	// through the scan's scoped, authenticated HTTP engine instead of being
+	// re-rendered in the browser. Tests and browser-only registries can leave
+	// it nil.
+	engine httpengine.Engine
 }
 
 // NewNetworkSource loads each seed in a real browser and emits the network
 // requests it observes (including XHR/fetch) as endpoints.
 func NewNetworkSource(b browser.Browser, cfg Config) Source {
 	return &networkSource{browser: b, cfg: cfg.withDefaults()}
+}
+
+// NewNetworkSourceWithEngine is NewNetworkSource plus the scoped HTTP engine
+// used to read small route-menu JSON responses. It keeps the constructor
+// backward-compatible for tests that only provide a browser.
+func NewNetworkSourceWithEngine(b browser.Browser, engine httpengine.Engine, cfg Config) Source {
+	return &networkSource{browser: b, cfg: cfg.withDefaults(), engine: engine}
 }
 
 func (n *networkSource) Name() domain.DiscoverySource { return domain.SourceBrowserNetwork }
@@ -518,7 +530,9 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			}
 			return err
 		}
-		if err := n.renderSPARoutes(ctx, in, sink, info.Canonical, res.HTML); err != nil {
+		routes := extractSPARoutes(res.HTML)
+		routes = append(routes, n.harvestRouteAPIs(ctx, in, info.Canonical, res.Network)...)
+		if err := n.renderSPARoutes(ctx, in, sink, info.Canonical, routes); err != nil {
 			if errors.Is(err, ErrLimitReached) {
 				return nil
 			}
@@ -621,18 +635,89 @@ func extractSPARoutes(body string) []string {
 	return out
 }
 
+// maxSPARouteAPIProbes bounds the JSON endpoints inspected for route links.
+// The lesson-menu shape is common in SPA frameworks, but an arbitrary JSON API
+// can be large and expensive to render; four is enough to catch a menu payload
+// without turning discovery into a second crawler.
+const maxSPARouteAPIProbes = 8
+
+// harvestRouteAPIs renders a small number of observed dynamic GET endpoints in
+// the authenticated browser context and extracts route-like hash links from
+// their response. A lesson menu, for example, may expose #lesson/... links only
+// through an API response, never in the initial HTML. Request events do not
+// reliably carry the response MIME type, so the bounded probe uses path/scope
+// filters and the rendered body rather than guessing from the request headers.
+func (n *networkSource) harvestRouteAPIs(ctx context.Context, in Input, base string, network []browser.NetworkEvent) []string {
+	var out []string
+	seen := make(map[string]struct{})
+	probes := 0
+	for _, ev := range network {
+		if probes >= maxSPARouteAPIProbes {
+			break
+		}
+		if !strings.EqualFold(strings.TrimSpace(ev.Method), "GET") || !in.Scope.Permits(ev.URL).Allowed {
+			continue
+		}
+		info, err := Normalize(ev.URL)
+		if err != nil || IsStaticAssetPath(info.Path) || strings.EqualFold(info.Canonical, base) {
+			continue
+		}
+		if err := in.wait(ctx); err != nil {
+			return out
+		}
+		if n.engine != nil {
+			resp, err := n.engine.Do(ctx, httpengine.GET(ev.URL))
+			if err == nil && resp != nil && len(resp.Body) > 0 {
+				probes++
+				for _, route := range extractSPARoutes(string(resp.Body)) {
+					if _, ok := seen[route]; ok {
+						continue
+					}
+					seen[route] = struct{}{}
+					out = append(out, route)
+				}
+				continue
+			}
+		}
+		res, err := n.browser.Render(ctx, ev.URL, browser.RenderOptions{
+			Limiter:           n.cfg.Limiter,
+			WaitUntil:         browser.WaitLoad,
+			ObservationWindow: 100 * time.Millisecond,
+			AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
+			SessionStatePath:  in.SessionStatePath,
+			UserAgent:         n.cfg.HuntingUserAgent,
+		})
+		if err != nil {
+			continue
+		}
+		probes++
+		for _, route := range extractSPARoutes(res.HTML) {
+			if _, ok := seen[route]; ok {
+				continue
+			}
+			seen[route] = struct{}{}
+			out = append(out, route)
+		}
+	}
+	return out
+}
+
 // renderSPARoutes loads hash routes found on a rendered page in the same
 // browser context and emits the network requests they cause. It never changes
 // the HTTP crawler's URL set: fragments are client-side state, so ordinary
 // HTTP discovery would only request the same document again.
-func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink, base, body string) error {
-	routes := extractSPARoutes(body)
+func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink, base string, routes []string) error {
 	if len(routes) == 0 {
 		return nil
 	}
 	base = strings.SplitN(base, "#", 2)[0]
 	rendered := 0
+	seen := make(map[string]struct{}, len(routes))
 	for _, route := range routes {
+		if _, ok := seen[route]; ok {
+			continue
+		}
+		seen[route] = struct{}{}
 		if rendered >= maxSPARouteRenders {
 			break
 		}
