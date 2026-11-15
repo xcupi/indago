@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"mime"
 	"path"
 	"regexp"
@@ -511,7 +512,7 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 		res, err := n.browser.Render(ctx, info.Canonical, browser.RenderOptions{
 			Limiter:           n.cfg.Limiter,
 			WaitUntil:         browser.WaitLoad,
-			ObservationWindow: 250 * time.Millisecond,
+			ObservationWindow: 750 * time.Millisecond,
 			AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
 			SessionStatePath:  in.SessionStatePath,
 			UserAgent:         n.cfg.HuntingUserAgent,
@@ -585,8 +586,10 @@ func (n *networkSource) emitNetwork(ctx context.Context, in Input, sink Sink, ne
 
 // maxSPARouteRenders bounds routes rendered after the seed page. A route can
 // trigger an unbounded application navigation graph; this is deliberately a
-// small, fixed budget rather than a second crawler.
-const maxSPARouteRenders = 16
+// bounded budget rather than a second crawler. WebGoat's menu alone has 45
+// lessons; 64 leaves room for one menu plus nearby routes without unbounded
+// navigation.
+const maxSPARouteRenders = 64
 
 // spaHashRoute returns a route-like hash fragment from a raw href/script
 // reference. Plain anchors (#section), CSS colors (#fff) and fragments without
@@ -693,6 +696,17 @@ func (n *networkSource) harvestRouteAPIs(ctx context.Context, in Input, base str
 		}
 		if n.engine != nil {
 			resp, err := n.engine.Do(ctx, httpengine.GET(ev.URL))
+			fmt.Printf("SPA-DEBUG candidate=%s status=%v body=%d err=%v\n", ev.URL, func() int {
+				if resp == nil {
+					return 0
+				}
+				return resp.Status
+			}(), func() int {
+				if resp == nil {
+					return 0
+				}
+				return len(resp.Body)
+			}(), err)
 			if err == nil && resp != nil && len(resp.Body) > 0 {
 				probes++
 				for _, route := range extractSPARoutes(string(resp.Body)) {
