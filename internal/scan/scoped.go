@@ -51,11 +51,18 @@ type scopedEngine struct {
 	limiter *ratelimit.Limiter
 }
 
-// sessionAuthHeader is one bearer token bound to the browser origin that stored
-// it. Value is already a complete Authorization header value.
+// sessionAuthHeader is one bearer token recovered from the scan's saved browser
+// storage state. Value is already a complete Authorization header value.
+//
+// An exact-origin token (HostOnly false) is applied only to the origin that
+// stored it. A HostOnly token is a host-scoped fallback, recovered from a
+// cookie: it is used only for requests to that host for which no exact-origin
+// token matched, which is what lets a JWT-in-cookie SPA authenticate raw HTTP
+// requests without ever sending the token to another host.
 type sessionAuthHeader struct {
-	Origin string
-	Value  string
+	Origin   string
+	Value    string
+	HostOnly bool
 }
 
 var _ httpengine.Engine = (*scopedEngine)(nil)
@@ -94,6 +101,39 @@ func (s *scopedEngine) WithRateLimiter(l *ratelimit.Limiter) *scopedEngine {
 	return s
 }
 
+// sessionBearerFor returns the Authorization header value this engine would send
+// to rawURL: a token stored for rawURL's exact origin always wins, and a
+// host-scoped token recovered from a cookie is used only as a fallback for
+// requests no exact-origin token covers. Empty when the engine holds no bearer
+// credential for the URL.
+//
+// It is also how the IDOR engine reads the caller identity offline: the token
+// that authenticates a request also carries the claims that name the caller.
+func (s *scopedEngine) sessionBearerFor(rawURL string) string {
+	for _, h := range s.authHeaders {
+		if !h.HostOnly && h.Origin != "" && sameURLOrigin(rawURL, h.Origin) {
+			return h.Value
+		}
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return ""
+	}
+	for _, h := range s.authHeaders {
+		if !h.HostOnly || h.Origin == "" {
+			continue
+		}
+		if strings.EqualFold(host, strings.TrimPrefix(strings.ToLower(h.Origin), ".")) {
+			return h.Value
+		}
+	}
+	return ""
+}
+
 // Do implements httpengine.Engine.
 func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpengine.Response, error) {
 	if req == nil {
@@ -121,16 +161,15 @@ func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpen
 			return nil, err
 		}
 		// Apply the saved SPA bearer token only to the exact origin that stored
-		// it. A redirect can change origin; never carry the token across it.
+		// it, falling back to a host-scoped token recovered from a cookie when
+		// no exact-origin token covers this request. A redirect can change
+		// origin (or host); never carry a token across it.
 		if !cur.NoCookies {
 			if _, explicit := req.Headers["Authorization"]; !explicit {
 				delete(cur.Headers, "Authorization")
-				for _, h := range s.authHeaders {
-					if sameURLOrigin(cur.URL, h.Origin) {
-						cur.Headers = ensureHeaderMap(cur.Headers)
-						cur.Headers["Authorization"] = h.Value
-						break
-					}
+				if value := s.sessionBearerFor(cur.URL); value != "" {
+					cur.Headers = ensureHeaderMap(cur.Headers)
+					cur.Headers["Authorization"] = value
 				}
 			}
 		}
@@ -427,10 +466,20 @@ func cloneHeaderMap(headers map[string]string) map[string]string {
 	return out
 }
 
-// sessionAuthHeaders recovers a bearer token from Playwright storage-state
-// localStorage. Only a small set of conventional token names and JWT-shaped
-// values are considered; arbitrary localStorage values are never turned into
-// headers. Tokens are scoped to the exact origin recorded in the state file.
+// sessionCookieTokenNames are the cookie names an SPA commonly stores its bearer
+// JWT under. Only these names, and only a JWT-shaped value, are turned into a
+// fallback Authorization header: an arbitrary cookie is never one.
+var sessionCookieTokenNames = map[string]bool{
+	"token": true, "access_token": true, "access-token": true,
+	"id_token": true, "jwt": true, "auth_token": true,
+}
+
+// sessionAuthHeaders recovers bearer tokens from Playwright storage state: first
+// from localStorage (scoped to the exact origin recorded in the state file),
+// then from cookies (scoped to the cookie's host, used only when no
+// exact-origin token matched the request). Only a small set of conventional
+// token names and JWT-shaped values are considered; arbitrary stored values are
+// never turned into headers.
 func sessionAuthHeaders(statePath string) []sessionAuthHeader {
 	if statePath == "" {
 		return nil
@@ -447,6 +496,15 @@ func sessionAuthHeaders(statePath string) []sessionAuthHeader {
 				Value string `json:"value"`
 			} `json:"localStorage"`
 		} `json:"origins"`
+		Cookies []struct {
+			Name   string `json:"name"`
+			Value  string `json:"value"`
+			Domain string `json:"domain"`
+			// partitionKey is an object in newer storage states; a raw pointer
+			// keeps a partitioned cookie recognisable without failing the whole
+			// state parse on its shape.
+			PartitionKey *json.RawMessage `json:"partitionKey"`
+		} `json:"cookies"`
 	}
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil
@@ -487,6 +545,33 @@ func sessionAuthHeaders(statePath string) []sessionAuthHeader {
 			seen[key] = true
 			out = append(out, sessionAuthHeader{Origin: key, Value: header})
 		}
+	}
+	// A JWT kept in an httpOnly cookie is invisible to localStorage but is
+	// still the scan's own session credential. It becomes a host-scoped
+	// fallback: exact-origin tokens above always win, and a request to any
+	// other host never sees it. Partitioned cookies are skipped for the same
+	// reason sessionCookies skips them: a raw request has no partition context.
+	for _, cookie := range state.Cookies {
+		if cookie.PartitionKey != nil {
+			continue
+		}
+		if !sessionCookieTokenNames[strings.ToLower(strings.TrimSpace(cookie.Name))] {
+			continue
+		}
+		value := strings.TrimSpace(cookie.Value)
+		if value == "" || len(value) > 8192 || !looksLikeJWT(value) {
+			continue
+		}
+		host, _, ok := cookieDomainParts(cookie.Domain)
+		if !ok {
+			continue
+		}
+		key := "host:" + host
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, sessionAuthHeader{Origin: host, Value: "Bearer " + value, HostOnly: true})
 	}
 	return out
 }

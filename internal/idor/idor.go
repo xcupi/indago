@@ -10,6 +10,7 @@ package idor
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -71,6 +72,171 @@ func ExtractIdentity(body []byte) Identity {
 		return Identity{Fields: dedupeFields(fields)}
 	}
 	return Identity{Fields: dedupeFields(extractHTMLIdentity(body))}
+}
+
+// MergeIdentities unions identities into one, dropping exact (kind, value)
+// duplicates and returning the canonical (username, email, user_id) order. It
+// is how a baseline assembled from several sources — an account page, a
+// whoami API and the session's own token claims — stays one identity: a field
+// one source found is never lost because another source omitted it, and a
+// field two sources agree on is recorded once.
+func MergeIdentities(ids ...Identity) Identity {
+	var fields []Field
+	for _, id := range ids {
+		fields = append(fields, id.Fields...)
+	}
+	if len(fields) == 0 {
+		return Identity{}
+	}
+	return Identity{Fields: dedupeFields(fields)}
+}
+
+// maxJWTLen bounds the token this parser will look at. Bearer tokens are small;
+// anything larger is not something to decode and scan.
+const maxJWTLen = 1 << 16
+
+// ExtractJWTIdentity reads the caller identity carried by a bearer JWT,
+// entirely offline: no request is sent, nothing is logged and a malformed
+// token simply yields an empty Identity. The optional "Bearer " prefix is
+// stripped, the payload (the second dot-separated segment) is base64url-decoded
+// and read exactly like a JSON identity response, so every conventional claim
+// name (email, username, user_id, data.id, user.id, …) is understood. Two
+// JWT-specific claims are mapped as well:
+//
+//   - "sub", at the root or inside a nested object, becomes an email when it
+//     contains "@" and a username otherwise;
+//   - a root "id" becomes a user id only when no other user-id claim exists,
+//     because a root "id" is often the token's own identifier, not the user's.
+//
+// The claims are a source of identity, never a form of proof: the differential
+// still decides on what the target itself returns.
+func ExtractJWTIdentity(rawToken string) Identity {
+	payload, ok := jwtPayload(rawToken)
+	if !ok {
+		return Identity{}
+	}
+	root, ok := unmarshalAny(payload)
+	if !ok {
+		return Identity{}
+	}
+	fields := extractJSONIdentity(payload)
+	fields = append(fields, jwtSubjectFields(root)...)
+	if !hasFieldKind(fields, FieldUserID) {
+		if id, ok := jwtRootID(root); ok {
+			fields = append(fields, id)
+		}
+	}
+	if len(fields) == 0 {
+		return Identity{}
+	}
+	return Identity{Fields: dedupeFields(fields)}
+}
+
+// jwtPayload extracts and decodes the payload segment of a compact JWS.
+func jwtPayload(rawToken string) ([]byte, bool) {
+	token := strings.TrimSpace(rawToken)
+	if token == "" || len(token) > maxJWTLen {
+		return nil, false
+	}
+	if len(token) > 7 && strings.EqualFold(token[:7], "bearer ") {
+		token = strings.TrimSpace(token[7:])
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return nil, false
+	}
+	segment := strings.TrimSpace(parts[1])
+	if segment == "" {
+		return nil, false
+	}
+	// Compact JWS uses unpadded base64url; padded input is tolerated because
+	// some issuers (and hand-written fixtures) pad it.
+	if payload, err := base64.RawURLEncoding.DecodeString(segment); err == nil {
+		return payload, true
+	}
+	if payload, err := base64.URLEncoding.DecodeString(segment); err == nil {
+		return payload, true
+	}
+	return nil, false
+}
+
+// jwtSubjectFields maps every "sub" claim in the payload (root or nested
+// object, bounded depth) to an identity field. Values that are not plausible
+// identities (empty, placeholder, template or punctuation) are dropped.
+func jwtSubjectFields(root map[string]any) []Field {
+	var out []Field
+	var walk func(m map[string]any, depth int)
+	walk = func(m map[string]any, depth int) {
+		if depth > 3 {
+			return
+		}
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			switch val := m[k].(type) {
+			case string:
+				if !strings.EqualFold(k, "sub") {
+					continue
+				}
+				if f, ok := jwtSubjectField(val); ok {
+					out = append(out, f)
+				}
+			case map[string]any:
+				walk(val, depth+1)
+			}
+		}
+	}
+	walk(root, 0)
+	return out
+}
+
+func jwtSubjectField(raw string) (Field, bool) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return Field{}, false
+	}
+	kind := FieldUsername
+	if strings.Contains(v, "@") {
+		kind = FieldEmail
+	}
+	s, ok := acceptableValue(kind, v)
+	if !ok {
+		return Field{}, false
+	}
+	return Field{Kind: kind, Value: s}, true
+}
+
+// jwtRootID maps the payload's own "id" claim to a user id. Only the root is
+// considered here: a nested id is already mapped by identityKey when its parent
+// object names a user/account/profile.
+func jwtRootID(root map[string]any) (Field, bool) {
+	switch v := root["id"].(type) {
+	case string:
+		if s, ok := acceptableValue(FieldUserID, v); ok {
+			return Field{Kind: FieldUserID, Value: s}, true
+		}
+	case json.Number:
+		if s, ok := acceptableValue(FieldUserID, v.String()); ok {
+			return Field{Kind: FieldUserID, Value: s}, true
+		}
+	case float64:
+		if s, ok := acceptableValue(FieldUserID, strconv.FormatFloat(v, 'f', -1, 64)); ok {
+			return Field{Kind: FieldUserID, Value: s}, true
+		}
+	}
+	return Field{}, false
+}
+
+func hasFieldKind(fields []Field, kind FieldKind) bool {
+	for _, f := range fields {
+		if f.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // unmarshalAny accepts only a TRUTHY JSON document: a bare number/string or a

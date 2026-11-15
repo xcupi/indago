@@ -46,9 +46,9 @@ func (l *sstiProbeLog) all() []string {
 	return out
 }
 
-// runSSTIJob drives the SSTI engine once against endpointURL (a full URL with
+// runSSTIFingerprintJob drives the SSTI engine once against endpointURL (a full URL with
 // ?q=hello) and returns the recorded detail plus the single test case.
-func runSSTIJob(t *testing.T, endpointURL string) (*sstiDetail, *domain.TestCase) {
+func runSSTIFingerprintJob(t *testing.T, endpointURL string) (*sstiDetail, *domain.TestCase) {
 	t.Helper()
 	env := newScanEnv(t)
 	ep := env.endpoint(endpointURL, domain.MethodGET)
@@ -89,7 +89,7 @@ func TestSSTIFingerprintSkipsStaticAssetEndpoint(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, tc := runSSTIJob(t, srv.URL+"/assets/logo.png?q=hello")
+	d, tc := runSSTIFingerprintJob(t, srv.URL+"/assets/logo.png?q=hello")
 	if got := probes.all(); len(got) != 0 {
 		t.Fatalf("static asset received %d template payloads, want 0: %v", len(got), got)
 	}
@@ -117,7 +117,7 @@ func TestSSTIFingerprintSkipsJSONWithoutTemplateEvidence(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, tc := runSSTIJob(t, srv.URL+"/api/page?q=hello")
+	_, tc := runSSTIFingerprintJob(t, srv.URL+"/api/page?q=hello")
 	if got := probes.all(); len(got) != 0 {
 		t.Fatalf("JSON endpoint received %d template payloads, want 0: %v", len(got), got)
 	}
@@ -141,7 +141,7 @@ func TestSSTIFingerprintProbesJSONWhenEngineNamed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, tc := runSSTIJob(t, srv.URL+"/api/error?q=hello")
+	d, tc := runSSTIFingerprintJob(t, srv.URL+"/api/error?q=hello")
 	if tc.Status != domain.TestCaseCompleted {
 		t.Fatalf("status = %s, want completed (note %q)", tc.Status, tc.Note)
 	}
@@ -203,7 +203,7 @@ func TestSSTIFingerprintPrioritizesMatchingShape(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			d, tc := runSSTIJob(t, srv.URL+"/page?q=hello")
+			d, tc := runSSTIFingerprintJob(t, srv.URL+"/page?q=hello")
 			if tc.Status != domain.TestCaseCompleted {
 				t.Fatalf("status = %s, want completed (note %q)", tc.Status, tc.Note)
 			}

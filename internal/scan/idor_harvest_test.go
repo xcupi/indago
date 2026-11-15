@@ -172,15 +172,15 @@ func TestIDORHarvestedCandidateConfirmsWithProvenance(t *testing.T) {
 		t.Fatalf("finding summary must attribute the tested identifier: %q", fs[0].Summary)
 	}
 
-	// The harvest itself must not fetch anything: only the identity page, the
+	// The harvest itself must not fetch anything: only the identity paths, the
 	// own-object baseline and the foreign candidate were requested.
 	for _, call := range eng.seen() {
 		if strings.Contains(call, "/admin/users") {
 			t.Fatalf("harvesting fetched the source page instead of reusing stored data: %s", call)
 		}
 	}
-	if len(eng.seen()) != 3 {
-		t.Fatalf("requests = %v, want exactly identity + baseline + candidate", eng.seen())
+	if want := len(identityPaths) + 1 + 1; len(eng.seen()) != want {
+		t.Fatalf("requests = %v, want exactly %d (identity paths + baseline + candidate)", eng.seen(), want)
 	}
 }
 

@@ -56,6 +56,7 @@ type idorDetail struct {
 	OwnValue         string               `json:"own_value,omitempty"`
 	CallerIdentity   idor.Identity        `json:"caller_identity,omitempty"`
 	IdentitySource   string               `json:"identity_source,omitempty"`
+	IdentityJWT      bool                 `json:"identity_jwt,omitempty"`
 	IdentityEvidence []domain.ID          `json:"identity_evidence,omitempty"`
 	BaselineEvidence []domain.ID          `json:"baseline_evidence,omitempty"`
 	BaselineStatus   int                  `json:"baseline_status,omitempty"`
@@ -189,6 +190,9 @@ func (b *idorProbeBudget) remaining() int {
 type idorIdentity struct {
 	Identity idor.Identity
 	Source   string
+	// JWT records that the session's own bearer-token claims contributed at
+	// least one field to this baseline. False for a pure page/API baseline.
+	JWT      bool
 	Evidence []domain.ID
 	Reason   string // non-empty when no identity could be established
 	// CaseID is the persisted identity-baseline TestCase; the harvested
@@ -637,7 +641,7 @@ func (e *idorExecutor) loadIdentityCase(ctx context.Context, scanID domain.ID) (
 		}
 		var d idorDetail
 		_ = json.Unmarshal(tc.Detail, &d)
-		return &idorIdentity{Identity: d.CallerIdentity, Source: d.IdentitySource,
+		return &idorIdentity{Identity: d.CallerIdentity, Source: d.IdentitySource, JWT: d.IdentityJWT,
 			Evidence: d.IdentityEvidence, Reason: d.SkipReason, CaseID: tc.ID,
 			Harvest: d.Harvest, HarvestNote: d.HarvestNote}, true
 	}
@@ -663,8 +667,22 @@ func (e *idorExecutor) knownIdentity(ctx context.Context, scanID domain.ID) *ido
 // maxIdentityPaths bounds the identity-page probes. The list now includes
 // account pages on the seed/auth-profile origin as well as the endpoint origin:
 // an authenticated app commonly keeps the account page on my.example.com while
-// the object endpoint is on www.example.com.
-const maxIdentityPaths = 12
+// the object endpoint is on www.example.com. It also has to fit the
+// conventional identity paths (see identityPaths) on BOTH origins when an app
+// splits its human pages from its APIs.
+const maxIdentityPaths = 20
+
+// identityPaths are the conventional caller-identity pages tried on an origin,
+// in order: the human account pages first (cheap HTML, often the only source of
+// a username), then the read-only identity APIs common in SPA/JWT deployments
+// (whoami, /me, versioned user resources). A JWT-only API — cRAPI is the
+// canonical example — names the caller ONLY through such an endpoint, so
+// without them the differential could never start.
+var identityPaths = []string{
+	"/my-account", "/profile", "/account", "/me",
+	"/rest/user/whoami", "/api/v1/user", "/api/user",
+	"/identity/api/v2/user/dashboard", "/api/users/me",
+}
 
 // identityURLs returns bounded, read-only candidate URLs for the caller
 // identity baseline. It starts with conventional account paths, adds pages the
@@ -693,7 +711,7 @@ func (e *idorExecutor) identityURLs(ctx context.Context, ep *domain.Endpoint) []
 		out = append(out, u)
 		return len(out) >= maxIdentityPaths
 	}
-	for _, path := range []string{"/my-account", "/profile", "/account", "/me"} {
+	for _, path := range identityPaths {
 		if add(origin, path) {
 			return out
 		}
@@ -816,11 +834,36 @@ func isIdentityPath(path string) bool {
 	return false
 }
 
+// identitySourceJWT labels a caller identity read from the session's own bearer
+// token claims instead of from a target response. It is the only identity
+// source that costs no request, and the only one that works when the target
+// exposes the caller exclusively through a JWT-protected API.
+const identitySourceJWT = "jwt_claims"
+
+// sessionBearerSource is implemented by scopedEngine: the Authorization value it
+// would attach to a request for a URL, if any. Depending on the interface rather
+// than the concrete engine keeps the IDOR executor testable and means a scan
+// whose engine carries no bearer token simply has no JWT identity source.
+type sessionBearerSource interface {
+	sessionBearerFor(string) string
+}
+
 // identity returns the scan's caller-identity baseline, establishing and
 // persisting it on first use. The baseline is read back from a TestCase so a
-// restarted scan does not probe the account page again. Only bounded, common
-// account paths on the endpoint's own origin are tried: no wordlist, no
-// cross-host lookup.
+// restarted scan does not probe the account page again.
+//
+// Two sources are combined, both bounded and read-only:
+//
+//  1. the conventional identity pages/APIs on the endpoint's own origin (no
+//     wordlist, no cross-host lookup), and
+//  2. the claims of the session's own bearer token, decoded OFFLINE (see
+//     idor.ExtractJWTIdentity) — no request is sent for it.
+//
+// A page that names the caller only partially (an email but no user id) is not
+// the end of the search: probing continues, merging fields as it goes, until the
+// baseline carries a user id AND a name (email or username) or every bounded
+// candidate has been tried. When no page yields anything but the token claims
+// do, the claims become the baseline (source "jwt_claims").
 func (e *idorExecutor) identity(ctx context.Context, scanID domain.ID, ep *domain.Endpoint) (*idorIdentity, bool) {
 	e.identityMu.Lock()
 	defer e.identityMu.Unlock()
@@ -832,53 +875,130 @@ func (e *idorExecutor) identity(ctx context.Context, scanID domain.ID, ep *domai
 		return e.cached, true
 	}
 
+	urls := e.identityURLs(ctx, ep)
+	jwtIdent := e.sessionJWTIdentity(append([]string{ep.URL}, urls...))
+
 	var tried []string
-	for _, target := range e.identityURLs(ctx, ep) {
+	var pageIdent idor.Identity
+	var pageSource string
+	var pageResps []*httpengine.Response
+	for _, target := range urls {
 		tried = append(tried, target)
 		req := httpengine.GET(target)
 		resp, outcome, _, _ := e.send(ctx, req)
 		if outcome != domain.OutcomeSuccess || resp == nil || resp.Status < 200 || resp.Status >= 300 {
 			continue
 		}
-		ident := idor.ExtractIdentity(resp.Body)
-		if ident.Empty() {
+		found := idor.ExtractIdentity(resp.Body)
+		if found.Empty() {
 			continue
 		}
-		e.cached = &idorIdentity{Identity: ident, Source: target}
-		e.cached.CaseID = e.persistIdentity(ctx, scanID, e.cached, resp)
-		return e.cached, false
+		// Merge rather than replace: another page (or the token claims) may
+		// carry the piece this one omits. Only a page that actually adds a
+		// field is kept as evidence, so the stored baseline proves every
+		// attribute it claims.
+		before := len(pageIdent.Fields)
+		pageIdent = idor.MergeIdentities(pageIdent, found)
+		if len(pageIdent.Fields) > before {
+			if pageSource == "" {
+				pageSource = target
+			}
+			pageResps = append(pageResps, resp)
+		}
+		if identityComplete(idor.MergeIdentities(pageIdent, jwtIdent)) {
+			break
+		}
 	}
 
-	reason := fmt.Sprintf("caller identity could not be established from the target with this session (tried %s)",
-		strings.Join(tried, ", "))
-	e.cached = &idorIdentity{Reason: reason}
-	e.cached.CaseID = e.persistIdentity(ctx, scanID, e.cached, nil)
+	merged := idor.MergeIdentities(pageIdent, jwtIdent)
+	if merged.Empty() {
+		reason := fmt.Sprintf("caller identity could not be established from the target with this session (tried %s)",
+			strings.Join(tried, ", "))
+		e.cached = &idorIdentity{Reason: reason}
+		e.cached.CaseID = e.persistIdentity(ctx, scanID, e.cached, nil)
+		return e.cached, false
+	}
+	if pageSource == "" {
+		pageSource = identitySourceJWT
+	}
+	e.cached = &idorIdentity{
+		Identity: merged,
+		Source:   pageSource,
+		JWT:      len(pageIdent.Fields) < len(merged.Fields),
+	}
+	e.cached.CaseID = e.persistIdentity(ctx, scanID, e.cached, pageResps)
 	return e.cached, false
+}
+
+// identityComplete reports whether a baseline is good enough to stop probing:
+// the differential needs a stable object identifier (user id) AND a human-facing
+// name (email or username) to compare a foreign response against.
+func identityComplete(i idor.Identity) bool {
+	if len(i.Values(idor.FieldUserID)) == 0 {
+		return false
+	}
+	return len(i.Values(idor.FieldEmail)) > 0 || len(i.Values(idor.FieldUsername)) > 0
+}
+
+// sessionJWTIdentity reads the identity claims of every bearer token the scan's
+// engine would send to urls. Nothing is sent: the token is decoded locally, so
+// a scan whose identity pages are unreachable can still know who its caller is.
+// Several origins can each store their own token, so all of them are merged.
+func (e *idorExecutor) sessionJWTIdentity(urls []string) idor.Identity {
+	src, ok := e.engine.(sessionBearerSource)
+	if !ok {
+		return idor.Identity{}
+	}
+	var ids []idor.Identity
+	seen := map[string]bool{}
+	for _, u := range urls {
+		token := src.sessionBearerFor(u)
+		if token == "" || seen[token] {
+			continue
+		}
+		seen[token] = true
+		if ident := idor.ExtractJWTIdentity(token); !ident.Empty() {
+			ids = append(ids, ident)
+		}
+	}
+	return idor.MergeIdentities(ids...)
 }
 
 // persistIdentity records the baseline (positive or negative) as a TestCase
 // with its own request/response evidence, and returns its ID so the harvested
-// candidate set can be attached to the same durable row.
-func (e *idorExecutor) persistIdentity(ctx context.Context, scanID domain.ID, id *idorIdentity, resp *httpengine.Response) domain.ID {
+// candidate set can be attached to the same durable row. Every page that
+// CONTRIBUTED a field is stored as evidence, so a merged baseline is provable
+// field by field; a baseline read from the token claims alone carries no HTTP
+// evidence because no request produced it.
+func (e *idorExecutor) persistIdentity(ctx context.Context, scanID domain.ID, id *idorIdentity, resps []*httpengine.Response) domain.ID {
 	now := time.Now()
 	tc := &domain.TestCase{
 		ID: domain.NewID(), ScanID: scanID, VulnClass: domain.VulnIDOR,
 		Status: domain.TestCaseCompleted, Outcome: domain.OutcomeSuccess,
 		URL: id.Source, StartedAt: &now, FinishedAt: &now, CreatedAt: now, UpdatedAt: now,
 	}
-	d := idorDetail{Engine: "idor", CallerIdentity: id.Identity, IdentitySource: id.Source, Reason: id.Reason, SkipReason: id.Reason}
+	d := idorDetail{Engine: "idor", CallerIdentity: id.Identity, IdentitySource: id.Source, IdentityJWT: id.JWT,
+		Reason: id.Reason, SkipReason: id.Reason}
 	tc.Note = idorIdentityNote
 	if id.Identity.Empty() {
 		tc.Note = idorIdentityNote + " unavailable: " + truncate(id.Reason, 200)
 	}
-	if resp != nil {
-		if ids, err := e.persistPair(ctx, tc, resp, "idor identity baseline"); err == nil {
-			tc.EvidenceIDs = ids
-			id.Evidence = ids
-			d.IdentityEvidence = ids
-		} else {
-			tc.Note += " | identity evidence incomplete: " + truncate(err.Error(), 200)
+	for i, resp := range resps {
+		if resp == nil {
+			continue
 		}
+		role := "idor identity baseline"
+		if len(resps) > 1 {
+			role = fmt.Sprintf("idor identity baseline (%d/%d)", i+1, len(resps))
+		}
+		ids, err := e.persistPair(ctx, tc, resp, role)
+		if err != nil {
+			tc.Note += " | identity evidence incomplete: " + truncate(err.Error(), 200)
+			continue
+		}
+		tc.EvidenceIDs = appendUniqueIDs(tc.EvidenceIDs, ids)
+		id.Evidence = appendUniqueIDs(id.Evidence, ids)
+		d.IdentityEvidence = appendUniqueIDs(d.IdentityEvidence, ids)
 	}
 	tc.Detail = encodeIDORDetail(d)
 	if err := e.store.TestCases().Create(ctx, tc); err != nil {
