@@ -288,6 +288,11 @@ func (c *Controller) discoveryConfig(sc *domain.Scan) discovery.Config {
 	if mode, err := discovery.ParseRawQueryMode(sc.Config.RawQueryInjection); err == nil {
 		cfg.RawQueryInjection = mode
 	}
+	// A scan that omits the GraphQL engine must not spend a discovery request
+	// looking for a GraphQL endpoint nothing would test. The probe is ON for
+	// every scan that keeps the engine, at every recon level — see
+	// discovery.NewWellKnownSource.
+	cfg.SkipGraphQLProbe = sc.Config.SkipGraphQL
 	cfg.HuntingUserAgent = c.huntingUserAgent(sc)
 	return cfg
 }

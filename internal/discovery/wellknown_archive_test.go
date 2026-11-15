@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/indago/indago/internal/discovery"
@@ -71,22 +72,68 @@ func TestWellKnownReadsSelfDescribingDocuments(t *testing.T) {
 	}
 }
 
-// Below standard, the source must send nothing: default scans stay unchanged.
-func TestWellKnownIsOffBelowStandard(t *testing.T) {
-	var hits int
+// Below standard this source reads no self-describing document at all. The one
+// request it may still send is the lightweight GraphQL well-known probe: a
+// GraphQL API is a single POST URL no crawler can link to, so a scan that does
+// no wordlist recon (the conservative default) must still ask /graphql — and
+// must ask nothing else.
+func TestWellKnownReadsDocumentsOnlyFromStandard(t *testing.T) {
+	var mu sync.Mutex
+	var requested []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
-		w.Write([]byte("Contact: mailto:x@example.test"))
+		mu.Lock()
+		requested = append(requested, r.URL.Path)
+		mu.Unlock()
+		// An HTML page, not GraphQL: the probe must classify it as such.
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html><body>Contact: mailto:x@example.test</body></html>"))
 	}))
 	defer srv.Close()
+
 	for _, level := range []discovery.ReconLevel{discovery.ReconOff, discovery.ReconSafe} {
+		mu.Lock()
+		requested = nil
+		mu.Unlock()
 		cfg := discovery.DefaultConfig()
 		cfg.ReconLevel = level
-		runSource(t, discovery.NewWellKnownSource(&countingEngine{inner: httpengine.NewDefault()}, cfg), srv.URL)
+		sink := runSource(t, discovery.NewWellKnownSource(&countingEngine{inner: httpengine.NewDefault()}, cfg), srv.URL)
+
+		mu.Lock()
+		got := append([]string(nil), requested...)
+		mu.Unlock()
+		if len(got) != 1 || got[0] != "/graphql" {
+			t.Fatalf("level %q requested %v, want exactly one /graphql probe", level, got)
+		}
+		if len(sink.endpointURLs()) != 0 {
+			t.Fatalf("level %q registered %v; an HTML page at /graphql is not a GraphQL API", level, sink.endpointURLs())
+		}
 	}
-	if hits != 0 {
-		t.Fatalf("well-known source sent %d requests below standard", hits)
+
+	// Standard still reads every self-describing document.
+	mu.Lock()
+	requested = nil
+	mu.Unlock()
+	cfg := discovery.DefaultConfig()
+	cfg.ReconLevel = discovery.ReconStandard
+	runSource(t, discovery.NewWellKnownSource(&countingEngine{inner: httpengine.NewDefault()}, cfg), srv.URL)
+
+	mu.Lock()
+	got := append([]string(nil), requested...)
+	mu.Unlock()
+	for _, want := range []string{"/.well-known/security.txt", "/swagger.json", "/openapi.json", "/v3/api-docs"} {
+		if !containsPath(got, want) {
+			t.Fatalf("standard level did not request %s (got %v)", want, got)
+		}
 	}
+}
+
+func containsPath(paths []string, want string) bool {
+	for _, p := range paths {
+		if p == want {
+			return true
+		}
+	}
+	return false
 }
 
 // The archive source is aggressive-only and keeps only same-host URLs.

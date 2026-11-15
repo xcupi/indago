@@ -23,6 +23,16 @@ import (
 // a listing page with hundreds of links.
 const MaxObservedExamples = 20
 
+// speculativeEndpointShare is the denominator of the endpoint-cap share that
+// guessed endpoints may claim: at most MaxEndpoints/speculativeEndpointShare
+// slots go to wordlist/archive guesses, so the rest of the budget always stays
+// available for locations the site itself exposes (a crawled page and the
+// <form> actions in its HTML). Measured on QA sweeps with -max-endpoints 4 and
+// 5: speculative directory probes filled the whole budget before the seed
+// page's own forms were registered, and the reachable surface was never tested
+// at all. Guessed endpoints are worth less than observed ones, so they yield.
+const speculativeEndpointShare = 4
+
 type Collector struct {
 	store         store.Store
 	queue         queue.Queue
@@ -39,12 +49,43 @@ type Collector struct {
 	paramCount    int
 	jobCount      int
 	reconCounts   map[string]int // "list/level" → candidates recorded by recon
+	// knownURLs holds the canonical URL of every registered endpoint, so a
+	// Source can ask whether a surface is already known (AnyEndpoint) without
+	// decoding dedup keys.
+	knownURLs []string
+	// speculativeCount counts registered guessed endpoints; see
+	// speculativeEndpointShare and speculativeLimit.
+	speculativeCount int
 	// rawQueryProbes counts raw-query injection points registered so far,
 	// hydrated from persisted rows and capped by MaxRawQueryProbesPerScan.
 	rawQueryProbes int
 }
 
-var _ Sink = (*Collector)(nil)
+var (
+	_ Sink           = (*Collector)(nil)
+	_ endpointLookup = (*Collector)(nil)
+)
+
+// speculativeEndpointSource reports whether a source proposes guessed URLs
+// rather than locations the site itself exposes. Only guessed endpoints are
+// subject to the reserved cap share: wordlist paths are probed blind, and
+// archive entries are historical URLs that may no longer exist.
+func speculativeEndpointSource(s domain.DiscoverySource) bool {
+	switch s {
+	case domain.SourceContentDiscovery, domain.SourceArchive:
+		return true
+	default:
+		return false
+	}
+}
+
+// speculativeLimit is how many guessed endpoints this scan may register. The
+// caller holds c.mu. A cap of three or less leaves recon no slot at all: an
+// operator who asks for three endpoints wants the site's own pages, not
+// directory guesses.
+func (c *Collector) speculativeLimit() int {
+	return c.cfg.MaxEndpoints / speculativeEndpointShare
+}
 
 // NewCollector builds a collector for one scan. authenticated marks whether
 // the scan is running with a session (non-empty RunParams.SessionStatePath)
@@ -145,6 +186,13 @@ func (c *Collector) Hydrate(ctx context.Context) error {
 		if _, ok := c.seenEndpoints[e.Fingerprint]; !ok {
 			c.seenEndpoints[e.Fingerprint] = e.ID
 			c.endpointCount++
+			// The guessed-endpoint share is a per-scan budget, not a
+			// per-run one: restore it from what is already persisted so a
+			// resumed scan does not hand recon a fresh share.
+			if speculativeEndpointSource(e.Source) {
+				c.speculativeCount++
+			}
+			c.knownURLs = append(c.knownURLs, e.URL)
 		}
 	}
 	for _, p := range params {
@@ -283,6 +331,23 @@ func (c *Collector) AllowFetch(rawURL string, source domain.DiscoverySource) boo
 	return !(c.authenticated && source != domain.SourceUserProvided && looksSessionTerminating(rawURL))
 }
 
+// AnyEndpoint implements endpointLookup: it reports whether the scan already
+// knows an endpoint whose canonical URL satisfies match. A Source uses it to
+// skip a probe for a surface another source already registered (a crawled
+// link, a rendered XHR, a published spec), so the request budget is not spent
+// asking what the scan already knows.
+func (c *Collector) AnyEndpoint(match func(rawURL string) bool) bool {
+	c.mu.Lock()
+	urls := append([]string(nil), c.knownURLs...)
+	c.mu.Unlock()
+	for _, u := range urls {
+		if match(u) {
+			return true
+		}
+	}
+	return false
+}
+
 // AddEndpoint implements Sink.
 func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (domain.ID, error) {
 	info, err := Normalize(ep.URL)
@@ -343,6 +408,18 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 		c.recordObservedValues(ctx, id, method, info)
 		return id, nil
 	}
+	// Guessed endpoints (wordlist probes, archive history) may only claim a
+	// fixed share of the endpoint cap, so a small -max-endpoints budget cannot
+	// be filled by speculative directories before the pages and <form>
+	// submissions observed in the crawl are registered. ErrLimitReached is the
+	// sources' normal "stop probing" signal: once the share is spent, further
+	// recon requests could not be recorded anyway, so none are sent.
+	if speculativeEndpointSource(ep.Source) && c.speculativeCount >= c.speculativeLimit() {
+		c.mu.Unlock()
+		c.log.Debug("discovery: guessed-endpoint share spent, keeping the rest of the cap for observed pages",
+			"url", info.Canonical, "source", ep.Source, "limit", c.speculativeLimit())
+		return "", ErrLimitReached
+	}
 	if c.endpointCount >= c.cfg.MaxEndpoints {
 		c.mu.Unlock()
 		return "", ErrLimitReached
@@ -350,6 +427,9 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 	id := domain.NewID()
 	c.seenEndpoints[key] = id
 	c.endpointCount++
+	if speculativeEndpointSource(ep.Source) {
+		c.speculativeCount++
+	}
 	c.mu.Unlock()
 
 	now := time.Now()
@@ -368,9 +448,15 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 		c.mu.Lock()
 		delete(c.seenEndpoints, key)
 		c.endpointCount--
+		if speculativeEndpointSource(ep.Source) {
+			c.speculativeCount--
+		}
 		c.mu.Unlock()
 		return "", err
 	}
+	c.mu.Lock()
+	c.knownURLs = append(c.knownURLs, info.Canonical)
+	c.mu.Unlock()
 
 	if ep.Provenance != nil {
 		// Structured record of the guess: which embedded list and level

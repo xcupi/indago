@@ -49,6 +49,19 @@ site publishes about itself:
   `{__typename}` query over GET, and only a GraphQL-shaped answer registers the
   endpoint. A plain JSON API that happens to answer at `/query` is not
   registered.
+- **The GraphQL probe is not gated on the recon level.** A GraphQL API is one
+  POST URL that no crawler can link to, so on a scan with no wordlist recon (the
+  conservative default) it would be invisible and the GraphQL engine would never
+  run. Below `standard` the source sends exactly ONE `GET /graphql?query={__typename}`
+  per seed origin; at `standard` and above it sends the full conventional set.
+  It is skipped entirely when a GraphQL-looking endpoint is already known (a
+  crawled link, an observed XHR, an API spec) or when the scan skipped the
+  engine (`-skip-graphql` → `discovery.Config.SkipGraphQLProbe`). Tests:
+  `TestWellKnownProbesGraphQLLightlyBelowStandard`,
+  `TestWellKnownProbesAllGraphQLPathsAtStandard`,
+  `TestWellKnownSkipsGraphQLProbeWhenEndpointAlreadyKnown`,
+  `TestWellKnownGraphQLProbeHonoursSkipFlag`,
+  `TestWellKnownGraphQLProbeHonoursScope`.
 
 Every URL taken from a document is untrusted: it is normalized, must stay on
 the scanned host, must pass the scope check, and must pass the same

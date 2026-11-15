@@ -102,6 +102,21 @@ func allowFetch(sink Sink, rawURL string, source domain.DiscoverySource) bool {
 	return !ok || g.AllowFetch(rawURL, source)
 }
 
+// endpointLookup is an optional Sink capability: it answers whether the scan
+// already knows an endpoint whose URL satisfies match. A Source asks before
+// spending a request to re-discover a surface another source already
+// registered — e.g. a page that links to /graphql.
+type endpointLookup interface {
+	AnyEndpoint(match func(rawURL string) bool) bool
+}
+
+// knowsEndpoint reports whether sink already knows an endpoint matching match.
+// A Sink without the capability knows nothing, so the caller probes.
+func knowsEndpoint(sink Sink, match func(rawURL string) bool) bool {
+	l, ok := sink.(endpointLookup)
+	return ok && l.AnyEndpoint(match)
+}
+
 // Input is the per-scan context a Source runs within.
 type Input struct {
 	ScanID    domain.ID
@@ -228,6 +243,15 @@ type Config struct {
 	// SkipReflectedXSS keeps parameters/injection points for DOM/IDOR/access
 	// work but does not enqueue the per-parameter reflection job.
 	SkipReflectedXSS bool
+
+	// SkipGraphQLProbe omits the lightweight GraphQL well-known probe (see
+	// wellknown.go). It is wired from domain.ScanConfig.SkipGraphQL, so a scan
+	// that does not run the GraphQL engine also does not spend a request
+	// looking for a GraphQL endpoint. Off by default: ONE GET per seed origin,
+	// and only when no GraphQL-looking endpoint is known yet — a GraphQL API
+	// is invisible to a link crawler, so without this probe a GraphQL target
+	// is never seen at all on a scan that does no wordlist recon.
+	SkipGraphQLProbe bool
 }
 
 // DefaultConfig returns conservative discovery defaults.

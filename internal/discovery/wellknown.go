@@ -8,7 +8,11 @@ package discovery
 // Contract, same as every other source:
 //   - only GET, through the scan's scope-enforcing engine (rate limit, host
 //     scope, fail-closed redirects);
-//   - only at recon level standard and above, so default scans are unchanged;
+//   - reading the documents themselves only happens at recon level standard
+//     and above, so default scans are unchanged. The ONE exception is the
+//     bounded GraphQL well-known probe below, which runs at every level: a
+//     GraphQL API is a single POST URL no crawler can link to, so without it a
+//     GraphQL target is invisible on a scan that does no wordlist recon;
 //   - a URL found inside a document is untrusted input: it is normalized and
 //     must be in scope and safe to fetch before it becomes an endpoint;
 //   - no verdict, no mutation — discovery only.
@@ -55,6 +59,12 @@ var graphQLProbePaths = []string{
 	"/query",
 }
 
+// graphQLLightPath is the single path the lightweight probe tries when the
+// scan asked for no wordlist recon (the conservative default). /graphql is the
+// overwhelming convention (Apollo, graphql-go, Hasura, Graphene, DVGA), and one
+// request is cheap enough to make on every scan.
+const graphQLLightPath = "/graphql"
+
 // graphQLTypenameQuery is the whole probe document. __typename is a built-in
 // meta field, so the query is valid against every schema.
 const graphQLTypenameQuery = "{__typename}"
@@ -77,68 +87,55 @@ func NewWellKnownSource(engine httpengine.Engine, cfg Config) Source {
 func (s *wellKnownSource) Name() domain.DiscoverySource { return domain.SourceWellKnown }
 
 func (s *wellKnownSource) Run(ctx context.Context, in Input, sink Sink) error {
-	if s.cfg.ReconLevel != ReconStandard && s.cfg.ReconLevel != ReconAggressive {
-		return nil
-	}
+	// Reading the documents is the standard+ half of this source. The GraphQL
+	// probe below is the part that must run regardless: it is the only way a
+	// scan without wordlist recon can see a GraphQL API at all.
+	readDocuments := s.cfg.ReconLevel == ReconStandard || s.cfg.ReconLevel == ReconAggressive
 	for _, origin := range uniqueOrigins(in.SeedURLs) {
 		base, err := url.Parse(origin)
 		if err != nil {
 			continue
 		}
 		seen := map[string]bool{}
-		for _, p := range selfDescribingPaths {
-			if err := in.wait(ctx); err != nil {
+		if readDocuments {
+			if err := s.readSelfDescribingDocuments(ctx, in, sink, origin, base, seen); err != nil {
 				return err
-			}
-			resp, err := s.engine.Do(ctx, &httpengine.Request{Method: "GET", URL: origin + p})
-			if err != nil || resp == nil || resp.Status != 200 || len(resp.Body) == 0 {
-				continue
-			}
-			var found []string
-			switch {
-			case strings.HasSuffix(p, "security.txt"):
-				found = securityTxtURLs(resp.Body, base)
-			case strings.Contains(p, "swagger") || strings.Contains(p, "openapi") || strings.Contains(p, "api-docs"):
-				found = openAPIPaths(resp.Body, base)
-			default:
-				found = jsonDocURLs(resp.Body, base)
-			}
-			for _, raw := range found {
-				info, err := Normalize(raw)
-				if err != nil || seen[info.Canonical] {
-					continue
-				}
-				if !sameHost(base, info) || !in.Scope.Permits(info.Canonical).Allowed {
-					continue
-				}
-				if !allowFetch(sink, info.Canonical, domain.SourceWellKnown) {
-					continue
-				}
-				seen[info.Canonical] = true
-				if _, err := sink.AddEndpoint(ctx, EndpointCandidate{
-					URL: info.Canonical, Method: domain.MethodGET, Source: domain.SourceWellKnown,
-				}); err != nil {
-					return err
-				}
 			}
 		}
-		// GraphQL: the path is conventional, the protocol is what identifies
-		// it. Only a response that actually looks like GraphQL to
-		// `{__typename}` registers the endpoint, so these four probes do not
-		// add four bogus endpoints to every site that happens to answer 200 on
-		// /query. The registered method is GET (that is the request that
-		// proved the path); a GraphQL engine sends its own POST queries.
-		for _, p := range graphQLProbePaths {
-			if err := in.wait(ctx); err != nil {
-				return err
-			}
-			probe := origin + p + "?query=" + url.QueryEscape(graphQLTypenameQuery)
-			resp, err := s.engine.Do(ctx, &httpengine.Request{Method: "GET", URL: probe})
-			if err != nil || resp == nil || !looksLikeGraphQLResponse(resp.Body) {
+		if err := s.probeGraphQL(ctx, in, sink, origin, seen); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readSelfDescribingDocuments fetches the well-known documents for one origin
+// and registers the endpoints they name. seen deduplicates this origin's
+// registrations across the source's phases.
+func (s *wellKnownSource) readSelfDescribingDocuments(ctx context.Context, in Input, sink Sink, origin string, base *url.URL, seen map[string]bool) error {
+	for _, p := range selfDescribingPaths {
+		if err := in.wait(ctx); err != nil {
+			return err
+		}
+		resp, err := s.engine.Do(ctx, &httpengine.Request{Method: "GET", URL: origin + p})
+		if err != nil || resp == nil || resp.Status != 200 || len(resp.Body) == 0 {
+			continue
+		}
+		var found []string
+		switch {
+		case strings.HasSuffix(p, "security.txt"):
+			found = securityTxtURLs(resp.Body, base)
+		case strings.Contains(p, "swagger") || strings.Contains(p, "openapi") || strings.Contains(p, "api-docs"):
+			found = openAPIPaths(resp.Body, base)
+		default:
+			found = jsonDocURLs(resp.Body, base)
+		}
+		for _, raw := range found {
+			info, err := Normalize(raw)
+			if err != nil || seen[info.Canonical] {
 				continue
 			}
-			info, err := Normalize(origin + p)
-			if err != nil || seen[info.Canonical] || !in.Scope.Permits(info.Canonical).Allowed {
+			if !sameHost(base, info) || !in.Scope.Permits(info.Canonical).Allowed {
 				continue
 			}
 			if !allowFetch(sink, info.Canonical, domain.SourceWellKnown) {
@@ -153,6 +150,82 @@ func (s *wellKnownSource) Run(ctx context.Context, in Input, sink Sink) error {
 		}
 	}
 	return nil
+}
+
+// probeGraphQL asks the conventional GraphQL entry points whether the site
+// speaks GraphQL, and registers the endpoint the answer proves.
+//
+// This is the one part of this source that runs at EVERY recon level. A GraphQL
+// API is a single POST URL that no link points at, so on a scan that does no
+// wordlist recon (the conservative default) the GraphQL engine would otherwise
+// never be handed an endpoint and would silently never run. The cost is kept
+// deliberately small:
+//
+//   - below standard, exactly ONE GET of /graphql per seed origin;
+//   - at standard and above, the full conventional path set (the same probes
+//     this source always made);
+//   - nothing at all when a GraphQL-looking endpoint is already known (a
+//     crawled link, an observed XHR, an API spec) or when the operator skipped
+//     the GraphQL engine (Config.SkipGraphQLProbe).
+//
+// The path is conventional; the protocol is what identifies it. Only a
+// response that actually looks like GraphQL to `{__typename}` registers the
+// endpoint, so a site that answers 200 on /graphql with an HTML page or a
+// generic JSON API error adds nothing. The registered method is GET (that is
+// the request that proved the path); a GraphQL engine sends its own read-only
+// POST queries.
+func (s *wellKnownSource) probeGraphQL(ctx context.Context, in Input, sink Sink, origin string, seen map[string]bool) error {
+	if s.cfg.SkipGraphQLProbe {
+		return nil
+	}
+	paths := []string{graphQLLightPath}
+	if s.cfg.ReconLevel == ReconStandard || s.cfg.ReconLevel == ReconAggressive {
+		paths = graphQLProbePaths
+	}
+	if knowsEndpoint(sink, looksLikeGraphQLEndpointURL) {
+		return nil
+	}
+	for _, p := range paths {
+		info, err := Normalize(origin + p)
+		if err != nil || seen[info.Canonical] || !in.Scope.Permits(info.Canonical).Allowed {
+			continue
+		}
+		// Same pre-request veto every other source honours: a session-
+		// terminating path must not be requested just to classify it.
+		if !allowFetch(sink, info.Canonical, domain.SourceWellKnown) {
+			continue
+		}
+		if err := in.wait(ctx); err != nil {
+			return err
+		}
+		probe := info.Canonical + "?query=" + url.QueryEscape(graphQLTypenameQuery)
+		resp, err := s.engine.Do(ctx, &httpengine.Request{Method: "GET", URL: probe})
+		if err != nil || resp == nil || !looksLikeGraphQLResponse(resp.Body) {
+			continue
+		}
+		seen[info.Canonical] = true
+		if _, err := sink.AddEndpoint(ctx, EndpointCandidate{
+			URL: info.Canonical, Method: domain.MethodGET, Source: domain.SourceWellKnown,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// looksLikeGraphQLEndpointURL reports whether a URL's path is a GraphQL entry
+// point by its name alone. It proves nothing (only a probe can); it exists so
+// the light probe is not sent when the scan already registered the API — for
+// example a SPA whose bundle posts to /graphql. The convention matches the
+// GraphQL engine's own candidate filter, so "found by discovery" and "tested by
+// the engine" cannot drift apart.
+func looksLikeGraphQLEndpointURL(rawURL string) bool {
+	info, err := Normalize(rawURL)
+	if err != nil {
+		return false
+	}
+	p := strings.ToLower(strings.TrimSuffix(info.Path, "/"))
+	return strings.Contains(p, "graphql") || p == "/query" || p == "/api/query"
 }
 
 // looksLikeGraphQLResponse reports whether body is a GraphQL response to the

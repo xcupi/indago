@@ -80,7 +80,7 @@ func newRawQuerySite(t *testing.T, reflect bool, links int) *rawQuerySite {
 		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) { writeHTML(w, "ok") })
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.RawQuery != "" && !strings.HasPrefix(r.URL.Path, "/favicon") {
+		if r.URL.RawQuery != "" && !strings.HasPrefix(r.URL.Path, "/favicon") && !isDiscoveryProbe(r) {
 			s.mu.Lock()
 			s.hits = append(s.hits, r.URL.Path+"?"+r.URL.RawQuery)
 			s.per[r.URL.Path]++
@@ -90,6 +90,15 @@ func newRawQuerySite(t *testing.T, reflect bool, links int) *rawQuerySite {
 	}))
 	t.Cleanup(s.Close)
 	return s
+}
+
+// isDiscoveryProbe reports whether a request is discovery traffic rather than an
+// injected raw-query blob. Discovery always sends ONE bounded, read-only
+// `GET /graphql?query={__typename}` probe per origin (see
+// docs/recon-coverage.md); counting it as a blob request would make the
+// raw-query budget tests measure something they do not own.
+func isDiscoveryProbe(r *http.Request) bool {
+	return r.URL.Path == "/graphql" && r.URL.Query().Get("query") == "{__typename}"
 }
 
 func (s *rawQuerySite) queryHits() []string {

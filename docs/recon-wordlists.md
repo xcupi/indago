@@ -136,6 +136,33 @@ directory is depth 1, its children are depth 2; the source never goes to depth
 3. Bounds: 2 directories, 25 words each, sub-cap 60 requests, plus the shared
 budget.
 
+## Observed endpoints outrank guessed ones
+
+The endpoint cap (`-max-endpoints`, `Config.MaxEndpoints`) is shared by every
+source, and the sources run concurrently, so a wordlist probe can answer before
+the crawler has finished its first page. Measured in QA sweeps with
+`-max-endpoints 4` and `5`: `/admin/`, `/documents/`, `/images/` and
+`/passwords/` were registered first and filled the whole budget, so the POST
+forms the seed page itself declared (`/commandi.php`, `/product/stock`) were
+refused with `ErrLimitReached` and never tested at all.
+
+The collector therefore reserves the cap for observed endpoints: **guessed**
+endpoints (`content_discovery` paths, `archive` history) may claim at most
+`MaxEndpoints / 4` slots. The remaining three quarters are only ever used by
+locations the site actually exposes (the seed, crawled pages, `<form>` actions,
+browser-observed requests, published documents). A cap of three or less gives
+recon no slot at all: an operator who asks for that few endpoints wants the
+site's own pages, not directory guesses.
+
+Once the guessed share is spent the collector answers `ErrLimitReached`, which
+is the sources' normal stop signal — so no further probes are sent for paths
+that could not be recorded anyway. The share is a per-scan budget: it is
+restored from the persisted rows on resume (`Hydrate`), not handed out fresh.
+Tests: `TestCollectorReservesEndpointCapForObservedForms`,
+`TestCollectorRestoresSpeculativeShareOnHydrate`,
+`TestDiscoveryRegistersCrawledFormsBeforeSpeculativeDirectories` (a fixture
+whose seed page renders after the wordlist has answered, i.e. the QA ordering).
+
 ## Scope, methods, provenance
 
 - Every request goes through the scan's scope-enforcing engine: same rate
