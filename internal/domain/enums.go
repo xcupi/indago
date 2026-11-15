@@ -38,12 +38,19 @@ const (
 	// VulnXXE is XML external entity processing: an XML parser resolves a
 	// user-supplied external entity.
 	VulnXXE VulnClass = "xxe"
+	// VulnSSRF is server-side request forgery: a parameter causes the server to
+	// issue an outbound request to a canary/OAST destination.
+	VulnSSRF VulnClass = "ssrf"
+	// VulnCORS is permissive cross-origin resource sharing configuration.
+	VulnCORS VulnClass = "cors"
+	// VulnGraphQL is GraphQL introspection/batching/error/CSRF exposure.
+	VulnGraphQL VulnClass = "graphql"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnXXE:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL:
 		return true
 	default:
 		return false

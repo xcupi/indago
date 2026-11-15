@@ -87,6 +87,18 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 		xxe.withCallback(sc.Config.XXECallbackURL, sc.Config.XXECallbackPollURL)
 	}
 	h[domain.JobXXE] = xxe
+	ssrf := newSSRFExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	if sc != nil {
+		cbURL, pollURL := sc.Config.SSRFCallbackURL, sc.Config.SSRFCallbackPollURL
+		if cbURL == "" {
+			cbURL, pollURL = sc.Config.CommandInjectionCallbackURL, sc.Config.CommandInjectionCallbackPollURL
+		}
+		ssrf.withCallback(cbURL, pollURL)
+	}
+	h[domain.JobSSRF] = ssrf
+	h[domain.JobCORS] = newCORSExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	h[domain.JobOpenRedirect] = newOpenRedirectExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	h[domain.JobGraphQL] = newGraphQLExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	return h
 }
 
@@ -145,5 +157,9 @@ func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 		domain.JobCommandInjection: noop(domain.JobCommandInjection),
 		domain.JobSSTI:             noop(domain.JobSSTI),
 		domain.JobXXE:              noop(domain.JobXXE),
+		domain.JobSSRF:             noop(domain.JobSSRF),
+		domain.JobCORS:             noop(domain.JobCORS),
+		domain.JobOpenRedirect:     noop(domain.JobOpenRedirect),
+		domain.JobGraphQL:          noop(domain.JobGraphQL),
 	}
 }

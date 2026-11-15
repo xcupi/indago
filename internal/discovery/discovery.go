@@ -219,7 +219,11 @@ type Config struct {
 	// SkipGlobalInjection omits header/cookie injection points. The default
 	// false preserves the previous coverage for existing scans.
 	SkipGlobalInjection bool
-	// SkipStaticAssets drops non-seed static resources before registration.
+	// SkipStaticAssets is retained for compatibility with existing callers
+	// (scan profiles, API and CLI). Static resources are excluded from test
+	// targets unconditionally now — see Collector.AddEndpoint — because they
+	// have no reflection surface and only consume the request budget. Setting
+	// this changes nothing; leaving it lets old configuration keep loading.
 	SkipStaticAssets bool
 	// SkipReflectedXSS keeps parameters/injection points for DOM/IDOR/access
 	// work but does not enqueue the per-parameter reflection job.

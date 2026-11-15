@@ -349,6 +349,11 @@ func (e *executor) reportAuthLost(scanID domain.ID, resp *httpengine.Response) {
 	if e.cfg.OnAuthLost == nil || resp == nil {
 		return
 	}
+	// If the probe itself targeted a login endpoint (e.g. testing GET/POST
+	// /login), receiving the login page is expected, not session expiration.
+	if resp.Request != nil && isLoginPath(resp.Request.URL) {
+		return
+	}
 	if !looksLikeLoginResponse(resp) {
 		return
 	}
@@ -357,16 +362,23 @@ func (e *executor) reportAuthLost(scanID domain.ID, resp *httpengine.Response) {
 	})
 }
 
-func looksLikeLoginResponse(resp *httpengine.Response) bool {
-	if resp == nil || resp.FinalURL == "" {
+func isLoginPath(rawURL string) bool {
+	if rawURL == "" {
 		return false
 	}
-	u, err := url.Parse(resp.FinalURL)
+	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
 	p := strings.ToLower(strings.TrimSuffix(u.Path, "/"))
-	if p != "/login" && p != "/signin" && p != "/sign-in" && !strings.HasSuffix(p, "/login") && !strings.HasSuffix(p, "/signin") {
+	return p == "/login" || p == "/signin" || p == "/sign-in" || strings.HasSuffix(p, "/login") || strings.HasSuffix(p, "/signin")
+}
+
+func looksLikeLoginResponse(resp *httpengine.Response) bool {
+	if resp == nil || resp.FinalURL == "" {
+		return false
+	}
+	if !isLoginPath(resp.FinalURL) {
 		return false
 	}
 	return idor.LooksLikeLoginPage(resp.Body)
@@ -645,6 +657,40 @@ func putEvidenceBlob(ctx context.Context, st store.Store, ev evidence.Store, sca
 		return "", err
 	}
 	return row.ID, nil
+}
+
+// persistHTTPExchange stores one request/response pair as evidence for a probe
+// that has no TestCase of its own yet, redacting cookie values the way the
+// test-job executor does. It is the shared form of the per-engine
+// "persistEvidence" helpers: a response without a captured request is skipped,
+// because the request half is what makes the pair reproducible.
+func persistHTTPExchange(ctx context.Context, st store.Store, ev evidence.Store, scanID domain.ID, resp *httpengine.Response, role string) ([]domain.ID, error) {
+	if ev == nil || resp == nil || resp.Request == nil {
+		return nil, nil
+	}
+	var ids []domain.ID
+	captured := *resp.Request
+	captured.Headers = resp.Request.Headers.Clone()
+	if redactRequestCookieValues(captured.Headers) {
+		role += " (cookie values redacted)"
+	}
+	reqID, err := putEvidenceBlob(ctx, st, ev, scanID, domain.EvidenceRequest, ".http", "message/http", dumpRequest(&captured), role+" request")
+	if err != nil {
+		return ids, err
+	}
+	ids = append(ids, reqID)
+	recorded := *resp
+	recorded.Headers = resp.Headers.Clone()
+	note := role + " response"
+	if redactSetCookieValues(recorded.Headers) {
+		note += " (cookie values redacted)"
+	}
+	respID, err := putEvidenceBlob(ctx, st, ev, scanID, domain.EvidenceResponse, ".http", "message/http", dumpResponse(&recorded), note)
+	if err != nil {
+		return ids, err
+	}
+	ids = append(ids, respID)
+	return ids, nil
 }
 
 // ---------------------------------------------------------------------------

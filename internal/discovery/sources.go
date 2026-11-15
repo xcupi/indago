@@ -70,13 +70,21 @@ type crawlSource struct {
 	engine httpengine.Engine
 	cfg    Config
 	conc   *liveConcurrency // crawl fetch concurrency; adjustable while running
+	// scripts counts JavaScript assets fetched for literal mining across one
+	// crawl (see harvestScriptEndpoints). It is a per-run budget, not a
+	// per-level one: a site that references the same bundle on every page must
+	// not multiply the fetches.
+	scripts atomic.Int64
+	// scriptSeen deduplicates those fetches by URL, so a bundle referenced
+	// from every page is read once.
+	scriptSeen *sync.Map
 }
 
 // NewCrawlSource crawls from the seeds, extracting links, forms, and parameters
 // up to the configured depth and limits.
 func NewCrawlSource(engine httpengine.Engine, cfg Config) Source {
 	cfg = cfg.withDefaults()
-	return &crawlSource{engine: engine, cfg: cfg, conc: newLiveConcurrency(cfg.Concurrency)}
+	return &crawlSource{engine: engine, cfg: cfg, conc: newLiveConcurrency(cfg.Concurrency), scriptSeen: &sync.Map{}}
 }
 
 func (c *crawlSource) Name() domain.DiscoverySource { return domain.SourceCrawler }
@@ -93,6 +101,7 @@ var _ ConcurrencyAdjustable = (*crawlSource)(nil)
 func (c *crawlSource) Run(ctx context.Context, in Input, sink Sink) error {
 	var visited sync.Map
 	var pages atomic.Int64
+	c.scripts.Store(0)
 
 	// Seed the first level with in-scope, normalized seed URLs.
 	var level []string
@@ -260,6 +269,18 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 		if !allowFetch(sink, info.Canonical, domain.SourceCrawler) {
 			continue
 		}
+		// A referenced stylesheet, image, font or media file has no reflection
+		// surface of its own: it is never registered as a test target and never
+		// queued for the next crawl level. JavaScript is the exception — a
+		// bundle names the endpoints the application calls — so a bounded
+		// number of script assets are fetched for their literals instead of
+		// being tested themselves.
+		if IsStaticAssetPath(info.Path) {
+			if IsScriptAssetPath(info.Path) {
+				c.harvestScriptEndpoints(ctx, in, sink, info)
+			}
+			continue
+		}
 		id, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: info.Canonical, Method: domain.MethodGET, Source: domain.SourceCrawler})
 		if err != nil {
 			return nil, err
@@ -270,6 +291,60 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 		nextLinks = append(nextLinks, info.Canonical)
 	}
 	return nextLinks, nil
+}
+
+// maxScriptAssetFetches bounds how many JavaScript assets one crawl fetches to
+// mine endpoint literals. A modern site ships several bundles per page; a
+// dozen is enough to cover the application's own code without turning the
+// crawler into a downloader for every vendor chunk and source map.
+const maxScriptAssetFetches = 12
+
+// harvestScriptEndpoints reads one JavaScript asset and registers the
+// application paths its string literals name. The asset itself is never
+// registered: it is a static file with no injection surface, which is exactly
+// what the queue filter drops. Its *contents* are still discovery input, so a
+// crawl that sees /static/app.js learns about /api/invoices even when no page
+// links there.
+//
+// Bounded and fail-soft: a per-crawl fetch budget, a per-asset literal cap
+// (ExtractScriptEndpointLiterals), scope checks on every resolved path, and no
+// error is ever returned — losing a harvest costs candidates, not the crawl.
+func (c *crawlSource) harvestScriptEndpoints(ctx context.Context, in Input, sink Sink, script URLInfo) {
+	if c.cfg.MaxDepth <= 0 {
+		return // seeds-only scans do not fetch extra resources
+	}
+	if _, loaded := c.scriptSeen.LoadOrStore(script.Canonical, struct{}{}); loaded {
+		return // already read in this crawl
+	}
+	if c.scripts.Add(1) > maxScriptAssetFetches {
+		return
+	}
+	if err := in.wait(ctx); err != nil {
+		return
+	}
+	resp, err := c.engine.Do(ctx, &httpengine.Request{Method: "GET", URL: script.Canonical})
+	if err != nil || resp == nil || len(resp.Body) == 0 {
+		return
+	}
+	for _, literal := range ExtractScriptEndpointLiterals(string(resp.Body)) {
+		ref, err := NormalizeRef(script.Canonical, literal)
+		if err != nil || !in.Scope.Permits(ref.Canonical).Allowed {
+			continue
+		}
+		if IsStaticAssetPath(ref.Path) {
+			continue
+		}
+		if !allowFetch(sink, ref.Canonical, domain.SourceCrawler) {
+			continue
+		}
+		// SourceScriptLiteral already means "a literal in the site's own
+		// script", which is the honest provenance for these endpoints too.
+		if _, err := sink.AddEndpoint(ctx, EndpointCandidate{
+			URL: ref.Canonical, Method: domain.MethodGET, Source: domain.SourceScriptLiteral,
+		}); err != nil {
+			return
+		}
+	}
 }
 
 func (c *crawlSource) applyParamWordlist(ctx context.Context, sink Sink, endpointURL string) {
@@ -559,6 +634,14 @@ func (n *networkSource) emitNetwork(ctx context.Context, in Input, sink Sink, ne
 		}
 		if isAutomaticFaviconRequest(ev.URL) {
 			continue // browsers request favicon.ico automatically; it is not a useful XSS input surface
+		}
+		// A browser loads every stylesheet, font and image the page references.
+		// None of them is a test target (see IsStaticAssetPath); skipping them
+		// here keeps the sink from even considering the noise. JavaScript is
+		// not exempt from the filter either — the crawler mines literals from
+		// script assets, the browser network only sees the request.
+		if asset, err := Normalize(ev.URL); err == nil && IsStaticAssetPath(asset.Path) {
+			continue
 		}
 		method := domain.HTTPMethod(strings.ToUpper(ev.Method))
 		if !method.IsValid() {

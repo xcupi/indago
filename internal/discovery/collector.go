@@ -201,6 +201,17 @@ func (c *Collector) reconcile(ctx context.Context, endpoints []*domain.Endpoint,
 		if e.Fingerprint == "" {
 			continue
 		}
+		info, err := Normalize(e.URL)
+		if err != nil {
+			continue
+		}
+		// Legacy rows: a scan resumed from a store written before static
+		// resources were excluded from testing still has CSS/JS/image
+		// endpoints. Reconcile must not resurrect a test job (or injection
+		// points) for them.
+		if e.Source != domain.SourceUserProvided && IsStaticAssetPath(info.Path) {
+			continue
+		}
 		if c.cfg.EnqueueEndpointJobs && !endpointJob[e.ID] {
 			if err := c.enqueueJob(ctx, domain.JobTarget{EndpointID: e.ID, URL: e.URL}); err != nil {
 				return fmt.Errorf("reconcile endpoint job %s: %w", e.ID, err)
@@ -209,10 +220,6 @@ func (c *Collector) reconcile(ctx context.Context, endpoints []*domain.Endpoint,
 		// The endpoint's own query parameters are registered right after it;
 		// registerParam skips any already hydrated, so only the missing ones
 		// are created (each with its injection point and job).
-		info, err := Normalize(e.URL)
-		if err != nil {
-			continue
-		}
 		for _, name := range info.ParamNames {
 			c.registerParam(ctx, e.ID, e.Method, info, name, domain.LocationQuery, info.Query.Get(name), e.Source)
 		}
@@ -286,8 +293,19 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 	if d := c.scope.Permits(info.Canonical); !d.Allowed {
 		return "", nil // out of scope: silently skip (fail closed)
 	}
-	if c.cfg.SkipStaticAssets && ep.Source != domain.SourceUserProvided && IsStaticAssetPath(info.Path) {
-		c.log.Debug("discovery: skipping static asset", "url", info.Canonical, "source", ep.Source)
+	// Static resources are never test targets: they have no server-side
+	// reflection surface of their own, and queueing every stylesheet, image and
+	// font a page references spends the scan's request budget on URLs nothing
+	// can be injected into. This is enforced for every discovered source, not
+	// only when Config.SkipStaticAssets is set.
+	//
+	// It is a *registration* decision, not a crawling one. The crawler still
+	// fetches a bounded number of JavaScript assets to mine the endpoint
+	// literals inside them (crawlSource.harvestScriptEndpoints) — the bundle is
+	// thrown away as a test target, the endpoints it names are kept. An
+	// operator-supplied seed is explicit intent and is never dropped here.
+	if ep.Source != domain.SourceUserProvided && IsStaticAssetPath(info.Path) {
+		c.log.Debug("discovery: static asset is not a test target", "url", info.Canonical, "source", ep.Source)
 		return "", nil
 	}
 
@@ -464,7 +482,7 @@ func (c *Collector) AddParameter(ctx context.Context, p ParamCandidate) error {
 			return err
 		}
 		if id == "" {
-			return nil // skipped (out of scope)
+			return nil // skipped (out of scope, malformed, or a static asset)
 		}
 		endpointID = id
 	}

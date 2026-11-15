@@ -96,6 +96,14 @@ type execution struct {
 	sstiPassDone atomic.Bool
 	// xxePassDone marks the one-time XML external entity pass.
 	xxePassDone atomic.Bool
+	// ssrfPassDone marks the one-time non-destructive SSRF pass.
+	ssrfPassDone atomic.Bool
+	// corsPassDone marks the one-time read-only CORS misconfiguration pass.
+	corsPassDone atomic.Bool
+	// openRedirectPassDone marks the one-time server-side open redirect pass.
+	openRedirectPassDone atomic.Bool
+	// graphQLPassDone marks the one-time safe GraphQL exposure pass.
+	graphQLPassDone atomic.Bool
 }
 
 // pause routes a scan pause to both the worker pool and discovery.
@@ -606,6 +614,34 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		ex.roleFieldPassDone.Store(true)
 		if !sc.Config.SkipAccessControl {
 			c.enqueueRoleFieldProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.ssrfPassDone.Load() {
+		ex.ssrfPassDone.Store(true)
+		if !sc.Config.SkipSSRF {
+			c.enqueueSSRFProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.corsPassDone.Load() {
+		ex.corsPassDone.Store(true)
+		if !sc.Config.SkipCORS {
+			c.enqueueCORSProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.openRedirectPassDone.Load() {
+		ex.openRedirectPassDone.Store(true)
+		if !sc.Config.SkipOpenRedirect {
+			c.enqueueOpenRedirectProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.graphQLPassDone.Load() {
+		ex.graphQLPassDone.Store(true)
+		if !sc.Config.SkipGraphQL {
+			c.enqueueGraphQLProbes(ctx, ex.scanID)
 			passes = true
 		}
 	}

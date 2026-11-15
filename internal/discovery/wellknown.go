@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/indago/indago/internal/domain"
@@ -26,16 +27,42 @@ import (
 
 // selfDescribingPaths are the well-known documents worth reading. Swagger and
 // OpenAPI paths are included because an exposed spec is the cheapest complete
-// endpoint inventory a target can hand over.
+// endpoint inventory a target can hand over. The list covers both naming
+// conventions: the OpenAPI 3 default (/openapi.json, /v3/api-docs), the
+// Swagger 2 default (/swagger.json, /swagger/v1/swagger.json) and the
+// springdoc/NSwag style /api-docs.
 var selfDescribingPaths = []string{
 	"/.well-known/security.txt",
 	"/security.txt",
 	"/.well-known/openid-configuration",
 	"/swagger.json",
-	"/openapi.json",
+	"/swagger/v1/swagger.json",
 	"/api/swagger.json",
+	"/openapi.json",
+	"/api-docs",
 	"/v3/api-docs",
 }
+
+// graphQLProbePaths are the conventional GraphQL entry points. A GraphQL API
+// is invisible to a link crawler — the whole application is one POST URL — so
+// discovery has to ask for the path and let the answer decide. Every probe is a
+// read-only `{__typename}` query, the cheapest operation a GraphQL server can
+// execute and one that no server implements as a mutation.
+var graphQLProbePaths = []string{
+	"/graphql",
+	"/api/graphql",
+	"/v1/graphql",
+	"/query",
+}
+
+// graphQLTypenameQuery is the whole probe document. __typename is a built-in
+// meta field, so the query is valid against every schema.
+const graphQLTypenameQuery = "{__typename}"
+
+// maxGraphQLProbeBody bounds the body parsed for a probe. The answer to
+// {__typename} is a few dozen bytes; anything larger is not this probe's
+// response.
+const maxGraphQLProbeBody = 256 << 10
 
 type wellKnownSource struct {
 	engine httpengine.Engine
@@ -95,8 +122,69 @@ func (s *wellKnownSource) Run(ctx context.Context, in Input, sink Sink) error {
 				}
 			}
 		}
+		// GraphQL: the path is conventional, the protocol is what identifies
+		// it. Only a response that actually looks like GraphQL to
+		// `{__typename}` registers the endpoint, so these four probes do not
+		// add four bogus endpoints to every site that happens to answer 200 on
+		// /query. The registered method is GET (that is the request that
+		// proved the path); a GraphQL engine sends its own POST queries.
+		for _, p := range graphQLProbePaths {
+			if err := in.wait(ctx); err != nil {
+				return err
+			}
+			probe := origin + p + "?query=" + url.QueryEscape(graphQLTypenameQuery)
+			resp, err := s.engine.Do(ctx, &httpengine.Request{Method: "GET", URL: probe})
+			if err != nil || resp == nil || !looksLikeGraphQLResponse(resp.Body) {
+				continue
+			}
+			info, err := Normalize(origin + p)
+			if err != nil || seen[info.Canonical] || !in.Scope.Permits(info.Canonical).Allowed {
+				continue
+			}
+			if !allowFetch(sink, info.Canonical, domain.SourceWellKnown) {
+				continue
+			}
+			seen[info.Canonical] = true
+			if _, err := sink.AddEndpoint(ctx, EndpointCandidate{
+				URL: info.Canonical, Method: domain.MethodGET, Source: domain.SourceWellKnown,
+			}); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
+}
+
+// looksLikeGraphQLResponse reports whether body is a GraphQL response to the
+// `{__typename}` probe. Data carrying __typename is definitive. An error
+// envelope counts only when a message names GraphQL itself (__typename,
+// graphql, operation, syntax): a generic JSON API error such as
+// {"errors":["field required"]} is not a GraphQL server.
+func looksLikeGraphQLResponse(body []byte) bool {
+	if len(body) == 0 || len(body) > maxGraphQLProbeBody {
+		return false
+	}
+	var doc struct {
+		Data   json.RawMessage `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if json.Unmarshal(body, &doc) != nil {
+		return false
+	}
+	if len(doc.Data) > 0 && string(doc.Data) != "null" {
+		return strings.Contains(string(doc.Data), "__typename")
+	}
+	for _, e := range doc.Errors {
+		msg := strings.ToLower(e.Message)
+		for _, marker := range []string{"__typename", "graphql", "operation", "syntax"} {
+			if strings.Contains(msg, marker) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // sameHost keeps document-derived URLs on the origin being scanned. An
@@ -156,10 +244,20 @@ func jsonDocURLs(body []byte, base *url.URL) []string {
 }
 
 // openAPIPaths turns a spec into endpoints: every path key, resolved against
-// the first server URL when the spec declares one.
+// the spec's declared base. OpenAPI 3 documents describe it in `servers`;
+// Swagger 2.0 documents use `host`/`basePath`/`schemes`, which is still the
+// most common shape in the wild, so both are handled.
+//
+// Templated paths ("/users/{id}") are skipped: the braces are a parameter
+// declaration, not a requestable URL, and registering them would queue a
+// literal "/users/{id}" request that no router matches.
 func openAPIPaths(body []byte, base *url.URL) []string {
 	var spec struct {
-		Servers []struct {
+		Swagger  string   `json:"swagger"`
+		Host     string   `json:"host"`
+		BasePath string   `json:"basePath"`
+		Schemes  []string `json:"schemes"`
+		Servers  []struct {
 			URL string `json:"url"`
 		} `json:"servers"`
 		Paths map[string]any `json:"paths"`
@@ -168,17 +266,32 @@ func openAPIPaths(body []byte, base *url.URL) []string {
 		return nil
 	}
 	prefix := base.Scheme + "://" + base.Host
-	if len(spec.Servers) > 0 && spec.Servers[0].URL != "" {
+	switch {
+	case len(spec.Servers) > 0 && spec.Servers[0].URL != "":
 		server := spec.Servers[0].URL
 		if strings.HasPrefix(server, "/") {
 			prefix += server
 		} else if strings.HasPrefix(server, "http") {
 			prefix = server
 		}
+	case spec.Host != "" || spec.BasePath != "":
+		scheme := base.Scheme
+		if len(spec.Schemes) > 0 && spec.Schemes[0] != "" {
+			scheme = spec.Schemes[0]
+		}
+		host := base.Host
+		if spec.Host != "" {
+			host = spec.Host
+		}
+		prefix = scheme + "://" + host + strings.TrimRight(spec.BasePath, "/")
 	}
-	var out []string
+	out := make([]string, 0, len(spec.Paths))
 	for p := range spec.Paths {
+		if strings.ContainsAny(p, "{}") {
+			continue
+		}
 		out = append(out, strings.TrimRight(prefix, "/")+"/"+strings.TrimLeft(p, "/"))
 	}
+	sort.Strings(out) // deterministic registration order across runs
 	return out
 }

@@ -400,32 +400,7 @@ func isCommandInjectionLocation(loc domain.ParamLocation) bool {
 }
 
 func (e *commandInjectionExecutor) persistEvidence(ctx context.Context, scanID domain.ID, resp *httpengine.Response, role string) ([]domain.ID, error) {
-	if e.evidence == nil || resp == nil || resp.Request == nil {
-		return nil, nil
-	}
-	var ids []domain.ID
-	captured := *resp.Request
-	captured.Headers = resp.Request.Headers.Clone()
-	if redactRequestCookieValues(captured.Headers) {
-		role += " (cookie values redacted)"
-	}
-	reqID, err := putEvidenceBlob(ctx, e.store, e.evidence, scanID, domain.EvidenceRequest, ".http", "message/http", dumpRequest(&captured), role+" request")
-	if err != nil {
-		return ids, err
-	}
-	ids = append(ids, reqID)
-	recorded := *resp
-	recorded.Headers = resp.Headers.Clone()
-	note := role + " response"
-	if redactSetCookieValues(recorded.Headers) {
-		note += " (cookie values redacted)"
-	}
-	respID, err := putEvidenceBlob(ctx, e.store, e.evidence, scanID, domain.EvidenceResponse, ".http", "message/http", dumpResponse(&recorded), note)
-	if err != nil {
-		return ids, err
-	}
-	ids = append(ids, respID)
-	return ids, nil
+	return persistHTTPExchange(ctx, e.store, e.evidence, scanID, resp, role)
 }
 
 func (e *commandInjectionExecutor) persistCase(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, focus *domain.Parameter, d commandInjectionDetail, status domain.TestCaseStatus, outcome domain.TestOutcome, note string) {

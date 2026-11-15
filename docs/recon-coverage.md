@@ -27,7 +27,7 @@ rather than an accident.
 | Value fuzzing | not covered | Finding a *valid* value (`?x=OA_HTML`) is a guessing problem, not a vulnerability signal; the injection engine already sends values. |
 | Subdomain fuzzing | not covered | See subdomain row above: scope and authorization. |
 | Vhost fuzzing | not covered | Requires Host-header brute force against a resolved IP; a wrong guess can reach an unrelated vhost on shared infrastructure. Needs its own opt-in and scope rules. |
-| API fuzzing | covered (paths) + partial (schemas) | JS/JSON literal extraction, `/swagger.json`, `/openapi.json`, `/v3/api-docs` in the path list, and — since this page was written — `wellKnownSource` expands the paths inside a discovered OpenAPI document into endpoints |
+| API fuzzing | covered (paths) + partial (schemas) | JS/JSON literal extraction, `/swagger.json`, `/openapi.json`, `/v3/api-docs`, `/api-docs`, `/swagger/v1/swagger.json` in the path list, `wellKnownSource` expands the paths inside a discovered OpenAPI/Swagger document into endpoints, and the conventional GraphQL entry points (`/graphql`, `/api/graphql`, `/v1/graphql`, `/query`) are probed with a read-only `{__typename}` query |
 
 ## What changed in this pass
 
@@ -39,13 +39,30 @@ site publishes about itself:
 - `/.well-known/openid-configuration` — issuer, authorization, token, userinfo,
   JWKS, registration and end-session endpoints (any absolute or root-relative
   URL value);
-- `/swagger.json`, `/openapi.json`, `/api/swagger.json`, `/v3/api-docs` — every
-  key under `paths`, resolved against the spec's first `servers` URL.
+- `/swagger.json`, `/swagger/v1/swagger.json`, `/api/swagger.json`, `/openapi.json`,
+  `/api-docs`, `/v3/api-docs` — every key under `paths`. OpenAPI 3 specs are
+  resolved against their first `servers` URL; Swagger 2.0 specs against
+  `schemes`/`host`/`basePath`. Templated paths (`/users/{id}`) are skipped:
+  the braces declare a parameter, they are not a requestable URL.
+- The conventional GraphQL entry points (`/graphql`, `/api/graphql`,
+  `/v1/graphql`, `/query`) — each one is asked a single read-only
+  `{__typename}` query over GET, and only a GraphQL-shaped answer registers the
+  endpoint. A plain JSON API that happens to answer at `/query` is not
+  registered.
 
 Every URL taken from a document is untrusted: it is normalized, must stay on
 the scanned host, must pass the scope check, and must pass the same
 session-safety guard as any other fetch before it becomes an endpoint. mailto:
 contacts and external policy URLs are ignored.
+
+**Static resources are never test targets.** Crawled and browser-observed
+CSS/images/fonts/media are dropped before an endpoint, parameter or job is
+created (operator-supplied seeds excepted — scanning one is explicit intent).
+JavaScript is filtered the same way *as a target*, but a crawl still fetches a
+bounded number of script assets (≤12 per crawl, once each, ≤32 literals per
+file) to mine the endpoint paths inside them; those paths are registered with
+`script_literal` provenance. Before this cut the crawler followed every
+referenced asset as a page, so the change also lowers request volume.
 
 `internal/discovery/archive.go` (aggressive only) asks the Wayback CDX index for
 historical URLs on the same host. It is the only source that contacts a third

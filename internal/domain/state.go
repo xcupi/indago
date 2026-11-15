@@ -272,12 +272,21 @@ const (
 	JobSSTI JobType = "ssti"
 	// JobXXE probes one XML request body for external-entity processing.
 	JobXXE JobType = "xxe"
+	// JobSSRF probes one injection point for server-side request forgery using
+	// non-destructive OAST/canary URLs.
+	JobSSRF JobType = "ssrf"
+	// JobCORS probes one endpoint for cross-origin resource sharing misconfigurations.
+	JobCORS JobType = "cors"
+	// JobOpenRedirect probes one endpoint for server-side open redirect vulnerabilities.
+	JobOpenRedirect JobType = "open_redirect"
+	// JobGraphQL probes one endpoint for safe GraphQL misconfigurations.
+	JobGraphQL JobType = "graphql"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobXXE:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL:
 		return true
 	default:
 		return false

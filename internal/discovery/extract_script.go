@@ -3,6 +3,8 @@ package discovery
 import (
 	"regexp"
 	"sort"
+	"strings"
+	"unicode"
 )
 
 const (
@@ -10,6 +12,14 @@ const (
 	maxScriptParamNames = 32
 	maxScriptBlocks     = 64
 	maxScriptMatches    = 128
+
+	// maxScriptEndpointLiterals bounds how many endpoints one JavaScript asset
+	// may contribute. A bundle can contain thousands of path literals (vendor
+	// code, source maps, error strings); the cap keeps a single file from
+	// flooding the queue.
+	maxScriptEndpointLiterals = 32
+	// maxScriptEndpointLiteralLen rejects minified blobs and embedded data.
+	maxScriptEndpointLiteralLen = 256
 )
 
 var (
@@ -79,4 +89,68 @@ func ExtractScriptParamNames(body string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// scriptEndpointLiteralRE finds quoted root-relative paths in JavaScript
+// source. It is deliberately syntax-blind: minified bundles, template strings
+// and concatenation defeat a parser, while a path literal is recognizable
+// without one.
+var scriptEndpointLiteralRE = regexp.MustCompile(`["'](/[A-Za-z0-9._~!$&()*+,;=:@%/?-]{1,255})["']`)
+
+// ExtractScriptEndpointLiterals returns the application paths a JavaScript
+// asset names as string literals, sorted and unique (nil when none).
+//
+// This is discovery input, not evidence: a literal may be a dead route, a
+// third-party path, or a string that only looks like a path. The collector
+// still normalizes, scope-checks and deduplicates every result, and no verdict
+// ever comes from here. Only root-relative paths are returned — absolute URLs
+// would leave the scanned origin, and protocol-relative ("//cdn/x") values are
+// almost always CDN references.
+func ExtractScriptEndpointLiterals(body string) []string {
+	if body == "" {
+		return nil
+	}
+	seen := make(map[string]struct{}, maxScriptEndpointLiterals)
+	out := make([]string, 0, maxScriptEndpointLiterals)
+	for _, m := range scriptEndpointLiteralRE.FindAllStringSubmatch(body, maxScriptMatches) {
+		literal := m[1]
+		if !usableScriptEndpointLiteral(literal) {
+			continue
+		}
+		if _, dup := seen[literal]; dup {
+			continue
+		}
+		seen[literal] = struct{}{}
+		out = append(out, literal)
+		if len(out) >= maxScriptEndpointLiterals {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
+}
+
+// usableScriptEndpointLiteral rejects values that cannot be an application
+// path: template placeholders, escapes, markup, punctuation-only strings, and
+// nested references to static assets (the same noise the queue filter drops).
+func usableScriptEndpointLiteral(v string) bool {
+	if len(v) < 3 || len(v) > maxScriptEndpointLiteralLen {
+		return false
+	}
+	if !strings.HasPrefix(v, "/") || strings.HasPrefix(v, "//") {
+		return false
+	}
+	if strings.ContainsAny(v, "{}\\<>\" ") {
+		return false
+	}
+	if strings.ContainsFunc(v, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return false
+	}
+	if !strings.ContainsFunc(v, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) {
+		return false
+	}
+	return !IsStaticAssetPath(v)
 }
