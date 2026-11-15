@@ -33,6 +33,13 @@ var (
 
 	errNonHTTP = errors.New("discovery: non-http(s) URL")
 	errNoHost  = errors.New("discovery: URL has no host")
+	// errMarkupPath rejects a path that is not a path but a piece of markup.
+	// A React/SPA document ships its inline SVG/JSX as text, so a link or
+	// action extractor reading that text can hand back fragments like
+	// "/></g></svg>" or "/><path d=" as if they were routes. Registering one
+	// would create a GET endpoint no server can route (http://host/></svg>)
+	// and hand every later stage a URL that is not a URL.
+	errMarkupPath = errors.New("discovery: URL path contains markup or unescaped characters")
 )
 
 // EndpointCandidate is a discovered endpoint proposed to the Sink. The Sink owns

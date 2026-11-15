@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"fmt"
 	"net/url"
 	"path"
 	"sort"
@@ -68,6 +69,36 @@ func NormalizeRef(base, ref string) (URLInfo, error) {
 	return normalizeParsed(bu.ResolveReference(ru))
 }
 
+// pathMarkupChars are the characters that can only reach a path from markup
+// text, never from a route a server declares: HTML/JSX tag delimiters and
+// attribute quotes, the JavaScript escape, and template/placeholder braces
+// (JSX and ES template literals, "/api/${id}", "/user/{id}" spec paths).
+const pathMarkupChars = "<>\"'\\{}`"
+
+// pathViolation reports the first rune of p that cannot appear in a URL path,
+// with its byte offset: a markup delimiter, an ASCII control character (only
+// reachable here when it arrives percent-encoded, e.g. %0A), or a space. A
+// space is rejected for the same reason the extractors reject one in a script
+// literal, a hash route or an inline handler target: an unescaped space is not
+// a valid path byte, so a path carrying one came from markup text, not from a
+// server-declared route. The offset is -1 when p is clean.
+//
+// Only the path is checked. A '<' in a query VALUE is a legitimate injection
+// payload, and a fragment route is rendered in the browser, never requested.
+func pathViolation(p string) (rune, int) {
+	for i, r := range p {
+		switch {
+		case r < 0x20 || r == 0x7f: // control byte, unescaped
+			return r, i
+		case r == ' ':
+			return r, i
+		case strings.ContainsRune(pathMarkupChars, r):
+			return r, i
+		}
+	}
+	return 0, -1
+}
+
 func normalizeParsed(u *url.URL) (URLInfo, error) {
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
@@ -76,6 +107,16 @@ func normalizeParsed(u *url.URL) (URLInfo, error) {
 	host := strings.ToLower(u.Hostname())
 	if host == "" {
 		return URLInfo{}, &url.Error{Op: "normalize", URL: u.String(), Err: errNoHost}
+	}
+
+	// Reject a path that is really a fragment of inline SVG/JSX markup before
+	// it becomes an endpoint (see errMarkupPath).
+	if bad, at := pathViolation(u.Path); at >= 0 {
+		return URLInfo{}, &url.Error{
+			Op:  "normalize",
+			URL: u.String(),
+			Err: fmt.Errorf("%w (found %q at offset %d in path %q)", errMarkupPath, string(bad), at, u.Path),
+		}
 	}
 
 	// Drop the port when it is the scheme default.
