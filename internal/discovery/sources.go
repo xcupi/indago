@@ -6,6 +6,7 @@ import (
 	"errors"
 	"mime"
 	"path"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -511,45 +512,157 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			}
 			continue
 		}
-		for _, ev := range res.Network {
-			if !in.Scope.Permits(ev.URL).Allowed {
-				continue // never persist or enqueue an out-of-scope observation
+		if err := n.emitNetwork(ctx, in, sink, res.Network); err != nil {
+			if errors.Is(err, ErrLimitReached) {
+				return nil
 			}
-			if isAutomaticFaviconRequest(ev.URL) {
-				continue // browsers request favicon.ico automatically; it is not a useful XSS input surface
+			return err
+		}
+		if err := n.renderSPARoutes(ctx, in, sink, info.Canonical, res.HTML); err != nil {
+			if errors.Is(err, ErrLimitReached) {
+				return nil
 			}
-			method := domain.HTTPMethod(strings.ToUpper(ev.Method))
-			if !method.IsValid() {
-				method = domain.MethodGET
-			}
-			body := ""
-			if isXMLContentType(ev.ContentType) {
-				body = ev.PostData
-			}
-			if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: ev.URL, Method: method, Source: domain.SourceBrowserNetwork, ContentType: ev.ContentType, RequestBody: body}); err != nil {
-				if errors.Is(err, ErrLimitReached) {
-					return nil
-				}
+			return err
+		}
+	}
+	return nil
+}
+
+// emitNetwork turns browser observations into endpoints and JSON body
+// parameters. It is shared by the initial seed render and each SPA route render.
+func (n *networkSource) emitNetwork(ctx context.Context, in Input, sink Sink, network []browser.NetworkEvent) error {
+	for _, ev := range network {
+		if !in.Scope.Permits(ev.URL).Allowed {
+			continue // never persist or enqueue an out-of-scope observation
+		}
+		if isAutomaticFaviconRequest(ev.URL) {
+			continue // browsers request favicon.ico automatically; it is not a useful XSS input surface
+		}
+		method := domain.HTTPMethod(strings.ToUpper(ev.Method))
+		if !method.IsValid() {
+			method = domain.MethodGET
+		}
+		body := ""
+		if isXMLContentType(ev.ContentType) {
+			body = ev.PostData
+		}
+		if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: ev.URL, Method: method, Source: domain.SourceBrowserNetwork, ContentType: ev.ContentType, RequestBody: body}); err != nil {
+			return err
+		}
+		if ev.PostData == "" || !isJSONContentType(ev.ContentType) {
+			continue
+		}
+		for _, field := range ExtractJSONBodyParams(ev.PostData) {
+			if err := in.wait(ctx); err != nil {
 				return err
 			}
-			if ev.PostData == "" || !isJSONContentType(ev.ContentType) {
-				continue
+			if err := sink.AddParameter(ctx, ParamCandidate{
+				EndpointURL: ev.URL, EndpointMethod: method,
+				Name: field.Name, Location: domain.LocationJSON,
+				Example: field.RawValue, Source: domain.SourceBrowserNetwork,
+			}); err != nil {
+				return err
 			}
-			for _, field := range ExtractJSONBodyParams(ev.PostData) {
-				if err := in.wait(ctx); err != nil {
-					return err
-				}
-				if err := sink.AddParameter(ctx, ParamCandidate{
-					EndpointURL: ev.URL, EndpointMethod: method,
-					Name: field.Name, Location: domain.LocationJSON,
-					Example: field.RawValue, Source: domain.SourceBrowserNetwork,
-				}); err != nil {
-					if errors.Is(err, ErrLimitReached) {
-						return nil
-					}
-					return err
-				}
+		}
+	}
+	return nil
+}
+
+// maxSPARouteRenders bounds routes rendered after the seed page. A route can
+// trigger an unbounded application navigation graph; this is deliberately a
+// small, fixed budget rather than a second crawler.
+const maxSPARouteRenders = 16
+
+// spaHashRoute returns a route-like hash fragment from a raw href/script
+// reference. Plain anchors (#section), CSS colors (#fff) and fragments without
+// a path separator are not routes. Both #/path and application-style
+// #lesson/name routes are accepted; the route is never sent over HTTP, only
+// rendered in the browser context.
+func spaHashRoute(ref string) string {
+	s := strings.TrimSpace(ref)
+	if !strings.HasPrefix(s, "#") {
+		return ""
+	}
+	frag := s[1:]
+	if frag == "" || len(frag) > 512 || strings.HasPrefix(frag, "//") {
+		return ""
+	}
+	if strings.ContainsAny(frag, " \t\r\n\"'<>") {
+		return ""
+	}
+	if !strings.HasPrefix(frag, "/") && !strings.Contains(frag, "/") {
+		return ""
+	}
+	return frag
+}
+
+var hashRouteLiteralRe = regexp.MustCompile(`(?:#[A-Za-z0-9_][A-Za-z0-9_./?=&%+-]*|#/[A-Za-z0-9_][A-Za-z0-9_./?=&%+-]*)`)
+
+func extractSPARoutes(body string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 8)
+	add := func(raw string) {
+		route := spaHashRoute(raw)
+		if route == "" {
+			return
+		}
+		if _, ok := seen[route]; ok {
+			return
+		}
+		seen[route] = struct{}{}
+		out = append(out, route)
+	}
+	for _, ref := range ExtractLinks(body) {
+		add(ref)
+	}
+	for _, raw := range hashRouteLiteralRe.FindAllString(body, -1) {
+		add(raw)
+	}
+	return out
+}
+
+// renderSPARoutes loads hash routes found on a rendered page in the same
+// browser context and emits the network requests they cause. It never changes
+// the HTTP crawler's URL set: fragments are client-side state, so ordinary
+// HTTP discovery would only request the same document again.
+func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink, base, body string) error {
+	routes := extractSPARoutes(body)
+	if len(routes) == 0 {
+		return nil
+	}
+	base = strings.SplitN(base, "#", 2)[0]
+	rendered := 0
+	for _, route := range routes {
+		if rendered >= maxSPARouteRenders {
+			break
+		}
+		routeURL := base + "#" + route
+		if !in.Scope.Permits(routeURL).Allowed {
+			continue
+		}
+		if err := in.wait(ctx); err != nil {
+			return err
+		}
+		res, err := n.browser.Render(ctx, routeURL, browser.RenderOptions{
+			Limiter:           n.cfg.Limiter,
+			WaitUntil:         browser.WaitLoad,
+			ObservationWindow: 350 * time.Millisecond,
+			AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
+			SessionStatePath:  in.SessionStatePath,
+			UserAgent:         n.cfg.HuntingUserAgent,
+		})
+		if err != nil {
+			if errors.Is(err, browser.ErrNotImplemented) {
+				return nil
 			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			continue
+		}
+		rendered++
+		if err := n.emitNetwork(ctx, in, sink, res.Network); err != nil {
+			return err
 		}
 	}
 	return nil
