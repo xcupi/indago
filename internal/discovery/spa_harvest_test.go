@@ -24,7 +24,7 @@ func TestHarvestRouteAPIsReadsMenuJSON(t *testing.T) {
 	n := &networkSource{engine: eng, cfg: DefaultConfig()}
 	routes := n.harvestRouteAPIs(t.Context(), Input{
 		Scope: scope,
-	}, srv.URL+"/", []browser.NetworkEvent{{URL: srv.URL + "/menu", Method: "GET"}})
+	}, nil, srv.URL+"/", []browser.NetworkEvent{{URL: srv.URL + "/menu", Method: "GET"}})
 	if len(routes) != 2 || routes[0] != "lesson/HttpBasics.lesson" || routes[1] != "/account?tab=1" {
 		t.Fatalf("routes = %v, want two menu routes", routes)
 	}

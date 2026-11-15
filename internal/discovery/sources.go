@@ -533,7 +533,7 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			return err
 		}
 		routes := extractSPARoutes(res.HTML)
-		routes = append(routes, n.harvestRouteAPIs(ctx, in, info.Canonical, res.Network)...)
+		routes = append(routes, n.harvestRouteAPIs(ctx, in, sink, info.Canonical, res.Network)...)
 		if err := n.renderSPARoutes(ctx, in, sink, info.Canonical, routes); err != nil {
 			if errors.Is(err, ErrLimitReached) {
 				return nil
@@ -669,12 +669,13 @@ func routeAPIProbeScore(rawURL string) int {
 	return score
 }
 
-func (n *networkSource) harvestRouteAPIs(ctx context.Context, in Input, base string, network []browser.NetworkEvent) []string {
+func (n *networkSource) harvestRouteAPIs(ctx context.Context, in Input, sink Sink, base string, network []browser.NetworkEvent) []string {
 	var out []string
 	seen := make(map[string]struct{})
 	candidates := make([]browser.NetworkEvent, 0, len(network))
 	for _, ev := range network {
-		if !strings.EqualFold(strings.TrimSpace(ev.Method), "GET") || !in.Scope.Permits(ev.URL).Allowed {
+		if !strings.EqualFold(strings.TrimSpace(ev.Method), "GET") || !in.Scope.Permits(ev.URL).Allowed ||
+			!allowFetch(sink, ev.URL, domain.SourceBrowserNetwork) {
 			continue
 		}
 		info, err := Normalize(ev.URL)
@@ -762,7 +763,7 @@ func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink
 			break
 		}
 		routeURL := base + "#" + route
-		if !in.Scope.Permits(routeURL).Allowed {
+		if !in.Scope.Permits(routeURL).Allowed || !allowFetch(sink, routeURL, domain.SourceBrowserNetwork) {
 			continue
 		}
 		if err := in.wait(ctx); err != nil {
