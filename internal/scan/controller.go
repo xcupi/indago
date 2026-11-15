@@ -1326,6 +1326,20 @@ func (c *Controller) sessionCookiesFor(ctx context.Context, sc *domain.Scan) []*
 	return sessionCookies(sess.StatePath)
 }
 
+// sessionAuthHeadersFor returns bearer tokens saved in the scan's browser
+// storage state (SPA localStorage), scoped to the origin that stored them.
+// Best-effort: missing state or unsupported values yield nil.
+func (c *Controller) sessionAuthHeadersFor(ctx context.Context, sc *domain.Scan) []sessionAuthHeader {
+	if sc.SessionID.Empty() {
+		return nil
+	}
+	sess, err := c.store.Sessions().Get(ctx, sc.SessionID)
+	if err != nil || sess.StatePath == "" {
+		return nil
+	}
+	return sessionAuthHeaders(sess.StatePath)
+}
+
 // reauthenticateIfAwaitingAuth re-establishes the scan's session before it
 // resumes from AwaitingAuth. The scanner never silently re-authenticates
 // outside of this path (see domain.Session's doc comment) — a plain Paused

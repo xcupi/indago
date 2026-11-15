@@ -137,6 +137,9 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 	if len(cookies) > 0 {
 		eng = eng.WithSessionCookies(cookies)
 	}
+	if headers := c.sessionAuthHeadersFor(ctx, sc); len(headers) > 0 {
+		eng = eng.WithSessionAuthHeaders(headers)
+	}
 	if c.opts.Preflight {
 		if err := c.preflightTarget(runCtx, eng, target, seedsFor(sc, target)); err != nil {
 			cancel()

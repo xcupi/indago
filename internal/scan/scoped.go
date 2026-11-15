@@ -42,9 +42,20 @@ type scopedEngine struct {
 	// cookie's scope separately for the current URL/hop; nil for most scans
 	// (anonymous auth, or no browser storage state).
 	cookies []*http.Cookie
+	// authHeaders are bearer tokens recovered from the saved browser storage
+	// state (SPA localStorage). They are applied only to their exact origin and
+	// are dropped again on a redirect to another origin.
+	authHeaders []sessionAuthHeader
 	// limiter paces every request this engine sends (one permit per request,
 	// per redirect hop), after the scope check — see WithRateLimiter.
 	limiter *ratelimit.Limiter
+}
+
+// sessionAuthHeader is one bearer token bound to the browser origin that stored
+// it. Value is already a complete Authorization header value.
+type sessionAuthHeader struct {
+	Origin string
+	Value  string
 }
 
 var _ httpengine.Engine = (*scopedEngine)(nil)
@@ -66,6 +77,14 @@ func (s *scopedEngine) WithSessionCookies(cookies []*http.Cookie) *scopedEngine 
 	return s
 }
 
+// WithSessionAuthHeaders gives scopedEngine bearer credentials recovered from
+// the saved browser state. They are never sent outside the origin that stored
+// them, and an explicit Authorization header on the request always wins.
+func (s *scopedEngine) WithSessionAuthHeaders(headers []sessionAuthHeader) *scopedEngine {
+	s.authHeaders = headers
+	return s
+}
+
 // WithRateLimiter paces every request this engine sends with the scan's shared
 // limiter: one permit per request and per redirect hop, taken AFTER the scope
 // check (an out-of-scope request never consumes a permit) and BEFORE the request
@@ -81,6 +100,11 @@ func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpen
 		return nil, fmt.Errorf("%w: nil request", httpengine.ErrInvalidRequest)
 	}
 	cur := *req // never mutate the caller's request
+	if len(s.authHeaders) > 0 && !cur.NoCookies {
+		// The header is added/removed per redirect hop; work on a copy so the
+		// caller's request map is never mutated.
+		cur.Headers = cloneHeaderMap(req.Headers)
+	}
 	requestCookies := append([]*http.Cookie(nil), req.Cookies...)
 	var chain []string
 
@@ -93,6 +117,21 @@ func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpen
 		if err := s.limiter.Wait(ctx); err != nil {
 			return nil, err
 		}
+		// Apply the saved SPA bearer token only to the exact origin that stored
+		// it. A redirect can change origin; never carry the token across it.
+		if !cur.NoCookies {
+			if _, explicit := req.Headers["Authorization"]; !explicit {
+				delete(cur.Headers, "Authorization")
+				for _, h := range s.authHeaders {
+					if sameURLOrigin(cur.URL, h.Origin) {
+						cur.Headers = ensureHeaderMap(cur.Headers)
+						cur.Headers["Authorization"] = h.Value
+						break
+					}
+				}
+			}
+		}
+
 		// Rebuild the cookie list for this URL on every hop. Session cookies
 		// carry storage-state scope metadata; request-specific overrides remain
 		// first so a targeted injection wins over a same-named session cookie.
@@ -352,6 +391,106 @@ func isRedirectStatus(code int) bool {
 	default:
 		return false
 	}
+}
+
+func sameURLOrigin(rawURL, rawOrigin string) bool {
+	a, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	b, err := url.Parse(rawOrigin)
+	if err != nil {
+		return false
+	}
+	return a.Scheme != "" && strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Host, b.Host)
+}
+
+func ensureHeaderMap(headers map[string]string) map[string]string {
+	if headers == nil {
+		return make(map[string]string, 1)
+	}
+	return headers
+}
+
+func cloneHeaderMap(headers map[string]string) map[string]string {
+	if headers == nil {
+		return nil
+	}
+	out := make(map[string]string, len(headers))
+	for k, v := range headers {
+		out[k] = v
+	}
+	return out
+}
+
+// sessionAuthHeaders recovers a bearer token from Playwright storage-state
+// localStorage. Only a small set of conventional token names and JWT-shaped
+// values are considered; arbitrary localStorage values are never turned into
+// headers. Tokens are scoped to the exact origin recorded in the state file.
+func sessionAuthHeaders(statePath string) []sessionAuthHeader {
+	if statePath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return nil
+	}
+	var state struct {
+		Origins []struct {
+			Origin       string `json:"origin"`
+			LocalStorage []struct {
+				Name  string `json:"name"`
+				Value string `json:"value"`
+			} `json:"localStorage"`
+		} `json:"origins"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil
+	}
+	var out []sessionAuthHeader
+	seen := map[string]bool{}
+	for _, origin := range state.Origins {
+		u, err := url.Parse(origin.Origin)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			continue
+		}
+		for _, entry := range origin.LocalStorage {
+			name := strings.ToLower(strings.TrimSpace(entry.Name))
+			value := strings.TrimSpace(entry.Value)
+			if value == "" || len(value) > 8192 {
+				continue
+			}
+			switch name {
+			case "token", "access_token", "access-token", "id_token", "jwt", "auth_token", "authorization":
+			default:
+				continue
+			}
+			header := value
+			if name == "authorization" {
+				if !strings.HasPrefix(strings.ToLower(header), "bearer ") {
+					continue
+				}
+			} else if !strings.HasPrefix(strings.ToLower(header), "bearer ") {
+				if !looksLikeJWT(value) {
+					continue
+				}
+				header = "Bearer " + value
+			}
+			key := u.Scheme + "://" + u.Host
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, sessionAuthHeader{Origin: key, Value: header})
+		}
+	}
+	return out
+}
+
+func looksLikeJWT(value string) bool {
+	parts := strings.Split(value, ".")
+	return len(parts) == 3 && len(parts[0]) > 4 && len(parts[1]) > 4
 }
 
 // sessionCookies reads a browser storage-state file and retains every valid
