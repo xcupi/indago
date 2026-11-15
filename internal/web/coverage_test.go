@@ -88,6 +88,7 @@ type coverageResp struct {
 		Completed int    `json:"completed"`
 		Skipped   int    `json:"skipped"`
 		Failed    int    `json:"failed"`
+		Note      string `json:"note"`
 	} `json:"capabilities"`
 	Reasons []struct {
 		Code     string   `json:"code"`
@@ -214,23 +215,82 @@ func TestCoverageReportsCapabilityMatrix(t *testing.T) {
 	}
 	sc.Config.SkipReflectedXSS = true
 	sc.Config.SkipIDOR = true
+	sc.Config.SkipSSRF = true
+	sc.Config.SkipCORS = true
+	sc.Config.SkipGraphQL = true
 	if err := a.st.Scans().Update(context.Background(), sc); err != nil {
 		t.Fatal(err)
 	}
 	var c coverageResp
 	a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
-	if len(c.Capabilities) != 10 {
-		t.Fatalf("capabilities = %d, want 10", len(c.Capabilities))
+	if len(c.Capabilities) != 13 {
+		t.Fatalf("capabilities = %d, want 13", len(c.Capabilities))
 	}
 	byKey := map[string]bool{}
+	labels := map[string]string{}
+	notes := map[string]string{}
 	for _, cap := range c.Capabilities {
 		byKey[cap.Key] = cap.Enabled
+		labels[cap.Key] = cap.Label
+		notes[cap.Key] = cap.Note
 	}
-	if byKey["reflected_xss"] || byKey["idor"] {
-		t.Fatalf("disabled capabilities reported enabled: %+v", byKey)
+	for _, k := range []string{"reflected_xss", "idor", "ssrf", "cors", "graphql"} {
+		if byKey[k] {
+			t.Fatalf("%s is disabled for this scan but reported enabled: %+v", k, byKey)
+		}
 	}
-	if !byKey["dom_xss"] || !byKey["access_control"] || !byKey["information_disclosure"] || byKey["ssti"] || byKey["sqli"] || byKey["xxe"] {
-		t.Fatalf("enabled capabilities reported disabled: %+v", byKey)
+	for _, k := range []string{"dom_xss", "access_control", "information_disclosure", "open_redirect"} {
+		if !byKey[k] {
+			t.Fatalf("%s is enabled for this scan but reported disabled: %+v", k, byKey)
+		}
+	}
+	if byKey["ssti"] || byKey["sqli"] || byKey["xxe"] || byKey["command_injection"] {
+		t.Fatalf("opt-in engines reported enabled: %+v", byKey)
+	}
+	if labels["open_redirect"] != "Open redirect" {
+		t.Fatalf("open_redirect label = %q", labels["open_redirect"])
+	}
+	// The note used to claim server-side redirect detection did not exist. It
+	// must not stand in as a statement about what ran.
+	if strings.Contains(strings.ToLower(notes["open_redirect"]), "not implemented") {
+		t.Fatalf("stale open_redirect note: %q", notes["open_redirect"])
+	}
+}
+
+// Open redirect is covered by two engines, so it stays on while either one is
+// on and only reads disabled when both are.
+func TestCoverageOpenRedirectSpansBothEngines(t *testing.T) {
+	a, id := coverageAPI(t, web.Capabilities{BrowserEnabled: true})
+	for _, tc := range []struct {
+		name                string
+		skipServer, skipDOM bool
+		want                bool
+	}{
+		{"both on", false, false, true},
+		{"only server-side", false, true, true},
+		{"only client-side", true, false, true},
+		{"both off", true, true, false},
+	} {
+		sc, err := a.st.Scans().Get(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sc.Config.SkipOpenRedirect = tc.skipServer
+		sc.Config.SkipDOMXSS = tc.skipDOM
+		if err := a.st.Scans().Update(context.Background(), sc); err != nil {
+			t.Fatal(err)
+		}
+		var c coverageResp
+		a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
+		var got bool
+		for _, cap := range c.Capabilities {
+			if cap.Key == "open_redirect" {
+				got = cap.Enabled
+			}
+		}
+		if got != tc.want {
+			t.Fatalf("%s: open_redirect enabled = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -387,9 +447,45 @@ func TestCapabilitiesJSONShapeIsStable(t *testing.T) {
 	a, _ := coverageAPI(t, web.Capabilities{})
 	var raw map[string]json.RawMessage
 	a.mustJSON(a.do("GET", "/api/capabilities", nil), 200, &raw)
-	for _, k := range []string{"version", "browser_enabled", "browser_sandbox", "state_changing_allowed", "interactive_login"} {
+	for _, k := range []string{"version", "browser_enabled", "browser_sandbox", "state_changing_allowed", "interactive_login",
+		"oast_enabled", "allow_private_oast"} {
 		if _, ok := raw[k]; !ok {
 			t.Errorf("capabilities is missing %q", k)
 		}
+	}
+	// The callback URL is only reported when one exists: a blank string would
+	// read as "no collaborator" anyway and a loopback URL is not a secret.
+	if _, ok := raw["oast_callback_url"]; ok {
+		t.Errorf("a server with no OAST collaborator must not advertise a callback URL: %s", raw["oast_callback_url"])
+	}
+}
+
+// Callback-confirmed engines are only as good as the collaborator behind them,
+// so its presence (and the URL targets are asked to reach) is advertised.
+func TestCapabilitiesAdvertisesOASTCollaborator(t *testing.T) {
+	a, _ := coverageAPI(t, web.Capabilities{
+		OASTEnabled:      true,
+		OASTCallbackURL:  "https://abc.example-tunnel.net",
+		AllowPrivateOAST: true,
+	})
+	var got map[string]any
+	a.mustJSON(a.do("GET", "/api/capabilities", nil), 200, &got)
+	if got["oast_enabled"] != true || got["allow_private_oast"] != true {
+		t.Fatalf("capabilities = %v", got)
+	}
+	if got["oast_callback_url"] != "https://abc.example-tunnel.net" {
+		t.Fatalf("oast_callback_url = %v", got["oast_callback_url"])
+	}
+
+	// Enabled, but with only the loopback listener: the manager has a callback
+	// base and it must be reported as such rather than dropped.
+	loop, _ := coverageAPI(t, web.Capabilities{OASTEnabled: true, OASTCallbackURL: "http://127.0.0.1:37553"})
+	var lb map[string]any
+	loop.mustJSON(loop.do("GET", "/api/capabilities", nil), 200, &lb)
+	if lb["oast_enabled"] != true || lb["oast_callback_url"] != "http://127.0.0.1:37553" {
+		t.Fatalf("loopback capabilities = %v", lb)
+	}
+	if lb["allow_private_oast"] != false {
+		t.Fatalf("private-OAST opt-in must default to off: %v", lb)
 	}
 }

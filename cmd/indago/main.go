@@ -318,12 +318,14 @@ func cmdServe(args []string) error {
 	// confirms a vulnerability by callback (SSRF, XXE, command injection), so an
 	// operator needs no third-party webhook account — and nothing is started at
 	// all when -oast-addr is empty (the default).
+	var oastMgr *oast.Manager // nil unless -oast-addr: /api/capabilities reports it
 	if wantOAST {
 		oastCfg.Logger = log
-		oastMgr, oerr := oast.New(context.Background(), oastCfg)
+		mgr, oerr := oast.New(context.Background(), oastCfg)
 		if oerr != nil {
 			return fmt.Errorf("start OAST collaborator (-oast-addr): %w", oerr)
 		}
+		oastMgr = mgr
 		defer func() { _ = oastMgr.Close() }()
 		// Start the poll API now, not on the first scan: a listener that cannot
 		// report its own hits is worse than none, and this is where the
@@ -413,10 +415,22 @@ func cmdServe(args []string) error {
 	// ChatGPT OAuth: Indago keeps its own session under the data directory so
 	// an operator can log in once here instead of borrowing another tool's.
 	srv.SetChatGPTCredDir(filepath.Join(cfg.DataDir, "chatgpt"))
+	// Callback-confirmed engines (SSRF/XXE/command injection) only get their
+	// collaborator when -oast-addr started one, and their silence must not read
+	// as a clean result when it did not. BaseURL is the public URL when the
+	// operator published one, otherwise the loopback listener.
+	oastEnabled := oastMgr != nil
+	var oastURL string
+	if oastEnabled {
+		oastURL = oastMgr.BaseURL()
+	}
 	srv.SetCapabilities(web.Capabilities{
 		BrowserEnabled:       *useBrowser,
 		BrowserSandbox:       *useBrowser && !*browserNoSandbox,
 		StateChangingAllowed: *allowUnsafe,
+		OASTEnabled:          oastEnabled,
+		OASTCallbackURL:      oastURL,
+		AllowPrivateOAST:     *allowPrivateOAST,
 	})
 	if err := srv.SetRateLimit(cfg.Server.APIRate, cfg.Server.APIBurst); err != nil {
 		return fmt.Errorf("serve: %w", err)

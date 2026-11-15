@@ -15,13 +15,22 @@ reports what was and was not tested.
 | `browser_sandbox` | Chromium sandbox on (off with `-browser-no-sandbox`); false when the browser is off |
 | `state_changing_allowed` | `-allow-state-changing`; POST/PUT/PATCH/DELETE candidates are sent |
 | `interactive_login` | an interactive-login function is wired (needs the browser) |
+| `oast_enabled` | `-oast-addr` started the built-in callback collaborator that confirms SSRF/XXE/command injection |
+| `oast_callback_url` | the base URL callbacks are issued under (the `-oast-public-url` tunnel, else the loopback listener); omitted when no collaborator runs |
+| `allow_private_oast` | `-allow-private-oast`; the SSRF engine may use a collaborator on a literal RFC 1918/ULA address. Loopback, link-local/instance-metadata and CGNAT collaborators stay refused |
 
 A `Server` that never calls `SetCapabilities` reports everything off. The UI
 treats an unreadable response as "capabilities unknown", never as "on".
 
 `GET /api/scans/{id}/coverage`
 
-Groups the scan's skipped tests by reason and reports warnings:
+Groups the scan's skipped tests by reason and reports warnings. It also carries
+a `capabilities` array — one row per engine (`reflected_xss`, `dom_xss`,
+`access_control`, `idor`, `information_disclosure`, `open_redirect`, `ssrf`,
+`cors`, `graphql`, `command_injection`, `ssti`, `sqli`, `xxe`) with `enabled`,
+its test counts and an optional `note`. `open_redirect` covers both the
+server-side redirect probe and the client-side DOM engine, so it reads enabled
+while either one is on.
 
 - `browser_disabled` (high): DOM probes did not run and nothing could be
   confirmed in a browser. Zero findings is not a clean result.

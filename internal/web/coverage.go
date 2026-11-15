@@ -17,6 +17,15 @@ type Capabilities struct {
 	BrowserEnabled       bool `json:"browser_enabled"`
 	BrowserSandbox       bool `json:"browser_sandbox"`
 	StateChangingAllowed bool `json:"state_changing_allowed"`
+	// OASTEnabled is set when the built-in collaborator is running. Without it
+	// SSRF, XXE and command injection fall back to their non-callback
+	// confirmation (or skip), so its absence is a real coverage limit.
+	OASTEnabled bool `json:"oast_enabled"`
+	// OASTCallbackURL is the base URL callbacks are issued under: the operator's
+	// public URL when -oast-public-url is set, otherwise the loopback listener
+	// (reachable only from this host).
+	OASTCallbackURL  string `json:"oast_callback_url,omitempty"`
+	AllowPrivateOAST bool   `json:"allow_private_oast"`
 }
 
 // SetCapabilities records what the server was started with. cmd/indago calls it
@@ -24,13 +33,21 @@ type Capabilities struct {
 func (s *Server) SetCapabilities(c Capabilities) { s.caps = c }
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"version":                s.version,
 		"browser_enabled":        s.caps.BrowserEnabled,
 		"browser_sandbox":        s.caps.BrowserEnabled && s.caps.BrowserSandbox,
 		"state_changing_allowed": s.caps.StateChangingAllowed,
+		"oast_enabled":           s.caps.OASTEnabled,
+		"allow_private_oast":     s.caps.AllowPrivateOAST,
 		"interactive_login":      s.login != nil,
-	})
+	}
+	// Only meaningful when a collaborator exists, and an empty string would read
+	// as "no callback URL" anyway, so it is omitted rather than sent blank.
+	if s.caps.OASTCallbackURL != "" {
+		resp["oast_callback_url"] = s.caps.OASTCallbackURL
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -181,30 +198,39 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 	out := scanCoverage{ScanID: id, State: st.Scan.State, BrowserEnabled: s.caps.BrowserEnabled,
 		Reasons: []coverageReason{}, Warnings: []coverageWarning{}}
 	cfg := st.Scan.Config
-	out.Capabilities = []coverageCapability{
-		{Key: "reflected_xss", Label: "Reflected XSS", Enabled: !cfg.SkipReflectedXSS},
-		{Key: "dom_xss", Label: "DOM XSS", Enabled: !cfg.SkipDOMXSS},
-		{Key: "access_control", Label: "Access control", Enabled: !cfg.SkipAccessControl},
-		{Key: "idor", Label: "IDOR", Enabled: !cfg.SkipIDOR},
-		{Key: "information_disclosure", Label: "Information disclosure", Enabled: !cfg.SkipInfoDisclosure},
-		{Key: "open_redirect", Label: "Open redirect (client-side)", Enabled: !cfg.SkipDOMXSS,
-			Note: "Server-side redirect detection is not implemented."},
-		{Key: "command_injection", Label: "OS command injection", Enabled: cfg.EnableCommandInjection},
-		{Key: "ssti", Label: "Server-side template injection", Enabled: cfg.EnableSSTI},
-		{Key: "sqli", Label: "SQL injection", Enabled: cfg.EnableSQLi},
-		{Key: "xxe", Label: "XML external entity", Enabled: cfg.EnableXXE},
+	// One row per engine, in the order the API reports them. capByClass is
+	// derived from these rows, so adding an engine never means keeping a
+	// hand-written index in sync.
+	type capabilitySpec struct {
+		key       string
+		label     string
+		enabled   bool
+		note      string
+		vulnClass domain.VulnClass
 	}
-	capByClass := map[domain.VulnClass]*coverageCapability{
-		domain.VulnReflectedXSS:     &out.Capabilities[0],
-		domain.VulnDOMXSS:           &out.Capabilities[1],
-		domain.VulnAccessControl:    &out.Capabilities[2],
-		domain.VulnIDOR:             &out.Capabilities[3],
-		domain.VulnInfoDisclosure:   &out.Capabilities[4],
-		domain.VulnOpenRedirect:     &out.Capabilities[5],
-		domain.VulnCommandInjection: &out.Capabilities[6],
-		domain.VulnSSTI:             &out.Capabilities[7],
-		domain.VulnSQLi:             &out.Capabilities[8],
-		domain.VulnXXE:              &out.Capabilities[9],
+	specs := []capabilitySpec{
+		{"reflected_xss", "Reflected XSS", !cfg.SkipReflectedXSS, "", domain.VulnReflectedXSS},
+		{"dom_xss", "DOM XSS", !cfg.SkipDOMXSS, "", domain.VulnDOMXSS},
+		{"access_control", "Access control", !cfg.SkipAccessControl, "", domain.VulnAccessControl},
+		{"idor", "IDOR", !cfg.SkipIDOR, "", domain.VulnIDOR},
+		{"information_disclosure", "Information disclosure", !cfg.SkipInfoDisclosure, "", domain.VulnInfoDisclosure},
+		// Two engines cover open redirect: the server-side redirect probe and
+		// the client-side DOM engine. It is on while either one is on.
+		{"open_redirect", "Open redirect", !cfg.SkipOpenRedirect || !cfg.SkipDOMXSS,
+			"Covers the server-side redirect probe and the client-side DOM engine.", domain.VulnOpenRedirect},
+		{"ssrf", "Server-side request forgery", !cfg.SkipSSRF, "", domain.VulnSSRF},
+		{"cors", "CORS misconfiguration", !cfg.SkipCORS, "", domain.VulnCORS},
+		{"graphql", "GraphQL", !cfg.SkipGraphQL, "", domain.VulnGraphQL},
+		{"command_injection", "OS command injection", cfg.EnableCommandInjection, "", domain.VulnCommandInjection},
+		{"ssti", "Server-side template injection", cfg.EnableSSTI, "", domain.VulnSSTI},
+		{"sqli", "SQL injection", cfg.EnableSQLi, "", domain.VulnSQLi},
+		{"xxe", "XML external entity", cfg.EnableXXE, "", domain.VulnXXE},
+	}
+	out.Capabilities = make([]coverageCapability, len(specs))
+	capByClass := make(map[domain.VulnClass]*coverageCapability, len(specs))
+	for i, spec := range specs {
+		out.Capabilities[i] = coverageCapability{Key: spec.key, Label: spec.label, Enabled: spec.enabled, Note: spec.note}
+		capByClass[spec.vulnClass] = &out.Capabilities[i]
 	}
 	groups := map[string]*coverageReason{}
 	seen := map[string]map[string]bool{}
@@ -279,7 +305,7 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 	if !st.Scan.Config.EnableXXE {
 		out.Warnings = append(out.Warnings, coverageWarning{"xxe_disabled", sevInfo,
 			"XXE was not enabled for this scan; its XML-body entity-expansion pass was intentionally not run."})
-	} else if len(out.Capabilities) > 9 && out.Capabilities[9].Tests == 0 {
+	} else if capByClass[domain.VulnXXE].Tests == 0 {
 		out.Warnings = append(out.Warnings, coverageWarning{"xxe_no_applicable_endpoints", sevInfo,
 			"XXE was enabled, but discovery captured no XML request body; no XML parser was guessed or attacked."})
 	}
