@@ -27,7 +27,7 @@ func TestCapabilitiesReportOASTWiring(t *testing.T) {
 	zero, _ := coverageAPI(t, web.Capabilities{})
 	var off map[string]any
 	zero.mustJSON(zero.do("GET", "/api/capabilities", nil), 200, &off)
-	if off["oast_enabled"] != false || off["oast_callback_url"] != "" || off["allow_private_oast"] != false {
+	if off["oast_enabled"] != false || off["oast_callback_url"] != nil || off["allow_private_oast"] != false {
 		t.Fatalf("a server without a collaborator must report OAST off: %v", off)
 	}
 }
