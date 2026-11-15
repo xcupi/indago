@@ -236,6 +236,13 @@ func handlerSubmitPath(handler string) string {
 		if strings.ContainsRune(literal, '\\') || strings.ContainsFunc(literal, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
 			continue
 		}
+		// An inline handler is JavaScript too: `replace(/"/g,"")` hides a
+		// quote inside the regex and a comma after its flags, so the literal
+		// scan reads "/g," as the submit target. Judge it with the same rule
+		// the script-literal extractor uses.
+		if pathPunctuationArtifact(literal) {
+			continue
+		}
 		target = literal
 	}
 	return target

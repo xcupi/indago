@@ -133,6 +133,34 @@ func ExtractScriptEndpointLiterals(body string) []string {
 	return out
 }
 
+// pathPunctuationArtifact reports whether a supposed path is really JavaScript
+// punctuation a syntax-blind literal scan mistook for one. These extractors
+// only ever see quotes, so `.replace(/"/g,"")` — the quote inside the regex
+// pattern, then the flags, then the comma that ends the argument — is
+// indistinguishable from a quoted path literal and yields "/g," (QA against a
+// real SPA registered GET /g, from source=script_literal). No server declares
+// a route ending in ',', ';', or an unbalanced ')': those tails are list
+// separators and call syntax, never route segments.
+//
+// Only the path is judged. A query may legitimately end with a separator
+// ("/api/users?ids=1,2,"), and a balanced pair is a real path shape
+// ("/wiki/Foo_(bar)", "/api/v1/x(my)"), so neither is dropped.
+func pathPunctuationArtifact(p string) bool {
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	if p == "" {
+		return false
+	}
+	switch p[len(p)-1] {
+	case ',', ';':
+		return true
+	case ')':
+		return strings.Count(p, ")") > strings.Count(p, "(")
+	}
+	return false
+}
+
 // usableScriptEndpointLiteral rejects values that cannot be an application
 // path: template placeholders, escapes, markup, punctuation-only strings, and
 // nested references to static assets (the same noise the queue filter drops).
@@ -147,6 +175,9 @@ func usableScriptEndpointLiteral(v string) bool {
 		return false
 	}
 	if strings.ContainsFunc(v, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return false
+	}
+	if pathPunctuationArtifact(v) {
 		return false
 	}
 	if !strings.ContainsFunc(v, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) {
