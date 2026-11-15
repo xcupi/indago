@@ -36,6 +36,7 @@ import (
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/llm"
+	"github.com/indago/indago/internal/oast"
 	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/store/sqlite"
@@ -199,6 +200,12 @@ func cmdServe(args []string) error {
 	aiProvider := fs.String("ai-provider", "", "enable the advisory AI Gateway with this provider (openai|anthropic|openrouter|ollama|vllm); empty keeps AI fully disabled")
 	aiModel := fs.String("ai-model", "", "model name for -ai-provider (required if -ai-provider is set)")
 	aiBaseURL := fs.String("ai-base-url", "", "override the provider's default base URL (required for a non-default ollama/vllm deployment)")
+	oastAddr := fs.String("oast-addr", "",
+		"start the built-in OAST collaborator on this address (host:port, e.g. 127.0.0.1:0 for an ephemeral port): one local listener that confirms out-of-band callbacks for SSRF/XXE/command injection automatically. Empty (default) starts nothing")
+	oastPublicURL := fs.String("oast-public-url", "",
+		"URL a TARGET can reach for -oast-addr (a tunnel or reverse proxy, e.g. https://abc.example-tunnel.net). Without it the callback base URL is the loopback listener, which only a target on this host can reach and which SSRF refuses as a canary")
+	oastAllowExternalBind := fs.Bool("oast-allow-external-bind", false,
+		"allow -oast-addr to bind a non-loopback address; the callback listener is then reachable beyond this host (readily flooded — see docs/oast.md)")
 	_ = fs.Parse(args)
 	setFlags := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
@@ -206,6 +213,10 @@ func cmdServe(args []string) error {
 	log := newLogger(*debug)
 
 	browserCfg, err := browserConfigFromFlags(*useBrowser, *browserNoSandbox, *chromium)
+	if err != nil {
+		return err
+	}
+	oastCfg, wantOAST, err := oastConfigFromFlags(*oastAddr, *oastPublicURL, *oastAllowExternalBind)
 	if err != nil {
 		return err
 	}
@@ -296,6 +307,33 @@ func cmdServe(args []string) error {
 	}
 	if *allowUnsafe {
 		log.Warn("state-changing methods (POST/PUT/PATCH/DELETE) will be executed against in-scope targets")
+	}
+	// Built-in OAST collaborator. One listener + one loopback poll API for the
+	// whole process: the scan controller hands their URLs to every engine that
+	// confirms a vulnerability by callback (SSRF, XXE, command injection), so an
+	// operator needs no third-party webhook account — and nothing is started at
+	// all when -oast-addr is empty (the default).
+	if wantOAST {
+		oastCfg.Logger = log
+		oastMgr, oerr := oast.New(context.Background(), oastCfg)
+		if oerr != nil {
+			return fmt.Errorf("start OAST collaborator (-oast-addr): %w", oerr)
+		}
+		defer func() { _ = oastMgr.Close() }()
+		// Start the poll API now, not on the first scan: a listener that cannot
+		// report its own hits is worse than none, and this is where the
+		// operator can still see the failure.
+		pollURL, perr := oastMgr.PollURL()
+		if perr != nil {
+			return fmt.Errorf("start OAST poll API: %w", perr)
+		}
+		opts.OAST = oastMgr
+		log.Info("OAST collaborator listening",
+			"callback", oastMgr.BaseURL(), "listen", oastMgr.ListenAddr(), "poll", pollURL)
+		if oastCfg.PublicBaseURL == "" {
+			log.Info("OAST: no -oast-public-url, so only a target on this host can reach the collaborator; " +
+				"a remote target cannot call back to a loopback URL, and SSRF keeps its response-differential confirmation")
+		}
 	}
 	var loginFn web.LoginFunc
 	if *useBrowser {

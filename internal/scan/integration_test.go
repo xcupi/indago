@@ -162,11 +162,47 @@ func workersCfg(httpWorkers int) *domain.ScanConfig {
 	return &domain.ScanConfig{DiscoveryConcurrency: 2, HTTPConcurrency: httpWorkers, BrowserConcurrency: 0}
 }
 
+// legacyPipelineCfg is workersCfg with the Wave-1 raw-HTTP engines switched
+// off. These legacy integration tests pin an exact job/case graph computed from
+// the endpoint and injection-point registries (one job per endpoint, one per
+// injection point, plus the DOM-XSS/disclosure/access-control passes each test
+// enumerates itself). SSRF/CORS/OpenRedirect/GraphQL add their own jobs whose
+// count derives from per-engine eligibility heuristics — duplicating those
+// heuristics here would be a second, drifting copy of the production logic, so
+// the legacy tests keep a fixed fixture contract instead. Each Wave-1 engine is
+// covered by its own focused tests (ssrf_test.go, cors_test.go,
+// openredirect_test.go, graphql_test.go).
+func legacyPipelineCfg(httpWorkers int) *domain.ScanConfig {
+	cfg := workersCfg(httpWorkers)
+	cfg.SkipSSRF = true
+	cfg.SkipCORS = true
+	cfg.SkipOpenRedirect = true
+	cfg.SkipGraphQL = true
+	return cfg
+}
+
 func createScan(t *testing.T, c *scan.Controller, proj, tgt domain.ID, cfg *domain.ScanConfig, stop domain.StopPolicy) *domain.Scan {
 	t.Helper()
 	p := scan.CreateScanParams{ProjectID: proj, TargetID: tgt, Name: "it", Profile: domain.ProfileBalanced, Stop: stop}
 	if cfg != nil {
 		p.Profile, p.Config = domain.ProfileCustom, cfg
+		// The engine allow/skip switches are CreateScanParams fields, not
+		// config-only: CreateScan writes them over the profile/custom config,
+		// so a config object alone cannot turn an engine off. Mirror them
+		// here so a test's custom config really is the whole configuration.
+		p.SkipGlobalInjection = cfg.SkipGlobalInjection
+		p.SkipStaticAssets = cfg.SkipStaticAssets
+		p.SkipReflectedXSS = cfg.SkipReflectedXSS
+		p.SkipDOMXSS = cfg.SkipDOMXSS
+		p.SkipAccessControl = cfg.SkipAccessControl
+		p.SkipIDOR = cfg.SkipIDOR
+		p.SkipInfoDisclosure = cfg.SkipInfoDisclosure
+		p.SkipSSRF = cfg.SkipSSRF
+		p.SkipCORS = cfg.SkipCORS
+		p.SkipOpenRedirect = cfg.SkipOpenRedirect
+		p.SkipGraphQL = cfg.SkipGraphQL
+		p.SkipWriteEndpoints = cfg.SkipWriteEndpoints
+		p.SkipDownloadEndpoints = cfg.SkipDownloadEndpoints
 	}
 	sc, err := c.CreateScan(context.Background(), p)
 	if err != nil {
@@ -335,7 +371,7 @@ func TestScanCompletesAfterDiscoveryAndJobs(t *testing.T) {
 	handlers, handled := recordingHandlers()
 	ctrl := newCtrl(t, st, q, scan.Options{Handlers: handlers})
 
-	sc := createScan(t, ctrl, proj, tgt, workersCfg(4), domain.StopPolicy{})
+	sc := createScan(t, ctrl, proj, tgt, legacyPipelineCfg(4), domain.StopPolicy{})
 	if err := ctrl.Start(ctx, sc.ID); err != nil {
 		t.Fatal(err)
 	}

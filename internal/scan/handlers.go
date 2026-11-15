@@ -20,6 +20,9 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 		enum = idorEnum[0]
 	}
 	h := phase0Handlers(c.log)
+	// Built-in OAST collaborator (nil unless the server started one): derived
+	// once per controller and shared by every out-of-band engine below.
+	oastCollab := c.oastCollaborator()
 	// Shared by both executors so Finding correlation (candidate-side upsert
 	// and verification-side update) is race-free across the whole scan — see
 	// newExecutor's doc comment. tokenMu is the same sharing pattern for the
@@ -77,24 +80,36 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	// OS command injection is a bounded raw-HTTP pass. It sends only harmless
 	// arithmetic markers and confirms only two independent executions.
 	commandInjection := newCommandInjectionExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	var cmdCallbackURL, cmdPollURL string
 	if sc != nil {
-		commandInjection.withCallback(sc.Config.CommandInjectionCallbackURL, sc.Config.CommandInjectionCallbackPollURL)
+		cmdCallbackURL, cmdPollURL = sc.Config.CommandInjectionCallbackURL, sc.Config.CommandInjectionCallbackPollURL
 	}
+	// Built-in OAST collaborator, when the server started one and the operator
+	// did not supply this engine's own callback pair (oast_wiring.go).
+	cmdCallbackURL, cmdPollURL = oastCollab.callbackPair(cmdCallbackURL, cmdPollURL)
+	commandInjection.withCallback(cmdCallbackURL, cmdPollURL)
 	h[domain.JobCommandInjection] = commandInjection
 	h[domain.JobSSTI] = newSSTIExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	xxe := newXXEExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	var xxeCallbackURL, xxePollURL string
 	if sc != nil {
-		xxe.withCallback(sc.Config.XXECallbackURL, sc.Config.XXECallbackPollURL)
+		xxeCallbackURL, xxePollURL = sc.Config.XXECallbackURL, sc.Config.XXECallbackPollURL
 	}
+	xxeCallbackURL, xxePollURL = oastCollab.callbackPair(xxeCallbackURL, xxePollURL)
+	xxe.withCallback(xxeCallbackURL, xxePollURL)
 	h[domain.JobXXE] = xxe
 	ssrf := newSSRFExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	var ssrfCallbackURL, ssrfPollURL string
 	if sc != nil {
-		cbURL, pollURL := sc.Config.SSRFCallbackURL, sc.Config.SSRFCallbackPollURL
-		if cbURL == "" {
-			cbURL, pollURL = sc.Config.CommandInjectionCallbackURL, sc.Config.CommandInjectionCallbackPollURL
+		ssrfCallbackURL, ssrfPollURL = sc.Config.SSRFCallbackURL, sc.Config.SSRFCallbackPollURL
+		if ssrfCallbackURL == "" {
+			ssrfCallbackURL, ssrfPollURL = sc.Config.CommandInjectionCallbackURL, sc.Config.CommandInjectionCallbackPollURL
 		}
-		ssrf.withCallback(cbURL, pollURL)
 	}
+	// The built-in collaborator is used here only when its host is one the SSRF
+	// engine's own canary rules accept (ssrfCallbackPair).
+	ssrfCallbackURL, ssrfPollURL = oastCollab.ssrfCallbackPair(ssrfCallbackURL, ssrfPollURL)
+	ssrf.withCallback(ssrfCallbackURL, ssrfPollURL)
 	h[domain.JobSSRF] = ssrf
 	h[domain.JobCORS] = newCORSExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobOpenRedirect] = newOpenRedirectExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)

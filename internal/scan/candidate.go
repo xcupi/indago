@@ -32,6 +32,12 @@ import (
 // source (builtin / llm), so the two remain distinguishable end to end.
 type candidateJob struct {
 	Candidate detection.Candidate `json:"candidate"`
+	// Adaptation, when set, records what the canonical probe responses said
+	// about the target's filter and which response-derived tactic motivated
+	// THIS shape (see waf_escalation.go). It is provenance for an operator —
+	// why a bypass shape was worth trying — never an input to detection, and
+	// it is absent on every canonical candidate job.
+	Adaptation *evasionAdaptation `json:"adaptation,omitempty"`
 }
 
 // parseCandidateJob decodes a candidate from a job's payload. It returns

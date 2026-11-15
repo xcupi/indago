@@ -152,7 +152,7 @@ func (e *executor) Handle(ctx context.Context, job *domain.TestJob) error {
 
 	res := e.run(ctx, job, tc)
 	if e.cfg.Authenticated {
-		e.reportAuthLost(job.ScanID, res.resp)
+		e.reportAuthLost(job.ScanID, tc.URL, res.resp)
 	}
 	if res.outcome == domain.OutcomeError && isOutOfScopeRedirectError(res.err) {
 		res.skipped = true
@@ -345,13 +345,20 @@ func (e *executor) reportBlock(scanID domain.ID, reason string) {
 // reportAuthLost recognizes an authenticated request that ended on the
 // target's login page. A password form is the signal; a redirect chain alone
 // can be a normal public navigation, so the body is checked as well.
-func (e *executor) reportAuthLost(scanID domain.ID, resp *httpengine.Response) {
+//
+// probeURL is the URL this probe itself requested, NOT resp.Request: the
+// scope-enforcing engine follows redirects hop by hop, so resp.Request (and
+// resp.FinalURL) describe the LAST hop. Using the last hop here would treat
+// every "protected page redirects to /login" — the exact signal this detector
+// exists for — as a probe that deliberately targeted the login endpoint, and
+// silently suppress it.
+func (e *executor) reportAuthLost(scanID domain.ID, probeURL string, resp *httpengine.Response) {
 	if e.cfg.OnAuthLost == nil || resp == nil {
 		return
 	}
 	// If the probe itself targeted a login endpoint (e.g. testing GET/POST
 	// /login), receiving the login page is expected, not session expiration.
-	if resp.Request != nil && isLoginPath(resp.Request.URL) {
+	if isLoginPath(probeURL) {
 		return
 	}
 	if !looksLikeLoginResponse(resp) {

@@ -22,6 +22,7 @@ import (
 
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
+	"github.com/indago/indago/internal/fingerprint"
 	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/worker"
@@ -74,6 +75,21 @@ func (e *xxeExecutor) withCallback(url, poll string) {
 
 var _ worker.Handler = (*xxeExecutor)(nil)
 
+// xxeProfile fingerprints an already-fetched baseline response for the XXE
+// gate. It is passive: the observation is handed in, nothing is fetched.
+func xxeProfile(ep *domain.Endpoint, resp *httpengine.Response) fingerprint.Profile {
+	obs := fingerprint.Observation{}
+	if ep != nil {
+		obs.URL = ep.URL
+	}
+	if resp != nil {
+		obs.Status = resp.Status
+		obs.Header = resp.Headers
+		obs.Body = resp.Body
+	}
+	return fingerprint.Analyze(obs)
+}
+
 func isXMLBodyEndpoint(ep *domain.Endpoint) bool {
 	if ep == nil || strings.TrimSpace(ep.RequestBody) == "" {
 		return false
@@ -112,6 +128,14 @@ func (e *xxeExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	baseResp, baseOutcome, _ := e.do(ctx, req)
 	if baseOutcome != domain.OutcomeSuccess || baseResp == nil {
 		return e.finishXXEUnavailable(ctx, job, "baseline XML request did not succeed")
+	}
+	// Passive applicability gate: an XML parser has to be plausibly in play for
+	// THIS endpoint before an entity is sent. The fingerprint reads the baseline
+	// response that was just fetched plus the endpoint's own request shape and
+	// sends nothing; a JSON-only request/response pair with no XML anywhere is
+	// refused here even if the stored content type merely contained "xml".
+	if !fingerprint.ShouldProbeXXE(xxeProfile(ep, baseResp), ep.ContentType, ep.RequestBody) {
+		return e.finishXXEUnavailable(ctx, job, "fingerprint found no XML surface on this endpoint")
 	}
 	d := xxeDetail{Engine: xxeEngine}
 	if ev, err := e.persistEvidence(ctx, job.ScanID, baseResp, "xxe baseline"); err == nil {
@@ -316,8 +340,9 @@ func (c *Controller) enqueueXXEProbes(ctx context.Context, scanID domain.ID) {
 	// whose body is not visible during page load (typically a form that only
 	// submits XML after a click). It is never inferred and never used instead
 	// of an observed body; the normal observed-body candidates below still run.
-	if sc.Config.XXEBodyURL != "" && sc.Config.XXEBody != "" &&
-		sc.Config.XXECallbackURL != "" && sc.Config.XXECallbackPollURL != "" {
+	canConfirm := (sc.Config.XXECallbackURL != "" && sc.Config.XXECallbackPollURL != "") ||
+		c.oastCollaborator() != nil
+	if sc.Config.XXEBodyURL != "" && sc.Config.XXEBody != "" && canConfirm {
 		found := false
 		for _, ep := range eps {
 			if ep != nil && ep.URL == sc.Config.XXEBodyURL && ep.Method == domain.MethodPOST && isXMLBodyEndpoint(ep) {

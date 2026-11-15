@@ -6,8 +6,9 @@ Code: `internal/fingerprint/tech.go`.
 
 **This package sends nothing.** It has no HTTP client, no browser, no socket: it
 reads an `Observation{URL, Status, Header, Body}` that another layer already
-fetched. Wiring it into the scan pipeline is a separate step; nothing in
-`internal/scan` consumes it yet.
+fetched. The SSTI and XXE executors (`internal/scan/ssti.go`,
+`internal/scan/xxe.go`) run the gates over the baseline response they already
+fetched; no other scan path consumes the package yet.
 
 ## Guarantees
 
@@ -87,6 +88,10 @@ hints in order, so a caller can prioritize the matching syntax instead of
 spraying every engine (`PHP → twig/smarty/blade`, `Python → jinja2/django/mako`,
 `Java → freemarker/velocity/spel/thymeleaf`). The list names engines, not payload
 shapes — choosing a `{{7*7}}` vs `<%= %>` vs `${}` shape stays with the caller.
+The SSTI executor does that: `sstiPrioritizedVariants` stable-sorts its existing,
+unchanged variant plan so the recommended engine's shape goes first (Jinja2/Twig
+→ `{{…}}`, Freemarker/EL → `${…}`, ERB/EJS → `<%= … %>`) without dropping a
+candidate.
 
 Every gate is advisory triage, not a scope decision and not a verdict. Gates
 fail *open* on ambiguity (an unlabelled response may still be the vulnerable
@@ -109,8 +114,10 @@ opaque download cannot reflect markup, and a static file server runs no shell).
   document is missed by design.
 - No CDN/edge inventory beyond WAF vendors, no JS-library inventory, no version
   fingerprinting, no active probing — all deliberately out of this slice.
-- Not wired into `internal/scan` yet: no scan behaviour changes with this package
-  alone.
+- Wired into the SSTI and XXE executors only: the gates decide whether a probe is
+  worth a send and which template syntax goes first, and every skip is recorded as
+  a skipped test case with the gate's reason. Other engines still probe
+  unconditionally, and a gate never yields a verdict.
 
 ## Verification
 

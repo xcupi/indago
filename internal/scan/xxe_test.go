@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -104,6 +105,57 @@ func TestXXESkipsNonXMLBodyWithoutPayload(t *testing.T) {
 	}
 	if len(cases) != 1 || cases[0].VulnClass != domain.VulnXXE || cases[0].Status != domain.TestCaseSkipped {
 		t.Fatalf("cases = %+v, want one skipped XXE case", cases)
+	}
+}
+
+// An endpoint whose stored content type merely CONTAINS "xml" is not proof of an
+// XML parser: application/xml-dtd with an HTML fragment in the body passes the
+// structural check above, so the fingerprint gate is what keeps the entity off
+// the wire.
+func TestXXEFingerprintRejectsNonXMLEntitySurface(t *testing.T) {
+	var requests atomic.Int32
+	var entityRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if strings.Contains(string(body), "<!DOCTYPE") {
+			entityRequests.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer target.Close()
+
+	env := newScanEnv(t)
+	ep := &domain.Endpoint{ID: domain.NewID(), ScanID: env.scanID, URL: target.URL + "/legacy",
+		Method: domain.MethodPOST, Source: domain.SourceBrowserNetwork, ContentType: "application/xml-dtd",
+		RequestBody: `<p>hello</p>`, CreatedAt: time.Now()}
+	if err := env.st.Endpoints().Create(context.Background(), ep); err != nil {
+		t.Fatal(err)
+	}
+	ex := newXXEExecutor(env.st, scopedClient(t, openScope()), env.ev,
+		ExecutorConfig{AllowStateChanging: true, SkipWriteEndpoints: false}, execLog(), nil)
+	ex.withCallback("http://127.0.0.1:1", "http://127.0.0.1:1/poll")
+	job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobXXE,
+		Target: domain.JobTarget{EndpointID: ep.ID, URL: ep.URL}, Attempts: 1, MaxAttempts: 1}
+	if err := ex.Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if got := entityRequests.Load(); got != 0 {
+		t.Fatalf("endpoint received %d entity payloads, want 0", got)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("endpoint received %d requests, want the baseline only", got)
+	}
+	cases, err := env.st.TestCases().ListByScan(context.Background(), env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cases) != 1 || cases[0].VulnClass != domain.VulnXXE || cases[0].Status != domain.TestCaseSkipped {
+		t.Fatalf("cases = %+v, want one skipped XXE case", cases)
+	}
+	if !strings.Contains(cases[0].Note, "no XML surface") {
+		t.Fatalf("skip note = %q, want the fingerprint's XML-surface reason", cases[0].Note)
 	}
 }
 

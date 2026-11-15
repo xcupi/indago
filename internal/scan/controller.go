@@ -167,6 +167,16 @@ type Options struct {
 	// rejection does NOT auto-pause: that is the evidence that can justify the
 	// separately bounded evasion pass. Off by default for tests.
 	AutoPauseOnBlock bool
+
+	// OAST, when non-nil, is the built-in out-of-band collaborator the server
+	// started for this process (CLI: `indago serve -oast-addr`). Scan engines
+	// that confirm a vulnerability by callback (SSRF, XXE, command injection)
+	// then get a callback base URL plus the collaborator's loopback poll API
+	// automatically, instead of requiring an operator to register with a
+	// third-party service. An engine keeps its own operator-configured callback
+	// pair when one is set — see oast_wiring.go. Nil (the default) leaves every
+	// engine with exactly the configuration it had before.
+	OAST OASTCollaborator
 }
 
 func (o Options) withDefaults() Options {
@@ -213,6 +223,12 @@ type Controller struct {
 	// refresh can never overwrite a concurrent state change with stale data.
 	// Lock order: mu → scanMu (never the reverse).
 	scanMu sync.Mutex
+
+	// oastOnce/oastCollab cache the built-in OAST collaborator wiring derived
+	// from Options.OAST (oast_wiring.go), so one derivation serves every scan
+	// this controller runs and the derivation's diagnostics are logged once.
+	oastOnce   sync.Once
+	oastCollab *oastWiring
 }
 
 // NewController builds a controller. A nil logger uses slog.Default.

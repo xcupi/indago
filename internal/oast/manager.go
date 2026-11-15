@@ -18,7 +18,9 @@
 //     bounded body, and the listener answers with a fixed inert canary. A
 //     DNS-style bridge (an operator's wildcard DNS, tunnel or proxy forwarding
 //     hits) feeds the same correlated records through RecordHit with
-//     Protocol "dns".
+//     Protocol "dns". PollURL adds a loopback-only read API over those records,
+//     so an engine that only knows how to poll a URL for its own marker can
+//     confirm a hit without any external service (poll.go).
 //   - Interactsh mode registers with any interactsh-compatible server,
 //     generates a unique per-probe subdomain, polls on demand, decrypts the
 //     server's RSA/AES payloads and records the resulting interactions.
@@ -380,6 +382,14 @@ type Manager struct {
 	changed      chan struct{} // closed and replaced on every new interaction
 
 	pollMu sync.Mutex // serializes external polls
+
+	// The loopback poll API (poll.go): started on demand by PollURL, so a
+	// Manager used only for its callback listener never opens a second socket.
+	pollOnce  sync.Once
+	pollSrvMu sync.Mutex
+	poll      *pollServer
+	pollURL   string
+	pollErr   error
 
 	listener net.Listener
 	server   *http.Server
@@ -852,11 +862,24 @@ func (m *Manager) Dropped() uint64 {
 // BaseURL is the local listener base URL, or the configured OAST server.
 func (m *Manager) BaseURL() string { return m.baseURL }
 
+// ListenAddr is the local listener's bound address ("127.0.0.1:37553") in
+// local mode, or "" in interactsh mode, where there is no local listener. It
+// is the address actually bound, so an ephemeral port (":0") is resolved.
+func (m *Manager) ListenAddr() string {
+	if m.listener == nil {
+		return ""
+	}
+	return m.listener.Addr().String()
+}
+
 // Close stops the local listener (gracefully, for in-flight callbacks) and is
-// idempotent.
+// idempotent. The loopback poll API, if it was started, stops with it.
 func (m *Manager) Close() error {
 	m.closeOnce.Do(func() {
 		close(m.closed)
+		if err := m.closePoll(); err != nil && m.closeErr == nil {
+			m.closeErr = err
+		}
 		if m.server != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

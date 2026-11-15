@@ -78,7 +78,11 @@ func interrupt(t *testing.T, s *recoverySite) (dbPath string, scanID domain.ID) 
 	defer release()
 	ctrl1 := newCtrl(t, db, q, scan.Options{Handlers: handlers})
 
-	sc := createScan(t, ctrl1, proj, tgt, workersCfg(2), domain.StopPolicy{})
+	// legacyPipelineCfg keeps the fixture's job graph to the one-job-per-
+	// endpoint/injection-point graph TestRestartRecoversAndResumesScan
+	// independently re-derives (the Wave-1 SSRF/CORS/OpenRedirect/GraphQL
+	// probes have their own tests and their own enqueue heuristics).
+	sc := createScan(t, ctrl1, proj, tgt, legacyPipelineCfg(2), domain.StopPolicy{})
 	if err := ctrl1.Start(ctx, sc.ID); err != nil {
 		t.Fatal(err)
 	}

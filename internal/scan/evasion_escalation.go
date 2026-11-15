@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/indago/indago/internal/detection"
@@ -18,6 +19,12 @@ type evasionEscalationSource struct {
 	parent          *domain.TestJob
 	report          *detection.ReflectionReport
 	techniqueQueued map[string]bool
+	// canonical holds each planned canonical candidate's persisted TestCase in
+	// plan order. Their Detail carries the candidate's own request/response
+	// evidence references, which the response-driven analyzer reads to decide
+	// which bypass shapes the target's answers actually justify (see
+	// waf_escalation.go).
+	canonical []*domain.TestCase
 }
 
 // enqueueEvasionEscalationCandidates enqueues a single, bounded filter-bypass
@@ -25,6 +32,12 @@ type evasionEscalationSource struct {
 // without a confirmed Reflected-XSS finding. It runs from execution.evaluate's
 // quiet tick, so no canonical candidate or browser-verification job is still
 // pending when this decision is made.
+//
+// The pass is response-driven: each canonical candidate's stored
+// request/response evidence is analysed (waf_escalation.go) and the resulting
+// tactics reorder the documented shapes the planner produced, never widen the
+// set. A response that asked for backpressure (429/503, or Retry-After on a
+// failed probe) suppresses the whole point.
 //
 // An explicit EnableEvasion scan retains its established behavior: it already
 // planned the bypass set at the start, so this fallback must not duplicate it.
@@ -67,11 +80,40 @@ func (c *Controller) enqueueEvasionEscalationCandidates(ctx context.Context, sca
 		if !c.evasionEscalationCanVerify(ctx, src.parent) {
 			continue
 		}
+		// What the canonical probes' own responses said about the target's
+		// filter. Nothing is sent here: it is a pure analysis of evidence the
+		// scan already stored (see waf_escalation.go).
+		analysis := c.escalationAdaptation(ctx, src)
+		if analysis.BackoffRequired {
+			// 429/503 (or a Retry-After on a failed probe) is the target
+			// asking for less traffic, not a judgement on the payload. The
+			// findingDetail.Throttled gate above only covers points where a
+			// block diagnostic was persisted; this veto also covers the
+			// canonical probes that were throttled without one.
+			c.log.Info("evasion escalation: skipped, target asked for backoff",
+				"scan", scanID, "injection_point", src.parent.Target.InjectionPointID,
+				"probes", analysis.Probes, "reason", analysis.Reason)
+			continue
+		}
+		if analysis.observed() {
+			c.log.Info("evasion escalation: response adaptation",
+				"scan", scanID, "injection_point", src.parent.Target.InjectionPointID,
+				"probes", analysis.Probes,
+				"waf_vendor", analysis.WAFVendor,
+				"blocked", analysis.Blocked,
+				"block_signal", analysis.BlockSignal,
+				"sanitized", strings.Join(analysis.Sanitized, ","),
+				"escaped", strings.Join(analysis.Escaped, ","),
+				"tactics", strings.Join(analysis.Tactics, ","))
+		}
 		candidates := detection.EvasionEscalationCandidates(src.report, detection.PlanOptions{
 			ScanID:           scanID,
 			InjectionPointID: src.parent.Target.InjectionPointID,
 			Profile:          profile,
 		})
+		// Response evidence only REORDERS the documented shapes: the set of
+		// DedupKeys is unchanged, so restart reconciliation still works.
+		candidates = rankEvasionCandidatesByAdaptation(candidates, analysis)
 		for _, cand := range candidates {
 			// A restart can happen after only a prefix of the pass was
 			// persisted. The durable queue is the ledger: retain every existing
@@ -81,7 +123,9 @@ func (c *Controller) enqueueEvasionEscalationCandidates(ctx context.Context, sca
 			if src.techniqueQueued[cand.DedupKey] {
 				continue
 			}
-			if c.enqueueEvasionEscalationCandidate(ctx, src.parent, cand) {
+			priority := evasionCandidatePriority(cand, analysis.tactics)
+			matched := matchingEvasionTactics(cand, analysis.tactics)
+			if c.enqueueEvasionEscalationCandidate(ctx, src.parent, cand, priority, analysis.forCandidate(matched)) {
 				n++
 			}
 		}
@@ -99,13 +143,14 @@ func (c *Controller) enqueueEvasionEscalationCandidates(ctx context.Context, sca
 // reason to send more target-facing requests.
 func selectEvasionEscalationSources(cases []*domain.TestCase, jobs []*domain.TestJob, findings []*domain.Finding) []evasionEscalationSource {
 	jobsByID := make(map[domain.ID]*domain.TestJob, len(jobs))
-	completedTestCase := make(map[domain.ID]bool, len(cases))
+	completedCase := make(map[domain.ID]*domain.TestCase, len(cases))
 	for _, tc := range cases {
 		if tc != nil && tc.Status == domain.TestCaseCompleted && tc.Outcome == domain.OutcomeSuccess {
-			completedTestCase[tc.JobID] = true
+			completedCase[tc.JobID] = tc
 		}
 	}
 	canonicalSucceeded := map[domain.ID]map[string]bool{}
+	canonicalCases := map[domain.ID]map[string]*domain.TestCase{}
 	techniqueQueued := map[domain.ID]map[string]bool{}
 	malformedInjection := map[domain.ID]bool{}
 	malformedUnattributed := false
@@ -143,13 +188,15 @@ func selectEvasionEscalationSources(cases []*domain.TestCase, jobs []*domain.Tes
 			techniqueQueued[job.Target.InjectionPointID][cand.DedupKey] = true
 			continue
 		}
-		if cand.Variation != "" || cand.Combined || job.State != domain.JobSucceeded || !completedTestCase[job.ID] {
+		if cand.Variation != "" || cand.Combined || job.State != domain.JobSucceeded || completedCase[job.ID] == nil {
 			continue
 		}
 		if canonicalSucceeded[job.Target.InjectionPointID] == nil {
 			canonicalSucceeded[job.Target.InjectionPointID] = map[string]bool{}
+			canonicalCases[job.Target.InjectionPointID] = map[string]*domain.TestCase{}
 		}
 		canonicalSucceeded[job.Target.InjectionPointID][cand.DedupKey] = true
+		canonicalCases[job.Target.InjectionPointID][cand.DedupKey] = completedCase[job.ID]
 	}
 	// An unattributable malformed candidate record means the stored plan cannot
 	// be trusted at all: skip escalation for the whole scan.
@@ -204,11 +251,20 @@ func selectEvasionEscalationSources(cases []*domain.TestCase, jobs []*domain.Tes
 		// persisted in creation order, but sort below makes the result stable
 		// even for store implementations that do not promise that ordering.
 		if _, exists := byInjection[tc.InjectionPointID]; !exists {
-			byInjection[tc.InjectionPointID] = evasionEscalationSource{
+			src := evasionEscalationSource{
 				parent:          parent,
 				report:          report,
 				techniqueQueued: techniqueQueued[tc.InjectionPointID],
 			}
+			// Attach the plan's canonical candidate test cases in plan order,
+			// so the response-driven analyzer reads exactly the probes this
+			// plan sent — never an arbitrary older/newer attempt.
+			for _, cand := range report.Plan.Candidates {
+				if c := canonicalCases[tc.InjectionPointID][cand.DedupKey]; c != nil {
+					src.canonical = append(src.canonical, c)
+				}
+			}
+			byInjection[tc.InjectionPointID] = src
 		}
 	}
 
@@ -267,11 +323,11 @@ func allCanonicalCandidatesSucceeded(plan *detection.CandidatePlan, completed ma
 	return n > 0
 }
 
-func (c *Controller) enqueueEvasionEscalationCandidate(ctx context.Context, parent *domain.TestJob, cand detection.Candidate) bool {
+func (c *Controller) enqueueEvasionEscalationCandidate(ctx context.Context, parent *domain.TestJob, cand detection.Candidate, priority int, adapt *evasionAdaptation) bool {
 	if parent == nil || cand.Technique == "" {
 		return false
 	}
-	payload, err := json.Marshal(candidateJob{Candidate: cand})
+	payload, err := json.Marshal(candidateJob{Candidate: cand, Adaptation: adapt})
 	if err != nil {
 		c.log.Warn("evasion escalation: marshal candidate", "scan", parent.ScanID, "candidate", cand.DedupKey, "err", err)
 		return false
@@ -286,7 +342,7 @@ func (c *Controller) enqueueEvasionEscalationCandidate(ctx context.Context, pare
 		ScanID:      parent.ScanID,
 		Type:        domain.JobTest,
 		State:       domain.JobQueued,
-		Priority:    cand.Priority,
+		Priority:    priority,
 		Target:      parent.Target,
 		Payload:     payload,
 		MaxAttempts: maxAttempts,

@@ -225,6 +225,7 @@ Read the design docs:
 - [`docs/reports.md`](docs/reports.md) — report formats and templates
 - [`docs/ai.md`](docs/ai.md) — providers, OAuth, advisory boundaries
 - [`docs/bounty.md`](docs/bounty.md) — YesWeHack import and submission
+- [`docs/oast.md`](docs/oast.md) — built-in OAST collaborator (`-oast-addr`) and its poll API
 - [`docs/feature-review.md`](docs/feature-review.md) — coverage scoreboard and gaps
 
 ---

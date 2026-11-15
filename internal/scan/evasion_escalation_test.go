@@ -33,9 +33,14 @@ func completedEscalationJob(t *testing.T, q queue.Queue, scanID domain.ID, job *
 
 // evasionController has a real (test-double) verifier rather than the default
 // no-browser Stub. Automatic escalation is only meaningful when a candidate
-// could still produce the product's deterministic confirmation signal.
+// could still produce the product's deterministic confirmation signal. The
+// evidence store is the same one the executor uses, so the response-driven
+// analyzer reads exactly the blobs a real run would have persisted.
 func evasionController(env *scanEnv, q queue.Queue) *Controller {
-	return NewController(env.st, q, execLog(), "test", Options{Verification: &fakeVerifier{result: rejectedResult()}})
+	return NewController(env.st, q, execLog(), "test", Options{
+		Verification: &fakeVerifier{result: rejectedResult()},
+		Evidence:     env.ev,
+	})
 }
 
 func escalationParent(t *testing.T, env *scanEnv, q queue.Queue, ep *domain.Endpoint, ip *domain.InjectionPoint) (*domain.TestJob, *detection.ReflectionReport) {

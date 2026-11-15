@@ -32,7 +32,7 @@ func TestScanExecutesEveryJobAndPersistsResults(t *testing.T) {
 	proj, tgt := seedProject(t, st, s.URL, hostScope())
 	ctrl := newCtrl(t, st, q, scan.Options{Evidence: ev})
 
-	sc := createScan(t, ctrl, proj, tgt, workersCfg(4), domain.StopPolicy{})
+	sc := createScan(t, ctrl, proj, tgt, legacyPipelineCfg(4), domain.StopPolicy{})
 	if err := ctrl.Start(ctx, sc.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestScanExecutesPostWhenAllowed(t *testing.T) {
 	proj, tgt := seedProject(t, st, s.URL, hostScope())
 	ctrl := newCtrl(t, st, q, scan.Options{Executor: scan.ExecutorConfig{AllowStateChanging: true}})
 
-	sc := createScan(t, ctrl, proj, tgt, workersCfg(2), domain.StopPolicy{})
+	sc := createScan(t, ctrl, proj, tgt, legacyPipelineCfg(2), domain.StopPolicy{})
 	if err := ctrl.Start(ctx, sc.ID); err != nil {
 		t.Fatal(err)
 	}

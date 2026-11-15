@@ -773,6 +773,24 @@ silently regain interaction-only or known-neutralized bypass shapes; `standard`
 retains the documented allow-list techniques for labs 8–11. The fallback does
 not change canonical profile selection or initial-plan semantics.
 
+**Response-driven ordering (same set, evidence-ordered).** Within that bounded
+set, the automatic fallback reads each canonical candidate's stored
+request/response evidence and runs `AnalyzeResponseAdaptation`
+(`internal/scan/waf_adaptive.go`, pure) over it, comparing against the stored
+baseline when one exists. The merged tactics then order the shapes the pass
+enqueues and the queue priority each one gets, so a primitive the response just
+proved it rewrites is not retried first: a stripped `<script>` promotes the
+`svg`/`onload` shapes, and a stripped `onload`/`onerror` promotes the
+alternative-handler shapes (`onfocus`, `ontoggle`, …). A probe answered 429/503
+— or carrying `Retry-After` on a failed response — vetoes the whole point even
+when no block-diagnostic Finding recorded the throttle. The observed
+`WAFVendor`, `sanitized`/`escaped` signals and the per-shape matched tactic ids
+are logged and carried in the `adaptation` metadata of each enqueued job. The
+SET is unchanged: response evidence can only reorder documented Technique
+candidates (the same `DedupKey`s are enqueued, so restart reconciliation still
+applies), it never adds a shape, and a point whose evidence is absent keeps the
+planner's exact order and priorities.
+
 **Fixture proof (`internal/detection/evasion_filter_test.go`).** Each lab is
 reproduced as an allow-list over tag names and `on*` attributes, driven through
 a real HTML tokenizer:

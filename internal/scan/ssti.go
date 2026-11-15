@@ -19,12 +19,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
+	"github.com/indago/indago/internal/fingerprint"
 	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/store"
 	"github.com/indago/indago/internal/worker"
@@ -45,11 +48,15 @@ type sstiDetail struct {
 	Parameter      string               `json:"parameter"`
 	Location       domain.ParamLocation `json:"location"`
 	BaselineStatus int                  `json:"baseline_status,omitempty"`
-	Attempts       []sstiAttempt        `json:"attempts,omitempty"`
-	ConfirmedCount int                  `json:"confirmed_count"`
-	Verdict        domain.Verdict       `json:"verdict"`
-	Reason         string               `json:"reason,omitempty"`
-	EvidenceIDs    []domain.ID          `json:"evidence_ids,omitempty"`
+	// TemplateEngines is the fingerprint's ordered engine recommendation for the
+	// baseline response. It drives which payload shape is probed first and is
+	// recorded so a reader can see why that order was chosen.
+	TemplateEngines []string       `json:"template_engines,omitempty"`
+	Attempts        []sstiAttempt  `json:"attempts,omitempty"`
+	ConfirmedCount  int            `json:"confirmed_count"`
+	Verdict         domain.Verdict `json:"verdict"`
+	Reason          string         `json:"reason,omitempty"`
+	EvidenceIDs     []domain.ID    `json:"evidence_ids,omitempty"`
 }
 
 type sstiExecutor struct {
@@ -137,10 +144,12 @@ func sstiContextVariants(baseValue string) []sstiVariant {
 	}
 }
 
-// sstiSupportedFamilies is a passive applicability gate. It only returns
-// families when the baseline response carries a technology fingerprint that
-// makes a template engine plausible. An unknown stack is skipped rather than
-// sprayed with template syntax; the user explicitly asked for that behavior.
+// sstiSupportedFamilies is the local marker table: it only returns families
+// when the baseline response carries a technology marker that makes a template
+// engine plausible. sstiStackFor consults it as a fallback when the shared
+// fingerprint catalog recognises nothing, so an unmodelled stack does not turn
+// a reachable injection point into a silent skip. An unknown stack with no
+// marker at all is still skipped rather than sprayed with template syntax.
 func sstiSupportedFamilies(resp *httpengine.Response) map[string]string {
 	supported := map[string]string{}
 	if resp == nil {
@@ -178,6 +187,206 @@ func sstiSupportedFamilies(resp *httpengine.Response) map[string]string {
 		add(sstiFamilyRuby, "Ruby/Rails application fingerprint")
 	}
 	return supported
+}
+
+// Payload shapes — the delimiter pair a template engine evaluates. Every shape
+// below already exists in sstiVariants; the tables that follow only decide which
+// of them is tried first, they never add a payload.
+const (
+	sstiSyntaxMustache = "mustache" // {{7*7}}
+	sstiSyntaxDollar   = "dollar"   // ${7*7}
+	sstiSyntaxHash     = "hash"     // #{7*7}
+	sstiSyntaxStar     = "star"     // *{7*7}
+	sstiSyntaxErb      = "erb"      // <%= 7*7 %>
+	sstiSyntaxSmarty   = "smarty"   // {7*7}
+	sstiSyntaxVelocity = "velocity" // #set($indago=7*7)$indago
+)
+
+// sstiFamilyDotNet carries a detected .NET stack. No Razor variant exists yet,
+// so families built only from it end up probing nothing and the point is
+// reported as skipped rather than sprayed with another engine's syntax.
+const sstiFamilyDotNet = "dotnet"
+
+// sstiEngineShape ties a fingerprint template-engine name to the variant family
+// that can express it and to the payload shapes worth trying for it, most
+// likely first (Jinja2/Twig → "{{…}}", Freemarker/EL → "${…}", ERB/EJS →
+// "<%= … %>").
+type sstiEngineShape struct {
+	family string
+	syntax []string
+}
+
+var sstiEngineShapes = map[string]sstiEngineShape{
+	fingerprint.TplJinja2:     {family: sstiFamilyPython, syntax: []string{sstiSyntaxMustache}},
+	fingerprint.TplDjango:     {family: sstiFamilyPython, syntax: []string{sstiSyntaxMustache}},
+	fingerprint.TplMako:       {family: sstiFamilyPython, syntax: []string{sstiSyntaxDollar}},
+	fingerprint.TplTwig:       {family: sstiFamilyPHP, syntax: []string{sstiSyntaxMustache}},
+	fingerprint.TplSmarty:     {family: sstiFamilyPHP, syntax: []string{sstiSyntaxSmarty, sstiSyntaxMustache}},
+	fingerprint.TplBlade:      {family: sstiFamilyPHP, syntax: []string{sstiSyntaxMustache}},
+	fingerprint.TplERB:        {family: sstiFamilyRuby, syntax: []string{sstiSyntaxErb}},
+	fingerprint.TplHaml:       {family: sstiFamilyRuby, syntax: []string{sstiSyntaxErb}},
+	fingerprint.TplFreemarker: {family: sstiFamilyJava, syntax: []string{sstiSyntaxDollar, sstiSyntaxHash}},
+	fingerprint.TplVelocity:   {family: sstiFamilyJava, syntax: []string{sstiSyntaxVelocity, sstiSyntaxDollar}},
+	fingerprint.TplSpEL:       {family: sstiFamilyJava, syntax: []string{sstiSyntaxDollar, sstiSyntaxStar, sstiSyntaxHash}},
+	fingerprint.TplThymeleaf:  {family: sstiFamilyJava, syntax: []string{sstiSyntaxStar, sstiSyntaxDollar}},
+	fingerprint.TplEJS:        {family: sstiFamilyNode, syntax: []string{sstiSyntaxErb, sstiSyntaxMustache}},
+	fingerprint.TplHandlebars: {family: sstiFamilyNode, syntax: []string{sstiSyntaxMustache}},
+	fingerprint.TplNunjucks:   {family: sstiFamilyNode, syntax: []string{sstiSyntaxMustache}},
+	fingerprint.TplPug:        {family: sstiFamilyNode, syntax: []string{sstiSyntaxHash}},
+	// Mustache is language-agnostic; "{{…}}" is already carried by the PHP and
+	// Node families, so either one can express it.
+	fingerprint.TplMustache: {family: sstiFamilyPHP, syntax: []string{sstiSyntaxMustache}},
+	fingerprint.TplRazor:    {family: sstiFamilyDotNet},
+}
+
+// sstiStack is the passive applicability decision for one injection point:
+// whether a template probe is worth a request, which engine families the
+// response supports, the recommended engine order, and — when the answer is no —
+// why.
+type sstiStack struct {
+	probe    bool
+	engines  []string
+	families map[string]string
+	reason   string
+}
+
+// sstiStackFor runs the shared fingerprint gate over an ALREADY-FETCHED
+// baseline response; it sends nothing. Analysis is the only source of the
+// engine recommendation: this layer does not guess syntax, it elects which
+// existing variant family to try first.
+//
+// The gate is authoritative whenever it has positive evidence that the response
+// is not a rendered document: a static asset, a binary body, a cache reply and a
+// serialized JSON reply with no engine named all suppress the probe. When the
+// catalog recognises nothing at all, the local markers in sstiSupportedFamilies
+// are still consulted — an unmodelled stack must not silently turn a reachable
+// injection point into a skip — and only a complete absence of evidence skips
+// (the historical behaviour).
+func sstiStackFor(url string, resp *httpengine.Response) sstiStack {
+	stack := sstiStack{families: map[string]string{}}
+	if resp == nil {
+		stack.reason = "no baseline response"
+		return stack
+	}
+	prof := fingerprint.Analyze(fingerprint.Observation{
+		URL:    url,
+		Status: resp.Status,
+		Header: resp.Headers,
+		Body:   resp.Body,
+	})
+	// Checked first so the local fallback below can never re-enable a probe on a
+	// body that cannot be rendered at all.
+	if prof.Status == http.StatusNotModified || prof.StaticAsset || prof.ContentKind == fingerprint.KindBinary {
+		stack.reason = "baseline response is a static asset, a binary body or a cache reply"
+		return stack
+	}
+	ok, engines := fingerprint.ShouldProbeSSTI(prof)
+	local := sstiSupportedFamilies(resp)
+	switch {
+	case ok:
+		stack.probe = true
+		stack.engines = engines
+		// The union keeps the local markers' coverage (a bare product word, a
+		// Passenger header) while the engine families add what the shared
+		// catalog spotted. Membership only: order is not observable here.
+		for family, evidence := range local {
+			stack.families[family] = evidence
+		}
+		for family, evidence := range sstiFamiliesForEngines(engines) {
+			if _, seen := stack.families[family]; !seen {
+				stack.families[family] = evidence
+			}
+		}
+	case prof.ContentKind == fingerprint.KindJSON:
+		// ShouldProbeSSTI only refuses JSON after checking for explicit engine
+		// evidence, so reaching this case means there is none: serialized data
+		// with no template surface. Any other refusal (a client-rendered shell)
+		// falls through to the local markers instead, which stays fail-open.
+		stack.reason = "baseline is serialized JSON with no template engine evidence"
+	case len(local) == 0:
+		stack.reason = "no supported template stack fingerprint"
+	default:
+		stack.probe = true
+		stack.families = local
+	}
+	return stack
+}
+
+// sstiFamiliesForEngines maps a fingerprint engine recommendation onto the
+// variant families that can express it.
+func sstiFamiliesForEngines(engines []string) map[string]string {
+	families := make(map[string]string, len(engines))
+	for _, engine := range engines {
+		shape, ok := sstiEngineShapes[strings.ToLower(strings.TrimSpace(engine))]
+		if !ok || shape.family == "" {
+			continue
+		}
+		if _, seen := families[shape.family]; !seen {
+			families[shape.family] = "template engine " + shape.family + " detected (" + engine + ")"
+		}
+	}
+	return families
+}
+
+// sstiVariantSyntax names the payload shape a variant uses. It is derived from
+// the delimiters themselves, so the tag can never drift from what is sent.
+func sstiVariantSyntax(v sstiVariant) string {
+	switch {
+	case strings.Contains(v.prefix, "<%="):
+		return sstiSyntaxErb
+	case strings.Contains(v.prefix, "#set("):
+		return sstiSyntaxVelocity
+	case strings.HasSuffix(v.prefix, "{{"):
+		return sstiSyntaxMustache
+	case strings.HasSuffix(v.prefix, "${"):
+		return sstiSyntaxDollar
+	case strings.HasSuffix(v.prefix, "#{"):
+		return sstiSyntaxHash
+	case strings.HasSuffix(v.prefix, "*{"):
+		return sstiSyntaxStar
+	case strings.HasSuffix(v.prefix, "{"):
+		return sstiSyntaxSmarty
+	}
+	return ""
+}
+
+// sstiShapeRank turns the recommended engine order into a shape priority: a
+// shape named earlier by an earlier engine sorts first.
+func sstiShapeRank(engines []string) map[string]int {
+	rank := make(map[string]int, 4)
+	for _, engine := range engines {
+		shape, ok := sstiEngineShapes[strings.ToLower(strings.TrimSpace(engine))]
+		if !ok {
+			continue
+		}
+		for i, syntax := range shape.syntax {
+			if current, seen := rank[syntax]; !seen || i < current {
+				rank[syntax] = i
+			}
+		}
+	}
+	return rank
+}
+
+// sstiPrioritizedVariants stable-sorts a filtered plan so the shapes the
+// detected engines actually evaluate come first. It only reorders: no variant is
+// dropped, and shapes no engine recommends keep their relative order behind the
+// recommended ones.
+func sstiPrioritizedVariants(variants []sstiVariant, engines []string) []sstiVariant {
+	rank := sstiShapeRank(engines)
+	if len(rank) == 0 || len(variants) < 2 {
+		return variants
+	}
+	out := make([]sstiVariant, len(variants))
+	copy(out, variants)
+	score := func(v sstiVariant) int {
+		if r, ok := rank[sstiVariantSyntax(v)]; ok {
+			return r
+		}
+		return len(rank) + 1
+	}
+	sort.SliceStable(out, func(i, j int) bool { return score(out[i]) < score(out[j]) })
+	return out
 }
 
 func sstiFilteredVariants(variants []sstiVariant, supported map[string]string) []sstiVariant {
@@ -236,11 +445,15 @@ func (e *sstiExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	baseEvidence, _ := e.persistEvidence(ctx, job.ScanID, baseResp, "ssti baseline")
 	d.EvidenceIDs = append(d.EvidenceIDs, baseEvidence...)
 	baseBody := string(baseResp.Body)
-	supported := sstiSupportedFamilies(baseResp)
-	if len(supported) == 0 {
-		return e.finishSSTIUnavailable(ctx, job, started, ep, "no supported template stack fingerprint")
+	stack := sstiStackFor(ep.URL, baseResp)
+	if !stack.probe {
+		return e.finishSSTIUnavailable(ctx, job, started, ep, stack.reason)
 	}
-	variants := sstiFilteredVariants(sstiVariants(), supported)
+	d.TemplateEngines = stack.engines
+	variants := sstiPrioritizedVariants(sstiFilteredVariants(sstiVariants(), stack.families), stack.engines)
+	if len(variants) == 0 {
+		return e.finishSSTIUnavailable(ctx, job, started, ep, "no template probe shape for the detected stack")
+	}
 
 	confirmedValues := map[string]bool{}
 	for _, v := range variants {
@@ -282,7 +495,8 @@ func (e *sstiExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	}
 
 	if len(confirmedValues) < 2 {
-		for _, v := range sstiFilteredVariants(sstiContextVariants(baseValue), supported) {
+		contextVariants := sstiPrioritizedVariants(sstiFilteredVariants(sstiContextVariants(baseValue), stack.families), stack.engines)
+		for _, v := range contextVariants {
 			key := v.prefix + v.expected
 			if _, already := confirmedValues[key]; already {
 				continue
