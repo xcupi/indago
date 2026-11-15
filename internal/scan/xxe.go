@@ -3,11 +3,31 @@ package scan
 // XML external entity (XXE) engine.
 //
 // XXE is only applicable to an endpoint whose observed request body is XML and
-// whose parser is asked to resolve an external entity. The engine never guesses
-// an XML endpoint or sprays XML at a form/JSON route: discovery must have
-// captured an XML request body in the browser network, and the operator must
-// provide a callback. The entity itself is a marker-only callback; no local
-// file is read and no target data is exfiltrated.
+// whose parser resolves entities. The engine never guesses an XML endpoint or
+// sprays XML at a form/JSON route: discovery must have captured an XML request
+// body in the browser network, or the operator must have supplied one.
+//
+// Two confirmation signals exist. Both are marker-only — no local file is read,
+// no response data is exfiltrated and nothing on the target changes:
+//
+//  1. In-band (default, no collaborator needed): the DOCTYPE internal subset
+//     declares a harmless INTERNAL entity (<!ENTITY indago_x "indagox">) and
+//     the document references it. A parser that expands DTD entities replaces
+//     the reference with the literal value, which the application can only
+//     hand back to us through its own response. Confirmation needs TWO
+//     INDEPENDENT markers (separate requests, separately randomized names and
+//     values) and a strict non-reflection check: a response that carries the
+//     entity NAME (which exists only in the declaration we sent) is treated as
+//     an echo of our payload, never as expansion.
+//  2. Out-of-band (only when the operator configured a callback+poll URL): an
+//     EXTERNAL entity pointing at the collaborator. This remains the only path
+//     that detects a parser which resolves external entities without ever
+//     reflecting document content, so it is preserved whenever configured and
+//     used after in-band produced no signal.
+//
+// The in-band probe cannot become a resource-exhaustion payload: it declares
+// two single-level entities holding short hex literals, never a SYSTEM or
+// PUBLIC resource, and never nests one entity inside another.
 
 import (
 	"context"
@@ -28,22 +48,41 @@ import (
 	"github.com/indago/indago/internal/worker"
 )
 
-const xxeEngine = "xxe"
+const (
+	xxeEngine = "xxe"
+
+	// xxeModeInBand / xxeModeOutOfBand record which signal produced a verdict
+	// so a triager can tell a fully local proof from a collaborator hit.
+	xxeModeInBand    = "in_band"
+	xxeModeOutOfBand = "out_of_band"
+)
 
 var xxeRootRe = regexp.MustCompile(`<([A-Za-z_][A-Za-z0-9_.:-]*)(\s[^>]*)?>`)
 
+// xxeAttempt is one out-of-band probe.
 type xxeAttempt struct {
 	Payload  string `json:"payload"`
 	Status   int    `json:"status,omitempty"`
 	Callback bool   `json:"callback"`
 }
 
+// xxeInBandAttempt is one document-internal entity probe.
+type xxeInBandAttempt struct {
+	Payload   string `json:"payload"`
+	Entity    string `json:"entity,omitempty"`
+	Status    int    `json:"status,omitempty"`
+	Expanded  bool   `json:"expanded"`
+	Reflected bool   `json:"raw_markup_reflected,omitempty"`
+}
+
 type xxeDetail struct {
-	Engine      string         `json:"engine"`
-	Attempts    []xxeAttempt   `json:"attempts,omitempty"`
-	Verdict     domain.Verdict `json:"verdict"`
-	Reason      string         `json:"reason,omitempty"`
-	EvidenceIDs []domain.ID    `json:"evidence_ids,omitempty"`
+	Engine      string             `json:"engine"`
+	Mode        string             `json:"mode,omitempty"`
+	Attempts    []xxeAttempt       `json:"attempts,omitempty"`
+	InBand      []xxeInBandAttempt `json:"in_band,omitempty"`
+	Verdict     domain.Verdict     `json:"verdict"`
+	Reason      string             `json:"reason,omitempty"`
+	EvidenceIDs []domain.ID        `json:"evidence_ids,omitempty"`
 }
 
 type xxeExecutor struct {
@@ -72,6 +111,8 @@ func (e *xxeExecutor) withCallback(url, poll string) {
 	e.callback = strings.TrimSpace(url)
 	e.poll = strings.TrimSpace(poll)
 }
+
+func (e *xxeExecutor) hasCallback() bool { return e.callback != "" && e.poll != "" }
 
 var _ worker.Handler = (*xxeExecutor)(nil)
 
@@ -116,9 +157,6 @@ func (e *xxeExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	if e.cfg.SkipWriteEndpoints || !e.cfg.AllowStateChanging {
 		return e.finishXXEUnavailable(ctx, job, "state-changing XML endpoint skipped by policy")
 	}
-	if e.callback == "" || e.poll == "" {
-		return e.finishXXEUnavailable(ctx, job, "no XXE callback configured")
-	}
 	req := &httpengine.Request{
 		Method:      string(ep.Method),
 		URL:         ep.URL,
@@ -141,6 +179,159 @@ func (e *xxeExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	if ev, err := e.persistEvidence(ctx, job.ScanID, baseResp, "xxe baseline"); err == nil {
 		d.EvidenceIDs = append(d.EvidenceIDs, ev...)
 	}
+	baseBody := string(baseResp.Body)
+
+	// Phase 1: in-band, document-internal entities. Deterministic and local to
+	// the target, so it runs even when no collaborator is configured.
+	inBand := e.tryInBand(ctx, job, ep, req, baseBody, &d)
+	if inBand.Confirmed {
+		d.Mode = xxeModeInBand
+		d.Verdict = domain.VerdictConfirmed
+		d.Reason = "the XML parser expanded two independent document-internal entities"
+		e.persistXXECase(ctx, job, d, domain.TestCaseCompleted, domain.OutcomeSuccess,
+			"confirmed document-internal entity expansion")
+		e.correlateXXE(ctx, job, ep, d)
+		return nil
+	}
+
+	// Phase 2: out-of-band, only when the operator configured a collaborator.
+	// This is the only signal that survives a parser which resolves external
+	// entities without reflecting document content.
+	if e.hasCallback() {
+		return e.tryOutOfBand(ctx, job, ep, req, &d)
+	}
+
+	switch {
+	case inBand.Sent == 0:
+		// The document has no place to put an entity reference (e.g. a
+		// self-closing root and no callback configured to test externally).
+		return e.finishXXEUnavailable(ctx, job, "XML body has no injectable root element")
+	case inBand.Failed == inBand.Sent && inBand.Sent > 0:
+		d.Verdict = domain.VerdictInconclusive
+		d.Reason = "in-band entity probes did not complete"
+		e.persistXXECase(ctx, job, d, domain.TestCaseCompleted, domain.OutcomeError, "xxe in-band probe did not complete")
+		return nil
+	case inBand.Expanded == 1:
+		// One expansion is real but not independent: a second marker is required
+		// before calling the endpoint an XXE finding.
+		d.Verdict = domain.VerdictInconclusive
+		d.Reason = "one document-internal entity was expanded; a second independent marker is required"
+		e.persistXXECase(ctx, job, d, domain.TestCaseCompleted, domain.OutcomeSuccess, "one document-internal entity expanded; not enough to confirm")
+		return nil
+	case inBand.Reflected:
+		d.Verdict = domain.VerdictRejected
+		d.Reason = "the endpoint echoed the XML markup without expanding the entity, and no callback is configured"
+	default:
+		d.Verdict = domain.VerdictRejected
+		d.Reason = "no document-internal entity expansion observed and no external callback configured"
+	}
+	e.persistXXECase(ctx, job, d, domain.TestCaseCompleted, domain.OutcomeSuccess, "no XML entity expansion observed")
+	return nil
+}
+
+// xxeInBandResult summarizes the internal-entity probes of one job.
+type xxeInBandResult struct {
+	Confirmed bool
+	Reflected bool // the endpoint returned our declaration markup instead of parsing it
+	Sent      int
+	Expanded  int // probes whose entity was actually expanded
+	Failed    int // probes whose request did not complete successfully
+}
+
+// xxeEntityProbe is one harmless document-internal entity: a random name and a
+// random marker value, both unique to this request.
+type xxeEntityProbe struct {
+	Name  string
+	Value string
+}
+
+func newXXEEntityProbe() xxeEntityProbe {
+	// The name and the value are deliberately different strings: the NAME exists
+	// only in the declaration we send, so seeing it proves the response echoed
+	// our markup, while the VALUE can only appear once the reference is expanded.
+	token := markerToken("")
+	return xxeEntityProbe{Name: "indago_" + token, Value: "indago" + token}
+}
+
+// tryInBand sends at most two internal-entity probes. Each probe carries its
+// own randomly named entity and its own random value in a separate request, so
+// two confirmations cannot come from one expansion or from a page that happens
+// to contain a number. A response that returns our declaration markup stops the
+// loop: a second probe would be echoed exactly the same way.
+func (e *xxeExecutor) tryInBand(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, req *httpengine.Request, baseBody string, d *xxeDetail) xxeInBandResult {
+	var res xxeInBandResult
+	expanded := 0
+	for i := 0; i < 2; i++ {
+		probe := newXXEEntityProbe()
+		payload, ok := injectXXEInternal(ep.RequestBody, probe)
+		if !ok {
+			return res
+		}
+		attempt := xxeInBandAttempt{Payload: truncate(payload, 300), Entity: probe.Name}
+		body := *req
+		body.Body = []byte(payload)
+		resp, outcome, _ := e.do(ctx, &body)
+		res.Sent++
+		if resp != nil {
+			attempt.Status = resp.Status
+			if ev, err := e.persistEvidence(ctx, job.ScanID, resp, "xxe in-band entity "+probe.Name); err == nil {
+				d.EvidenceIDs = append(d.EvidenceIDs, ev...)
+			}
+		}
+		if outcome != domain.OutcomeSuccess || resp == nil {
+			res.Failed++
+			d.InBand = append(d.InBand, attempt)
+			continue
+		}
+		got := string(resp.Body)
+		// The entity NAME only exists in the declaration we sent: a response
+		// that carries it echoed our payload (raw or escaped) rather than
+		// expanding it, so it is never evidence and never worth a second probe.
+		if xxeMarkupEchoed(got, probe) {
+			attempt.Reflected = true
+			res.Reflected = true
+			d.InBand = append(d.InBand, attempt)
+			return res
+		}
+		if xxeEntityExpanded(got, baseBody, probe) {
+			attempt.Expanded = true
+			expanded++
+			res.Expanded = expanded
+		}
+		d.InBand = append(d.InBand, attempt)
+		if expanded >= 2 {
+			res.Confirmed = true
+			return res
+		}
+	}
+	return res
+}
+
+// xxeMarkupEchoed reports whether the response returned the entity NAME we
+// declared. An expanded entity leaves only its value behind, so the presence of
+// the name means the endpoint handed back the markup instead of parsing it.
+func xxeMarkupEchoed(body string, p xxeEntityProbe) bool {
+	return strings.Contains(body, p.Name)
+}
+
+// xxeEntityExpanded reports whether respBody carries the probe's literal marker
+// value in a response that did not echo the declaration and in a body that did
+// not already contain it. The value is random per request, so its presence can
+// only be explained by the parser substituting the entity reference.
+func xxeEntityExpanded(respBody, baseBody string, p xxeEntityProbe) bool {
+	if respBody == "" || !strings.Contains(respBody, p.Value) {
+		return false
+	}
+	if strings.Contains(baseBody, p.Value) {
+		return false
+	}
+	return !xxeMarkupEchoed(respBody, p)
+}
+
+// tryOutOfBand sends the external-entity probe and polls the collaborator. Used
+// only when the operator configured both a callback and a poll URL.
+func (e *xxeExecutor) tryOutOfBand(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, req *httpengine.Request, d *xxeDetail) error {
+	d.Mode = xxeModeOutOfBand
 	marker := fmt.Sprintf("indago-xxe-%d", time.Now().UnixNano()%1000000000)
 	callback := strings.TrimRight(e.callback, "/") + "/" + marker
 	payload, ok := injectXXE(ep.RequestBody, callback)
@@ -148,8 +339,9 @@ func (e *xxeExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 		return e.finishXXEUnavailable(ctx, job, "XML body has no injectable root element")
 	}
 	attempt := xxeAttempt{Payload: truncate(payload, 300)}
-	req.Body = []byte(payload)
-	resp, outcome, _ := e.do(ctx, req)
+	probe := *req
+	probe.Body = []byte(payload)
+	resp, outcome, _ := e.do(ctx, &probe)
 	if resp != nil {
 		attempt.Status = resp.Status
 		if ev, err := e.persistEvidence(ctx, job.ScanID, resp, "xxe entity request"); err == nil {
@@ -160,7 +352,7 @@ func (e *xxeExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	if outcome != domain.OutcomeSuccess {
 		d.Verdict = domain.VerdictInconclusive
 		d.Reason = "XXE request did not complete"
-		e.persistXXECase(ctx, job, d, domain.TestCaseCompleted, domain.OutcomeError, "xxe request did not complete")
+		e.persistXXECase(ctx, job, *d, domain.TestCaseCompleted, domain.OutcomeError, "xxe request did not complete")
 		return nil
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -186,47 +378,163 @@ func (e *xxeExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 			d.Attempts = append(d.Attempts, attempt)
 			d.Verdict = domain.VerdictConfirmed
 			d.Reason = "the XML parser resolved an external entity and called the collaborator"
-			e.persistXXECase(ctx, job, d, domain.TestCaseCompleted, domain.OutcomeSuccess, "confirmed XML external entity processing")
-			e.correlateXXE(ctx, job, ep, d)
+			e.persistXXECase(ctx, job, *d, domain.TestCaseCompleted, domain.OutcomeSuccess, "confirmed XML external entity processing")
+			e.correlateXXE(ctx, job, ep, *d)
 			return nil
 		}
 	}
 	d.Verdict = domain.VerdictRejected
 	d.Reason = "no external entity callback observed"
-	e.persistXXECase(ctx, job, d, domain.TestCaseCompleted, domain.OutcomeSuccess, "no external entity callback observed")
+	expanded := 0
+	for _, a := range d.InBand {
+		if a.Expanded {
+			expanded++
+		}
+	}
+	if expanded == 1 {
+		// The parser did expand one internal entity, so a negative verdict would
+		// overstate the evidence; it just never produced a second independent
+		// marker or an out-of-band hit.
+		d.Verdict = domain.VerdictInconclusive
+		d.Reason = "one document-internal entity was expanded, but no second independent marker and no external callback confirmed it"
+	}
+	e.persistXXECase(ctx, job, *d, domain.TestCaseCompleted, domain.OutcomeSuccess, "no external entity callback observed")
 	return nil
 }
 
+// injectXXE inserts an EXTERNAL entity declaration pointing at the collaborator
+// and places its reference right after the root element's opening tag.
 func injectXXE(body, callback string) (string, bool) {
-	loc := xxeRootRe.FindStringIndex(body)
-	if loc == nil {
+	out, ok := injectXMLDTD(body, `<!ENTITY xxe SYSTEM "`+xmlEntityEscape(callback)+`">`)
+	if !ok {
 		return "", false
 	}
-	root := xxeRootRe.FindStringSubmatch(body)
-	if len(root) < 2 {
+	return injectXMLRefAfterRoot(out, "&xxe;")
+}
+
+// injectXXEInternal inserts one INTERNAL entity — a short literal, never a
+// file or a URL — and places its reference where a parser is most likely to
+// hand the resolved value back: the first text-only element if the document has
+// one, otherwise the root element's own content.
+func injectXXEInternal(body string, p xxeEntityProbe) (string, bool) {
+	decl := `<!ENTITY ` + p.Name + ` "` + xmlEntityEscape(p.Value) + `">`
+	out, ok := injectXMLDTD(body, decl)
+	if !ok {
 		return "", false
 	}
-	name := root[1]
-	open := body[loc[0]:loc[1]]
-	if strings.HasSuffix(strings.TrimSpace(open), "/>") {
+	ref := "&" + p.Name + ";"
+	if leaf, ok := injectXMLRefIntoLeaf(out, ref); ok {
+		return leaf, true
+	}
+	return injectXMLRefAfterRoot(out, ref)
+}
+
+// injectXMLDTD adds a DTD internal subset carrying one markup declaration. An
+// existing DOCTYPE is reused (the declaration goes inside its internal subset)
+// instead of emitting a second, invalid DOCTYPE.
+func injectXMLDTD(body, declaration string) (string, bool) {
+	if idx := strings.Index(body, "<!DOCTYPE"); idx >= 0 {
+		open, close, end := xxeInternalSubset(body, idx)
+		if end < 0 {
+			return "", false
+		}
+		switch {
+		case open >= 0 && close > open:
+			return body[:close] + declaration + body[close:], true
+		case open >= 0:
+			return "", false // unterminated internal subset: never guess a repair
+		default:
+			return body[:end] + " [" + declaration + "]" + body[end:], true
+		}
+	}
+	m := xxeRootRe.FindStringSubmatchIndex(body)
+	if m == nil {
 		return "", false
 	}
-	doctype := "<!DOCTYPE " + name + " [<!ENTITY xxe SYSTEM \"" + xmlEntityEscape(callback) + "\">]>"
-	insert := loc[0]
-	trimmed := strings.TrimSpace(body)
-	if strings.HasPrefix(trimmed, "<?xml") {
+	name := body[m[2]:m[3]]
+	insert := m[0]
+	if strings.HasPrefix(strings.TrimSpace(body), "<?xml") {
 		if idx := strings.Index(body, "?>"); idx >= 0 {
 			insert = idx + 2
 		}
 	}
-	out := body[:insert] + doctype + body[insert:]
-	// Re-find the root opening tag after the doctype insert.
-	loc = xxeRootRe.FindStringIndex(out)
+	doctype := "<!DOCTYPE " + name + " [" + declaration + "]>"
+	return body[:insert] + doctype + body[insert:], true
+}
+
+// xxeInternalSubset locates a DOCTYPE's internal subset and its end offset. It
+// tracks bracket depth and quotes so a '>' inside a markup declaration is not
+// mistaken for the end of the DOCTYPE.
+func xxeInternalSubset(body string, start int) (open, close, end int) {
+	open, close, end = -1, -1, -1
+	depth := 0
+	var quote byte
+	for i := start; i < len(body); i++ {
+		c := body[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+		case '[':
+			if depth == 0 && open < 0 {
+				open = i
+			}
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				close = i
+			}
+		case '>':
+			if depth <= 0 {
+				return open, close, i
+			}
+		}
+	}
+	return open, close, end
+}
+
+// injectXMLRefAfterRoot places the entity reference as the root element's first
+// content node.
+func injectXMLRefAfterRoot(body, ref string) (string, bool) {
+	loc := xxeRootRe.FindStringIndex(body)
 	if loc == nil {
 		return "", false
 	}
-	out = out[:loc[1]] + "&xxe;" + out[loc[1]:]
-	return out, true
+	if strings.HasSuffix(strings.TrimSpace(body[loc[0]:loc[1]]), "/>") {
+		return "", false // self-closing root has no content to put a reference in
+	}
+	return body[:loc[1]] + ref + body[loc[1]:], true
+}
+
+// injectXMLRefIntoLeaf replaces the text of the first text-only element with the
+// entity reference. A leaf value is the shape an application most often echoes
+// back, which makes in-band confirmation observable without a collaborator.
+func injectXMLRefIntoLeaf(body, ref string) (string, bool) {
+	for _, m := range xxeRootRe.FindAllStringSubmatchIndex(body, -1) {
+		if strings.HasSuffix(strings.TrimSpace(body[m[0]:m[1]]), "/>") {
+			continue
+		}
+		name := body[m[2]:m[3]]
+		rest := body[m[1]:]
+		if strings.HasPrefix(rest, "<") {
+			continue // nested content or an empty element, not a text leaf
+		}
+		idx := strings.Index(rest, "</"+name+">")
+		if idx <= 0 {
+			continue
+		}
+		if text := rest[:idx]; strings.Contains(text, "<") {
+			continue
+		}
+		return body[:m[1]] + ref + rest[idx:], true
+	}
+	return "", false
 }
 
 func xmlEntityEscape(s string) string {
@@ -311,11 +619,17 @@ func (e *xxeExecutor) correlateXXE(ctx context.Context, job *domain.TestJob, ep 
 	}
 	now := time.Now()
 	detail, _ := json.Marshal(d)
+	title := "XML entity expansion in an XML request body"
+	summary := "An observed XML request body made the server's XML parser expand two document-internal entities and return their values. No local file or network resource was involved."
+	if d.Mode == xxeModeOutOfBand {
+		title = "XML external entity processing in an XML request body"
+		summary = "An observed XML request body caused the server to resolve an external entity and call the collaborator."
+	}
 	f := &domain.Finding{
 		ID: domain.NewID(), ScanID: job.ScanID, ProjectID: scan.ProjectID,
 		VulnClass: domain.VulnXXE, Verdict: domain.VerdictConfirmed,
 		Severity: domain.SeverityHigh, Confidence: domain.ConfidenceHigh,
-		Title: "XML external entity processing", Summary: "An observed XML request body caused the server to resolve an external entity and call the collaborator.",
+		Title: title, Summary: summary,
 		EndpointID: ep.ID, EvidenceIDs: d.EvidenceIDs, Detail: detail,
 		Provenance: domain.Provenance{Engine: xxeEngine, DiscoverySource: ep.Source, DetectedAt: now},
 		CreatedAt:  now, UpdatedAt: now,
@@ -340,9 +654,9 @@ func (c *Controller) enqueueXXEProbes(ctx context.Context, scanID domain.ID) {
 	// whose body is not visible during page load (typically a form that only
 	// submits XML after a click). It is never inferred and never used instead
 	// of an observed body; the normal observed-body candidates below still run.
-	canConfirm := (sc.Config.XXECallbackURL != "" && sc.Config.XXECallbackPollURL != "") ||
-		c.oastCollaborator() != nil
-	if sc.Config.XXEBodyURL != "" && sc.Config.XXEBody != "" && canConfirm {
+	// A collaborator is no longer required for the body to be useful: the
+	// in-band internal-entity probe confirms expansion on its own.
+	if sc.Config.XXEBodyURL != "" && sc.Config.XXEBody != "" {
 		found := false
 		for _, ep := range eps {
 			if ep != nil && ep.URL == sc.Config.XXEBodyURL && ep.Method == domain.MethodPOST && isXMLBodyEndpoint(ep) {

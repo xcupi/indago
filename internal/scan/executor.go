@@ -3,6 +3,8 @@ package scan
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1102,6 +1104,19 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// markerToken returns a short, unguessable, template-safe ASCII token. Engines
+// that need a marker to travel through a parser or a template expression append
+// it to the probe so the string they expect back cannot be produced by echoing
+// the payload, by a numeric dashboard that already renders the bare result, or
+// by a cached page.
+func markerToken(prefix string) string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return prefix + fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return prefix + hex.EncodeToString(b[:])
 }
 
 // ---------------------------------------------------------------------------

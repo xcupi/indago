@@ -246,7 +246,10 @@ type ScanConfig struct {
 	// template-evaluated result, not a shell-expanded marker.
 	EnableSSTI bool `json:"enable_ssti,omitempty"`
 	// EnableXXE opts into XML external-entity probing. It only runs against
-	// observed XML request bodies and requires an operator callback.
+	// observed (or operator-supplied) XML request bodies. In-band
+	// document-internal entity expansion is confirmed without a collaborator;
+	// the callback URL, when configured, adds out-of-band detection for parsers
+	// that never reflect document content.
 	EnableXXE          bool   `json:"enable_xxe,omitempty"`
 	XXECallbackURL     string `json:"xxe_callback_url,omitempty"`
 	XXECallbackPollURL string `json:"xxe_callback_poll_url,omitempty"`

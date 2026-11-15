@@ -82,8 +82,8 @@ func classifySkip(note string) skipReason {
 		return skipReason{"tls_redirect_mismatch", sevInfo, "HTTP/HTTPS redirect could not be followed on this port",
 			"The site redirects to a scheme the service does not serve on that port. The endpoint remains untested; this is a coverage gap, not a negative result."}
 	case strings.Contains(n, "xxe skipped:"):
-		return skipReason{"xxe_not_applicable", sevInfo, "XXE skipped: no observed XML input or callback",
-			"XXE was enabled, but discovery had no XML request body for this endpoint or no collaborator callback was configured. The engine intentionally did not guess an XML parser or send an XML payload."}
+		return skipReason{"xxe_not_applicable", sevInfo, "XXE skipped: no observed XML input",
+			"XXE was enabled, but discovery had no XML request body for this endpoint. The engine intentionally did not guess an XML parser or send an XML payload."}
 	case strings.Contains(n, "no supported template stack fingerprint"):
 		return skipReason{"ssti_not_applicable", sevInfo, "SSTI skipped: no supported template stack fingerprint",
 			"The baseline response did not identify a template-engine stack (for example PHP/Twig, Java/Spring, Express, Django/Flask, or Rails). The engine intentionally sent no template payloads to an unknown stack."}
@@ -272,7 +272,7 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 	}
 	if !st.Scan.Config.EnableXXE {
 		out.Warnings = append(out.Warnings, coverageWarning{"xxe_disabled", sevInfo,
-			"XXE was not enabled for this scan; its XML-body callback pass was intentionally not run."})
+			"XXE was not enabled for this scan; its XML-body entity-expansion pass was intentionally not run."})
 	} else if len(out.Capabilities) > 8 && out.Capabilities[8].Tests == 0 {
 		out.Warnings = append(out.Warnings, coverageWarning{"xxe_no_applicable_endpoints", sevInfo,
 			"XXE was enabled, but discovery captured no XML request body; no XML parser was guessed or attacked."})

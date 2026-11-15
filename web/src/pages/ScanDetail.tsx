@@ -374,7 +374,7 @@ export default function ScanDetail({ id }: { id: string }) {
               ["disclosure", "Information disclosure", "Sensitive files, SCM/git exposure and error probes."],
               ["command", "OS command injection", "Opt-in marker probes; confirms two independent executions."],
               ["ssti", "Server-side template injection", "Opt-in arithmetic template probes; confirms two independent evaluations."],
-              ["xxe", "XML external entity", "Opt-in XML-body probes; only observed XML endpoints with a callback."],
+              ["xxe", "XML external entity", "Opt-in XML-body probes; confirms in-band entity expansion, and uses your callback when one is set."],
             ].map(([key, label, hint]) => (
               <label key={key} className="flex items-start justify-between gap-4 rounded-md border border-border p-3">
                 <span>
