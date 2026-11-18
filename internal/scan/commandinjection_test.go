@@ -158,3 +158,112 @@ func TestCommandInjectionRefreshParamsSkipsTimedOutAndMissingSources(t *testing.
 		t.Fatalf("unrelatedHits = %d, want 2 (once for ep1, once for ep2; ep1 second call negatively cached)", unrelatedHits.Load())
 	}
 }
+
+// A baseline the target refuses before evaluating the parameter must not be
+// followed by the bounded payload set: the gate, not the payload, decides the
+// response, and recording that as "no output" would read as a negative result
+// for a sink that was never reached.
+func TestCommandInjectionSkipsProbesWhenBaselineIsDenied(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"status":403,"error":"Forbidden","message":"safety acknowledgement required"}`)
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/CommandInjection/task2/run", domain.MethodPOST)
+	focus := env.param(ep, "base", domain.LocationForm, "")
+	ip := env.injection(ep, focus)
+	ex := newCommandInjectionExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{AllowStateChanging: true}, execLog(), nil)
+	job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobCommandInjection,
+		Target: domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID, URL: ep.URL}, Attempts: 1, MaxAttempts: 2}
+	if err := ex.Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("requests = %d, want 1 (baseline only; a denied baseline must not be probed)", got)
+	}
+	cases, err := env.st.TestCases().ListByScan(context.Background(), env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *domain.TestCase
+	for _, tc := range cases {
+		if tc.VulnClass == domain.VulnCommandInjection {
+			got = tc
+		}
+	}
+	if got == nil {
+		t.Fatal("no command-injection test case recorded")
+	}
+	if got.Status != domain.TestCaseSkipped {
+		t.Fatalf("status = %q, want skipped (a gated baseline is not a completed test)", got.Status)
+	}
+	if got.HTTPStatus != http.StatusForbidden {
+		t.Fatalf("http_status = %d, want 403", got.HTTPStatus)
+	}
+	if !strings.Contains(got.Note, "baseline was denied") || !strings.Contains(got.Note, "HTTP 403") {
+		t.Fatalf("note = %q, want the gate and status", got.Note)
+	}
+	if len(got.EvidenceIDs) == 0 {
+		t.Fatal("baseline evidence was not attached to the skipped case")
+	}
+}
+
+// 400 is deliberately NOT a gate: targets commonly reject the baseline's shape
+// but process a payload, so the engine must still probe.
+func TestCommandInjectionProbesWhenBaselineIsABadRequest(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, "bad request")
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/search", domain.MethodPOST)
+	focus := env.param(ep, "q", domain.LocationForm, "1")
+	ip := env.injection(ep, focus)
+	ex := newCommandInjectionExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{AllowStateChanging: true}, execLog(), nil)
+	job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobCommandInjection,
+		Target: domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID, URL: ep.URL}, Attempts: 1, MaxAttempts: 2}
+	if err := ex.Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	if hits.Load() < 2 {
+		t.Fatalf("requests = %d, want more than the baseline (a 400 baseline must still be probed)", hits.Load())
+	}
+	cases, err := env.st.TestCases().ListByScan(context.Background(), env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		if tc.VulnClass == domain.VulnCommandInjection && tc.Status != domain.TestCaseCompleted {
+			t.Fatalf("status = %q, want completed for a 400 baseline", tc.Status)
+		}
+	}
+}
+
+func TestCommandInjectionBaselineGateStatuses(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		if gate, gated := commandInjectionGateFor(status); !gated || gate.Note != "baseline was denied" {
+			t.Errorf("status %d = (%+v, %v), want a denied gate", status, gate, gated)
+		}
+	}
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusGone} {
+		if gate, gated := commandInjectionGateFor(status); !gated || gate.Note != "baseline was unavailable" {
+			t.Errorf("status %d = (%+v, %v), want an unavailable gate", status, gate, gated)
+		}
+	}
+	for _, status := range []int{http.StatusOK, http.StatusBadRequest, http.StatusInternalServerError, http.StatusTooManyRequests} {
+		if gate, gated := commandInjectionGateFor(status); gated {
+			t.Errorf("status %d = gated (%+v), want probed", status, gate)
+		}
+	}
+}

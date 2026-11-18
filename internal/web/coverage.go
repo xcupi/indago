@@ -104,6 +104,12 @@ func classifySkip(note string) skipReason {
 	case strings.Contains(n, "no supported template stack fingerprint"):
 		return skipReason{"ssti_not_applicable", sevInfo, "SSTI skipped: no supported template stack fingerprint",
 			"The baseline response did not identify a template-engine stack (for example PHP/Twig, Java/Spring, Express, Django/Flask, or Rails). The engine intentionally sent no template payloads to an unknown stack."}
+	case strings.Contains(n, "baseline was denied"):
+		return skipReason{"endpoint_gated", sevMedium, "Endpoint refused the unmutated request (authorization or prerequisite gate)",
+			"The endpoint answered 401/403 before the parameter was evaluated, so no payload was sent. Complete the required login or acknowledgement in the scan's own session and re-run; this is a coverage gap, not a negative result."}
+	case strings.Contains(n, "baseline was unavailable"):
+		return skipReason{"endpoint_unavailable", sevInfo, "Endpoint does not serve this method/path",
+			"The endpoint answered 404/405/410 to the unmutated request, so the command-injection payload set was not sent. Usually a discovery artifact (a form action or method the site does not serve); not a negative result."}
 	case strings.Contains(n, "source not tested:"):
 		return skipReason{"source_not_applicable", sevInfo, "DOM source had nothing to test on this endpoint",
 			"No query parameter, storage key or other input of that kind was found on the endpoint. Usually expected."}
