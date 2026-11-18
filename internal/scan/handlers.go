@@ -127,6 +127,11 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	ssrfCallbackURL, ssrfPollURL = oastCollab.ssrfCallbackPair(ssrfCallbackURL, ssrfPollURL)
 	ssrf.withCallback(ssrfCallbackURL, ssrfPollURL)
 	h[domain.JobSSRF] = ssrf
+	// Path traversal / local file inclusion is a bounded READ-ONLY pass: it
+	// asks the endpoint for /etc/passwd or windows\win.ini and confirms only
+	// when the file's own multi-token content comes back over a clean baseline
+	// and a clean nonexistent-path control.
+	h[domain.JobPathTraversal] = newPathTraversalExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobCORS] = newCORSExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobOpenRedirect] = newOpenRedirectExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobGraphQL] = newGraphQLExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
@@ -203,6 +208,7 @@ func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 		domain.JobSQLi:             noop(domain.JobSQLi),
 		domain.JobXXE:              noop(domain.JobXXE),
 		domain.JobSSRF:             noop(domain.JobSSRF),
+		domain.JobPathTraversal:    noop(domain.JobPathTraversal),
 		domain.JobCORS:             noop(domain.JobCORS),
 		domain.JobOpenRedirect:     noop(domain.JobOpenRedirect),
 		domain.JobGraphQL:          noop(domain.JobGraphQL),

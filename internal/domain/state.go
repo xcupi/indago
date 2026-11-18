@@ -286,12 +286,19 @@ const (
 	JobOpenRedirect JobType = "open_redirect"
 	// JobGraphQL probes one endpoint for safe GraphQL misconfigurations.
 	JobGraphQL JobType = "graphql"
+	// JobPathTraversal probes one injection point for path traversal / local
+	// file inclusion. It is strictly READ-ONLY: a bounded payload set asks the
+	// endpoint to read /etc/passwd or windows\win.ini, and a finding is
+	// confirmed only when the response carries the file's own multi-token
+	// content, which an untouched baseline and a nonexistent-path control did
+	// NOT produce. See internal/scan/pathtraversal.go.
+	JobPathTraversal JobType = "path_traversal"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal:
 		return true
 	default:
 		return false

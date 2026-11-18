@@ -11,11 +11,109 @@ import (
 )
 
 const (
-	maxSSRFProbes         = 80
+	maxSSRFProbes          = 80
+	maxPathTraversalProbes = 80
+	// maxPathSegmentSkips bounds the path-segment points queued ONLY to record
+	// why they cannot be tested. They must never consume the budget the
+	// testable query/form points need, so they are queued after those and
+	// under their own small cap.
+	maxPathSegmentSkips   = 10
 	maxCORSProbes         = 60
 	maxOpenRedirectProbes = 80
 	maxGraphQLProbes      = 20
 )
+
+// enqueuePathTraversalProbes queues one bounded JobPathTraversal per eligible
+// file/page-selector injection point. The pass is READ-ONLY: every payload asks
+// the endpoint to return a well-known system file (see pathtraversal.go).
+func (c *Controller) enqueuePathTraversalProbes(ctx context.Context, scanID domain.ID) {
+	sc, err := c.store.Scans().Get(ctx, scanID)
+	if err != nil || sc.Config.SkipPathTraversal {
+		return
+	}
+	ips, err := c.store.InjectionPoints().ListByScan(ctx, scanID)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	queued, skipped := 0, 0
+	enqueue := func(ip *domain.InjectionPoint) bool {
+		ep, err := c.store.Endpoints().Get(ctx, ip.EndpointID)
+		if err != nil || ep == nil {
+			return false
+		}
+		params, err := c.store.Parameters().ListByEndpoint(ctx, ep.ID)
+		if err != nil {
+			return false
+		}
+		var focus *domain.Parameter
+		for _, p := range params {
+			if p.ID == ip.ParameterID {
+				focus = p
+				break
+			}
+		}
+		if focus == nil || isDynamicTokenName(focus.Name) || !ptCandidate(ep, focus) {
+			return false
+		}
+		payload, _ := json.Marshal(map[string]string{
+			"endpoint_id":  string(ep.ID),
+			"parameter_id": string(focus.ID),
+		})
+		job := &domain.TestJob{
+			ID:          domain.NewID(),
+			ScanID:      scanID,
+			Type:        domain.JobPathTraversal,
+			State:       domain.JobQueued,
+			Priority:    45,
+			Target:      domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID, URL: ep.URL},
+			Payload:     payload,
+			MaxAttempts: 2,
+			AvailableAt: now,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		if err := c.queue.Enqueue(ctx, job); err != nil {
+			c.log.Warn("path traversal: enqueue", "scan", scanID, "err", err)
+			return false
+		}
+		return true
+	}
+
+	// Testable points first: a query/form parameter can actually deliver a path.
+	var pathPoints []*domain.InjectionPoint
+	for _, ip := range ips {
+		if queued >= maxPathTraversalProbes {
+			break
+		}
+		if ip == nil || !ptInjectableLocation(ip.Location) {
+			continue
+		}
+		if ip.Location == domain.LocationPath {
+			pathPoints = append(pathPoints, ip)
+			continue
+		}
+		if enqueue(ip) {
+			queued++
+		}
+	}
+	// Path-segment points can only ever be recorded as a skip (the scope
+	// validator refuses traversal shapes in a request path), so they are
+	// queued last, under their own cap, and never at the cost of a testable
+	// point.
+	for _, ip := range pathPoints {
+		if skipped >= maxPathSegmentSkips {
+			break
+		}
+		if enqueue(ip) {
+			skipped++
+		}
+	}
+	queued += skipped
+	if queued > 0 {
+		c.log.Info("path traversal probes: enqueued", "scan", scanID, "jobs", queued)
+	}
+}
 
 // enqueueSSRFProbes queues one bounded JobSSRF per eligible URL/callback-like
 // injection point.

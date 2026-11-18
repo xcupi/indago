@@ -49,12 +49,18 @@ const (
 	VulnCORS VulnClass = "cors"
 	// VulnGraphQL is GraphQL introspection/batching/error/CSRF exposure.
 	VulnGraphQL VulnClass = "graphql"
+	// VulnPathTraversal is path traversal / local file inclusion: a parameter
+	// value reaches a filesystem path and makes the server read a file outside
+	// the directory the endpoint intended. Confirmed only from the file's own
+	// content, never by an LLM. The engine is read-only: it never writes,
+	// uploads or executes anything. See internal/scan/pathtraversal.go.
+	VulnPathTraversal VulnClass = "path_traversal"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal:
 		return true
 	default:
 		return false

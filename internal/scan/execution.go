@@ -108,6 +108,9 @@ type execution struct {
 	xxePassDone atomic.Bool
 	// ssrfPassDone marks the one-time non-destructive SSRF pass.
 	ssrfPassDone atomic.Bool
+	// pathTraversalPassDone marks the one-time read-only path traversal /
+	// local file inclusion pass.
+	pathTraversalPassDone atomic.Bool
 	// corsPassDone marks the one-time read-only CORS misconfiguration pass.
 	corsPassDone atomic.Bool
 	// openRedirectPassDone marks the one-time server-side open redirect pass.
@@ -730,6 +733,13 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		ex.ssrfPassDone.Store(true)
 		if !sc.Config.SkipSSRF {
 			c.enqueueSSRFProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.pathTraversalPassDone.Load() {
+		ex.pathTraversalPassDone.Store(true)
+		if !sc.Config.SkipPathTraversal {
+			c.enqueuePathTraversalProbes(ctx, ex.scanID)
 			passes = true
 		}
 	}

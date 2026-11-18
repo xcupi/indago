@@ -110,6 +110,9 @@ func classifySkip(note string) skipReason {
 	case strings.Contains(n, "baseline was unavailable"):
 		return skipReason{"endpoint_unavailable", sevInfo, "Endpoint does not serve this method/path",
 			"The endpoint answered 404/405/410 to the unmutated request, so the command-injection payload set was not sent. Usually a discovery artifact (a form action or method the site does not serve); not a negative result."}
+	case strings.Contains(n, "path-segment injection point"):
+		return skipReason{"path_segment_not_testable", sevInfo, "Path traversal cannot be delivered through a URL path segment",
+			"The scope validator refuses dot segments, encoded slashes, NUL bytes and duplicate slashes in a request path (it fails closed), so no traversal payload can reach a path-segment injection point. Query and form parameters on the same endpoint are still tested."}
 	case strings.Contains(n, "source not tested:"):
 		return skipReason{"source_not_applicable", sevInfo, "DOM source had nothing to test on this endpoint",
 			"No query parameter, storage key or other input of that kind was found on the endpoint. Usually expected."}
@@ -225,6 +228,7 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		{"open_redirect", "Open redirect", !cfg.SkipOpenRedirect || !cfg.SkipDOMXSS,
 			"Covers the server-side redirect probe and the client-side DOM engine.", domain.VulnOpenRedirect},
 		{"ssrf", "Server-side request forgery", !cfg.SkipSSRF, "", domain.VulnSSRF},
+		{"path_traversal", "Path traversal / file inclusion", !cfg.SkipPathTraversal, "", domain.VulnPathTraversal},
 		{"cors", "CORS misconfiguration", !cfg.SkipCORS, "", domain.VulnCORS},
 		{"graphql", "GraphQL", !cfg.SkipGraphQL, "", domain.VulnGraphQL},
 		{"command_injection", "OS command injection", cfg.EnableCommandInjection, "", domain.VulnCommandInjection},

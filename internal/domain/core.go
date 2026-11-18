@@ -311,15 +311,19 @@ type ScanConfig struct {
 	// behavior for every existing scan); true omits that engine's jobs while
 	// leaving discovery and the other engines intact. OMIT the DOM switch to
 	// also omit the client-side open-redirect probe, which rides that pass.
-	SkipReflectedXSS    bool   `json:"skip_reflected_xss,omitempty"`
-	SkipDOMXSS          bool   `json:"skip_dom_xss,omitempty"`
-	SkipAccessControl   bool   `json:"skip_access_control,omitempty"`
-	SkipIDOR            bool   `json:"skip_idor,omitempty"`
-	SkipInfoDisclosure  bool   `json:"skip_info_disclosure,omitempty"`
-	SkipSSRF            bool   `json:"skip_ssrf,omitempty"`
-	SkipCORS            bool   `json:"skip_cors,omitempty"`
-	SkipOpenRedirect    bool   `json:"skip_open_redirect,omitempty"`
-	SkipGraphQL         bool   `json:"skip_graphql,omitempty"`
+	SkipReflectedXSS   bool `json:"skip_reflected_xss,omitempty"`
+	SkipDOMXSS         bool `json:"skip_dom_xss,omitempty"`
+	SkipAccessControl  bool `json:"skip_access_control,omitempty"`
+	SkipIDOR           bool `json:"skip_idor,omitempty"`
+	SkipInfoDisclosure bool `json:"skip_info_disclosure,omitempty"`
+	SkipSSRF           bool `json:"skip_ssrf,omitempty"`
+	SkipCORS           bool `json:"skip_cors,omitempty"`
+	SkipOpenRedirect   bool `json:"skip_open_redirect,omitempty"`
+	SkipGraphQL        bool `json:"skip_graphql,omitempty"`
+	// SkipPathTraversal omits the READ-ONLY path-traversal / local file
+	// inclusion pass. It is on by default, like the other Wave-1 read-only
+	// engines; true omits only its jobs.
+	SkipPathTraversal   bool   `json:"skip_path_traversal,omitempty"`
 	SSRFCallbackURL     string `json:"ssrf_callback_url,omitempty"`
 	SSRFCallbackPollURL string `json:"ssrf_callback_poll_url,omitempty"`
 	// AllowPrivateOAST lets THIS scan's SSRF engine use an OAST collaborator

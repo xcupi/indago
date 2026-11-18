@@ -175,6 +175,7 @@ func workersCfg(httpWorkers int) *domain.ScanConfig {
 func legacyPipelineCfg(httpWorkers int) *domain.ScanConfig {
 	cfg := workersCfg(httpWorkers)
 	cfg.SkipSSRF = true
+	cfg.SkipPathTraversal = true
 	cfg.SkipCORS = true
 	cfg.SkipOpenRedirect = true
 	cfg.SkipGraphQL = true
@@ -198,6 +199,7 @@ func createScan(t *testing.T, c *scan.Controller, proj, tgt domain.ID, cfg *doma
 		p.SkipIDOR = cfg.SkipIDOR
 		p.SkipInfoDisclosure = cfg.SkipInfoDisclosure
 		p.SkipSSRF = cfg.SkipSSRF
+		p.SkipPathTraversal = cfg.SkipPathTraversal
 		p.SkipCORS = cfg.SkipCORS
 		p.SkipOpenRedirect = cfg.SkipOpenRedirect
 		p.SkipGraphQL = cfg.SkipGraphQL

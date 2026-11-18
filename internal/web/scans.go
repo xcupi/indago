@@ -436,13 +436,16 @@ type createScanReq struct {
 	SkipAccessControl  bool `json:"skip_access_control"`
 	SkipIDOR           bool `json:"skip_idor"`
 	SkipInfoDisclosure bool `json:"skip_info_disclosure"`
-	// Wave-1 engine switches: the four Skip* flags turn off passes that run
-	// by default; SSRFCallbackURL/SSRFCallbackPollURL are the operator's own
-	// OAST collaborator for the SSRF engine (engine-validated at use time).
-	SkipSSRF                        bool   `json:"skip_ssrf"`
-	SkipCORS                        bool   `json:"skip_cors"`
-	SkipOpenRedirect                bool   `json:"skip_open_redirect"`
-	SkipGraphQL                     bool   `json:"skip_graphql"`
+	// Wave-1 engine switches: the Skip* flags turn off passes that run by
+	// default; SSRFCallbackURL/SSRFCallbackPollURL are the operator's own OAST
+	// collaborator for the SSRF engine (engine-validated at use time).
+	SkipSSRF         bool `json:"skip_ssrf"`
+	SkipCORS         bool `json:"skip_cors"`
+	SkipOpenRedirect bool `json:"skip_open_redirect"`
+	SkipGraphQL      bool `json:"skip_graphql"`
+	// SkipPathTraversal omits the READ-ONLY path-traversal / local file
+	// inclusion pass.
+	SkipPathTraversal               bool   `json:"skip_path_traversal"`
 	SSRFCallbackURL                 string `json:"ssrf_callback_url"`
 	SSRFCallbackPollURL             string `json:"ssrf_callback_poll_url"`
 	AllowPrivateOAST                bool   `json:"allow_private_oast"`
@@ -551,6 +554,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		SkipIDOR:                        req.SkipIDOR,
 		SkipInfoDisclosure:              req.SkipInfoDisclosure,
 		SkipSSRF:                        req.SkipSSRF,
+		SkipPathTraversal:               req.SkipPathTraversal,
 		SkipCORS:                        req.SkipCORS,
 		SkipOpenRedirect:                req.SkipOpenRedirect,
 		SkipGraphQL:                     req.SkipGraphQL,
@@ -642,15 +646,18 @@ type reconfigureReq struct {
 // the scan's current config and overlays only the four runtime fields, so the
 // crawl-extent controls set at creation are never clobbered.
 type capabilitiesReq struct {
-	SkipReflectedXSS       bool   `json:"skip_reflected_xss"`
-	SkipDOMXSS             bool   `json:"skip_dom_xss"`
-	SkipAccessControl      bool   `json:"skip_access_control"`
-	SkipIDOR               bool   `json:"skip_idor"`
-	SkipInfoDisclosure     bool   `json:"skip_info_disclosure"`
-	SkipSSRF               bool   `json:"skip_ssrf"`
-	SkipCORS               bool   `json:"skip_cors"`
-	SkipOpenRedirect       bool   `json:"skip_open_redirect"`
-	SkipGraphQL            bool   `json:"skip_graphql"`
+	SkipReflectedXSS   bool `json:"skip_reflected_xss"`
+	SkipDOMXSS         bool `json:"skip_dom_xss"`
+	SkipAccessControl  bool `json:"skip_access_control"`
+	SkipIDOR           bool `json:"skip_idor"`
+	SkipInfoDisclosure bool `json:"skip_info_disclosure"`
+	SkipSSRF           bool `json:"skip_ssrf"`
+	SkipCORS           bool `json:"skip_cors"`
+	SkipOpenRedirect   bool `json:"skip_open_redirect"`
+	SkipGraphQL        bool `json:"skip_graphql"`
+	// SkipPathTraversal omits the READ-ONLY path-traversal / local file
+	// inclusion pass.
+	SkipPathTraversal      bool   `json:"skip_path_traversal"`
 	EnableCommandInjection bool   `json:"enable_command_injection"`
 	EnableSSTI             bool   `json:"enable_ssti"`
 	EnableSQLi             bool   `json:"enable_sqli"`
@@ -686,6 +693,7 @@ func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Req
 	sc.Config.SkipIDOR = req.SkipIDOR
 	sc.Config.SkipInfoDisclosure = req.SkipInfoDisclosure
 	sc.Config.SkipSSRF = req.SkipSSRF
+	sc.Config.SkipPathTraversal = req.SkipPathTraversal
 	sc.Config.SkipCORS = req.SkipCORS
 	sc.Config.SkipOpenRedirect = req.SkipOpenRedirect
 	sc.Config.SkipGraphQL = req.SkipGraphQL
