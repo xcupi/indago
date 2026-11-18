@@ -546,3 +546,42 @@ func TestCandidateSkippedWhenParameterAlreadyConfirmed(t *testing.T) {
 		t.Fatalf("note = %q, want the early-stop reason", tc.Note)
 	}
 }
+
+func TestCandidateSkippedWhenPathPayloadViolatesScopePath(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<div>ok</div>")
+	}))
+	defer srv.Close()
+
+	env := newExecEnv(t)
+	ep := env.endpoint(srv.URL+"/challenge/1", domain.MethodPOST)
+	focus := env.param(ep, "path[1]", domain.LocationPath, "1")
+	ip := env.injection(ep, focus)
+
+	cand := detection.Candidate{
+		Source:   detection.SourceBuiltin,
+		Category: detection.CatHTMLText,
+		Value:    "<svg onload=" + marker(env.scanID, ip.ID) + ">",
+		Priority: 90,
+		DedupKey: "k-space",
+	}
+	job := env.candJob(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, cand)
+
+	if err := env.executor(scopedClient(t, openScope()), ExecutorConfig{AllowStateChanging: true}).Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if got := hits.Load(); got != 1 {
+		// Only the baseline request should hit the server; the unsafe path candidate must be skipped.
+		t.Fatalf("server hits = %d, want 1 (baseline only)", got)
+	}
+	tc := env.only()
+	if tc.Status != domain.TestCaseSkipped {
+		t.Fatalf("status = %s, want skipped", tc.Status)
+	}
+	if !strings.Contains(tc.Note, "scope path") {
+		t.Fatalf("note = %q, want scope path skip reason", tc.Note)
+	}
+}

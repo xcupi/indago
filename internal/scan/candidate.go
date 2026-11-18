@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/indago/indago/internal/detection"
@@ -177,6 +178,7 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 	var mutReq *httpengine.Request
 	var resp *httpengine.Response
 	var dur time.Duration
+	var skippedNote string
 	withDynamicTokenLock(e.tokenMu, params, focus, func() {
 		inj := &injection{param: focus, value: cand.Value, extraQuery: cand.ExtraQuery}
 		if focusB != nil {
@@ -186,8 +188,22 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 		if err != nil {
 			return
 		}
+		// Path-segment injection cannot carry spaces, backslashes, or percent
+		// escapes that domain.SafeScopePath rejects on the wire; skip rather
+		// than failing the whole job as out of scope.
+		if focus.Location == domain.LocationPath || (focusB != nil && focusB.Location == domain.LocationPath) {
+			if u, parseErr := url.Parse(mutReq.URL); parseErr == nil {
+				if _, scopeErr := domain.SafeScopePath(u); scopeErr != nil {
+					skippedNote = fmt.Sprintf("%s (skipped: %v)", note, scopeErr)
+					return
+				}
+			}
+		}
 		resp, outcome, err, dur = e.send(ctx, mutReq)
 	})
+	if skippedNote != "" {
+		return result{skipped: true, note: skippedNote, vulnClass: domain.VulnReflectedXSS}
+	}
 	if mutReq == nil {
 		return result{outcome: domain.OutcomeError, permanent: true, err: err, note: note, vulnClass: domain.VulnReflectedXSS, sharedEvidence: bl.evidenceIDs()}
 	}
