@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/queue"
 )
 
 func TestXXEConfirmsExternalEntityCallback(t *testing.T) {
@@ -722,5 +723,52 @@ func TestInjectXXEDTDReferencesCollaboratorFromDTD(t *testing.T) {
 	}
 	if _, ok := injectXXEDTD("not xml at all", cb); ok {
 		t.Fatal("a body with no element must not produce a DTD payload")
+	}
+}
+
+// TestEnqueueXXEProbesCoversDiscoveredXMLBody pins the link between discovery
+// and the XXE engine: an endpoint whose XML request body was registered from a
+// page's own inline script must be queued for probing exactly like an observed
+// XHR body would be, while a urlencoded POST at the same scan must not be.
+func TestEnqueueXXEProbesCoversDiscoveredXMLBody(t *testing.T) {
+	env := newScanEnv(t)
+	q := queue.NewMemory()
+	c := NewController(env.st, q, execLog(), "test", Options{})
+	t.Cleanup(c.Shutdown)
+
+	now := time.Now()
+	sc := &domain.Scan{ID: domain.NewID(), ProjectID: env.sc.ProjectID, Name: "xxe-from-script",
+		State: domain.ScanRunning, Config: domain.ScanConfig{EnableXXE: true}, CreatedAt: now, UpdatedAt: now}
+	if err := env.st.Scans().Create(context.Background(), sc); err != nil {
+		t.Fatal(err)
+	}
+	const xmlURL = "http://127.0.0.1:9/xxe-2.php"
+	endpoints := []*domain.Endpoint{
+		// The shape discovery.ExtractScriptRequests produces from an inline
+		// XMLHttpRequest declaration: literal method, content type and body.
+		{ID: domain.NewID(), ScanID: sc.ID, URL: xmlURL, Method: domain.MethodPOST,
+			Source: domain.SourceScriptLiteral, ContentType: "text/xml; charset=UTF-8",
+			RequestBody: "<reset><login>bee</login><secret>Any bugs?</secret></reset>", CreatedAt: now},
+		{ID: domain.NewID(), ScanID: sc.ID, URL: "http://127.0.0.1:9/plain", Method: domain.MethodPOST,
+			Source: domain.SourceForm, ContentType: "application/x-www-form-urlencoded",
+			RequestBody: "a=1", CreatedAt: now},
+	}
+	for _, ep := range endpoints {
+		if err := env.st.Endpoints().Create(context.Background(), ep); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c.enqueueXXEProbes(context.Background(), sc.ID)
+
+	job, err := q.Lease(context.Background(), "worker", sc.ID, []domain.JobType{domain.JobXXE}, time.Minute)
+	if err != nil {
+		t.Fatalf("no XXE job queued for the discovered XML body: %v", err)
+	}
+	if job.Target.URL != xmlURL {
+		t.Fatalf("queued XXE job target = %q, want %q", job.Target.URL, xmlURL)
+	}
+	if _, err := q.Lease(context.Background(), "worker", sc.ID, []domain.JobType{domain.JobXXE}, time.Minute); err == nil {
+		t.Fatal("a urlencoded POST endpoint was queued as XXE")
 	}
 }

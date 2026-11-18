@@ -256,6 +256,14 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 		}
 	}
 
+	// A request this page's inline script declares but only sends on an
+	// interaction (or after the observation window) is invisible to network
+	// capture; register the declaration itself so the endpoint and its body
+	// exist for the engines that key on them.
+	if err := emitScriptDeclaredRequests(ctx, in, sink, baseURL, body); err != nil {
+		return nil, err
+	}
+
 	// Links → endpoints + next level.
 	var nextLinks []string
 	for _, ref := range ExtractLinks(body) {
@@ -611,6 +619,19 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			return err
 		}
 		if err := n.emitForms(ctx, in, sink, info.Canonical, res.HTML); err != nil {
+			if errors.Is(err, ErrLimitReached) {
+				return nil
+			}
+			return err
+		}
+		// A request the page declares in its own inline script is not observed
+		// when it only fires on a click (or outside the observation window);
+		// register it from the declaration so its endpoint and body exist.
+		scriptBase := info.Canonical
+		if res.FinalURL != "" {
+			scriptBase = res.FinalURL
+		}
+		if err := emitScriptDeclaredRequests(ctx, in, sink, scriptBase, res.HTML); err != nil {
 			if errors.Is(err, ErrLimitReached) {
 				return nil
 			}

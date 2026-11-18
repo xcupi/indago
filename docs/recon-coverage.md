@@ -12,7 +12,7 @@ rather than an accident.
 | WHOIS | not covered | Network-level lookup; the scanner starts from a URL and has no registry client. Registrant data is also usually redacted. |
 | DNS (records, zone transfer) | not covered | Same: a separate network-recon phase. The web scanner resolves only what the HTTP client needs. |
 | Subdomain discovery | not covered | Would send requests to hosts outside the seed's scope; needs an explicit authorization model, not a silent crawler feature. |
-| Web crawling | covered | `crawlSource` (depth/pages caps, forms, redirects, JS-rendered pages via the browser source) |
+| Web crawling | covered | `crawlSource` (depth/pages caps, forms, redirects, JS-rendered pages via the browser source); request shapes declared in inline script (method, content type, literal body) are registered even when the page only sends them on a click, so a body-keyed engine (XXE) still sees the endpoint |
 | Web archives | covered (aggressive) | `archiveSource`: one Wayback CDX query per origin, same-host URLs only, ≤200 results, status 200 only |
 | Search engine discovery (dorking) | not covered | Needs a search-engine API/key and leaks the target to a third party; out of scope for an in-process scanner |
 | Fingerprinting | partial | Response headers and cookies are captured as evidence; jQuery/Angular are identified by the DOM analysis paths. There is no separate tech-stack inventory. |
