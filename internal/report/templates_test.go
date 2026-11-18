@@ -199,3 +199,58 @@ func TestYesWeHackTemplateUsesPlatformSections(t *testing.T) {
 		t.Fatal("the template must not invent a CVSS vector")
 	}
 }
+
+// A path-traversal finding must carry its own class context in every
+// deliverable layout. Without a table entry the renderer silently falls back to
+// "CWE: n/a" and "Impact depends on the finding's own evidence", which is
+// exactly the material a triager needs and does not get.
+func TestPathTraversalIntelIsRendered(t *testing.T) {
+	in := intelFor(domain.VulnPathTraversal)
+	if in.CWE != "CWE-22" {
+		t.Fatalf("intelFor(path_traversal).CWE = %q, want CWE-22", in.CWE)
+	}
+	if in.Name == "" || in.Impact == "" || in.Remediation == "" {
+		t.Fatalf("path traversal intel is incomplete: %+v", in)
+	}
+	if !strings.Contains(strings.Join(in.References, " "), "definitions/22") {
+		t.Fatalf("references = %v, want the CWE-22 page", in.References)
+	}
+
+	data := templateFixture()
+	data.Findings = []*domain.Finding{{
+		ID: "f-pt", ScanID: "s1", VulnClass: domain.VulnPathTraversal,
+		Verdict: domain.VerdictConfirmed, Severity: domain.SeverityHigh,
+		Confidence: domain.ConfidenceHigh, Title: `Path traversal in "file"`,
+		Summary: "The file parameter is joined onto the report directory without validating ..",
+	}}
+	for _, tmpl := range []Template{TemplatePentest, TemplateBugBounty} {
+		data.Template = tmpl
+		var b strings.Builder
+		if err := (MarkdownGenerator{}).Generate(&b, data); err != nil {
+			t.Fatalf("%s: %v", tmpl, err)
+		}
+		out := b.String()
+		for _, want := range []string{"CWE-22", in.Name, in.Impact, in.Remediation, "definitions/22"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("%s markdown missing %q\n%s", tmpl, want, out)
+			}
+		}
+		if strings.Contains(out, "CWE: n/a") {
+			t.Fatalf("%s rendered the generic class fallback for a known class", tmpl)
+		}
+	}
+}
+
+// The platform layout has its own wording functions; a class missing from them
+// submits the raw "path_traversal" token as the bug type.
+func TestYesWeHackPathTraversalWording(t *testing.T) {
+	if got := ywhBugType(domain.VulnPathTraversal); got != "Path Traversal" {
+		t.Fatalf("ywhBugType(path_traversal) = %q, want \"Path Traversal\"", got)
+	}
+	if got := ywhRemediation(domain.VulnPathTraversal); got == "" || strings.Contains(got, "Apply the remediation appropriate") {
+		t.Fatalf("ywhRemediation(path_traversal) fell back to the generic text: %q", got)
+	}
+	if got := riskSentence(domain.VulnPathTraversal); !strings.Contains(strings.ToLower(got), "file") {
+		t.Fatalf("riskSentence(path_traversal) = %q", got)
+	}
+}

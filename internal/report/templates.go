@@ -135,6 +135,17 @@ var classIntelByClass = map[domain.VulnClass]classIntel{
 			"exclude repository/VCS files at the web root.",
 		References: []string{"https://cwe.mitre.org/data/definitions/200.html"},
 	},
+	domain.VulnPathTraversal: {
+		CWE:  "CWE-22",
+		Name: "Path traversal / local file inclusion",
+		Impact: "A request parameter reaches a filesystem path, so the caller reads files outside the directory " +
+			"the endpoint intended: configuration, credentials, source code or key material. The response is an " +
+			"ordinary successful read, so the exposure leaves no error behind to notice.",
+		Remediation: "Resolve the requested name against a fixed base directory and reject the request when the " +
+			"resolved path leaves it (clean the path, then require it to stay under the base prefix, or serve " +
+			"only an allow-list of known files). Never pass a user-supplied name straight to a file API.",
+		References: []string{"https://cwe.mitre.org/data/definitions/22.html", "https://owasp.org/www-community/attacks/Path_Traversal"},
+	},
 }
 
 func intelFor(class domain.VulnClass) classIntel {
