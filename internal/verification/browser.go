@@ -23,8 +23,12 @@ import (
 //
 // Boundaries preserved here:
 //   - No payload generation: Input.Candidate.Value is sent byte-for-byte.
-//   - No anti-bot/WAF evasion: one navigation, one scope-gated context, no
-//     fingerprint spoofing.
+//   - No anti-bot/WAF evasion: one scope-gated context, no fingerprint
+//     spoofing, and at most two navigations per attempt — the candidate's own
+//     request plus, for POST/form only, the read-only same-origin warm-up that
+//     keeps the synthetic form's document on the target's origin so
+//     SameSite=Lax/Strict session cookies are actually sent (see
+//     browser.Page.NavigateForm). No extra payload, header or identity.
 //   - No DOM XSS: this observes the SAME marker the candidate step already sent;
 //     it does not crawl the DOM for new sinks or client-side-only inputs.
 //   - No LLM: the verdict in decide() is a pure function of the observations.

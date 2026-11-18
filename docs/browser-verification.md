@@ -75,6 +75,21 @@ parse that document and no breakout there can execute — see
    unsupported bodies are not attempted. For POST/JSON, Playwright submits the
    body through `Route.Fetch` with redirects disabled, then fulfills the
    top-level document response for Chromium to parse and execute.
+
+   POST/form first performs ONE bounded, read-only GET to the candidate's own
+   in-scope URL (paced by the scan's shared limiter) whenever the page is not
+   already on that origin, and then writes the synthetic `<form>` into that
+   document. Chromium classifies a form submission by the submitting document's
+   origin: a form written into a fresh about:blank page is submitted as a
+   **cross-site** POST, and Chromium withholds every `SameSite=Lax`/`Strict`
+   cookie — including the scan's session cookie. The replay would then arrive
+   unauthenticated, render the login/401 page, never re-observe the marker and
+   be reported `inconclusive` (a false negative) at every authenticated POST
+   endpoint. The warm-up gives the document the origin a real form page would
+   have had; the method, URL and field values are unchanged. If the warm-up
+   cannot land on the target's own origin (an off-origin redirect, a network
+   failure) the replay is refused with `browser.ErrFormOriginUnavailable`
+   instead of being sent cross-site.
 2. Direct browser requests are checked by the same `AllowRequest` scope gate.
    Playwright only routes the original request in an HTTP redirect chain, so
    each managed page also has a CDP response-stage gate: it resolves every 3xx

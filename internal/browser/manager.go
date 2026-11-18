@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/indago/indago/internal/ratelimit"
 )
 
 // Manager owns the browser engine lifecycle and a reusable pool of browsers, and
@@ -820,6 +823,26 @@ type formPoster interface {
 // driver cannot submit a form POST (e.g. a test fake).
 var ErrFormPostUnsupported = errors.New("browser: this driver cannot submit a form POST")
 
+// ErrFormOriginUnavailable is returned by NavigateForm when it could not put
+// the page on the form target's own origin before submitting. Submitting
+// anyway would send the POST from the warm-up document's origin (or, before
+// the warm-up existed, from about:blank's opaque origin), which Chromium
+// classifies as cross-site and answers by withholding every SameSite=Lax or
+// SameSite=Strict cookie — the scan's authenticated session among them. The
+// candidate would then be replayed unauthenticated and could be misreported as
+// "not reflected" (a false negative), so this fails loudly instead.
+var ErrFormOriginUnavailable = errors.New("browser: could not place the page on the form target's origin")
+
+// currentURLReporter is implemented by drivers that can report the URL of the
+// document the page currently has loaded. NavigateForm uses it to skip a
+// warm-up navigation the page does not need. Like formPoster it is a separate,
+// OPTIONAL interface rather than a new pageHandle method, so a test fake that
+// only implements pageHandle keeps compiling; a driver without it simply gets
+// the warm-up unconditionally (correct, at the cost of one extra in-scope GET).
+type currentURLReporter interface {
+	CurrentURL() string
+}
+
 // NavigateForm submits url as a real, top-level POST navigation: it renders a
 // throwaway auto-submitting <form method=post> whose hidden inputs are fields,
 // and lets the browser submit it — the SAME mechanism an ordinary HTML form
@@ -829,6 +852,12 @@ var ErrFormPostUnsupported = errors.New("browser: this driver cannot submit a fo
 // payload to fire (AGENTS.md §3) — fields carries the exact body the candidate
 // step already sent (including the parameter holding the candidate's own
 // breakout), nothing new is chosen or clicked.
+//
+// The synthetic form's DOCUMENT matters, not just the request: Chromium decides
+// whether a form submission is same-site from the submitting document's origin,
+// and a document written into a fresh page while it is still about:blank has an
+// opaque one — the POST is then treated as cross-site and SameSite=Lax/Strict
+// cookies are withheld (see warmUpFormOrigin).
 func (p *Page) NavigateForm(ctx context.Context, method, url string, fields map[string]string, opts NavOptions) (*NavResult, error) {
 	if !p.ctxp.allowStateChanging && !isReadOnlyMethod(method) {
 		// Fail here with a named error instead of letting the browser's own
@@ -840,9 +869,6 @@ func (p *Page) NavigateForm(ctx context.Context, method, url string, fields map[
 	if !ok {
 		return nil, ErrFormPostUnsupported
 	}
-	if err := opts.Limiter.Wait(ctx); err != nil {
-		return nil, err
-	}
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = p.ctxp.mgr.cfg.NavigationTimeout
@@ -850,6 +876,12 @@ func (p *Page) NavigateForm(ctx context.Context, method, url string, fields map[
 	wait := opts.WaitUntil
 	if wait == "" {
 		wait = WaitLoad
+	}
+	if err := p.warmUpFormOrigin(ctx, url, opts.Limiter, timeout); err != nil {
+		return nil, err
+	}
+	if err := opts.Limiter.Wait(ctx); err != nil {
+		return nil, err
 	}
 	type nav struct {
 		status   int
@@ -863,6 +895,99 @@ func (p *Page) NavigateForm(ctx context.Context, method, url string, fields map[
 		return nil, fmt.Errorf("browser: navigate form: %w", err)
 	}
 	return &NavResult{Status: r.status, FinalURL: r.finalURL}, nil
+}
+
+// warmUpFormOrigin performs the ONE bounded, read-only navigation that puts the
+// page on the form target's own origin before NavigateForm writes and submits
+// the synthetic form. It is a no-op when the page is already there, which is
+// what keeps a DOM-XSS caller that navigated to the page first from paying for
+// it twice.
+//
+// Why it is needed: a fresh page is about:blank. Writing the form with
+// document.write/SetContent does not change that document's origin, so the
+// browser submits the form as a CROSS-SITE top-level POST and refuses to attach
+// SameSite=Lax (the common session default) or SameSite=Strict cookies. An
+// authenticated candidate then replays unauthenticated — typically rendering
+// the login page, so the marker is never re-observed and verification reports
+// "inconclusive" instead of the truth. One plain GET to the SAME url gives the
+// document the origin a real form page would have had; nothing about the
+// candidate, the method or the fields changes, and the warm-up is read-only
+// (GET) so it needs no state-changing opt-in of its own. The exact target URL
+// is used rather than the origin root because a path-scoped scope need not
+// authorize "/" at all, while this URL has already passed the same gate.
+//
+// The warm-up is unconditional (not only when a session exists): a target may
+// set its own session or double-submit CSRF cookie on that GET, and a
+// SameSite=Strict cookie would be withheld for exactly the same reason. It is
+// paced by the scan's shared limiter like any other navigation.
+func (p *Page) warmUpFormOrigin(ctx context.Context, target string, limiter *ratelimit.Limiter, timeout time.Duration) error {
+	tu, ok := parseHTTPURL(target)
+	if !ok {
+		// Not an absolute http(s) URL: there is no origin to warm up to, so
+		// leave the submission to report the problem itself.
+		return nil
+	}
+	if cur, ok := pageCurrentURL(p.handle); ok {
+		if cu, err := url.Parse(cur); err == nil && sameOrigin(cu, tu) {
+			return nil
+		}
+	}
+	if err := limiter.Wait(ctx); err != nil {
+		return err
+	}
+	_, final, err := gotoWithCtx(ctx, p.handle, target, "", WaitDOMContentLoaded, timeout)
+	if err != nil {
+		return fmt.Errorf("%w: warm-up GET %s: %w", ErrFormOriginUnavailable, target, err)
+	}
+	if fu, err := url.Parse(final); err != nil || !sameOrigin(fu, tu) {
+		return fmt.Errorf("%w: warm-up GET %s ended on %q", ErrFormOriginUnavailable, target, final)
+	}
+	return nil
+}
+
+func pageCurrentURL(ph pageHandle) (string, bool) {
+	r, ok := ph.(currentURLReporter)
+	if !ok {
+		return "", false
+	}
+	u := r.CurrentURL()
+	return u, u != ""
+}
+
+func parseHTTPURL(raw string) (*url.URL, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return nil, false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		return u, true
+	}
+	return nil, false
+}
+
+// sameOrigin reports whether a and b have the same scheme, host and effective
+// port — Chromium's own origin comparison, which ignores a scheme's default
+// port (http://host:80 is the same origin as http://host).
+func sameOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return originKey(a) == originKey(b)
+}
+
+func originKey(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		switch scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+	}
+	return scheme + "://" + strings.ToLower(u.Hostname()) + ":" + port
 }
 
 // ErrJSONPostUnsupported is returned when the driver cannot turn the initial
