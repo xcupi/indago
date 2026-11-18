@@ -188,6 +188,10 @@ const (
 	SourceWellKnown DiscoverySource = "well_known"
 	// SourceArchive: a historical URL from the Wayback Machine CDX index.
 	SourceArchive DiscoverySource = "archive"
+	// SourceOpenAPI: an endpoint (or parameter) declared by an OpenAPI 3.x /
+	// Swagger 2.0 document the operator supplied. The document is a
+	// declaration, not an observation: nothing was fetched to learn it.
+	SourceOpenAPI DiscoverySource = "openapi"
 )
 
 // IsValid reports whether the source is a known value.
@@ -195,7 +199,7 @@ func (d DiscoverySource) IsValid() bool {
 	switch d {
 	case SourceUserProvided, SourceCrawler, SourceForm, SourceBrowserNetwork,
 		SourceSitemap, SourceRobots, SourceContentDiscovery, SourceParamDiscovery, SourceScriptLiteral,
-		SourceWellKnown, SourceArchive:
+		SourceWellKnown, SourceArchive, SourceOpenAPI:
 		return true
 	default:
 		return false

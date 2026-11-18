@@ -434,6 +434,10 @@ func (c *Controller) runDiscovery(ctx context.Context, ex *execution, sc *domain
 		SeedURLs:         seeds,
 		SessionID:        sc.SessionID,
 		SessionStatePath: statePath,
+		// The operator-supplied OpenAPI/Swagger document (or its URL). Empty
+		// for every scan that supplied none, which is the default.
+		OpenAPISpecJSON: sc.Config.OpenAPISpecJSON,
+		OpenAPISpecURL:  sc.Config.OpenAPISpecURL,
 	})
 	if err != nil {
 		if ctx.Err() != nil {

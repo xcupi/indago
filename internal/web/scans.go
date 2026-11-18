@@ -366,6 +366,14 @@ type createScanReq struct {
 	// domain.ScanConfig.ReconLevel and docs/recon-wordlists.md.
 	ReconLevel string `json:"recon_level"`
 
+	// OpenAPISpecJSON is the OpenAPI 3.x / Swagger 2.0 JSON document whose
+	// declared endpoints discovery should register (inline, max
+	// discovery.MaxOpenAPISpecBytes). OpenAPISpecURL is the same document's
+	// URL, fetched with ONE read-only GET through the scan's scope-enforcing
+	// engine; it must be in scope. Both empty (the default) adds nothing.
+	OpenAPISpecJSON string `json:"openapi_spec_json"`
+	OpenAPISpecURL  string `json:"openapi_spec_url"`
+
 	// Candidate selection: "minimal" | "standard" (default) | "thorough", and an
 	// optional per-injection-point cap overriding the profile's. Validated by
 	// the controller (unknown profile / cap above the ceiling → 400).
@@ -530,6 +538,8 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		MaxPages:              req.MaxPages,
 		MaxEndpoints:          req.MaxEndpoints,
 		ReconLevel:            req.ReconLevel,
+		OpenAPISpecJSON:       req.OpenAPISpecJSON,
+		OpenAPISpecURL:        req.OpenAPISpecURL,
 
 		CandidateProfile:                req.CandidateProfile,
 		MaxCandidates:                   req.MaxCandidates,

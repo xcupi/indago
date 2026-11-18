@@ -24,6 +24,7 @@ package scan
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -332,6 +333,15 @@ type CreateScanParams struct {
 	// discovery.Config.ReconLevel and docs/recon-wordlists.md. Empty means off,
 	// so existing scans and clients are unaffected.
 	ReconLevel string
+
+	// OpenAPISpecJSON / OpenAPISpecURL register the endpoints an operator-
+	// supplied OpenAPI 3.x / Swagger 2.0 JSON document declares — see
+	// domain.ScanConfig.OpenAPISpecJSON. The URL must be absolute http(s) and
+	// inside the scan's scope (validated here, fail closed); the inline
+	// document is bounded by discovery.MaxOpenAPISpecBytes. Either may be
+	// empty, and both empty adds nothing to discovery.
+	OpenAPISpecJSON string
+	OpenAPISpecURL  string
 
 	// CandidateProfile ("minimal" | "standard" | "thorough"; empty = standard)
 	// and MaxCandidates (> 0 overrides the profile's per-injection-point cap)
@@ -662,6 +672,41 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.SkipWriteEndpoints = p.SkipWriteEndpoints
 	cfg.SkipDownloadEndpoints = p.SkipDownloadEndpoints
 	cfg.MaxDOMXSSEndpoints = p.MaxDOMXSSEndpoints
+
+	// OpenAPI/Swagger import. The document is an operator input, so it is
+	// carried as-is and validated now instead of failing mid-discovery:
+	//   - the inline document must be valid JSON and within the byte bound the
+	//     discovery source enforces (fail fast, never truncate: half a spec
+	//     would understate the surfaces the scan was told about);
+	//   - a spec URL must be absolute http(s) and inside the scan's scope,
+	//     because discovery will fetch it through the scan's own engine.
+	// An empty pair is the default and adds nothing. A value already present in
+	// a custom config is kept: the top-level fields only override it when the
+	// caller actually supplied them.
+	if spec := strings.TrimSpace(p.OpenAPISpecJSON); spec != "" {
+		cfg.OpenAPISpecJSON = spec
+	}
+	if specURL := strings.TrimSpace(p.OpenAPISpecURL); specURL != "" {
+		cfg.OpenAPISpecURL = specURL
+	}
+	cfg.OpenAPISpecJSON = strings.TrimSpace(cfg.OpenAPISpecJSON)
+	cfg.OpenAPISpecURL = strings.TrimSpace(cfg.OpenAPISpecURL)
+	if cfg.OpenAPISpecJSON != "" && !json.Valid([]byte(cfg.OpenAPISpecJSON)) {
+		return nil, fmt.Errorf("%w: openapi_spec_json is not valid JSON", ErrBadConfig)
+	}
+	if len(cfg.OpenAPISpecJSON) > discovery.MaxOpenAPISpecBytes {
+		return nil, fmt.Errorf("%w: openapi_spec_json is %d bytes, limit is %d",
+			ErrBadConfig, len(cfg.OpenAPISpecJSON), discovery.MaxOpenAPISpecBytes)
+	}
+	if cfg.OpenAPISpecURL != "" {
+		u, err := url.Parse(cfg.OpenAPISpecURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("%w: openapi_spec_url must be an absolute http(s) URL", ErrBadConfig)
+		}
+		if d := scope.Permits(cfg.OpenAPISpecURL); !d.Allowed {
+			return nil, fmt.Errorf("%w: openapi_spec_url is outside scope: %s", ErrBadConfig, d.Reason)
+		}
+	}
 
 	statePath, err := c.resolveAuth(ctx, mode, p, scope, c.huntingUserAgent(&domain.Scan{Config: domain.ScanConfig{HuntingUserAgent: project.HuntingUserAgent, HuntingUserAgentReplace: project.HuntingUserAgentReplace}}))
 	if err != nil {
