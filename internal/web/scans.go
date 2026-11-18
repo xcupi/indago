@@ -97,11 +97,36 @@ func (s *Server) handleGetTarget(w http.ResponseWriter, r *http.Request) {
 // --- scope ---
 
 type scopeReq struct {
-	IncludeHosts        []string `json:"include_hosts"`
-	ExcludeHosts        []string `json:"exclude_hosts"`
-	IncludePathPrefixes []string `json:"include_path_prefixes"`
-	ExcludePathPrefixes []string `json:"exclude_path_prefixes"`
-	AllowSubdomains     bool     `json:"allow_subdomains"`
+	IncludeHosts []string `json:"include_hosts"`
+	ExcludeHosts []string `json:"exclude_hosts"`
+	// SubdomainOnlyHosts is the wildcard half of the scope: subdomains of these
+	// hosts are authorized, the hosts themselves are not (see
+	// domain.Scope.SubdomainOnlyHosts).
+	//
+	// It is a pointer because absence is meaningful: the bundled UI does not
+	// render this field yet, so a scope PUT that omits it must keep the current
+	// list rather than silently dropping an imported program's wildcard
+	// authorization. An explicit empty array clears it.
+	SubdomainOnlyHosts  *[]string `json:"subdomain_only_hosts"`
+	IncludePathPrefixes []string  `json:"include_path_prefixes"`
+	ExcludePathPrefixes []string  `json:"exclude_path_prefixes"`
+	AllowSubdomains     bool      `json:"allow_subdomains"`
+	// AllowedOrigins is the operator's scheme/port statement: the exact origins
+	// the scan may reach ("https://app.example.com",
+	// "http://app.example.com:8080", "https://*.example.com").
+	//
+	// A non-empty list replaces the stored one and is the ONLY way to add an
+	// origin. An explicit empty list is refused: to the matcher "no origins"
+	// means every scheme and port of the hosts, so that choice must be stated
+	// through AllowAnySchemePorts instead of being inferred. Omitting the field
+	// preserves what is stored, so a form that does not render it cannot erase a
+	// restriction. No save ever derives, expands or re-derives an origin from
+	// the host lists. See domain.Scope.AllowedOrigins.
+	AllowedOrigins *[]string `json:"allowed_origins"`
+	// AllowAnySchemePorts is the explicit legacy opt-out (any scheme, any port
+	// of an in-scope host). It is meaningless combined with a non-empty origin
+	// list and is rejected there rather than silently narrowing.
+	AllowAnySchemePorts *bool `json:"allow_any_scheme_ports"`
 }
 
 func (s *Server) handleGetScope(w http.ResponseWriter, r *http.Request) {
@@ -114,8 +139,10 @@ func (s *Server) handleGetScope(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePutScope creates or replaces a project's scope. Scope is the safety
-// boundary for every scan, so an empty include list is rejected outright rather
-// than stored (an empty scope would deny everything anyway).
+// boundary for every scan, so a scope that authorizes nothing is rejected
+// outright rather than stored, and no save ever guesses a scheme or port: the
+// operator states the origins (or explicitly chooses the legacy any-scheme/
+// any-port behaviour), and a stored entry keeps its exact scheme and port.
 func (s *Server) handlePutScope(w http.ResponseWriter, r *http.Request) {
 	projectID := domain.ID(r.PathValue("id"))
 	if _, err := s.store.Projects().Get(r.Context(), projectID); err != nil {
@@ -128,13 +155,31 @@ func (s *Server) handlePutScope(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	include := cleanList(req.IncludeHosts)
-	if len(include) == 0 {
-		writeError(w, http.StatusBadRequest, "include_hosts must contain at least one host")
-		return
-	}
 	exclude := cleanList(req.ExcludeHosts)
 	includePaths := cleanList(req.IncludePathPrefixes)
 	excludePaths := cleanList(req.ExcludePathPrefixes)
+
+	// Read the current scope first: an omitted subdomain_only_hosts means
+	// "keep what is there" (see scopeReq.SubdomainOnlyHosts), so the emptiness
+	// check below has to know what the scope already authorizes.
+	existing, err := s.store.Scopes().GetByProject(r.Context(), projectID)
+	notFound := errors.Is(err, store.ErrNotFound)
+	if err != nil && !notFound {
+		s.writeInternalError(w, "load scope", err)
+		return
+	}
+	subdomainOnly := []string{}
+	if !notFound && existing != nil {
+		subdomainOnly = cleanList(existing.SubdomainOnlyHosts)
+	}
+	if req.SubdomainOnlyHosts != nil {
+		subdomainOnly = cleanList(*req.SubdomainOnlyHosts)
+	}
+
+	if len(include) == 0 && len(subdomainOnly) == 0 {
+		writeError(w, http.StatusBadRequest, "include_hosts must contain at least one host (or subdomain_only_hosts must name a wildcard host)")
+		return
+	}
 	// An entry that can never match is not an error at match time: it just makes
 	// the scope silently deny the host the operator meant. Reject it here, before
 	// anything is stored, so a rejected replacement leaves the old scope intact.
@@ -142,28 +187,116 @@ func (s *Server) handlePutScope(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	now := time.Now()
-	existing, err := s.store.Scopes().GetByProject(r.Context(), projectID)
+	if msg := validateSubdomainOnlyHosts(subdomainOnly); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+
+	// --- scheme/port policy -------------------------------------------------
+	// The origin list is an operator statement, not something Indago infers: a
+	// save never derives, expands or re-derives it. Every entry keeps its exact
+	// scheme and port until the operator replaces the list, so editing a path
+	// prefix, an exclusion or any other field can never widen an https-only
+	// scope to plain http (or to another port). The three stored shapes are:
+	//
+	//   explicit origins       -> enforced; only replacing the list adds one
+	//   allow_any_scheme_ports -> the operator stated "any scheme and port"
+	//   empty + flag false     -> LEGACY (saved before origin rules existed). It
+	//                            keeps working unchanged, but no write surface
+	//                            creates it: a new scope, or a save that grants
+	//                            a host authority the stored scope lacked, has
+	//                            to state a policy first.
+	origins := []string{}
+	allowAny := false
+	storedLegacy := false
+	if !notFound && existing != nil {
+		origins = cleanList(existing.AllowedOrigins)
+		allowAny = existing.AllowAnySchemePorts
+		storedLegacy = existing.LegacySchemePorts()
+	}
+	originsExplicit := req.AllowedOrigins != nil
+	anyExplicit := req.AllowAnySchemePorts != nil
+	stated := originsExplicit || anyExplicit
+
 	switch {
-	case err == nil:
-		existing.IncludeHosts = include
-		existing.ExcludeHosts = exclude
-		existing.IncludePathPrefixes = includePaths
-		existing.ExcludePathPrefixes = excludePaths
-		existing.AllowSubdomains = req.AllowSubdomains
-		existing.UpdatedAt = now
-		if err := s.store.Scopes().Update(r.Context(), existing); err != nil {
-			s.writeInternalError(w, "update scope", err)
+	case originsExplicit && len(cleanList(*req.AllowedOrigins)) > 0:
+		if anyExplicit && *req.AllowAnySchemePorts {
+			writeError(w, http.StatusBadRequest, "allowed_origins and allow_any_scheme_ports are mutually exclusive: a non-empty origin list is always enforced")
 			return
 		}
-		writeJSON(w, http.StatusOK, existing)
-	case errors.Is(err, store.ErrNotFound):
+		// An explicit list is authoritative and clears the opt-out, so a stored
+		// row can never carry both.
+		origins = cleanList(*req.AllowedOrigins)
+		allowAny = false
+	case originsExplicit:
+		if !anyExplicit || !*req.AllowAnySchemePorts {
+			writeError(w, http.StatusBadRequest, "allowed_origins is empty: name the exact origins the scan may reach (for example [\"https://app.example.com\"]) or state allow_any_scheme_ports=true. An empty origin list means every scheme and port of the hosts, so it is never chosen implicitly")
+			return
+		}
+		origins = []string{}
+		allowAny = true
+	case anyExplicit && *req.AllowAnySchemePorts:
+		origins = []string{}
+		allowAny = true
+	case anyExplicit: // explicit false without an origin list
+		if len(origins) == 0 {
+			writeError(w, http.StatusBadRequest, "allow_any_scheme_ports=false needs allowed_origins: an empty origin list is the legacy any-scheme/any-port behaviour, not a restriction")
+			return
+		}
+		allowAny = false
+	}
+
+	// The only legal empty-list shape is the preserved legacy scope, and only
+	// while this save grants no authority the stored scope did not already
+	// grant. Adding a host to one therefore demands a policy instead of
+	// silently authorizing it on http and https (or on every port).
+	legacyKept := false
+	if !allowAny && len(origins) == 0 {
+		if storedLegacy && !stated && legacyAuthorityAtMost(existing, include, subdomainOnly, req.AllowSubdomains) {
+			legacyKept = true
+		} else {
+			writeError(w, http.StatusBadRequest, "state the scheme/port policy: allowed_origins (for example [\"https://app.example.com\"]) or allow_any_scheme_ports=true. Indago never guesses a scheme or port — not for a new scope, and not for a host added to this one")
+			return
+		}
+	}
+	if !allowAny && !legacyKept {
+		if originsExplicit {
+			normalized, err := domain.NormalizeScopeOrigins(origins)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			origins = normalized
+		} else {
+			// A preserved entry follows the host lists: one whose host left the
+			// scope (or whose spelling can never match) is dropped, which can
+			// only narrow.
+			origins = domain.FilterScopeOriginsByHosts(origins, include, subdomainOnly, req.AllowSubdomains)
+		}
+		if err := domain.ValidateScopeOrigins(origins, include, subdomainOnly, req.AllowSubdomains); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// Every named host must be reachable through a declared origin. A host
+		// that no origin covers would be silently dead, so the save is refused
+		// with the host named instead of guessing a scheme or port for it.
+		if uncovered := domain.UncoveredScopeHosts(origins, include, subdomainOnly); len(uncovered) > 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("allowed_origins does not cover %s: declare an origin for it (for example https://%s) or remove it from the host lists. A host is never authorized on a guessed scheme or port", strings.Join(uncovered, ", "), uncovered[0]))
+			return
+		}
+	}
+
+	now := time.Now()
+	if notFound {
 		sc := &domain.Scope{
 			ID: domain.NewID(), ProjectID: projectID,
 			IncludeHosts: include, ExcludeHosts: exclude,
+			SubdomainOnlyHosts:  subdomainOnly,
 			IncludePathPrefixes: includePaths,
 			ExcludePathPrefixes: excludePaths,
 			AllowSubdomains:     req.AllowSubdomains,
+			AllowedOrigins:      origins,
+			AllowAnySchemePorts: allowAny,
 			CreatedAt:           now, UpdatedAt: now,
 		}
 		if err := s.store.Scopes().Create(r.Context(), sc); err != nil {
@@ -171,9 +304,22 @@ func (s *Server) handlePutScope(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusCreated, sc)
-	default:
-		s.writeInternalError(w, "load scope", err)
+		return
 	}
+	existing.IncludeHosts = include
+	existing.ExcludeHosts = exclude
+	existing.SubdomainOnlyHosts = subdomainOnly
+	existing.IncludePathPrefixes = includePaths
+	existing.ExcludePathPrefixes = excludePaths
+	existing.AllowSubdomains = req.AllowSubdomains
+	existing.AllowedOrigins = origins
+	existing.AllowAnySchemePorts = allowAny
+	existing.UpdatedAt = now
+	if err := s.store.Scopes().Update(r.Context(), existing); err != nil {
+		s.writeInternalError(w, "update scope", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, existing)
 }
 
 // --- scans ---
@@ -792,6 +938,55 @@ func validateScopeLists(include, exclude, includePaths, excludePaths []string) s
 		}
 	}
 	return ""
+}
+
+// validateSubdomainOnlyHosts returns "" when every entry can authorize
+// something, else a message naming the first bad entry and how to write it.
+// The list already means "subdomains, not the host", so a leading dot or "*."
+// is refused instead of being reinterpreted (domain.ValidateScopeSubdomainHost).
+func validateSubdomainOnlyHosts(entries []string) string {
+	for i, e := range entries {
+		if err := domain.ValidateScopeSubdomainHost(e); err != nil {
+			return fmt.Sprintf("subdomain_only_hosts[%d]: %v", i, err)
+		}
+	}
+	return ""
+}
+
+// legacyAuthorityAtMost reports whether the requested host lists grant no
+// authority the stored legacy scope did not already grant. It is what lets an
+// operator narrow (or re-save unchanged) a scope that predates origin rules
+// without restating a scheme/port policy, while any host the old lists did not
+// cover demands one: a legacy scope is already "any scheme, any port", so
+// keeping it cannot widen anything, but silently extending it to a new host
+// would.
+//
+// The probe carries no origin list on purpose, so PermitsHost answers the
+// historical host-only question.
+func legacyAuthorityAtMost(prev *domain.Scope, include, subdomainOnly []string, allowSubdomains bool) bool {
+	if prev == nil {
+		return false
+	}
+	// Turning subdomains on gives every include host authority it did not have.
+	if allowSubdomains && !prev.AllowSubdomains {
+		return false
+	}
+	probe := domain.Scope{
+		IncludeHosts:       prev.IncludeHosts,
+		SubdomainOnlyHosts: prev.SubdomainOnlyHosts,
+		AllowSubdomains:    prev.AllowSubdomains,
+	}
+	for _, raw := range include {
+		if !probe.PermitsHost(strings.TrimPrefix(strings.TrimSpace(raw), ".")) {
+			return false
+		}
+	}
+	for _, raw := range subdomainOnly {
+		if !probe.PermitsHost("scope-probe." + strings.TrimSpace(raw)) {
+			return false
+		}
+	}
+	return true
 }
 
 // nonNil returns an empty slice instead of nil so JSON encodes [] not null.

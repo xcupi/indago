@@ -55,6 +55,12 @@ func TestIntegrationScopeGateRejectsUnmanagedTargets(t *testing.T) {
 				opts := browser.ContextOptions{}
 				if scoped {
 					opts.AllowRequest = func(raw string) bool { return strings.HasPrefix(raw, srv.URL+"/api/") }
+				} else {
+					// This is the NON-scoped control: it must let the POST form
+					// shape actually run, so the shape is shown to be
+					// discriminating rather than inert. State-changing requests
+					// are therefore explicitly allowed here.
+					opts.AllowStateChanging = true
 				}
 				c, err := m.NewContext(context.Background(), opts)
 				if err != nil {
@@ -128,7 +134,7 @@ func TestIntegrationScopeGatePreservesBodyReplay(t *testing.T) {
 			}))
 			t.Logf("OWNED_LISTENER=%s", srv.URL)
 			defer srv.Close()
-			c, err := m.NewContext(context.Background(), browser.ContextOptions{AllowRequest: func(raw string) bool { return strings.HasPrefix(raw, srv.URL+"/api/") }})
+			c, err := m.NewContext(context.Background(), browser.ContextOptions{AllowRequest: func(raw string) bool { return strings.HasPrefix(raw, srv.URL+"/api/") }, AllowStateChanging: true})
 			if err != nil {
 				t.Fatal(err)
 			}

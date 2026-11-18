@@ -107,3 +107,65 @@ func TestWaitHonoursContextCancel(t *testing.T) {
 		t.Fatalf("cancel took %v to surface", d)
 	}
 }
+
+func TestLimiterWithJitterVariesIntervals(t *testing.T) {
+	l := ratelimit.NewWithJitter(20, 0.5) // 50ms ± 25ms
+	var prev time.Time
+	var deltas []time.Duration
+	for i := 0; i < 6; i++ {
+		if err := l.Wait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now()
+		if i > 0 {
+			deltas = append(deltas, now.Sub(prev))
+		}
+		prev = now
+	}
+	if len(deltas) != 5 {
+		t.Fatalf("got %d deltas, want 5", len(deltas))
+	}
+	var minD, maxD time.Duration
+	for i, d := range deltas {
+		if i == 0 || d < minD {
+			minD = d
+		}
+		if i == 0 || d > maxD {
+			maxD = d
+		}
+	}
+	if maxD-minD < 2*time.Millisecond {
+		t.Fatalf("expected varied intervals with jitter, got min=%v max=%v (%v)", minD, maxD, deltas)
+	}
+}
+
+// The configured rate is a spacing floor between ACTUAL grants: a permit whose
+// timer woke late must delay the ones behind it, never let them catch up in a
+// burst. Run enough permits at a short interval that a contended scheduler is
+// bound to wake at least one of them late.
+func TestLimiterSpacesActualGrants(t *testing.T) {
+	const (
+		rps     = 100.0 // 10ms interval
+		permits = 80
+	)
+	interval := time.Duration(float64(time.Second) / rps)
+	// Timer/scheduler and measurement slack only; a compressed gap after a late
+	// wake was observed to be roughly half the interval, well below this floor.
+	slack := 2 * time.Millisecond
+	l := ratelimit.New(rps)
+	ctx := context.Background()
+	if err := l.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	prev := time.Now()
+	for i := 0; i < permits; i++ {
+		if err := l.Wait(ctx); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now()
+		if gap := now.Sub(prev); gap < interval-slack {
+			t.Fatalf("permit %d came %v after the previous one, want >= %v", i+1, gap, interval)
+		}
+		prev = now
+	}
+}

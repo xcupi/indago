@@ -20,7 +20,9 @@ func TestPageNavigateJSONHonoursLimiter(t *testing.T) {
 	m := newFakeManager(t, Config{PoolSize: 1}, d)
 	defer m.Close()
 	ctx := context.Background()
-	c, err := m.NewContext(ctx, ContextOptions{AllowRequest: func(string) bool { return true }})
+	// NavigateJSON is a state-changing (POST) replay, so the context must carry
+	// the explicit opt-in; this test is about pacing, not the method policy.
+	c, err := m.NewContext(ctx, ContextOptions{AllowRequest: func(string) bool { return true }, AllowStateChanging: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -86,8 +86,30 @@ per scan:
   point runs unauthenticated instead of reaching whatever sits behind the login
   the scan was specifically given a session to get past. An operator-provided
   seed URL is never skipped by this check, even if it matches — that is
-  explicit intent. Unauthenticated scans skip nothing (there is no session
-  to protect).
+  explicit intent. Unauthenticated scans skip nothing for THIS check (there is
+  no session to protect); the data-mutation check below still applies to them.
+- **Data-changing GET links are skipped on every scan.** A GET is not
+  read-only: `/delete?id=1`, `/users/7/update` and `?action=delete` are common
+  state-changing links, and the executor's write-like guard
+  (`skip_write_endpoints`) only decides what to TEST after discovery has
+  already registered the endpoint — and it is off by default. The Collector
+  therefore refuses, for every scan and every crawler-style source (never
+  `user_provided`), to fetch **or** register a read-method URL whose path,
+  query or SPA route names a destructive/write action
+  (`internal/discovery/mutating_guard.go`: `looksDataMutating`, word-bounded
+  with a CamelCase allowance). Content discovery asks the same guard before
+  probing a wordlist path. A POST form target on such a path is still
+  registered: discovery never sends it, and the executor's explicit
+  state-changing opt-ins remain the gate for that request. This is a name
+  heuristic, NOT a claim that every GET is safe: a neutral path that mutates on
+  GET (`/api/items/42`), a link that redirects to a destructive action, and an
+  unknown spelling stay invisible to it. Deliberate false positives are
+  accepted and skipped — `/orders/42/update` is often a read-only form page
+  and `?delete=0` may only toggle a UI flag — because one skipped read is
+  cheaper than one destructive request. Ambiguous nouns (`/store`,
+  `/register`, `/create`, `/users/1/edit`) are deliberately not path verbs;
+  they match only as the VALUE of an explicit action parameter
+  (`?action=store`).
 
 ## 1b. Test job execution
 
@@ -322,6 +344,25 @@ A paused or awaiting-auth scan never completes. `COMPLETED` is recorded only
 remaining jobs are canceled, so a status reader never sees a completed scan with
 pending work.
 
+The completion write itself is verified, not assumed. The monitor keeps its
+execution registered in `Controller.running` across the teardown and drops it in
+the **same critical section** as the successful write, re-checking ownership,
+shutdown and the persisted state before every attempt. Consequences:
+
+- A write error is no longer read as "a cancel won the race". Cancel, shutdown,
+  pause and awaiting-auth are distinguished from storage trouble: a scan that is
+  no longer `running` is `superseded` (that actor records the terminal state),
+  while a row that is still `running` is retried.
+- Retries are bounded (`completionAttempts`, 4 tries with a 20ms doubling
+  backoff, under 200ms total) and observable: every retry logs a WARN naming the
+  attempt, the budget and the error; success logs `scan completed` with the
+  attempt count.
+- If the retries are exhausted, the scan is **never** reported completed. It is
+  recorded as `failed` with `completion could not be persisted: …` (best effort
+  — the store may still be down, which leaves the row `running` so a restart's
+  recovery resumes it). The execution is always released from the map so no
+  phantom "running" scan with nothing driving it can remain.
+
 ## 5. Persisted scan and discovery state
 
 `Scan.Discovery` is persisted (migration `0002_scan_discovery`):
@@ -446,8 +487,12 @@ operator visits:
 - `Controller.scanMu` serializes read-modify-write of scan rows (`mutate`), so the
   monitor's stats refresh can never overwrite a concurrent state change with stale
   data. Lock order: `mu` → `scanMu`.
-- Completion takes ownership (state check + map removal in one critical section)
-  before tearing the execution down.
+- Completion takes ownership (state check under `mu`) and KEEPS it across the
+  teardown and the completion write. Ownership is dropped in the same critical
+  section as the persisted `COMPLETED` row (or when the write is superseded),
+  and always conditionally on `c.running[id] == ex`, so a Cancel/Shutdown that
+  already took the execution over — or a Resume that installed a replacement —
+  is never undone.
 
 ## 10. Known limitations
 

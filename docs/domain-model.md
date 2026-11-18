@@ -119,8 +119,12 @@ StopPolicy{ Mode StopMode; ConfirmedLimit int }
 ```
 
 - `ProfileName`: `conservative`, `balanced`, `fast`, `custom`. Presets in
-  [`internal/scan/profiles.go`](../internal/scan/profiles.go); Balanced =
-  Discovery 4 / HTTP 10 / Browser 2 (the spec default).
+  [`internal/scan/profiles.go`](../internal/scan/profiles.go). **Conservative is
+  the default for a new scan** (`domain.DefaultProfile`): Discovery 2 / HTTP 4 /
+  Browser 1, 2 requests per second. A caller that omits the profile, or names an
+  unknown one, gets that preset — never a faster one. Balanced is the medium
+  preset (4 / 10 / 2, 10 req/s) and Fast the aggressive one (8 / 25 / 4, 50
+  req/s); both must be requested explicitly.
 - `StopMode`: `continue_all`, `first_confirmed`, `after_n_confirmed`,
   `pause_and_ask`. Evaluated by `scan.EvaluateStop`.
 
@@ -130,17 +134,32 @@ StopPolicy{ Mode StopMode; ConfirmedLimit int }
 
 `domain.Scope.Permits(url)` is pure matching logic that **fails closed**:
 
-- Empty scope (no include hosts) → deny all.
+- Empty scope (no include hosts **and** no subdomain-only hosts) → deny all.
 - Exclusions (hosts, path prefixes) always win over inclusions.
 - Host must match an included host; subdomains allowed only when
   `AllowSubdomains` is set (or a `.suffix` pattern is used).
+- `SubdomainOnlyHosts` is the third shape: a host listed there authorizes its
+  **strict subdomains only**, never itself. It is how a bug-bounty wildcard
+  asset (`*.example.com`) is imported — the apex is not part of a wildcard, and
+  neither a leading-dot include nor an exclusion can express that. A scope that
+  lists only wildcard hosts is a real, non-empty scope.
 - If include path prefixes are configured, the path must match one.
 - Unparseable or hostless URLs → deny.
+- `AllowedOrigins`, when non-empty, adds a scheme/port requirement: the URL must
+  match an entry's `scheme://host[:port]` (an omitted port is the scheme
+  default; `*.example.com` means strict subdomains only). It can only narrow the
+  scope. An empty list is the documented **legacy** behaviour (any scheme, any
+  port of an in-scope host), which preserves scopes saved before the field
+  existed; `AllowAnySchemePorts` records that choice explicitly for a scope
+  saved later and never overrides a non-empty origin list. A save never derives
+  an origin list: a new scope must state one or explicitly choose
+  `AllowAnySchemePorts`.
 
 Scope is enforced at **scan creation** and again at **start** (defense in depth).
 
-The matcher compares the **hostname** only (not port, scheme, or the resolved IP),
-and path prefixes are plain string prefixes. See
+The host matcher compares the **hostname** only (not the resolved IP), and path
+prefixes are plain string prefixes. Scheme and port are compared only when the
+scope declares origins; otherwise they are ignored, exactly as before. See
 [scope-semantics.md](scope-semantics.md) for the exact behaviour and its limits.
 
 ---

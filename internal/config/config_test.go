@@ -15,8 +15,8 @@ func TestDefaultsAreConservativeAndAIDisabled(t *testing.T) {
 	if c.AI.Enabled {
 		t.Fatal("AI must be disabled by default")
 	}
-	if c.DefaultProfile != domain.ProfileBalanced {
-		t.Fatalf("default profile = %s", c.DefaultProfile)
+	if c.DefaultProfile != domain.ProfileConservative {
+		t.Fatalf("default profile = %s, want conservative", c.DefaultProfile)
 	}
 }
 

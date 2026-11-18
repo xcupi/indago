@@ -102,7 +102,7 @@ func TestValidateScopeHostSuggestionsAreThemselvesValid(t *testing.T) {
 }
 
 func TestValidateScopePathPrefix(t *testing.T) {
-	for _, entry := range []string{"/", "/app", "/app/", "/a/b/c", "/Admin", "/a%25b"} {
+	for _, entry := range []string{"/", "/app", "/app/", "/a/b/c", "/Admin"} {
 		if err := ValidateScopePathPrefix(entry); err != nil {
 			t.Errorf("%q should be accepted: %v", entry, err)
 		}
@@ -116,6 +116,16 @@ func TestValidateScopePathPrefix(t *testing.T) {
 		{"/a b", "whitespace"},
 		{"/a\tb", "whitespace"},
 		{"/app/../x", "dot-segment"},
+		{"/app/.%2e/x", "percent"},
+		{"/app/%2e%2e", "percent"},
+		{"/app/%2f", "percent"},
+		{"/app/%5c", "percent"},
+		{"/app/%00", "percent"},
+		{"/app//x", "duplicate"},
+		{`/app\..\x`, "backslash"},
+		{"/app;v=1", "path parameter"},
+		{"/app/..;/x", "path parameter"},
+		{"/a%25b", "percent"},
 	} {
 		err := ValidateScopePathPrefix(tc.entry)
 		if err == nil {

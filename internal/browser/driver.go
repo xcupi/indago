@@ -24,8 +24,11 @@ type browserHandle interface {
 	// extraHeaders, when non-empty, is merged into every request this context
 	// makes (see ContextOptions.ExtraHeaders). allow, when non-nil, gates
 	// every http(s) request: disallowed requests must be aborted before they
-	// are sent.
-	NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(url string) bool) (contextHandle, error)
+	// are sent. allowStateChanging, when false, must abort every request whose
+	// method is not read-only (GET/HEAD/OPTIONS) before it is sent — including
+	// a redirect hop that would preserve such a method (see
+	// ContextOptions.AllowStateChanging).
+	NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(url string) bool, allowStateChanging bool) (contextHandle, error)
 	// Close closes the browser and all its contexts.
 	Close() error
 }

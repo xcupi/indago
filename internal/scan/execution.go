@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -43,6 +44,13 @@ type execution struct {
 	// discFinished is set once discovery completed normally (or was skipped
 	// because it had already completed before a restart).
 	discFinished atomic.Bool
+
+	// stopped is set as soon as the execution starts being torn down. It stays
+	// in Controller.running while the completion write is in flight (see
+	// finish), so the controller paths that would act on a LIVE pool — Resume,
+	// Reconfigure — must be able to tell that this execution is only finalizing
+	// and that resuming/resizing it would revive a pool that no longer exists.
+	stopped atomic.Bool
 
 	// evasionPassDone marks that this execution's one-time, bounded automatic
 	// filter-bypass escalation (see evasion_escalation.go) has already been
@@ -140,8 +148,18 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 	// httpEng is the controller's shared engine UNLESS this scan configured its
 	// own ProxyPool, in which case it's a fresh client dedicated to this scan
 	// (see scanHTTPEngine) — closeHTTP releases it once the scan stops.
-	httpEng, closeHTTP := c.scanHTTPEngine(sc)
-	limiter := ratelimit.New(sc.Config.RequestsPerSecond)
+	httpEng, closeHTTP, err := c.scanHTTPEngine(sc)
+	if err != nil {
+		// Fail closed BEFORE anything is sent: the scan asked for a proxy, a TLS
+		// override and/or a hunting User-Agent and the client that carries it
+		// could not be built. Falling back to the shared engine here would send
+		// target traffic without them — unproxied, unspoofed or unidentified —
+		// so the launch is aborted and the caller records the failure/pause.
+		cancel()
+		closeHTTP()
+		return nil, err
+	}
+	limiter := newScanLimiter(sc.Config.RequestsPerSecond)
 	eng := newScopedEngine(httpEng, scope).WithRateLimiter(limiter)
 	cookies := c.sessionCookiesFor(ctx, sc)
 	if len(cookies) > 0 {
@@ -192,7 +210,7 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 		// session context, excluding whatever looks like the auth cookie.
 		cfg.SessionCookies = cookies
 		cfg.Limiter = limiter
-		reg := discovery.NewRealRegistry(eng, c.opts.Browser, cfg)
+		reg := discovery.NewRealRegistry(eng, c.discoveryBrowser(sc), cfg)
 		ex.disc = discovery.NewManager(c.store, c.queue, reg, cfg, c.log)
 		seeds := seedsFor(sc, target)
 		go c.runDiscovery(runCtx, ex, sc, scope, seeds)
@@ -201,6 +219,30 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 	go c.monitor(runCtx, ex)
 	return ex, nil
 }
+
+// newScanLimiter builds the scan's ONE request-rate limiter. It deliberately
+// uses the evenly spaced limiter rather than the ±jitter variant:
+// requests_per_second is a MINIMUM spacing floor (defensive load protection for
+// the target), and a randomized early permit would let two consecutive requests
+// land closer together than 1/rps — as much as 35% early at the jitter fraction
+// this wiring previously passed. Every target-facing path of the scan shares the
+// returned instance, so a runtime SetRate reconfigures them all at once.
+func newScanLimiter(rps float64) *ratelimit.Limiter {
+	return ratelimit.New(rps)
+}
+
+// ErrScanHTTPClient is returned when a scan asked for a scoped HTTP client — a
+// proxy pool, a randomized-TLS override, or a hunting User-Agent — and that
+// client could not be built. The scan must not start or resume: the shared
+// engine would send target traffic without the operator's proxy, fingerprint or
+// identifier. Start records the scan as failed and Resume returns it to paused,
+// so no worker pool is left running and nothing is queued.
+var ErrScanHTTPClient = errors.New("scan: refusing to send target traffic without the scan's required HTTP client")
+
+// newHTTPEngine builds a scan-scoped client. It is a variable so tests can
+// exercise an internal construction failure that is NOT a config-validation
+// failure; the fail-closed path must hold for both.
+var newHTTPEngine = httpengine.New
 
 // scanHTTPEngine returns the HTTP engine this scan's discovery and raw
 // candidate/reflection testing should use, plus a closer to release any
@@ -213,31 +255,83 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 // picks up ProxyPool on its own (verifyExecutor.nextProxy, wired in
 // defaultHandlers) — this is the raw-HTTP-side half of the same "every
 // outbound request this scan makes" contract (domain.ScanConfig.ProxyPool).
-func (c *Controller) scanHTTPEngine(sc *domain.Scan) (httpengine.Engine, func()) {
-	if len(sc.Config.ProxyPool) == 0 && !sc.Config.RandomizeTLSFingerprint && sc.Config.HuntingUserAgent == "" {
-		return c.opts.HTTP, func() {}
+//
+// FAIL CLOSED: when the scan asked for a proxy, a randomized TLS fingerprint
+// and/or a hunting User-Agent, the only honest engine is the one carrying it.
+// If that client cannot be built, this returns ErrScanHTTPClient instead of the
+// shared engine — a fallback would silently send unproxied (or unidentified)
+// target traffic, which is exactly what the operator configured the scan to
+// avoid. A hunting User-Agent that cannot be applied is reported the same way
+// rather than dropped: the identifier is often a program requirement.
+func (c *Controller) scanHTTPEngine(sc *domain.Scan) (httpengine.Engine, func(), error) {
+	wantsProxy := len(sc.Config.ProxyPool) > 0
+	wantsTLS := sc.Config.RandomizeTLSFingerprint
+	wantsUA := sc.Config.HuntingUserAgent != ""
+	if !wantsProxy && !wantsTLS && !wantsUA {
+		return c.opts.HTTP, func() {}, nil
 	}
 	cfg := c.opts.HTTPConfig
 	cfg.ProxyPool = sc.Config.ProxyPool
 	cfg.RandomizeTLSFingerprint = sc.Config.RandomizeTLSFingerprint
-	if sc.Config.HuntingUserAgent != "" {
+	if wantsUA {
 		if sc.Config.HuntingUserAgentReplace {
 			cfg.UserAgent = sc.Config.HuntingUserAgent
 		} else {
 			cfg.UserAgent = strings.TrimSpace(httpengine.DefaultUserAgent + " " + sc.Config.HuntingUserAgent)
 		}
 	}
-	eng, err := httpengine.New(cfg)
+	eng, err := newHTTPEngine(cfg)
 	if err != nil {
-		// A scan-scoped client failing to build (e.g. a malformed proxy URL
-		// that slipped past CreateScanParams validation) should not block
-		// the scan outright — it just runs unproxied, through the shared
-		// engine, and the reason is logged.
-		c.log.Warn("build scan-scoped proxied HTTP client, falling back to the shared engine (unproxied)",
-			"scan", sc.ID, "err", err)
-		return c.opts.HTTP, func() {}
+		reason := "its hunting User-Agent could not be applied"
+		if wantsProxy || wantsTLS {
+			reason = "its proxy/TLS-override HTTP client could not be built"
+		}
+		// httpengine.New quotes the offending entry verbatim; this error is
+		// persisted on the scan (status/UI), so strip any proxy credentials
+		// before it travels.
+		msg := redactProxyCredentials(err.Error(), sc.Config.ProxyPool)
+		c.log.Error("scan HTTP client unavailable; refusing to run without it",
+			"scan", sc.ID, "reason", reason, "err", msg)
+		return nil, func() {}, fmt.Errorf("%w: %s: %s", ErrScanHTTPClient, reason, msg)
 	}
-	return eng, eng.Close
+	return eng, eng.Close, nil
+}
+
+// redactProxyCredentials removes the userinfo of every proxy URL in pool from
+// msg, so a credential embedded in an operator proxy URL cannot end up in a
+// persisted scan error or a log line.
+func redactProxyCredentials(msg string, pool []string) string {
+	for _, p := range pool {
+		userinfo := proxyUserinfo(p)
+		if userinfo == "" {
+			continue
+		}
+		msg = strings.ReplaceAll(msg, userinfo+"@", "***@")
+	}
+	return msg
+}
+
+// proxyUserinfo returns the raw userinfo of a proxy URL, or "" when it has none.
+// It falls back to the literal "scheme://userinfo@host" shape for a URL that
+// net/url rejects — exactly the malformed entries whose error message quotes
+// them back.
+func proxyUserinfo(proxy string) string {
+	if u, err := url.Parse(proxy); err == nil {
+		if u.User == nil {
+			return ""
+		}
+		return u.User.String()
+	}
+	i := strings.Index(proxy, "://")
+	if i < 0 {
+		return ""
+	}
+	rest := proxy[i+3:]
+	at := strings.LastIndex(rest, "@")
+	if at <= 0 {
+		return ""
+	}
+	return rest[:at]
 }
 
 // discoveryConfig derives the per-scan discovery config from the controller
@@ -376,6 +470,7 @@ func (c *Controller) runDiscovery(ctx context.Context, ex *execution, sc *domain
 // must NOT hold c.mu. waitMonitor must be false when called from the monitor
 // goroutine itself.
 func (c *Controller) stopExecution(ex *execution, waitMonitor bool) {
+	ex.stopped.Store(true) // no live pool from here on (see execution.stopped)
 	ex.cancel()
 	ex.pool.Stop()
 	<-ex.discDone
@@ -733,6 +828,34 @@ func (c *Controller) failExecution(ctx context.Context, ex *execution, reason st
 	return true
 }
 
+// completionOutcome is what finish managed to do with the scan's terminal state.
+type completionOutcome int
+
+const (
+	// completionPersisted: the row now reads COMPLETED in the store.
+	completionPersisted completionOutcome = iota
+	// completionSuperseded: another actor (cancel, shutdown, pause) took the
+	// scan over while the completion write was in flight. finish wrote nothing
+	// and that actor records the terminal state itself.
+	completionSuperseded
+	// completionFailed: the write could not be persisted within the bounded
+	// retries. The scan is NOT reported as completed.
+	completionFailed
+)
+
+// Completion persistence is bounded and observable. A transient store error (a
+// locked database file, a momentarily unwritable disk) must never silently
+// strand a finished scan in `running` with no execution left to drive it — and
+// completion must never be reported unless the row actually says COMPLETED.
+const (
+	// completionAttempts is the total number of tries, not the retry count.
+	completionAttempts = 4
+	// completionRetryBase is the delay before the second attempt; it doubles
+	// per attempt. Total added latency stays well under 200ms, which bounds how
+	// long a Cancel/Shutdown waiting on this monitor can be held up.
+	completionRetryBase = 20 * time.Millisecond
+)
+
 // finish completes the scan from the monitor. When cancelJobs is set (stop
 // policy) the scan's remaining jobs are canceled too. It returns true when the
 // execution was finished (so the monitor exits) and false when the scan is not
@@ -740,13 +863,20 @@ func (c *Controller) failExecution(ctx context.Context, ex *execution, reason st
 //
 // Ordering:
 //
-//  1. Take ownership under mu: confirm the scan is still RUNNING and remove the
-//     execution from the map in one critical section. Pause/Resume/Cancel also
-//     take mu, so the state cannot change between the check and the removal.
+//  1. Confirm under mu that the scan is still RUNNING and that this execution
+//     still owns it. Pause/Resume/Cancel/Shutdown also take mu, so the state
+//     cannot change between that check and the completion write.
 //  2. Tear the execution down (discovery can no longer enqueue; interrupted
 //     workers finish re-queueing their retries), THEN cancel remaining jobs.
-//  3. Only now record COMPLETED, so a status reader can never observe a
-//     completed scan that still has pending jobs.
+//  3. Only now record COMPLETED — and only if the write actually lands — so a
+//     status reader can never observe a completed scan that still has pending
+//     jobs, and an unwritable store can never produce a lie.
+//
+// Ownership is deliberately kept (the execution stays in c.running) across 2
+// and 3, and re-verified under mu in the same critical section as each write
+// attempt. Releasing it first — as this used to do — created a window where a
+// failed write left the scan `running` with nothing driving it, while every
+// error (transient storage included) was reported as "a cancel won the race".
 func (c *Controller) finish(ctx context.Context, ex *execution, cancelJobs bool) bool {
 	c.mu.Lock()
 	if c.running[ex.scanID] != ex {
@@ -758,7 +888,6 @@ func (c *Controller) finish(ctx context.Context, ex *execution, cancelJobs bool)
 		c.mu.Unlock()
 		return false // paused/awaiting auth (or unreadable): keep the execution
 	}
-	delete(c.running, ex.scanID)
 	c.mu.Unlock() // never wait for goroutines while holding mu
 
 	c.stopExecution(ex, false) // we ARE the monitor goroutine
@@ -772,21 +901,160 @@ func (c *Controller) finish(ctx context.Context, ex *execution, cancelJobs bool)
 	}
 	ended := time.Now()
 	stats := c.snapshotStats(bg, ex.scanID)
-	if _, err := c.mutate(bg, ex.scanID, func(s *domain.Scan) error {
-		if err := transition(s, domain.ScanCompleted); err != nil {
+
+	outcome, attempts, err := c.persistCompletion(bg, ex, ended, stats)
+	switch outcome {
+	case completionPersisted:
+		c.log.Info("scan completed", "scan", ex.scanID, "stopped_early", cancelJobs, "attempts", attempts)
+	case completionSuperseded:
+		c.log.Info("finish: completion superseded by a concurrent scan state change",
+			"scan", ex.scanID, "attempts", attempts, "err", err)
+	case completionFailed:
+		// Never claim COMPLETED for a row that does not say so. Record a
+		// terminal failure the operator can see instead of leaving the scan
+		// looking alive with no execution behind it (best effort: the store
+		// may still be failing, and the failure record says so too).
+		reason := "completion could not be persisted"
+		if err != nil {
+			reason += ": " + err.Error()
+		}
+		c.log.Error("finish: could not persist completion",
+			"scan", ex.scanID, "attempts", attempts, "err", err)
+		c.recordUnpersistedCompletion(ex.scanID, reason)
+	}
+	return true
+}
+
+// recordUnpersistedCompletion marks a scan failed after its completion could
+// not be written. It only touches a scan that is still RUNNING: a concurrent
+// Cancel (or a restart's recovery) owns the terminal state from that point on,
+// and rewriting a canceled scan as failed would be the same class of lie this
+// whole path exists to avoid.
+func (c *Controller) recordUnpersistedCompletion(id domain.ID, reason string) {
+	ended := time.Now()
+	sc, err := c.mutate(context.Background(), id, func(s *domain.Scan) error {
+		if s.State != domain.ScanRunning {
+			return errSkipWrite // someone else owns the terminal state
+		}
+		if err := transition(s, domain.ScanFailed); err != nil {
 			return err
 		}
+		s.Error = reason
 		s.EndedAt = &ended
-		s.Stats = stats
 		return nil
-	}); err != nil {
-		// A concurrent Cancel won the race after we took ownership; it records the
-		// terminal state itself.
-		c.log.Info("finish: scan state changed during completion", "scan", ex.scanID, "err", err)
+	})
+	if err != nil {
+		c.log.Warn("could not record unpersisted completion", "scan", id, "err", err)
+		return
+	}
+	if sc.State != domain.ScanFailed {
+		c.log.Info("unpersisted completion: scan state is owned elsewhere",
+			"scan", id, "state", sc.State)
+		return
+	}
+	c.log.Error("scan failed", "scan", id, "reason", reason)
+}
+
+// persistCompletion writes the COMPLETED state, retrying a bounded number of
+// times, and drops this execution's ownership of the scan in the same critical
+// section as whichever outcome it reaches. Every attempt re-checks ownership,
+// shutdown and the persisted state under mu, so a Cancel/Shutdown that won the
+// race is never overwritten with a completion it did not ask for.
+func (c *Controller) persistCompletion(ctx context.Context, ex *execution, ended time.Time, stats domain.ScanStats) (completionOutcome, int, error) {
+	var lastErr error
+	for attempt := 1; attempt <= completionAttempts; attempt++ {
+		if attempt > 1 {
+			delay := completionRetryBase << (attempt - 2)
+			c.log.Warn("finish: retrying completion write", "scan", ex.scanID,
+				"attempt", attempt, "attempts", completionAttempts, "delay", delay, "err", lastErr)
+			time.Sleep(delay)
+		}
+
+		c.mu.Lock()
+		if c.running[ex.scanID] != ex {
+			// Cancel or Shutdown took the execution over. There is nothing to
+			// write: either it records the terminal state, or the shutdown
+			// leaves the row `running` on purpose so a restart can recover it.
+			c.mu.Unlock()
+			return completionSuperseded, attempt,
+				fmt.Errorf("%w: execution was taken over", ErrBadState)
+		}
+		sc, err := c.store.Scans().Get(ctx, ex.scanID)
+		if err != nil {
+			c.mu.Unlock()
+			lastErr = err
+			if !isTransientStoreErr(err) {
+				c.release(ex)
+				return completionFailed, attempt, err
+			}
+			continue
+		}
+		if sc.State != domain.ScanRunning {
+			// Paused / awaiting auth / already terminal: whoever moved it owns
+			// the next step. Drop our now-stale execution so a later Resume
+			// rebuilds one instead of resuming a torn-down pool.
+			delete(c.running, ex.scanID)
+			c.mu.Unlock()
+			return completionSuperseded, attempt, fmt.Errorf("%w: %s -> completed", ErrBadState, sc.State)
+		}
+		_, err = c.mutate(ctx, ex.scanID, func(s *domain.Scan) error {
+			if err := transition(s, domain.ScanCompleted); err != nil {
+				return err
+			}
+			s.EndedAt = &ended
+			s.Stats = stats
+			return nil
+		})
+		if err == nil {
+			// Same critical section as the write: a status reader holding mu
+			// can never see a completed scan still listed as running.
+			delete(c.running, ex.scanID)
+			c.mu.Unlock()
+			return completionPersisted, attempt, nil
+		}
+		c.mu.Unlock()
+		lastErr = err
+		if errors.Is(err, ErrBadState) {
+			c.release(ex)
+			return completionSuperseded, attempt, err
+		}
+		if !isTransientStoreErr(err) {
+			c.release(ex)
+			return completionFailed, attempt, err
+		}
+	}
+	c.release(ex)
+	return completionFailed, completionAttempts, lastErr
+}
+
+// release drops this execution's ownership of its scan, but only if the map
+// still holds THIS execution: a Cancel/Shutdown that already removed it, or a
+// Resume that installed a replacement, must never be undone here.
+func (c *Controller) release(ex *execution) {
+	c.mu.Lock()
+	if c.running[ex.scanID] == ex {
+		delete(c.running, ex.scanID)
+	}
+	c.mu.Unlock()
+}
+
+// isTransientStoreErr reports whether a failed scan write is worth retrying:
+// anything that is not a definitive answer about the data. A canceled context,
+// a missing row, or a rejected state transition will not improve with another
+// identical attempt; a locked/unavailable store may.
+func isTransientStoreErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch {
+	case errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded),
+		errors.Is(err, store.ErrNotFound),
+		errors.Is(err, ErrBadState):
+		return false
+	default:
 		return true
 	}
-	c.log.Info("scan completed", "scan", ex.scanID, "stopped_early", cancelJobs)
-	return true
 }
 
 // countConfirmed returns the number of confirmed findings for a scan.

@@ -190,7 +190,9 @@ async function renderScope(_params, view) {
   const excHosts = textarea("s_exchosts", 3);
   const incPaths = textarea("s_incpaths", 2);
   const excPaths = textarea("s_excpaths", 2, "/logout");
+  const origins = textarea("s_origins", 2, "https://app.example.com");
   const subs = el("input"); subs.type = "checkbox"; subs.id = "s_subs";
+  const anyPort = el("input"); anyPort.type = "checkbox"; anyPort.id = "s_any";
   const err = el("div", undefined, "err");
   const currentBox = el("div");
 
@@ -200,6 +202,13 @@ async function renderScope(_params, view) {
     add("Include hosts", sc.include_hosts); add("Exclude hosts", sc.exclude_hosts);
     add("Include paths", sc.include_path_prefixes); add("Exclude paths", sc.exclude_path_prefixes);
     dl.append(el("dt", "Allow subdomains"), el("dd", sc.allow_subdomains ? "yes" : "no"));
+    if (sc.allowed_origins && sc.allowed_origins.length) {
+      add("Allowed origins", sc.allowed_origins);
+    } else if (sc.allow_any_scheme_ports) {
+      dl.append(el("dt", "Allowed origins"), el("dd", "any scheme and port (explicitly chosen)"));
+    } else {
+      dl.append(el("dt", "Allowed origins"), el("dd", "legacy: no scheme/port rule recorded — every scheme and port of these hosts is in scope"));
+    }
     currentBox.replaceChildren(el("h2", "Current scope"), dl);
   }
 
@@ -209,17 +218,23 @@ async function renderScope(_params, view) {
     excHosts.value = (sc.exclude_hosts || []).join("\n");
     incPaths.value = (sc.include_path_prefixes || []).join("\n");
     excPaths.value = (sc.exclude_path_prefixes || []).join("\n");
+    origins.value = (sc.allowed_origins || []).join("\n");
     subs.checked = !!sc.allow_subdomains;
+    anyPort.checked = !!sc.allow_any_scheme_ports;
     render(sc);
   } catch (e) {
     currentBox.replaceChildren(el("p", "No scope configured yet — save one below before scanning.", "hint"));
   }
 
   const save = button("Save scope", async () => {
+    // When the explicit "any scheme and port" opt-in is ticked the origin list
+    // is ignored by the server (and sending both is a 400), so send it empty.
     const res = await mutate("PUT", api.project(project.id) + "/scope", {
       include_hosts: lines(incHosts), exclude_hosts: lines(excHosts),
       include_path_prefixes: lines(incPaths), exclude_path_prefixes: lines(excPaths),
       allow_subdomains: subs.checked,
+      allowed_origins: anyPort.checked ? [] : lines(origins),
+      allow_any_scheme_ports: anyPort.checked,
     });
     if (!res.ok) { setMsg(err, errMsg(res, "save scope failed")); return; }
     setMsg(err, "Scope saved.", true); render(res.data);
@@ -227,10 +242,12 @@ async function renderScope(_params, view) {
 
   const form = el("div");
   form.append(
-    el("p", "Hosts are bare hostnames: no https://, port, path or *. Write app.example.com, or .example.com for the host and all its subdomains. The port is ignored, so a host is in scope on every port. Path prefixes start with / and are plain string prefixes (/app also matches /application).", "hint scope-host-hint"),
+    el("p", "Hosts are bare hostnames: no https://, port, path or *. Write app.example.com, or .example.com for the host and all its subdomains. Scheme and port are a separate statement: list the exact origins you may test (https://app.example.com, http://host:8080, https://*.example.com) or tick the box to authorize every scheme and port. Nothing is derived from the host list, so adding a host never authorizes http or https by itself. Path prefixes start with / and cover their own segment and everything below it (/app matches /app and /app/x, not /application); they apply to EVERY host in this scope, so a path is never bound to one host.", "hint scope-host-hint"),
     rowOf(field("Include hosts (one per line)", incHosts), field("Exclude hosts (one per line)", excHosts)),
     rowOf(field("Include path prefixes (one per line)", incPaths), field("Exclude path prefixes (one per line)", excPaths)),
+    field("Allowed origins (one per line, scheme://host[:port]; required unless you authorize every scheme and port)", origins),
     labelInline(subs, "Allow subdomains of included hosts"),
+    labelInline(anyPort, "Authorize every scheme and port of these hosts (legacy; ignores the origin list)"),
     (function () { const a = el("div", undefined, "form-actions"); a.appendChild(save); return a; })(),
     err,
   );

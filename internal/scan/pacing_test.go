@@ -190,6 +190,41 @@ func TestVerifyPassesRateLimiter(t *testing.T) {
 	}
 }
 
+// The scan's request limiter must treat requests_per_second as a MINIMUM
+// spacing floor: no permit may be due until a full 1/rps has elapsed since the
+// previous one. This pins the wiring to the evenly spaced limiter — the ±jitter
+// variant's randomized early permits could put two requests only ~65% of the
+// configured interval apart, which is exactly the defensive-load regression this
+// test guards against.
+func TestScanLimiterEnforcesConfiguredMinimumSpacing(t *testing.T) {
+	const (
+		rps     = 100.0 // 10ms interval
+		permits = 60    // 59 gaps, ~600ms total
+	)
+	interval := time.Duration(float64(time.Second) / rps)
+	// Timer/scheduler slack only. A ±jitter step lands ~3.5ms early at the
+	// fraction this wiring used to pass, well below this floor, so the
+	// assertion still catches it on every run.
+	slack := time.Millisecond
+	l := newScanLimiter(rps)
+	ctx := context.Background()
+	if err := l.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	prev := time.Now()
+	for i := 0; i < permits; i++ {
+		if err := l.Wait(ctx); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now()
+		if gap := now.Sub(prev); gap < interval-slack {
+			t.Fatalf("permit %d came %v after the previous one, want >= %v: requests_per_second is a minimum spacing floor",
+				i+1, gap, interval)
+		}
+		prev = now
+	}
+}
+
 // A request's timeout bounds its own network time, not its wait for a permit.
 // Here the second request waits ~500ms for its permit (2 rps) under a 100ms
 // request timeout; it must still succeed, not be classified as a TIMEOUT for a

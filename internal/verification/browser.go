@@ -131,6 +131,11 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	if method != "GET" && method != "HEAD" && !isFormPost && !isJSONPost {
 		return nil, ErrUnsupportedMethod
 	}
+	if (isFormPost || isJSONPost) && !in.AllowStateChanging {
+		// Never replay a write without the scan's explicit opt-in, even if a
+		// caller reached the verifier directly.
+		return nil, ErrStateChangingNotAllowed
+	}
 	if in.URL == "" {
 		return nil, errors.New("verification: empty URL")
 	}
@@ -148,6 +153,10 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 		StorageStatePath: in.SessionStatePath,
 		ProxyServer:      in.ProxyServer,
 		ExtraHeaders:     in.ExtraHeaders,
+		// The scan's state-changing opt-in decides this context's method
+		// policy: a default scan verifies in a non-mutating browser, so a
+		// target page cannot turn verification into a write.
+		AllowStateChanging: in.AllowStateChanging,
 	})
 	if err != nil {
 		return nil, classifyBrowserErr(ctx, err)

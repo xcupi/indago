@@ -14,17 +14,19 @@ const (
 // RequestsPerSecond is the scan-wide budget for every target-facing request
 // (crawl, browser, and HTTP tests alike; see domain.ScanConfig).
 //
-// Defaults are conservative by design. The Balanced profile matches the spec's
-// initial defaults (Discovery=4, HTTP=10, Browser=2). Custom returns Balanced as
-// a starting point for the caller to override.
+// Defaults are conservative by design: an unnamed or unrecognized profile maps
+// to domain.DefaultProfile, the conservative preset (2 requests/second).
+// Balanced matches the spec's initial tuning (Discovery=4, HTTP=10, Browser=2)
+// and must be requested explicitly. Custom returns Balanced as a starting point
+// for the caller to override.
 func ProfileConfig(name domain.ProfileName) domain.ScanConfig {
 	switch name {
-	case domain.ProfileConservative:
+	case domain.ProfileBalanced, domain.ProfileCustom:
 		return domain.ScanConfig{
-			DiscoveryConcurrency: 2,
-			HTTPConcurrency:      4,
-			BrowserConcurrency:   1,
-			RequestsPerSecond:    2,
+			DiscoveryConcurrency: 4,
+			HTTPConcurrency:      10,
+			BrowserConcurrency:   2,
+			RequestsPerSecond:    10,
 		}
 	case domain.ProfileFast:
 		return domain.ScanConfig{
@@ -33,14 +35,14 @@ func ProfileConfig(name domain.ProfileName) domain.ScanConfig {
 			BrowserConcurrency:   4,
 			RequestsPerSecond:    50,
 		}
-	case domain.ProfileBalanced, domain.ProfileCustom:
-		fallthrough
 	default:
+		// domain.ProfileConservative, plus anything unrecognized: the default
+		// must stay quiet rather than run a faster preset by accident.
 		return domain.ScanConfig{
-			DiscoveryConcurrency: 4,
-			HTTPConcurrency:      10,
-			BrowserConcurrency:   2,
-			RequestsPerSecond:    10,
+			DiscoveryConcurrency: 2,
+			HTTPConcurrency:      4,
+			BrowserConcurrency:   1,
+			RequestsPerSecond:    2,
 		}
 	}
 }

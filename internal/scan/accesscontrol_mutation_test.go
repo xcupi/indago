@@ -24,11 +24,11 @@ import (
 	"github.com/indago/indago/internal/domain"
 )
 
-func runMutationJob(t *testing.T, target string) (*scanEnv, accessControlDetail, []*domain.Finding) {
+func runMutationJob(t *testing.T, target string, cfg ExecutorConfig) (*scanEnv, accessControlDetail, []*domain.Finding) {
 	t.Helper()
 	env := newScanEnv(t)
 	ep := acEndpoint(t, env, target, domain.SourceCrawler, domain.MethodPOST)
-	ex := newAccessControlExecutor(env.st, acSessionEngine(t), env.ev, ExecutorConfig{}, execLog(), &sync.Mutex{}, true)
+	ex := newAccessControlExecutor(env.st, acSessionEngine(t), env.ev, cfg, execLog(), &sync.Mutex{}, true)
 	job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobAccessControl,
 		Target: domain.JobTarget{EndpointID: ep.ID, URL: target}, MaxAttempts: 1,
 		Payload:   accessControlModePayload(accessModeMutation),
@@ -65,7 +65,7 @@ func TestAccessMutationConfirmationStepConfirms(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, d, findings := runMutationJob(t, srv.URL+"/admin-roles")
+	_, d, findings := runMutationJob(t, srv.URL+"/admin-roles", ExecutorConfig{AllowStateChanging: true})
 	if d.Verdict != domain.VerdictConfirmed || d.Bypass != "confirmation" {
 		t.Fatalf("verdict=%q bypass=%q reason=%q, want confirmed/confirmation", d.Verdict, d.Bypass, d.Reason)
 	}
@@ -96,7 +96,7 @@ func TestAccessMutationRefererConfirms(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, d, findings := runMutationJob(t, srv.URL+"/admin-roles")
+	_, d, findings := runMutationJob(t, srv.URL+"/admin-roles", ExecutorConfig{AllowStateChanging: true})
 	if d.Verdict != domain.VerdictConfirmed || d.Bypass != "referer" {
 		t.Fatalf("verdict=%q bypass=%q reason=%q, want confirmed/referer", d.Verdict, d.Bypass, d.Reason)
 	}
@@ -127,7 +127,7 @@ func TestAccessMutationPublicHandlerIsNeverConfirmed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, d, findings := runMutationJob(t, srv.URL+"/admin-roles")
+	_, d, findings := runMutationJob(t, srv.URL+"/admin-roles", ExecutorConfig{AllowStateChanging: true})
 	if d.Verdict == domain.VerdictConfirmed {
 		t.Fatalf("a handler that answers anonymous callers must never be Confirmed: %s", d.Reason)
 	}
@@ -143,9 +143,66 @@ func TestAccessMutationDeniedEverywhereStaysRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, d, findings := runMutationJob(t, srv.URL+"/admin-roles")
+	_, d, findings := runMutationJob(t, srv.URL+"/admin-roles", ExecutorConfig{AllowStateChanging: true})
 	if d.Verdict != domain.VerdictRejected {
 		t.Fatalf("verdict=%q reason=%q, want rejected", d.Verdict, d.Reason)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("findings = %+v, want none", findings)
+	}
+}
+
+// A mutation job can reach the executor from an old queue even after the
+// server's opt-in changed. It must fail closed before sending any POST.
+func TestAccessMutationRequiresAllowStateChanging(t *testing.T) {
+	var mu sync.Mutex
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	_, d, findings := runMutationJob(t, srv.URL+"/admin-roles", ExecutorConfig{})
+	mu.Lock()
+	got := hits
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("state-changing mutation probe sent %d request(s) without AllowStateChanging", got)
+	}
+	if !d.Skipped || !strings.Contains(d.SkipReason, "AllowStateChanging") {
+		t.Fatalf("detail = %+v, want a skip naming AllowStateChanging", d)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("findings = %+v, want none", findings)
+	}
+}
+
+func TestAccessMutationRequiresSkipWriteEndpointsOff(t *testing.T) {
+	var mu sync.Mutex
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	_, d, findings := runMutationJob(t, srv.URL+"/admin-roles", ExecutorConfig{
+		AllowStateChanging: true,
+		SkipWriteEndpoints: true,
+	})
+	mu.Lock()
+	got := hits
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("mutation probe sent %d request(s) despite skip_write_endpoints", got)
+	}
+	if !d.Skipped || !strings.Contains(d.SkipReason, "skip_write_endpoints") {
+		t.Fatalf("detail = %+v, want a skip naming skip_write_endpoints", d)
 	}
 	if len(findings) != 0 {
 		t.Fatalf("findings = %+v, want none", findings)

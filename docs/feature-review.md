@@ -1,10 +1,31 @@
 # Feature review and PortSwigger coverage
 
-Reviewed 2026-11-10 against the current branch (binary `b6b3cd2`).
+> **HISTORICAL SNAPSHOT — read this before citing any number below.**
+>
+> This document records **one review performed on 2026-11-10** against binary
+> `b6b3cd2`, not the state of the current build (HEAD `41a58cc`, 2026-11-16, at
+> the time this banner was added). The lab scoreboard is **historical,
+> mixed-revision evidence**: the review itself records that its confirmed column
+> spans more than one build, so **48/55 is not a reproducible measurement of any
+> single revision** and must not be quoted as current coverage.
+>
+> The tables are kept verbatim because they are still useful evidence about what
+> was exercised and why the gaps existed. They are not kept because they are
+> still true: several engines that did not exist at review time do exist now
+> (see [Current build (post-review)](#current-build-post-review)).
+>
+> **No number in this document is a current-build capability claim.**
+
+Reviewed 2026-11-10 against the then-current branch (binary `b6b3cd2`).
 The lab numbers come from `indago_lab/LABS.md`, which was rebuilt from the live
 PortSwigger catalogue; the confirmed column is mixed-revision and says so.
+That file is not part of this repository, so the counts below cannot be
+re-derived from a checkout and should be treated as an external lab artifact.
 
-## Scoreboard
+## Scoreboard (historical — 2026-11-10, `b6b3cd2`)
+
+Values are exactly as recorded at review time. `48/55` is a mixed-revision
+count, not current-build coverage.
 
 | Area | Result |
 | --- | --- |
@@ -16,15 +37,57 @@ PortSwigger catalogue; the confirmed column is mixed-revision and says so.
 | LLM provider ids / selectable in Settings | 9 / 9 |
 | API routes | 60+ (see `internal/web/server.go`) |
 
-"Confirmed" means the scanner produced the finding and its own execution
-evidence. Labs solved manually or with a vendor solution are not counted.
+"Confirmed" in this document is the **historical** sense: at the time of the
+review the scanner produced the finding and its own execution evidence. Labs
+solved manually or with a vendor solution are not counted.
+
+Passing QA controls is a different claim and must not be read into it. A green
+unit or integration test shows that a code path behaves the way its fixture
+asserts; it does not show that the capability has been confirmed end to end
+against a live target on the current build. The two are never interchangeable.
 
 ## What the product actually does
 
 Indago is an authorization-first, single-target web scanner. It crawls a seed
-inside a project scope and tests four vulnerability classes: reflected and DOM
-XSS, access control (including IDOR), and information disclosure. It does not
-claim SQL injection, SSRF, CSRF, deserialization, or stored XSS.
+inside a project scope. **At review time** it tested four vulnerability classes:
+reflected and DOM XSS, access control (including IDOR), and information
+disclosure, and claimed nothing beyond them. It has never claimed CSRF,
+deserialization, or stored XSS.
+
+### Current build (post-review)
+
+The four-class sentence above is historical and is now wrong about what the code
+contains. Since this review was written, engines for seven further classes have
+been added and are wired into the scan executor: `internal/scan/execution.go`
+enqueues each pass once per scan and gates it on the scan config.
+
+| Engine | Implementation | Default in a scan |
+| --- | --- | --- |
+| SQL injection | `internal/scan/sqli.go` | opt-in — `EnableSQLi` / `-enable-sqli` |
+| SSRF | `internal/scan/ssrf.go` | ON — `SkipSSRF` / `-skip-ssrf` omits it |
+| SSTI | `internal/scan/ssti.go` | opt-in — `EnableSSTI` / `-enable-ssti` |
+| OS command injection | `internal/scan/commandinjection.go` | opt-in — `EnableCommandInjection` / `-enable-command-injection` |
+| XXE | `internal/scan/xxe.go` | opt-in — `EnableXXE` / `-enable-xxe` |
+| CORS misconfiguration | `internal/scan/cors.go` | ON — `SkipCORS` / `-skip-cors` omits it |
+| GraphQL exposure | `internal/scan/graphql.go` | ON — `SkipGraphQL` / `-skip-graphql` omits it |
+
+A server-side open-redirect probe (`SkipOpenRedirect` / `-skip-open-redirect`)
+sits in the same registry. The switches live on `domain.ScanConfig`
+(`internal/domain/core.go`) and are reported per engine by
+`internal/web/coverage.go`. Two of them are conditional rather than universal:
+XXE only runs against observed (or operator-supplied) XML request bodies and
+needs `-xxe-callback` + `-xxe-poll` to do anything, recording a clean skip
+otherwise; SSRF's OAST path needs an operator-supplied canary.
+
+**Verification status: the implementations exist; current-build live
+verification is not established.** Nothing in this repository shows these
+engines working against a real target. The PortSwigger mapping below predates
+them, and there is no dated validation record for them of the kind
+`docs/p0-live-validation.md` establishes for the control plane. Their only
+in-repo evidence is unit and integration coverage under `internal/scan/`, which
+is sufficient to show the engines do what their fixtures assert and is **not**
+sufficient to call any of these capabilities confirmed. Treat all seven as
+unproven capability until a dated live run is written down.
 
 ### Discovery and recon
 
@@ -40,7 +103,7 @@ claim SQL injection, SSRF, CSRF, deserialization, or stored XSS.
 | Parameter mining | `internal/discovery` | differential + 200-name list, GET/body/JSON |
 | Script literal extraction | `internal/discovery/extract_script.go` | feeds DOM and endpoint analysis |
 | Browser network capture | `internal/discovery` | requires `-browser` |
-| Auth state | `internal/auth`, `lab_auth.py` | Playwright storage state; interactive login when enabled |
+| Auth state | `internal/auth`, `lab_auth.py` (lab helper, not in this repository) | Playwright storage state; interactive login when enabled |
 
 Deliberately not covered, with reasons in `docs/recon-coverage.md`: WHOIS, DNS
 and zone transfer, subdomain discovery, dorking, value fuzzing, subdomain
@@ -128,6 +191,11 @@ against the 141 event families in the cheat sheet excludes 28 with reasons
 
 ## PortSwigger mapping
 
+Everything in this section is the **2026-11-10** result set. The counts below
+cover only the four classes the review tested; the seven post-review engines
+have no lab row here because they did not exist yet. That absence means
+*untested*, not *passed* and not *failed* — the weakest of the three claims.
+
 ### XSS (30) - 23 confirmed
 
 Confirmed: 1, 3, 4, 5, 6, 7, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 21, 25,
@@ -199,6 +267,7 @@ is detected, header/comment/backup exposure is reported.
 
 | Priority | Work | Why |
 | --- | --- | --- |
+| **P1 (post-review)** | **Live-validate the seven new engines** (SQLi, SSRF, SSTI, command injection, XXE, CORS, GraphQL) | they are implemented and QA-controlled but have **no current-build live evidence** — see [Current build (post-review)](#current-build-post-review) |
 | P1 | Finish DOM open-redirect and clobbering models | the other sink models are in; these two need an engine that does not follow a redirect out of scope |
 | P1 | ~~Expose all 9 providers in Settings~~ | done |
 | P2 | ~~Token accounting~~ | done (tokens, not cost) |
@@ -209,6 +278,9 @@ is detected, header/comment/backup exposure is reported.
 
 ## Verification
 
+Historical run, 2026-11-10. Lines are the commands the review actually ran; they
+are preserved as evidence of that session, not re-run for this document.
+
 ```
 go test ./internal/web                     ok 47.4s
 go test ./internal/detection ./internal/report ./internal/llm
@@ -218,3 +290,14 @@ GET /api/capabilities  -> browser, sandbox, login, state-changing all true
 GET /api/payload-library -> 137 entries
 LABS.md -> 42 confirmed / 13 gap
 ```
+
+Two caveats that make this block weaker than it looks:
+
+- The historical `LABS.md` line records **42 confirmed / 13 gap**. QA on
+  2026-11-16 counted the sibling `indago_lab/LABS.md` table and found
+  **48 confirmed / 7 gap** across 55 rows. Its older 42/13 summary is now
+  labelled historical. Both totals remain mixed-revision evidence.
+- Green test packages and `GET /api/capabilities` are **QA controls**. They show
+  the tested code paths work and the server reports its flags correctly. They do
+  **not** show that any detection capability is live-confirmed, and none of them
+  cover the seven post-review engines.

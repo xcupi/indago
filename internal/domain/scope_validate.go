@@ -89,6 +89,24 @@ func ValidateScopeHost(entry string) error {
 	return nil
 }
 
+// ValidateScopeSubdomainHost reports why entry cannot be a subdomain-only host
+// entry, or nil.
+//
+// The list already means "subdomains of this host, not the host itself", so an
+// entry written with a leading dot or a "*." prefix is refused instead of being
+// silently reinterpreted into something broader or narrower than the operator
+// wrote. Everything else follows ValidateScopeHost, so the same shapes that can
+// never match are rejected here too.
+func ValidateScopeSubdomainHost(entry string) error {
+	if err := ValidateScopeHost(entry); err != nil {
+		return err
+	}
+	if strings.HasPrefix(entry, ".") {
+		return fmt.Errorf("%q: write the bare host %q; this list already matches subdomains only", entry, strings.TrimPrefix(entry, "."))
+	}
+	return nil
+}
+
 func isNumericLabel(l string) bool {
 	if l == "" {
 		return false
@@ -153,6 +171,11 @@ func ScopeHostSuggestion(entry string) (string, bool) {
 }
 
 // ValidateScopePathPrefix reports why prefix cannot be a scope path prefix, or nil.
+//
+// This is the save-time gate for stored prefixes. It preserves the operator-
+// facing hints below, then applies the same canonical-path rules the matcher
+// uses: no percent escapes (a prefix is a decoded path), no backslashes, no
+// duplicate slashes, no path parameters, and no dot segments.
 func ValidateScopePathPrefix(prefix string) error {
 	if prefix == "" {
 		return fmt.Errorf("path prefix is empty")
@@ -181,6 +204,22 @@ func ValidateScopePathPrefix(prefix string) error {
 	for _, seg := range strings.Split(prefix, "/") {
 		if seg == ".." || seg == "." {
 			return fmt.Errorf("%q contains a dot-segment; write the canonical path", prefix)
+		}
+	}
+	if _, err := SafeScopePathPrefix(prefix); err != nil {
+		switch {
+		case strings.Contains(err.Error(), "duplicate slash"):
+			return fmt.Errorf("%q contains duplicate slashes; write the canonical path", prefix)
+		case strings.Contains(err.Error(), "backslash"):
+			return fmt.Errorf("%q contains a backslash; write the canonical path", prefix)
+		case strings.Contains(err.Error(), "path parameter"):
+			return fmt.Errorf("%q contains a path parameter; a path prefix must be a stable segment boundary", prefix)
+		case strings.Contains(err.Error(), "percent"):
+			return fmt.Errorf("%q contains a percent escape; write the decoded path", prefix)
+		case strings.Contains(err.Error(), "dot segment"):
+			return fmt.Errorf("%q contains a dot-segment; write the canonical path", prefix)
+		default:
+			return fmt.Errorf("%q: %v", prefix, err)
 		}
 	}
 	return nil

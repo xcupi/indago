@@ -62,9 +62,11 @@ func cloneTarget(t *domain.Target) *domain.Target {
 func cloneScope(s *domain.Scope) *domain.Scope {
 	c := *s
 	c.IncludeHosts = cloneStrings(s.IncludeHosts)
+	c.SubdomainOnlyHosts = cloneStrings(s.SubdomainOnlyHosts)
 	c.ExcludeHosts = cloneStrings(s.ExcludeHosts)
 	c.IncludePathPrefixes = cloneStrings(s.IncludePathPrefixes)
 	c.ExcludePathPrefixes = cloneStrings(s.ExcludePathPrefixes)
+	c.AllowedOrigins = cloneStrings(s.AllowedOrigins)
 	return &c
 }
 

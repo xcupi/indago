@@ -383,16 +383,23 @@ func testIsolation(t *testing.T, f Factory) {
 	defer done()
 	ctx := context.Background()
 
-	sc := &domain.Scope{ID: domain.NewID(), ProjectID: domain.NewID(), IncludeHosts: []string{"a.com"}}
+	sc := &domain.Scope{ID: domain.NewID(), ProjectID: domain.NewID(), IncludeHosts: []string{"a.com"}, SubdomainOnlyHosts: []string{"b.com"}}
 	must(t, s.Scopes().Create(ctx, sc))
 
 	got, _ := s.Scopes().Get(ctx, sc.ID)
 	got.IncludeHosts[0] = "evil.com" // mutate the returned slice
 	got.IncludeHosts = append(got.IncludeHosts, "more.com")
+	got.SubdomainOnlyHosts[0] = "evil.com"
 
 	reread, _ := s.Scopes().Get(ctx, sc.ID)
 	if len(reread.IncludeHosts) != 1 || reread.IncludeHosts[0] != "a.com" {
 		t.Fatalf("stored scope was mutated through returned pointer: %v", reread.IncludeHosts)
+	}
+	// The wildcard half of the scope must round-trip through the store like
+	// any other field: an importer that writes it is useless if a reload drops
+	// it, and a dropped list would silently narrow an imported program's scope.
+	if len(reread.SubdomainOnlyHosts) != 1 || reread.SubdomainOnlyHosts[0] != "b.com" {
+		t.Fatalf("subdomain_only_hosts did not round-trip: %v", reread.SubdomainOnlyHosts)
 	}
 }
 

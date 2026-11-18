@@ -506,7 +506,10 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 
 	profile := p.Profile
 	if !profile.IsValid() {
-		profile = domain.ProfileBalanced
+		// An omitted (or unrecognized) profile takes the conservative default:
+		// a new scan must never become more aggressive just because the caller
+		// left the profile out.
+		profile = domain.DefaultProfile
 	}
 	cfg := ProfileConfig(profile)
 	if profile == domain.ProfileCustom && p.Config != nil {
@@ -840,7 +843,9 @@ func (c *Controller) pauseForBlock(scanID domain.ID, reason string) {
 }
 
 // Resume continues a paused scan. If the scan was restored after a restart (no
-// live execution), Resume rebuilds the worker pool and discovery first.
+// live execution), Resume rebuilds the worker pool and discovery first. An
+// execution that is only finalizing a completion (see finish) counts as no live
+// execution: it is dropped and rebuilt rather than resumed.
 func (c *Controller) Resume(ctx context.Context, scanID domain.ID) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -849,21 +854,28 @@ func (c *Controller) Resume(ctx context.Context, scanID domain.ID) error {
 	}
 
 	if ex, ok := c.running[scanID]; ok {
-		sc, err := c.store.Scans().Get(ctx, scanID)
-		if err != nil {
-			return err
+		if ex.stopped.Load() {
+			// Only a finalizing execution is left (its completion write is in
+			// flight). It cannot be resumed — its pool is gone — so drop it and
+			// restore the scan with a fresh execution below.
+			delete(c.running, scanID)
+		} else {
+			sc, err := c.store.Scans().Get(ctx, scanID)
+			if err != nil {
+				return err
+			}
+			if err := c.reauthenticateIfAwaitingAuth(ctx, sc); err != nil {
+				return err
+			}
+			if _, err := c.mutate(ctx, scanID, func(s *domain.Scan) error {
+				return transition(s, domain.ScanRunning)
+			}); err != nil {
+				return err
+			}
+			ex.resume()
+			c.log.Info("scan resumed", "scan", scanID)
+			return nil
 		}
-		if err := c.reauthenticateIfAwaitingAuth(ctx, sc); err != nil {
-			return err
-		}
-		if _, err := c.mutate(ctx, scanID, func(s *domain.Scan) error {
-			return transition(s, domain.ScanRunning)
-		}); err != nil {
-			return err
-		}
-		ex.resume()
-		c.log.Info("scan resumed", "scan", scanID)
-		return nil
 	}
 
 	// No live execution: only a persisted paused/awaiting_auth scan can be
@@ -988,7 +1000,10 @@ func (c *Controller) Reconfigure(ctx context.Context, scanID domain.ID, cfg doma
 	}); err != nil {
 		return err
 	}
-	if ex, ok := c.running[scanID]; ok {
+	// A finalizing execution (see finish) has no live pool left; resizing it
+	// would revive workers on a canceled context. The persisted config is still
+	// applied, and the next Start/Resume builds a pool from it.
+	if ex, ok := c.running[scanID]; ok && !ex.stopped.Load() {
 		_ = ex.pool.Resize(GroupDiscovery, cfg.DiscoveryConcurrency)
 		_ = ex.pool.Resize(GroupHTTP, cfg.HTTPConcurrency)
 		_ = ex.pool.Resize(GroupBrowser, minBrowserWorkers(cfg.BrowserConcurrency))
@@ -1281,7 +1296,16 @@ func validateIDOREnumeration(authMode domain.AuthMode, enableEnum bool, neighbou
 	return nil
 }
 
-// loadScope loads the project's scope, failing closed when absent or empty.
+// loadScope loads the project's scope, failing closed when absent or when it
+// authorizes nothing.
+//
+// A scope is "empty" only when BOTH its host lists are empty. A wildcard-only
+// scope (subdomain_only_hosts, no include hosts) is a real scope — it is the
+// shape a bug-bounty wildcard asset imports into — so refusing it here would
+// reject every scan of an imported wildcard program at CreateScan, Start and
+// Resume even though Scope.Permits authorizes its subdomains. The emptiness
+// test therefore mirrors the matcher's own fail-closed rule
+// (domain.Scope.Permits).
 func (c *Controller) loadScope(ctx context.Context, projectID domain.ID) (domain.Scope, error) {
 	scope, err := c.store.Scopes().GetByProject(ctx, projectID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -1290,7 +1314,7 @@ func (c *Controller) loadScope(ctx context.Context, projectID domain.ID) (domain
 	if err != nil {
 		return domain.Scope{}, fmt.Errorf("scan: scope: %w", err)
 	}
-	if len(scope.IncludeHosts) == 0 {
+	if len(scope.IncludeHosts) == 0 && len(scope.SubdomainOnlyHosts) == 0 {
 		return domain.Scope{}, ErrScopeEmpty
 	}
 	return *scope, nil

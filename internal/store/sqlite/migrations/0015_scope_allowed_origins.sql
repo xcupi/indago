@@ -1,0 +1,15 @@
+-- Explicit scheme/port restriction for a scope (allowed_origins).
+--
+-- An entry is "scheme://host[:port]" (port omitted = the scheme default) and,
+-- when the list is non-empty, a URL must also match one of these origins on top
+-- of the existing host/path rules. See internal/domain/scope_origin.go and
+-- docs/scope-semantics.md.
+--
+-- Every scope saved before this migration reads back an EMPTY list, which is
+-- the documented LEGACY behaviour: any scheme and any port of an in-scope host.
+-- That is deliberate: an upgrade must not silently narrow (or widen) an
+-- existing scope, and no code path derives origins from the hosts. The write
+-- surfaces (API/CLI/UI/importer) require the operator to state the list or
+-- choose allow_any_scheme_ports explicitly, so a legacy row keeps its behaviour
+-- until its operator records a policy; the UI labels it as legacy meanwhile.
+ALTER TABLE scopes ADD COLUMN allowed_origins TEXT NOT NULL DEFAULT '[]';

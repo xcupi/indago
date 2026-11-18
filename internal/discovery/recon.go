@@ -166,8 +166,8 @@ func (c *contentSource) probePaths(ctx context.Context, in Input, sink Sink, ori
 		if err != nil || !in.Scope.Permits(info.Canonical).Allowed {
 			continue
 		}
-		if !allowFetch(sink, info.Canonical, domain.SourceContentDiscovery) {
-			continue // probing it is itself the request that would end the session
+		if !allowFetch(sink, info.Canonical, domain.SourceContentDiscovery, domain.MethodGET) {
+			continue // probing it is itself the request: it can end the session or change data
 		}
 		if !budget.take() {
 			return found, nil
@@ -226,7 +226,7 @@ func (c *contentSource) probeExtensions(ctx context.Context, in Input, sink Sink
 			if err != nil || !in.Scope.Permits(info.Canonical).Allowed {
 				continue
 			}
-			if !allowFetch(sink, info.Canonical, domain.SourceContentDiscovery) {
+			if !allowFetch(sink, info.Canonical, domain.SourceContentDiscovery, domain.MethodGET) {
 				continue
 			}
 			if !budget.take() {
@@ -319,7 +319,7 @@ func (c *contentSource) mineEndpoint(ctx context.Context, in Input, sink Sink, t
 		if err != nil || !in.Scope.Permits(info.Canonical).Allowed {
 			continue
 		}
-		if !allowFetch(sink, info.Canonical, domain.SourceContentDiscovery) {
+		if !allowFetch(sink, info.Canonical, domain.SourceContentDiscovery, domain.MethodGET) {
 			continue
 		}
 		resp, err := c.fetch(ctx, in, info.Canonical, budget)
@@ -390,7 +390,7 @@ func (c *contentSource) probeRecursive(ctx context.Context, in Input, sink Sink,
 			if err != nil || !in.Scope.Permits(info.Canonical).Allowed {
 				continue
 			}
-			if !allowFetch(sink, info.Canonical, domain.SourceContentDiscovery) {
+			if !allowFetch(sink, info.Canonical, domain.SourceContentDiscovery, domain.MethodGET) {
 				continue
 			}
 			if !budget.take() {

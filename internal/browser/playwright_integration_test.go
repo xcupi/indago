@@ -273,7 +273,7 @@ func TestIntegrationNavigateJSONRedirectScopeGate(t *testing.T) {
 	ctx, err := m.NewContext(context.Background(), browser.ContextOptions{AllowRequest: func(raw string) bool {
 		u, err := url.Parse(raw)
 		return err == nil && strings.HasPrefix(u.Path, "/api/")
-	}})
+	}, AllowStateChanging: true}) // NavigateJSON is an explicit POST replay
 	if err != nil {
 		t.Fatal(err)
 	}

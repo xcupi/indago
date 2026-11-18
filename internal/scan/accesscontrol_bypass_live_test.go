@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,12 +23,12 @@ import (
 	"github.com/indago/indago/internal/domain"
 )
 
-func runBypassJob(t *testing.T, target string) (*scanEnv, accessControlDetail, []*domain.Finding) {
+func runBypassJob(t *testing.T, target string, cfg ExecutorConfig) (*scanEnv, accessControlDetail, []*domain.Finding) {
 	t.Helper()
 	env := newScanEnv(t)
 	ep := acEndpoint(t, env, target, domain.SourceCrawler, domain.MethodGET)
 	ex := newAccessControlExecutor(env.st, newScopedEngine(noFollowClient(t), openScope()), env.ev,
-		ExecutorConfig{}, execLog(), &sync.Mutex{}, true)
+		cfg, execLog(), &sync.Mutex{}, true)
 	job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobAccessControl,
 		Target: domain.JobTarget{EndpointID: ep.ID, URL: target}, MaxAttempts: 1,
 		Payload:   accessControlModePayload(accessModeBypass),
@@ -57,7 +58,7 @@ func TestAccessBypassHeaderOverrideConfirms(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, d, findings := runBypassJob(t, srv.URL+"/admin")
+	_, d, findings := runBypassJob(t, srv.URL+"/admin", ExecutorConfig{})
 	if d.Verdict != domain.VerdictConfirmed || d.Bypass != "header_url_override" {
 		t.Fatalf("verdict=%q bypass=%q reason=%q, want confirmed/header_url_override", d.Verdict, d.Bypass, d.Reason)
 	}
@@ -85,7 +86,7 @@ func TestAccessBypassMethodConfirms(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, d, findings := runBypassJob(t, srv.URL+"/admin-roles")
+	_, d, findings := runBypassJob(t, srv.URL+"/admin-roles", ExecutorConfig{AllowStateChanging: true})
 	if d.Verdict != domain.VerdictConfirmed || d.Bypass != "method_bypass" {
 		t.Fatalf("verdict=%q bypass=%q reason=%q, want confirmed/method_bypass", d.Verdict, d.Bypass, d.Reason)
 	}
@@ -101,11 +102,123 @@ func TestAccessBypassDenialStaysRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, d, findings := runBypassJob(t, srv.URL+"/admin")
+	_, d, findings := runBypassJob(t, srv.URL+"/admin", ExecutorConfig{})
 	if d.Verdict != domain.VerdictRejected {
 		t.Fatalf("verdict=%q reason=%q, want rejected", d.Verdict, d.Reason)
 	}
 	if len(findings) != 0 {
 		t.Fatalf("findings = %+v, want none for a surface that stays denied", findings)
+	}
+}
+
+// The default path must not send POST or TRACE. GET checks stay: the direct
+// baseline and the two header-override GETs are still recorded.
+func TestAccessBypassDefaultSendsNoPOSTOrTRACE(t *testing.T) {
+	var mu sync.Mutex
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		methods = append(methods, r.Method)
+		mu.Unlock()
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("denied"))
+	}))
+	defer srv.Close()
+
+	_, d, _ := runBypassJob(t, srv.URL+"/admin", ExecutorConfig{})
+
+	mu.Lock()
+	got := append([]string(nil), methods...)
+	mu.Unlock()
+	sawGET := false
+	for _, m := range got {
+		switch m {
+		case http.MethodGet:
+			sawGET = true
+		case http.MethodPost, http.MethodTrace:
+			t.Fatalf("default bypass pass sent %s; methods=%v", m, got)
+		}
+	}
+	if !sawGET {
+		t.Fatalf("default bypass pass sent no GET; methods=%v", got)
+	}
+	if len(d.SkippedProbes) != 2 {
+		t.Fatalf("skipped probes = %v, want POST and TRACE named", d.SkippedProbes)
+	}
+	if !strings.Contains(d.Reason, "AllowStateChanging") {
+		t.Fatalf("reason does not explain the skipped probes: %q", d.Reason)
+	}
+}
+
+// With the explicit opt-in, both method probes run again; this test records
+// them at the endpoint, not just in the detail JSON.
+func TestAccessBypassOptInSendsPOSTAndTRACE(t *testing.T) {
+	var mu sync.Mutex
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		methods = append(methods, r.Method)
+		mu.Unlock()
+		switch r.Method {
+		case http.MethodTrace:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case http.MethodPost:
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("Unauthorized"))
+		default:
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte("Access denied"))
+		}
+	}))
+	defer srv.Close()
+
+	_, d, _ := runBypassJob(t, srv.URL+"/admin-roles", ExecutorConfig{AllowStateChanging: true})
+
+	mu.Lock()
+	got := append([]string(nil), methods...)
+	mu.Unlock()
+	seen := map[string]bool{}
+	for _, m := range got {
+		seen[m] = true
+	}
+	if !seen[http.MethodPost] || !seen[http.MethodTrace] {
+		t.Fatalf("opt-in bypass methods = %v, want POST and TRACE", got)
+	}
+	if d.PostStatus != http.StatusUnauthorized {
+		t.Fatalf("post status = %d, want 401", d.PostStatus)
+	}
+	if len(d.SkippedProbes) != 0 {
+		t.Fatalf("opt-in path still reports skipped probes: %v", d.SkippedProbes)
+	}
+}
+
+// skip_write_endpoints suppresses the non-GET bypass probes even when the
+// server opt-in is on.
+func TestAccessBypassSkipWriteEndpointsSuppressesNonGET(t *testing.T) {
+	var mu sync.Mutex
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		methods = append(methods, r.Method)
+		mu.Unlock()
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	_, d, _ := runBypassJob(t, srv.URL+"/admin", ExecutorConfig{
+		AllowStateChanging: true,
+		SkipWriteEndpoints: true,
+	})
+
+	mu.Lock()
+	got := append([]string(nil), methods...)
+	mu.Unlock()
+	for _, m := range got {
+		if m == http.MethodPost || m == http.MethodTrace {
+			t.Fatalf("skip_write_endpoints still allowed %s; methods=%v", m, got)
+		}
+	}
+	if len(d.SkippedProbes) == 0 || !strings.Contains(strings.Join(d.SkippedProbes, "; "), "skip_write_endpoints") {
+		t.Fatalf("skipped probes = %v, want skip_write_endpoints named", d.SkippedProbes)
 	}
 }

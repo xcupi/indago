@@ -78,7 +78,7 @@ func (d *pwDriver) Stop() error { return d.pw.Stop() }
 
 type pwBrowser struct{ b pw.Browser }
 
-func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(string) bool) (contextHandle, error) {
+func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(string) bool, allowStateChanging bool) (contextHandle, error) {
 	opts := pw.BrowserNewContextOptions{}
 	if allow != nil {
 		// Service workers can initiate requests outside Playwright's page route
@@ -114,16 +114,24 @@ func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeader
 	if err != nil {
 		return nil, err
 	}
-	pc := &pwContext{c: c, allow: allow, scopeSessions: make(map[pw.Page]pw.CDPSession)}
+	pc := &pwContext{c: c, allow: allow, allowStateChanging: allowStateChanging, scopeSessions: make(map[pw.Page]pw.CDPSession)}
+	// The method gate is installed even without a scope gate: a context that
+	// did not explicitly opt into state-changing requests must never let one
+	// out, whichever caller created it. Scope routing only becomes mandatory
+	// when a scope gate exists.
+	if allow != nil || !allowStateChanging {
+		if err := c.Route("**/*", pc.onRoute); err != nil {
+			_ = c.Close()
+			return nil, fmt.Errorf("install scope gate and request override: %w", err)
+		}
+	}
 	if allow != nil {
 		// Context routing pauses even a popup's first request before network
 		// dispatch. Only pages explicitly created and guarded by NewPage may
 		// continue. A page event is too late to authorize a new target's first
 		// redirect, and target-controlled DOM listeners are not a scope boundary.
-		if err := c.Route("**/*", pc.onRoute); err != nil {
-			_ = c.Close()
-			return nil, fmt.Errorf("install scope gate and request override: %w", err)
-		}
+		// (When there is no scope gate, a popup's requests still pass through
+		// the same context route above, so the method gate covers them.)
 		// The scanner does not inspect WebSocket protocols. Close them rather
 		// than allow an unobservable connection to leave the declared scope.
 		if err := c.RouteWebSocket("**/*", func(route pw.WebSocketRoute) { route.Close() }); err != nil {
@@ -151,14 +159,21 @@ type jsonNavigationOverride struct {
 }
 
 type pwContext struct {
-	c     pw.BrowserContext
-	allow func(string) bool
+	c                  pw.BrowserContext
+	allow              func(string) bool
+	allowStateChanging bool
 
 	mu           sync.Mutex
 	jsonOverride *jsonNavigationOverride
 
 	scopeMu       sync.Mutex
 	scopeSessions map[pw.Page]pw.CDPSession
+}
+
+// permitsMethod applies this context's method policy: a context that did not
+// opt into state-changing requests may only issue read-only methods.
+func (c *pwContext) permitsMethod(method string) bool {
+	return c.allowStateChanging || isReadOnlyMethod(method)
 }
 
 func (c *pwContext) ensureRedirectScopeGate(page pw.Page) error {
@@ -172,7 +187,7 @@ func (c *pwContext) ensureRedirectScopeGate(page pw.Page) error {
 	if err != nil {
 		return fmt.Errorf("create redirect scope observer: %w", err)
 	}
-	if err := enableRedirectScopeGate(cdp, c.allow); err != nil {
+	if err := enableRedirectScopeGate(cdp, c.allow, c.allowStateChanging); err != nil {
 		return err
 	}
 	c.scopeMu.Lock()
@@ -200,6 +215,15 @@ func (c *pwContext) onRoute(route pw.Route) {
 	req := route.Request()
 	rawURL := req.URL()
 	if c.allow != nil && (!c.requestHasManagedPage(req) || (isNetworkURL(rawURL) && !c.allow(rawURL))) {
+		_ = route.Abort("blockedbyclient")
+		return
+	}
+	if isNetworkURL(rawURL) && !c.permitsMethod(req.Method()) {
+		// Page JS can issue a state-changing request the scan never opted into
+		// (fetch/XHR, an auto-submitted form, a popup's first document load).
+		// Refuse it here, before the request leaves the browser. Playwright's
+		// route is invoked once per redirect chain, so the per-hop 307/308
+		// case is covered separately by the CDP response-stage gate below.
 		_ = route.Abort("blockedbyclient")
 		return
 	}
@@ -284,6 +308,14 @@ func (c *pwContext) setJSONNavigationOverride(rawURL, contentType string, body [
 	defer c.mu.Unlock()
 	if c.allow == nil {
 		return nil, errors.New("browser: JSON POST navigation requires an explicit scope gate")
+	}
+	// GotoJSON turns the browser's initial GET into a route.Fetch POST, i.e. a
+	// request that does NOT pass through onRoute's method check. Refuse it here
+	// unless this context was explicitly granted the state-changing opt-in, so
+	// the gate cannot be bypassed by the one driver path that changes methods
+	// inside the route.
+	if !c.allowStateChanging {
+		return nil, ErrStateChangingBlocked
 	}
 	if c.jsonOverride != nil {
 		return nil, errors.New("browser: another JSON POST navigation is already pending")
@@ -784,7 +816,45 @@ func cdpRedirectTarget(params map[string]interface{}) (target string, isRedirect
 	return resolved.String(), true, false
 }
 
-func enableRedirectScopeGate(cdp pw.CDPSession, allow func(string) bool) error {
+// cdpRedirectPreservesMethod reports whether this 3xx response makes the browser
+// repeat the ORIGINAL request method instead of rewriting it to GET. Per the
+// fetch spec only 307/308 preserve it; 301/302/303 switch to GET, so they cannot
+// turn a read-only request into a state-changing one and need no method check.
+func cdpRedirectPreservesMethod(params map[string]interface{}) bool {
+	status, ok := cdpNumber(params["responseStatusCode"])
+	return ok && (status == 307 || status == 308)
+}
+
+// cdpRequestMethod returns the paused request's method, or "" when the event
+// carries none. isReadOnlyMethod treats "" as non-read-only, so a malformed
+// event fails closed at a 307/308.
+func cdpRequestMethod(params map[string]interface{}) string {
+	request, ok := params["request"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	method, _ := request["method"].(string)
+	return method
+}
+
+// redirectMustFail is the response-stage policy for one paused request: refuse
+// a redirect whose target is out of scope (or whose Location has no agreed
+// reading), and — when this context has not opted into state-changing requests
+// — refuse a 307/308 that would carry a non-read-only method to the next hop.
+// The initial request is already checked by onRoute; this is the per-hop half
+// of the same gate, needed because Playwright routes a redirect chain once.
+func redirectMustFail(params map[string]interface{}, allow func(string) bool, allowStateChanging bool) bool {
+	target, redirect, invalid := cdpRedirectTarget(params)
+	if !redirect {
+		return false
+	}
+	if invalid || !allow(target) {
+		return true
+	}
+	return !allowStateChanging && cdpRedirectPreservesMethod(params) && !isReadOnlyMethod(cdpRequestMethod(params))
+}
+
+func enableRedirectScopeGate(cdp pw.CDPSession, allow func(string) bool, allowStateChanging bool) error {
 	cdp.On("Fetch.requestPaused", func(params map[string]interface{}) {
 		requestID, _ := params["requestId"].(string)
 		if requestID == "" {
@@ -792,7 +862,7 @@ func enableRedirectScopeGate(cdp pw.CDPSession, allow func(string) bool) error {
 		}
 		method := "Fetch.continueRequest"
 		args := map[string]any{"requestId": requestID}
-		if target, redirect, invalid := cdpRedirectTarget(params); redirect && (invalid || !allow(target)) {
+		if redirectMustFail(params, allow, allowStateChanging) {
 			method = "Fetch.failRequest"
 			args["errorReason"] = "BlockedByClient"
 		}

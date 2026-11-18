@@ -279,6 +279,10 @@ func htmlSourceMatrixEvidence(t *testing.T, env *scanEnv, f *domain.Finding, ver
 // (attempts), while the log/DOM/screenshot assertions are made on the decisive one.
 func htmlSourceMatrixEvidenceFor(t *testing.T, env *scanEnv, f *domain.Finding, decisive domain.ID, attempts ...domain.ID) map[domain.EvidenceKind]string {
 	t.Helper()
+	// An authenticated scan must not persist raw page artifacts; the helper
+	// asserts the privacy contract instead of requiring them (see
+	// evidence_privacy.go).
+	withheld, _ := scanUsesAuthenticatedSession(context.Background(), env.st, env.scanID)
 	out := make(map[domain.EvidenceKind]string)
 	for _, id := range f.EvidenceIDs {
 		ev, err := env.st.Evidence().Get(context.Background(), id)
@@ -295,6 +299,12 @@ func htmlSourceMatrixEvidenceFor(t *testing.T, env *scanEnv, f *domain.Finding, 
 		if ev.ScanID != env.scanID || ev.BlobPath == "" || !attributed || ev.MediaType == "" {
 			t.Fatalf("missing evidence attribution/metadata: %+v", ev)
 		}
+		if withheld {
+			switch ev.Kind {
+			case domain.EvidenceScreenshot, domain.EvidenceDOM, domain.EvidenceBrowserLog:
+				t.Fatalf("authenticated scan persisted raw %s evidence: %+v", ev.Kind, ev)
+			}
+		}
 		r, err := env.ev.Open(ev.BlobPath)
 		if err != nil {
 			t.Fatal(err)
@@ -310,6 +320,20 @@ func htmlSourceMatrixEvidenceFor(t *testing.T, env *scanEnv, f *domain.Finding, 
 		if isDecisive {
 			out[ev.Kind] = string(body)
 		}
+	}
+	if withheld {
+		body := out[domain.EvidenceOther]
+		if body == "" {
+			t.Fatal("missing the non-sensitive browser-evidence summary for an authenticated scan")
+		}
+		var summary browserEvidenceSummary
+		if err := json.Unmarshal([]byte(body), &summary); err != nil {
+			t.Fatalf("browser-evidence summary is not valid JSON: %v (%s)", err, body)
+		}
+		if !summary.RawArtifactsWithheld {
+			t.Fatalf("browser-evidence summary does not record the withholding: %+v", summary)
+		}
+		return out
 	}
 	for _, kind := range []domain.EvidenceKind{domain.EvidenceScreenshot, domain.EvidenceDOM} {
 		if out[kind] == "" {

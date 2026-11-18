@@ -435,6 +435,9 @@ func (c *cli) scope(sub string, args []string) error {
 	includePath := fs.String("include-path", "", "comma-separated in-scope path prefixes")
 	excludePath := fs.String("exclude-path", "", "comma-separated excluded path prefixes")
 	subdomains := fs.Bool("subdomains", false, "allow subdomains of included hosts")
+	subdomainsOnly := fs.String("subdomains-only", "", "comma-separated hosts whose SUBDOMAINS are in scope but the host itself is not (a wildcard asset); empty clears the list")
+	origins := fs.String("origins", "", "comma-separated exact origins the scan may reach (scheme://host[:port], or scheme://*.host for subdomains); REQUIRED unless -allow-any-scheme-port states the legacy any-scheme/any-port choice")
+	allowAnySchemePort := fs.Bool("allow-any-scheme-port", false, "explicitly authorize every scheme and port of the in-scope hosts (legacy behaviour; cannot be combined with -origins)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
@@ -444,14 +447,42 @@ func (c *cli) scope(sub string, args []string) error {
 	path := "/api/projects/" + url.PathEscape(*project) + "/scope"
 	switch sub {
 	case "set":
-		if *include == "" {
-			return errors.New("usage: indago scope set -project ID -include host[,host...] [-exclude ...] [-include-path ...] [-exclude-path ...] [-subdomains]")
+		includeHosts := splitCSV(*include)
+		wildcards := splitCSV(*subdomainsOnly)
+		if len(includeHosts) == 0 && len(wildcards) == 0 {
+			return errors.New("usage: indago scope set -project ID -include host[,host...] | -subdomains-only host[,host...] [-exclude ...] [-include-path ...] [-exclude-path ...] [-subdomains] (-origins scheme://host[:port],... | -allow-any-scheme-port)")
+		}
+		if *allowAnySchemePort && strings.TrimSpace(*origins) != "" {
+			return errors.New("-origins and -allow-any-scheme-port are mutually exclusive: an origin list is always enforced")
+		}
+		// The scheme/port policy is mandatory and never guessed: -origins names
+		// the exact origins, -allow-any-scheme-port states the legacy choice.
+		// An empty origin list means "every scheme and port" to the matcher, so
+		// sending one without the flag would be exactly the implicit widening
+		// this command refuses to do.
+		originList := splitCSV(*origins)
+		if !*allowAnySchemePort && len(originList) == 0 {
+			return errors.New("state the scheme/port policy: -origins https://app.example.com[,https://api.example.com:8443] names the exact origins the scan may reach, or -allow-any-scheme-port authorizes every scheme and port of the hosts. Indago never guesses a scheme or port")
+		}
+		if originList == nil {
+			originList = []string{}
+		}
+		// "set" replaces the scope, so every list is sent explicitly. Both
+		// lists are sent as empty arrays when the operator names nothing —
+		// otherwise the server (which preserves an absent field so a UI save
+		// cannot delete an imported program's wildcard authorization) would
+		// keep them and `set` would not replace anything.
+		if wildcards == nil {
+			wildcards = []string{}
 		}
 		var sc domain.Scope
 		if err := c.call("PUT", path, map[string]any{
-			"include_hosts": splitCSV(*include), "exclude_hosts": splitCSV(*exclude),
+			"include_hosts": includeHosts, "exclude_hosts": splitCSV(*exclude),
+			"subdomain_only_hosts":  wildcards,
 			"include_path_prefixes": splitCSV(*includePath), "exclude_path_prefixes": splitCSV(*excludePath),
-			"allow_subdomains": *subdomains,
+			"allow_subdomains":       *subdomains,
+			"allowed_origins":        originList,
+			"allow_any_scheme_ports": *allowAnySchemePort,
 		}, &sc); err != nil {
 			return err
 		}
@@ -470,10 +501,28 @@ func (c *cli) scope(sub string, args []string) error {
 
 func printScope(w io.Writer, sc *domain.Scope) {
 	fmt.Fprintf(w, "include hosts:        %s\n", strings.Join(sc.IncludeHosts, ", "))
+	// Wildcard entries are a separate list: they authorize subdomains and not
+	// the host itself, so folding them into "include hosts" would misstate
+	// what the scope permits.
+	fmt.Fprintf(w, "subdomains only:      %s\n", strings.Join(sc.SubdomainOnlyHosts, ", "))
 	fmt.Fprintf(w, "exclude hosts:        %s\n", strings.Join(sc.ExcludeHosts, ", "))
 	fmt.Fprintf(w, "include path prefix:  %s\n", strings.Join(sc.IncludePathPrefixes, ", "))
 	fmt.Fprintf(w, "exclude path prefix:  %s\n", strings.Join(sc.ExcludePathPrefixes, ", "))
 	fmt.Fprintf(w, "allow subdomains:     %v\n", sc.AllowSubdomains)
+	// Scheme/port is a separate dimension from the host lists. An empty origin
+	// list is the LEGACY behaviour (any scheme, any port) that only a scope
+	// saved before origin rules can carry; every save states a policy, so the
+	// output says which of the three shapes is stored instead of leaving an
+	// empty line that reads like "nothing declared".
+	origins := strings.Join(sc.AllowedOrigins, ", ")
+	if origins == "" {
+		if sc.AllowAnySchemePorts {
+			origins = "(any scheme and port — explicitly chosen)"
+		} else {
+			origins = "(legacy: no scheme/port rule recorded — every scheme and port of the hosts is in scope; re-save with -origins or -allow-any-scheme-port to record a policy)"
+		}
+	}
+	fmt.Fprintf(w, "allowed origins:      %s\n", origins)
 }
 
 func (c *cli) scan(sub string, args []string) error {
@@ -504,7 +553,7 @@ func (c *cli) scanCreate(args []string) error {
 	project := fs.String("project", "", "project ID")
 	target := fs.String("target", "", "target ID")
 	name := fs.String("name", "", "scan name")
-	profile := fs.String("profile", "balanced", "conservative | balanced | fast")
+	profile := fs.String("profile", string(domain.DefaultProfile), "conservative (default) | balanced | fast")
 	stop := fs.String("stop", "", "stop policy: continue_all | first_confirmed | after_n_confirmed | pause_and_ask")
 	stopN := fs.Int("stop-n", 0, "confirmed-finding limit for -stop after_n_confirmed")
 	authMode := fs.String("auth", "", "auth mode: anonymous (default) | existing | interactive | mfa | password")
@@ -514,6 +563,7 @@ func (c *cli) scanCreate(args []string) error {
 	loginUserSel := fs.String("login-username-selector", "", "CSS selector override for the username/email field; -auth password only, empty = heuristic")
 	loginPassSel := fs.String("login-password-selector", "", "CSS selector override for the password field; -auth password only, empty = heuristic (input[type=password])")
 	loginSubmitSel := fs.String("login-submit-selector", "", "CSS selector override for the submit control; -auth password only, empty = heuristic")
+	autoBounty := fs.Bool("auto-bounty", false, "automatic non-destructive bug-bounty preset: enables safe non-mutating engines (reflected/DOM XSS, SSRF, CORS, open redirect, GraphQL, command-injection arithmetic canary, SSTI, SQLi, raw-query=auto, safe recon, access-control-pages, role-param, bounded WAF evasion, and TLS fingerprint randomization when not proxied) under conservative human-like pacing; keeps state-changing probes OFF")
 	candProfile := fs.String("candidate-profile", "", "XSS candidate profile: minimal | standard | thorough (default: server default)")
 	maxCand := registerMaxCandidates(fs)
 	enableEvasion := fs.Bool("enable-evasion", false, "eagerly try WAF/filter-bypass candidate variants (case variation, alt separators, double URL-encoding) ON TOP OF the canonical set; without this flag, Indago may run the same bounded Technique-only fallback only after canonical candidates at one in-scope point complete without confirmation (see AGENTS.md §2.2)")
@@ -566,6 +616,23 @@ func (c *cli) scanCreate(args []string) error {
 		"profile": *profile, "seed_urls": []string(seeds),
 		"quick_scan": *quick, "max_depth": *depth, "max_pages": *maxPages, "max_endpoints": *maxEndpoints,
 		"enable_evasion": *enableEvasion,
+	}
+	if *autoBounty {
+		req["enable_evasion"] = true
+		req["enable_command_injection"] = true
+		req["enable_ssti"] = true
+		req["enable_sqli"] = true
+		req["enable_access_control_pages"] = true
+		req["enable_role_param"] = true
+		if len(rawQuery) == 0 {
+			req["raw_query_injection"] = "auto"
+		}
+		if strings.EqualFold(*reconLevel, "off") || *reconLevel == "" {
+			req["recon_level"] = "safe"
+		}
+		if len(proxyPool) == 0 {
+			req["randomize_tls_fingerprint"] = true
+		}
 	}
 	if *enableRoleParam {
 		req["enable_role_param"] = true

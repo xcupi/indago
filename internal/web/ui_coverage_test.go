@@ -49,6 +49,9 @@ func TestUICoverageBrowserlessScanIsNotShownAsClean(t *testing.T) {
 		t.Fatalf("the overview must state the browser engine is OFF: %q", u.evalStr(`document.getElementById('readiness').textContent`))
 	}
 	u.waitUI("not-fully-tested banner", `document.querySelector('#coverageHost .banner[data-code="browser_disabled"]')`)
+	if u.evalBool(`document.querySelector('#coverageHost .coverage-notes [data-code="browser_disabled"]')`) {
+		t.Fatal("a high-severity coverage gap must stay an alarm banner, never an informational note")
+	}
 	if !u.evalBool(`/zero findings does not mean/i.test(document.getElementById('coverageHost').textContent)`) {
 		t.Fatal("the banner must say that zero findings does not mean clean")
 	}
@@ -84,8 +87,31 @@ func TestUICoverageCleanScanDoesNotRaiseAFalseAlarm(t *testing.T) {
 	// Wait for the coverage response itself, not a guess at how long it takes: an
 	// absence assertion made before the data lands would pass vacuously.
 	u.waitUI("coverage data landed", `coverageCache.data && coverageCache.data.tests.total === 1`)
+	// Informational warnings must stay VISIBLE, but as notes: they explain a
+	// declared choice (optional engines off) or an identity limit, and they must
+	// never borrow the alarm banner used for a real coverage gap.
+	u.waitUI("informational coverage notes",
+		`document.querySelector('#coverageHost .coverage-notes .warning-line[data-code="command_injection_disabled"] .pill.info')`)
+	if !u.evalBool(`Array.from(document.querySelectorAll('#coverageHost .coverage-notes .warning-line')).some(n => n.dataset.code === 'idor_anonymous_only')`) {
+		t.Fatal("the anonymous identity-limit explanation must stay visible as a note")
+	}
 	if u.evalBool(`document.querySelector('#coverageHost .banner')`) || u.evalBool(`document.querySelector('.page-head .gap-badge')`) {
-		t.Fatal("a fully-tested scan must not show a coverage warning or gap badge")
+		t.Fatal("a scan with only informational warnings must not show an alarm banner or gap badge")
+	}
+	if u.evalBool(`/Partly tested/.test(document.getElementById('coverageHost').textContent)`) {
+		t.Fatal("informational warnings must not be labelled as an alarm")
+	}
+	if !u.evalBool(`coverageCache.data.coverage_gaps === false`) {
+		t.Fatal("informational warnings must not set coverage_gaps")
+	}
+
+	// The Coverage tab applies the same severity split: notes stay visible,
+	// alarm banners are reserved for medium/high warnings.
+	u.mustClickText(".tabs a", "Coverage")
+	u.waitUI("coverage-tab informational note",
+		`document.querySelector('.coverage-notes .warning-line[data-code="command_injection_disabled"] .pill.info')`)
+	if u.evalBool(`document.querySelector('.coverage-notes .banner')`) {
+		t.Fatal("informational warnings must not become alarm banners on the Coverage tab")
 	}
 }
 

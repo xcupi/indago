@@ -123,11 +123,20 @@ Operational endpoints with no screen by design: `GET /healthz`, `GET /metrics`
 
 ## UX pass (2026-11)
 
-- Scope is manual-first: every project has an editable scope (hosts, path
-  prefixes, subdomains) on its page. Importing a platform program fills the
-  same fields; it is a shortcut, not a requirement.
+- Scope is manual-first: every project has an editable scope (exact hosts,
+  wildcard hosts, path prefixes, subdomains, authorized origins) on its page. The
+  wildcard list is its own field and says what it means: its hosts' subdomains
+  are in scope and the host itself is not, so a `*.example.com` asset is never
+  read as an exact host. The origin list is separate from the host lists and
+  must be stated on a new or changed scope (`https://host:8443` for a
+  non-standard origin, or the explicit "authorize every scheme and port"
+  switch for the legacy choice); the form never guesses a scheme or port. A
+  scope stored before origin rules shows as legacy. Importing a platform
+  program fills the same fields from the program's own asset URLs; it is a
+  shortcut, not a requirement.
 - Scan dialog shows the selected project's scope and warns when the target host
-  falls outside it, with a link to edit the scope.
+  falls outside it, with a link to edit the scope. The summary names the
+  wildcard list separately ("subdomains only, apex not in scope").
 - Bug bounty: explicit Load, ten-minute cache, pagination (Previous/Next with
   `page`/`total`/`has_more`), scope+rules preview per program without a
   credential, connected-state badge with Replace credential, duplicate imports

@@ -122,6 +122,14 @@ func idorPayloadMode(job *domain.TestJob) string {
 func (e *idorExecutor) runObjectFamily(ctx context.Context, job *domain.TestJob, tc *domain.TestCase) (idorDetail, domain.TestOutcome, error, bool, bool) {
 	d := idorDetail{Engine: "idor", ObjectFamily: true}
 	tc.Method, tc.URL = "GET", job.Target.URL
+	if !e.cfg.AllowStateChanging {
+		d.Skipped, d.SkipReason = true, "object-family probe sends POST and AllowStateChanging is off"
+		return d, domain.OutcomeSuccess, nil, false, true
+	}
+	if e.cfg.SkipWriteEndpoints {
+		d.Skipped, d.SkipReason = true, "object-family probe is write-like and skip_write_endpoints is on"
+		return d, domain.OutcomeSuccess, nil, false, true
+	}
 
 	pageURL, err := url.Parse(strings.TrimSpace(job.Target.URL))
 	if err != nil || pageURL.Host == "" {
@@ -266,21 +274,29 @@ func (e *idorExecutor) createObjectFamilyFinding(ctx context.Context, job *domai
 	}
 }
 
-// enqueueObjectFamilyProbes queues ONE job per discovered HTML page when the
-// scan opted in; the probe itself is bounded (scripts, paths, siblings).
+// objectFamilyProbeEnabled is the fail-closed gate for case 34. A per-scan
+// EnableObjectFamilyProbe flag can never authorize the POST by itself: the
+// server's AllowStateChanging opt-in is mandatory, and skip_write_endpoints
+// suppresses the probe as well.
+func objectFamilyProbeEnabled(cfg domain.ScanConfig, allowStateChanging bool) bool {
+	return allowStateChanging && cfg.EnableObjectFamilyProbe && !cfg.SkipWriteEndpoints
+}
+
+// enqueueObjectFamilyProbes queues ONE job per discovered HTML page only when
+// both opt-ins are present; the probe itself is bounded (scripts, paths,
+// siblings).
 func (c *Controller) enqueueObjectFamilyProbes(ctx context.Context, scanID domain.ID) {
 	sc, err := c.store.Scans().Get(ctx, scanID)
 	if err != nil {
 		return
 	}
-	if sc.Config.SkipWriteEndpoints {
-		c.log.Info("object-family probe skipped: write-like endpoints disabled", "scan", scanID)
-		return
-	}
-	// Same rule as cases 35/36: the server's -allow-state-changing authorizes
-	// the POST that creates the caller's own object, and the per-scan flag
-	// remains for a server that has not been started with it.
-	if !sc.Config.EnableObjectFamilyProbe && !c.opts.Executor.AllowStateChanging {
+	if !objectFamilyProbeEnabled(sc.Config, c.opts.Executor.AllowStateChanging) {
+		if sc.Config.EnableObjectFamilyProbe && !c.opts.Executor.AllowStateChanging {
+			c.log.Info("object-family probe skipped: server AllowStateChanging is off", "scan", scanID)
+		}
+		if sc.Config.EnableObjectFamilyProbe && sc.Config.SkipWriteEndpoints {
+			c.log.Info("object-family probe skipped: write-like endpoints disabled", "scan", scanID)
+		}
 		return
 	}
 	if !c.idorCallerIdentity(ctx, sc) {

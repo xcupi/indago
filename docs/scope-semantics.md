@@ -4,24 +4,122 @@ Scope is Indago's safety boundary: nothing outside it should be requested. This
 page states exactly what the matcher compares, so an operator does not assume a
 guarantee it does not give. Each statement is labelled with its basis:
 
-- **measured**: pinned by `internal/domain/scope_semantics_test.go` (48 cases;
-  change the matcher and these tests fail, which forces this page to be revisited)
+- **measured**: pinned by `internal/domain/scope_semantics_test.go` and
+  `internal/domain/scope_wildcard_test.go` (change the matcher and these tests
+  fail, which forces this page to be revisited)
 - **code**: read from the source, no dedicated test
 - **reasoned**: inferred, not demonstrated
 
-## 1. The decision is made on the hostname
+> **Note on AGENTS.md.** AGENTS.md §2.1 still describes the historical
+> hostname-only matcher ("a host in scope is in scope on every port and
+> scheme"). Agent-instruction files are intentionally not edited by this
+> change; the origin rules in §1a are the current behaviour, and this page plus
+> the tests it names are authoritative where the two differ. New scopes must
+> state a scheme/port policy; only a stored scope from before the feature gets
+> the legacy any-scheme/any-port behaviour.
 
-`Scope.Permits(url)` looks at the URL's **hostname** and path. It ignores:
+## 1. The decision is made on the hostname and path, plus an optional origin list
+
+`Scope.Permits(url)` applies two layers:
+
+1. the historical **hostname + path** decision (the table below); and
+2. an **optional scheme/port requirement** (`allowed_origins`). A scope with an
+   empty origin list is a *legacy* scope and layer 2 is not applied at all; see
+   §1a for the rules, the compatibility promise and the write-surface defaults.
 
 | ignored | consequence | basis |
 |---|---|---|
-| port | `example.com` permits `:1`, `:8443` and `:65535` alike. An internal admin service on another port of an in-scope host is in scope | measured |
-| scheme | `http`, `https` and `ftp` URLs to an in-scope host all pass | measured |
+| port (legacy scope, no `allowed_origins`) | `example.com` permits `:1`, `:8443` and `:65535` alike. An internal admin service on another port of an in-scope host is in scope | measured |
+| scheme (legacy scope) | `http`, `https` and `ftp` URLs to an in-scope host all pass | measured |
+| port/scheme (scope WITH `allowed_origins`) | **not ignored**: the URL must match an entry's scheme, effective port and host pattern, on top of the host/path rules | measured (`internal/domain/scope_origin_test.go`) |
 | query and fragment | `?next=/app` or `#/app` never helps a URL match a path rule | measured |
 | the IP the name resolves to | see section 5 | code |
 
-There is no way to say "only port 443". If a host runs something you are not
-authorized to test on another port, the scope cannot separate them.
+A legacy scope cannot say "only port 443", so if a host runs something you are
+not authorized to test on another port, save the scope with an explicit origin
+list. Indago does not derive one from the hostname: the operator states the
+scheme and port they are authorized to test.
+
+### 1a. Origin rules (`allowed_origins`)
+
+An entry is `scheme://host[:port]`:
+
+- `scheme` is `http` or `https` — the only schemes Indago requests;
+- an omitted port means the scheme default (`http` → 80, `https` → 443), and an
+  explicit default port is normalised to the same entry (`https://a:443` is
+  `https://a`);
+- the host is a bare hostname/IP, or `*.example.com` for **strict subdomains**
+  (never the apex; add an exact entry for the apex).
+
+**One entry, one permission.** A URL is permitted only when its scheme, its
+effective port AND its host all come from the **same** entry. The list is never
+turned into a global "schemes" list times a "ports" list times a "hosts" list:
+
+| stored entries | `https://a:8443` | `http://b:8080` | `https://b:8443` | `http://a:8080` |
+|---|---|---|---|---|
+| `https://a:8443`, `http://b:8080` | yes | yes | **no** (port from a, host from b) | **no** (scheme/port from b, host from a) |
+
+That is measured by `TestScopeOriginNeverCrossesHostsOrAssets`,
+`TestScopeOriginWildcardDoesNotBorrowSiblingOrigins` and the API-level
+`TestScopeAPIOriginsDoNotCrossAssets`. A wildcard entry is bound to its own
+base in the same way.
+
+When the list is non-empty it is an **additional** requirement: a URL must pass
+the host rules, the path rules and the origin match. It can only narrow a scope,
+never widen it, and it does not change any path-prefix rule.
+
+Precedence, deliberate and fail-closed:
+
+| stored shape | behaviour |
+|---|---|
+| `allowed_origins` non-empty | enforced, even if `allow_any_scheme_ports` is also set by a hand-edited row |
+| `allowed_origins` empty, `allow_any_scheme_ports` false | **legacy**: any scheme, any port of an in-scope host. This is what every scope saved before the feature has |
+| `allowed_origins` empty, `allow_any_scheme_ports` true | legacy, explicitly chosen and recorded at save time |
+
+`allow_any_scheme_ports` never widens a scope that has an origin list: it is a
+write-surface annotation for "I knowingly chose the legacy behaviour".
+
+**What a save does** (API `PUT /api/projects/{id}/scope`, CLI `scope set`, the
+bundled UI and the bug-bounty importer):
+
+- **Nothing is derived or guessed.** A new scope must name `allowed_origins` or
+  set `allow_any_scheme_ports: true`; a host-only save is a 400 that names both
+  choices and stores nothing. An explicit empty origin list without the opt-out
+  is refused too: "empty" means every scheme and port, which is never chosen
+  implicitly.
+- The **importer** takes each asset's own scheme and port from the asset URL:
+  `https://app.example.com` authorizes `https://app.example.com:443` and not
+  `http`, not `:8443`. A wildcard asset **must state its scheme**
+  (`https://*.example.com`); a scheme-less `*.example.com` is skipped and
+  reported, because its scheme/port is not in the source. Import never sets
+  `allow_any_scheme_ports`.
+- A save that **omits** `allowed_origins` keeps the stored list (so a UI that
+  does not render the field cannot erase a restriction). Editing a path prefix,
+  an exclusion or any unrelated field never re-derives it.
+- Adding a host without an origin for it is refused: every named host must be
+  covered by a declared origin, so a host is never silently dead and never
+  inherits a guessed scheme/port. Removing a host drops that host's entries
+  (a narrowing) and the save succeeds without restating the list.
+- A **legacy** scope keeps its stored behaviour on a save that changes nothing
+  (or only narrows). Extending it to a new host requires a policy: the stored
+  scope never authorized that host, so inheriting any-scheme/any-port would be
+  a widening nobody asked for.
+- `allowed_origins` and `allow_any_scheme_ports: true` are mutually exclusive in
+  one request; the server refuses the combination.
+
+Origin host patterns must be authorized by the scope's own host lists (an origin
+for a host the scope never included is refused at save time).
+
+**CONNECT boundary.** `Scope.PermitsHost` is used where only `host:port` is
+visible (a proxy CONNECT): it applies the port half of the rule, and the port is
+normalised the same way (an entry without a port has 80 or 443). It cannot see
+the scheme, so a port declared for the host under *either* scheme is accepted
+there — that is a documented blind spot of that boundary, not an origin match.
+A port declared for a different host is never accepted, a bare authority with no
+port is denied (fail closed), and the request that follows the tunnel is still
+checked against the full `Permits`, scheme included.
+
+
 
 ## 2. Include entries must be bare hostnames
 
@@ -36,9 +134,9 @@ scope stays). Measured by `internal/domain/scope_validate_test.go` and
 
 | entry | result | write instead |
 |---|---|---|
-| `https://example.com` | never matches | `example.com` |
-| `example.com:8443` | never matches (port is not part of the hostname) | `example.com` |
-| `*.example.com` | never matches | `.example.com`, or `example.com` with allow subdomains |
+| `https://example.com` | never matches as a host entry | `example.com`, plus `allowed_origins: ["https://example.com"]` |
+| `example.com:8443` | never matches as a host entry (port is not part of the hostname) | `example.com`, plus `allowed_origins: ["https://example.com:8443"]` |
+| `*.example.com` | never matches as an include entry | `.example.com`, or `example.com` with allow subdomains. (A program's `*.example.com` asset is imported into `subdomain_only_hosts` instead — see §3) |
 | `example.com/` | never matches | `example.com` |
 | `[::1]` | never matches | `::1` (IPv6 without brackets) |
 | `bücher.example` | a Unicode URL host does not match the punycode entry (measured); Chromium reports punycode hosts, so enter the punycode form (reasoned) | `xn--bcher-kva.example` |
@@ -46,12 +144,13 @@ scope stays). Measured by `internal/domain/scope_validate_test.go` and
 This fails closed, and since validation was added the operator is told at save
 time instead of discovering "host not in scope" later. The validator rejects
 exactly the shapes that cannot match; it does **not** reject entries that match
-more or less than they read (port ignored, path prefixes with no segment
-boundary, case-sensitive paths): those stay documented here. Path prefixes are
-validated too: they must start with `/` and contain no `?`, `#`, whitespace,
-`://` or dot-segment. Existing scopes saved before this check are not migrated;
-a bad entry in one still just matches nothing until it is re-saved. Case does
-not matter for hosts (measured).
+more or less than they read (path prefixes with no segment boundary,
+case-sensitive paths): those stay documented here. A host entry never carries a
+port or scheme; those are declared separately in `allowed_origins` (§1a). Path
+prefixes are validated too: they must start with `/` and contain no `?`, `#`,
+whitespace, `://` or dot-segment. Existing scopes saved before this check are not
+migrated; a bad entry in one still just matches nothing until it is re-saved.
+Case does not matter for hosts (measured).
 
 Other spellings of the same machine are **not** recognized as that host, so they
 are denied rather than allowed (measured): a trailing dot (`example.com.`),
@@ -66,6 +165,21 @@ decimal or hex IPv4 (`2130706433`, `0x7f.0.0.1`) and IPv4-mapped IPv6
   every depth of subdomain match. The match needs a dot boundary, so
   `evilexample.com` and `example.com.evil.net` do not (measured).
 - An excluded host always wins over an included one (measured).
+- `subdomain_only_hosts` is the third shape and the only one that means
+  "subdomains, **not** the host". Entries are bare hostnames: `example.com`
+  there authorizes `a.example.com` and `a.b.example.com`, and denies
+  `example.com` itself (measured). It exists because neither of the other
+  shapes can express it: a leading dot in `include_hosts` always includes the
+  base host, and an entry in `exclude_hosts` honours allow-subdomains, so it
+  would drop the subdomains too. Path and exclude rules apply to it exactly as
+  they do to an included host.
+- Only the bug-bounty importer writes `subdomain_only_hosts` today. A scope PUT
+  that omits the field keeps the stored list (the bundled UI does not render
+  it); an explicit empty array clears it. Entries are validated like include
+  hosts, and a leading dot or `*.` prefix is refused there rather than
+  reinterpreted — this list already means "subdomains only", so writing the
+  wildcard spelling would be ambiguous (measured:
+  `internal/web/scope_subdomain_test.go`, `internal/domain/scope_wildcard_test.go`).
 
 ## 4. Path prefixes are plain string prefixes
 
@@ -79,6 +193,23 @@ consequences in both directions (measured):
 | exclude `/admin` | also blocks `/administrator` | yes, over-blocks |
 | exclude `/admin/` | does **not** block `/admin` | **no**, narrower than it reads |
 | any path rule | case-sensitive: exclude `/admin` does not block `/Admin`; hosts are case-insensitive | **no** for exclusions |
+
+**Path prefixes are scope-wide, not per host.** `Permits` applies every stored
+prefix to every in-scope origin, so a scope cannot express "host a only under
+`/app`, host b only under `/api`". The bug-bounty importer enforces that: a
+program whose paths are bound to different hosts, schemes/ports or wildcards is
+**refused** (no project, no scope, nothing authorised) with a reason naming the
+conflicting origins, instead of being flattened into a scope that authorises the
+cross product (`https://a.test/app` + `https://b.test/api` would otherwise also
+permit `https://a.test/api` and `https://b.test/app`). A manual `PUT` is not
+refused for spanning hosts — the operator writes the one global list they mean
+(a prefix that cannot be matched safely is still rejected at save time, see §2).
+
+Scopes written before this check (or by an older import) are **not** rewritten:
+the importer cannot tell a cross-product scope from a manually written one, and
+silently narrowing a stored scope would break scans behind the operator's back.
+Re-import the program into a fresh project, or narrow the prefix list by hand.
+See `docs/bounty.md` for the importer's exact rule.
 
 Dot-segments are not collapsed by the matcher: `/app/../secret` passes an include
 of `/app`, and so does `/app/%2e%2e/secret` (measured). The request that is
@@ -160,12 +291,36 @@ redirects it compares the `Location` header itself, so forms where Go and
 Chromium would parse a `Location` differently are rejected outright
 (`docs/browser-scope-boundary.md`, "Redirect `Location` parsing").
 
+The scheme/port rule lives inside `Scope.Permits`, so every row above inherits it
+without a separate check: raw HTTP requests and **every redirect hop**
+(`internal/scan/scoped.go`), the browser gate (navigations, subresources,
+popups, CDP redirect hops), login, scan creation and discovery output. The
+host-only CONNECT boundary (`Scope.PermitsHost`) applies the port half of the
+rule, because it never sees a scheme.
+
 ## 7. Consequences for the operator
 
 - Adding an SSO or identity-provider host **authorizes scanning it too**. Add
   only hosts you are permitted to test.
-- A host in scope is in scope on **every port and scheme**.
+- A legacy scope (no `allowed_origins`) is in scope on **every port and
+  scheme**. A scope with an origin list is in scope only on the declared
+  scheme/port: `https://app.example.com` does not authorize `http`, nor
+  `:8443`. New scopes must declare their origins (or explicitly choose the
+  legacy behaviour); the importer takes them from the asset URL.
+- **Requests, not connections.** The origin rule is enforced on HTTP requests
+  (including redirect hops) and on browser requests. It does **not** stop
+  Chromium's TCP preconnect for a navigation target: the browser can open a
+  connection (and send a TLS ClientHello carrying the SNI) before the request
+  is refused. This is the known gap in
+  [browser-scope-boundary.md](browser-scope-boundary.md) ("Known gap:
+  connections"); no test in this feature measures or prevents it.
+- Origins are declared separately from hosts. A host entry never contains a
+  port or scheme; write those as `allowed_origins` entries.
 - Use exact hostnames; add subdomains deliberately.
+- An exact asset and a wildcard asset are not the same permission: the first
+  authorizes that host only, the second authorizes its subdomains and not its
+  apex. Importing a program keeps them apart; a manual scope save never turns
+  one into the other.
 - Prefer excluding by host over excluding by path.
 - Scope proves what Indago will not request by name; it does not prove what the
   name resolves to.
@@ -175,6 +330,16 @@ Chromium would parse a `Location` differently are rejected outright
 - The measured rows describe `Scope.Permits` in isolation. The server-side
   behaviour for `%2e%2e` and the effect of an unusual hostname on each target
   server were not tested.
+- Origin rules are unit-tested (`internal/domain/scope_origin_test.go`), tested
+  at the scan redirect layer on loopback (`internal/scan/scoped_origin_test.go`),
+  and covered by two real-browser tests that serve the page, the sibling port and
+  the redirect on `127.0.0.1`
+  (`internal/browser/origin_scope_integration_test.go`). Those tests count
+  **HTTP requests** at the second origin; they do not observe TCP connections,
+  so they do not prove the preconnect gap is closed (see §7). The browser tests
+  lower Chromium's sandbox only when `INDAGO_TEST_BROWSER_NO_SANDBOX=1` is set
+  for a restricted local test host; they were run that way here.
+  `PermitsHost`/CONNECT has unit tests only — no proxy integration test.
 - Rebinding and private-range behaviour are from reading the code; no test
   resolves a name to a private or link-local address, and the claim that private
   ranges are not blocked is untested.

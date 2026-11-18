@@ -191,6 +191,10 @@ type accessControlDetail struct {
 	PostStatus     int                        `json:"post_status,omitempty"`
 	Bypass         string                     `json:"bypass,omitempty"`
 	HeaderProbes   []accessControlHeaderProbe `json:"header_probes,omitempty"`
+	// SkippedProbes names the non-GET probes the default
+	// (AllowStateChanging=false) path deliberately did not send, so a
+	// Rejected/header-only result is not mistaken for complete coverage.
+	SkippedProbes []string `json:"skipped_probes,omitempty"`
 
 	// Cases 35/36 (admin action step) fields.
 	StepBaseline  int `json:"step_baseline,omitempty"`
@@ -265,6 +269,8 @@ type accessControlFindingDetail struct {
 	BeforeReach     accesscontrol.Reach    `json:"before_reach,omitempty"`
 	AfterReach      accesscontrol.Reach    `json:"after_reach,omitempty"`
 	Capabilities    []accesscontrol.Action `json:"capabilities,omitempty"`
+
+	SkippedProbes []string `json:"skipped_probes,omitempty"`
 
 	Attempts    []accessControlAttempt `json:"attempts,omitempty"`
 	Verdict     domain.Verdict         `json:"verdict,omitempty"`
@@ -1161,6 +1167,7 @@ func findingDetailFrom(d accessControlDetail, anonEvidence, nonAdminEvidence []d
 		NonAdminEvidence:  appendUniqueIDs(d.NonAdminEvidence, nonAdminEvidence),
 		PageURL:           d.PageURL, Refs: d.Refs,
 		Attempts: d.Attempts, Verdict: domain.VerdictConfirmed, Reason: d.Reason,
+		SkippedProbes: d.SkippedProbes,
 	}
 }
 

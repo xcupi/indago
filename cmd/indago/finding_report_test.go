@@ -33,7 +33,7 @@ func seedScanWithFinding(t *testing.T, c *cli, st store.Store, ev evidence.Store
 
 	projOut := must("project", "create", "Acme")
 	project := idFromString(t, projOut)
-	must("scope", "set", "-project", project, "-include", "127.0.0.1")
+	must("scope", "set", "-project", project, "-include", "127.0.0.1", "-origins", site.URL)
 	tgtOut := must("target", "add", "-project", project, "-name", "site", "-url", site.URL)
 	target := idFromString(t, tgtOut)
 	scOut := must("scan", "create", "-project", project, "-target", target)

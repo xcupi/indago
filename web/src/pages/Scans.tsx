@@ -166,11 +166,15 @@ export default function Scans() {
       return "";
     }
   })();
+  const wildcardHosts = (projectScope?.subdomain_only_hosts ?? []).map((h) => h.toLowerCase());
   const scopeCoversTarget = Boolean(
     targetHost &&
-      projectScope?.include_hosts?.some(
+      (projectScope?.include_hosts?.some(
         (h) => targetHost === h.toLowerCase() || (projectScope.allow_subdomains && targetHost.endsWith("." + h.toLowerCase())),
-      ),
+      ) ||
+        // A wildcard host authorizes strict subdomains only. The apex stays out
+        // of scope, so "example.com" must not match a wildcard entry.
+        wildcardHosts.some((w) => w !== "" && targetHost !== w && targetHost.endsWith("." + w))),
   );
 
   useEffect(() => {
@@ -366,9 +370,16 @@ export default function Scans() {
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="text-muted-foreground">
                         Scope:{" "}
-                        {projectScope?.include_hosts?.length
-                          ? `${projectScope.include_hosts.join(", ")}${projectScope.allow_subdomains ? " (+ subdomains)" : ""}`
-                          : "no include hosts — this scan would match nothing"}
+                        {projectScope?.include_hosts?.length || wildcardHosts.length
+                          ? [
+                              projectScope?.include_hosts?.length
+                                ? `${projectScope.include_hosts.join(", ")}${projectScope.allow_subdomains ? " (+ subdomains)" : ""}`
+                                : "",
+                              wildcardHosts.length ? `wildcard: ${wildcardHosts.join(", ")} (subdomains only, apex not in scope)` : "",
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")
+                          : "no hosts — this scan would match nothing"}
                       </span>
                       <button className="text-emerald-700 underline dark:text-emerald-400" onClick={() => navigate(`/projects/${projectId}`)}>
                         edit scope

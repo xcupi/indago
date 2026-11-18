@@ -118,8 +118,9 @@ func TestOASTWiringDisabledByDefault(t *testing.T) {
 		t.Fatalf("ssrf callbacks = (%q, %q), want both empty without a collaborator", got.callbackURL, got.callbackPollURL)
 	}
 
-	// And the engine still behaves as before: XXE with no collaborator is
-	// skipped, not run against a half-built callback.
+	// Without a collaborator, the engine runs its in-band internal-entity
+	// pass (it does not skip for lack of a callback), so it attempts the
+	// baseline XML request and records a clean skip when 127.0.0.1:1 refuses.
 	ep := &domain.Endpoint{ID: domain.NewID(), ScanID: env.scanID, URL: "http://127.0.0.1:1/x",
 		Method: domain.MethodPOST, Source: domain.SourceBrowserNetwork, ContentType: "application/xml",
 		RequestBody: `<a><b>1</b></a>`, CreatedAt: time.Now()}
@@ -132,8 +133,8 @@ func TestOASTWiringDisabledByDefault(t *testing.T) {
 		t.Fatalf("handle: %v", err)
 	}
 	tc := env.only()
-	if tc.Status != domain.TestCaseSkipped || !strings.Contains(tc.Note, "no XXE callback configured") {
-		t.Fatalf("test case = %+v, want the unchanged 'no XXE callback configured' skip", tc)
+	if tc.Status != domain.TestCaseSkipped || !strings.Contains(tc.Note, "baseline XML request did not succeed") {
+		t.Fatalf("test case = %+v, want baseline-request skip for in-band XXE", tc)
 	}
 }
 
@@ -512,11 +513,11 @@ func TestOASTWiringXXEOperatorBodyIsRegistered(t *testing.T) {
 		sc := newScan(t, env, cfg)
 
 		c.enqueueXXEProbes(context.Background(), sc.ID)
-		if registered(t, env, sc) != nil {
-			t.Fatal("the operator XML body was registered with no collaborator to confirm it")
+		if registered(t, env, sc) == nil {
+			t.Fatal("the operator XML body was not registered: in-band XXE can confirm without a collaborator")
 		}
-		if _, err := q.Lease(context.Background(), "worker", sc.ID, []domain.JobType{domain.JobXXE}, time.Minute); err == nil {
-			t.Fatal("an XXE job was queued with no collaborator, want none")
+		if job := lease(t, c, q, sc); job.Target.URL != xmlURL {
+			t.Fatalf("queued job target = %q, want %q", job.Target.URL, xmlURL)
 		}
 	})
 }

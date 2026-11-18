@@ -58,6 +58,16 @@ required = {
     "TestIntegrationScopeGateRejectsUnmanagedTargets",
     "TestIntegrationScopeGateManagedFramesAndSubresources",
     "TestIntegrationScopeGatePreservesBodyReplay",
+    # The scanner browser is non-mutating unless the scan explicitly opted into
+    # state-changing requests: a page's own fetch/XHR POST must not reach the
+    # server on a default scan, the GET control must, the opt-in must let it
+    # through, and neither a popup nor an explicit form/JSON/307 replay may
+    # bypass that policy.
+    "TestIntegrationDefaultContextBlocksPageInitiatedPOST",
+    "TestIntegrationStateChangingOptInAllowsPagePOST",
+    "TestIntegrationExplicitPOSTReplayNeedsOptIn",
+    "TestIntegrationPopupPOSTBlockedByMethodGate",
+    "TestIntegrationVerifyContextMethodPolicy",
     "TestIntegrationRejectFabricatedMarkerException",
     "TestIntegrationRejectConsoleOnlyMarker",
     "TestDOMXSSGenuineInnerHTMLExecutionIsStillConfirmed",

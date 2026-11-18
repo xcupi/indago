@@ -152,8 +152,10 @@ func TestSSTIFingerprintProbesJSONWhenEngineNamed(t *testing.T) {
 	if len(d.TemplateEngines) == 0 || d.TemplateEngines[0] != "jinja2" {
 		t.Fatalf("template engines = %v, want jinja2 first", d.TemplateEngines)
 	}
-	if sent[0] != "{{7*7}}" {
-		t.Fatalf("first payload = %q, want the Jinja2 shape", sent[0])
+	// Every probe carries the job's per-run marker after its shape (see
+	// sstiProbe), so the exact payload is the recommended shape plus d.Marker.
+	if want := "{{7*7}}" + d.Marker; sent[0] != want {
+		t.Fatalf("first payload = %q, want the Jinja2 shape %q", sent[0], want)
 	}
 }
 
@@ -211,8 +213,10 @@ func TestSSTIFingerprintPrioritizesMatchingShape(t *testing.T) {
 			if len(sent) < 2 {
 				t.Fatalf("sent %d probes, want the plan to run: %v", len(sent), sent)
 			}
-			if sent[0] != c.wantFirst {
-				t.Fatalf("first payload = %q, want %q (order %v)", sent[0], c.wantFirst, sent)
+			// The shape must come first; the per-run marker always follows it
+			// (see sstiProbe), so the exact payload is shape + d.Marker.
+			if want := c.wantFirst + d.Marker; sent[0] != want {
+				t.Fatalf("first payload = %q, want %q (order %v)", sent[0], want, sent)
 			}
 			if len(d.TemplateEngines) == 0 || d.TemplateEngines[0] != c.wantEngine {
 				t.Fatalf("template engines = %v, want %s first", d.TemplateEngines, c.wantEngine)

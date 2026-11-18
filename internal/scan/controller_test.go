@@ -94,6 +94,57 @@ func TestCreateScanOutOfScope(t *testing.T) {
 	}
 }
 
+// TestCreateScanDefaultProfileIsConservative pins the default for a new scan:
+// an omitted (or unrecognized) profile must land on the conservative preset
+// (2 requests/second), while an explicitly requested preset keeps its tuning.
+func TestCreateScanDefaultProfileIsConservative(t *testing.T) {
+	ctx := context.Background()
+	f := setup(t, true, []string{"example.com"})
+
+	def, err := f.ctrl.CreateScan(ctx, scan.CreateScanParams{
+		ProjectID: f.proj, TargetID: f.tgt, Name: "omitted",
+	})
+	if err != nil {
+		t.Fatalf("create with omitted profile: %v", err)
+	}
+	if def.Profile != domain.ProfileConservative {
+		t.Fatalf("omitted profile = %q, want conservative", def.Profile)
+	}
+	if def.Config.DiscoveryConcurrency != 2 || def.Config.HTTPConcurrency != 4 ||
+		def.Config.BrowserConcurrency != 1 || def.Config.RequestsPerSecond != 2 {
+		t.Fatalf("omitted profile config = %+v, want the conservative preset", def.Config)
+	}
+	stored, err := f.store.Scans().Get(ctx, def.ID)
+	if err != nil {
+		t.Fatalf("get stored scan: %v", err)
+	}
+	if stored.Profile != domain.ProfileConservative {
+		t.Fatalf("stored profile = %q, want conservative", stored.Profile)
+	}
+
+	// An unknown name is not a reason to fail open to the faster preset.
+	unk, err := f.ctrl.CreateScan(ctx, scan.CreateScanParams{
+		ProjectID: f.proj, TargetID: f.tgt, Name: "unknown", Profile: domain.ProfileName("turbo"),
+	})
+	if err != nil {
+		t.Fatalf("create with unknown profile: %v", err)
+	}
+	if unk.Profile != domain.ProfileConservative {
+		t.Fatalf("unknown profile = %q, want conservative", unk.Profile)
+	}
+
+	// Explicit balanced stays balanced.
+	bal, err := f.ctrl.CreateScan(ctx, scan.CreateScanParams{
+		ProjectID: f.proj, TargetID: f.tgt, Name: "balanced", Profile: domain.ProfileBalanced,
+	})
+	if err != nil {
+		t.Fatalf("create balanced: %v", err)
+	}
+	if bal.Profile != domain.ProfileBalanced || bal.Config.RequestsPerSecond != 10 {
+		t.Fatalf("balanced profile = %q config=%+v, want balanced/10 rps", bal.Profile, bal.Config)
+	}
+}
+
 // holdJobs returns handlers whose test-job handler blocks until release is
 // called (or the job's context is canceled). It keeps a scan from completing so
 // the pause/resume/cancel paths can be exercised on a running scan.

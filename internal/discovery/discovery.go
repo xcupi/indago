@@ -102,17 +102,20 @@ type Sink interface {
 
 // fetchGuard is an optional Sink capability: veto a request BEFORE it is sent.
 // Registering an endpoint is not the same as requesting it, and a request to a
-// session-terminating URL is itself the harm on an authenticated scan, so a
-// Source must ask first whenever it is about to GET a URL it discovered.
+// session-terminating or data-mutating URL is itself the harm, so a Source must
+// ask first whenever it is about to fetch or register a URL it discovered. The
+// method is part of the question: a destructive-looking GET is refused, while a
+// form's POST target is still registered for the executor's own opt-ins to
+// decide.
 type fetchGuard interface {
-	AllowFetch(rawURL string, source domain.DiscoverySource) bool
+	AllowFetch(rawURL string, source domain.DiscoverySource, method domain.HTTPMethod) bool
 }
 
-// allowFetch reports whether a Source may request rawURL. A Sink without the
-// guard capability never vetoes.
-func allowFetch(sink Sink, rawURL string, source domain.DiscoverySource) bool {
+// allowFetch reports whether a Source may request rawURL with method. A Sink
+// without the guard capability never vetoes.
+func allowFetch(sink Sink, rawURL string, source domain.DiscoverySource, method domain.HTTPMethod) bool {
 	g, ok := sink.(fetchGuard)
-	return !ok || g.AllowFetch(rawURL, source)
+	return !ok || g.AllowFetch(rawURL, source, method)
 }
 
 // endpointLookup is an optional Sink capability: it answers whether the scan

@@ -37,9 +37,26 @@ export interface Target {
 export interface Scope {
   project_id: ID;
   include_hosts: string[];
+  /**
+   * Wildcard half of the scope: these hosts' SUBDOMAINS are in scope and the
+   * hosts themselves are not (a bug-bounty `*.example.com` asset imports here).
+   * Kept separate from include_hosts because the two authorize different
+   * things; the API preserves an absent field, so a save must send it.
+   */
+  subdomain_only_hosts?: string[];
   exclude_hosts: string[];
   include_path_prefixes: string[];
   exclude_path_prefixes: string[];
+  /**
+   * Explicit scheme/port allowlist ("https://app.example.com",
+   * "http://app.example.com:8080", "https://*.example.com"). When non-empty it
+   * is enforced on top of the host/path rules, so it can only narrow a scope.
+   * Empty with allow_any_scheme_ports=false is the legacy any-scheme/any-port
+   * behaviour (a scope saved before origins existed).
+   */
+  allowed_origins?: string[];
+  /** Explicit opt-out to the legacy any-scheme/any-port behaviour. */
+  allow_any_scheme_ports?: boolean;
   allow_subdomains: boolean;
 }
 

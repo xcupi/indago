@@ -100,7 +100,22 @@ func newUIHarnessWith(t *testing.T, token string, caps web.Capabilities) *uiHarn
 // newUIHarnessWithHandler wraps the dashboard's HTTP handler, so a test can make
 // one endpoint fail the way a transient network error would. wrap runs for every
 // request the page makes, including the capabilities read at startup.
+//
+// The harness drives the dashboard as an OPERATOR would, from a real browser:
+// the operator's own browser may submit forms (PUT/POST), so the default
+// context allows state-changing requests. This is test-harness policy only; it
+// does not touch the scan's non-mutating default, which discovery, verification
+// and DOM contexts still get from the zero ContextOptions value. A test that
+// wants to model a different browser policy passes explicit options through
+// newUIHarnessWithContext.
 func newUIHarnessWithHandler(t *testing.T, token string, caps web.Capabilities, wrap func(http.Handler) http.Handler) *uiHarness {
+	return newUIHarnessWithContext(t, token, caps, wrap, browser.ContextOptions{AllowStateChanging: true})
+}
+
+// newUIHarnessWithContext is newUIHarnessWithHandler with explicit browser
+// context options, for a test that needs a specific browser policy instead of
+// the operator default above.
+func newUIHarnessWithContext(t *testing.T, token string, caps web.Capabilities, wrap func(http.Handler) http.Handler, ctxOpts browser.ContextOptions) *uiHarness {
 	if testing.Short() {
 		t.Skip("real-browser UI test skipped in -short mode")
 	}
@@ -108,7 +123,14 @@ func newUIHarnessWithHandler(t *testing.T, token string, caps web.Capabilities, 
 	if exe == "" {
 		t.Skip("no Chromium found (set INDAGO_CHROMIUM_PATH or `playwright install chromium`)")
 	}
-	mgr, err := browser.NewManager(browser.Config{Headless: true, ExecutablePath: exe}, nil)
+	mgr, err := browser.NewManager(browser.Config{
+		Headless:       true,
+		ExecutablePath: exe,
+		// A restricted container without user namespaces needs the explicit
+		// opt-out, exactly like internal/browser's integration fixtures. The
+		// default keeps Chromium's process sandbox ON.
+		DisableSandbox: os.Getenv("INDAGO_TEST_BROWSER_NO_SANDBOX") == "1",
+	}, nil)
 	if err != nil {
 		t.Skipf("browser engine unavailable: %v", err)
 	}
@@ -162,7 +184,7 @@ func newUIHarnessWithHandler(t *testing.T, token string, caps web.Capabilities, 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	t.Cleanup(cancel)
-	bctx, err := mgr.NewContext(ctx, browser.ContextOptions{})
+	bctx, err := mgr.NewContext(ctx, ctxOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,6 +356,9 @@ func TestUIOperationalWorkflow(t *testing.T) {
 	u.mustClickText("#sidebar a", "Scope")
 	u.waitUI("scope view", `document.getElementById('s_inchosts')!==null`)
 	u.setVal("s_inchosts", "127.0.0.1")
+	// The scheme/port statement is explicit (the target's own origin): a scope
+	// never derives one, and the walkthrough's scan must stay permitted.
+	u.setVal("s_origins", target.URL)
 	u.mustClickText(".form-actions button", "Save scope")
 	u.waitUI("scope saved", `/saved/.test(document.querySelector('.ok-msg')&&document.querySelector('.ok-msg').textContent||'') && /127\.0\.0\.1/.test(document.getElementById('view').textContent)`)
 

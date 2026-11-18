@@ -132,7 +132,7 @@ func TestGraphQLDetectsIntrospectionBatchingVerboseErrorsAndGETQueries(t *testin
 
 	env := newScanEnv(t)
 	ep := env.endpoint(srv.URL+"/graphql", domain.MethodGET)
-	ex := newGraphQLExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil)
+	ex := newGraphQLExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{AllowStateChanging: true}, execLog(), nil)
 	if err := ex.Handle(context.Background(), graphQLTestJob(env, ep)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -176,6 +176,15 @@ func TestGraphQLDetectsIntrospectionBatchingVerboseErrorsAndGETQueries(t *testin
 	if len(d.ConfirmedChecks) != 4 {
 		t.Fatalf("confirmed checks = %v, want all four", d.ConfirmedChecks)
 	}
+	if d.BaselineMethod != string(domain.MethodPOST) {
+		t.Fatalf("baseline method = %q, want POST with AllowStateChanging", d.BaselineMethod)
+	}
+	if d.POSTChecksSkipped {
+		t.Fatal("POST checks were marked skipped although AllowStateChanging is on")
+	}
+	if tc.Method != string(domain.MethodPOST) {
+		t.Fatalf("test-case method = %q, want POST", tc.Method)
+	}
 	if len(tc.EvidenceIDs) != 2*rec.count() {
 		t.Fatalf("evidence = %d ids for %d probes, want request+response each", len(tc.EvidenceIDs), rec.count())
 	}
@@ -191,28 +200,152 @@ func TestGraphQLDetectsIntrospectionBatchingVerboseErrorsAndGETQueries(t *testin
 		}
 	}
 	var aliases, gets int
+	posts := 0
 	for _, r := range reqs {
+		switch r.method {
+		case http.MethodPost:
+			posts++
+		case http.MethodGet:
+			gets++
+		}
 		if n := strings.Count(r.body, ":__typename"); n > 0 {
 			if n != 3 {
 				t.Fatalf("alias batch carries %d aliases, want the bounded 3: %q", n, r.body)
 			}
 			aliases++
 		}
-		if r.method == http.MethodGet {
-			gets++
-			if r.queryParam != "{__typename}" {
-				t.Fatalf("GET probe query = %q, want {__typename}", r.queryParam)
-			}
+		if r.method == http.MethodGet && r.queryParam != "{__typename}" {
+			t.Fatalf("GET probe query = %q, want {__typename}", r.queryParam)
 		}
 	}
-	if aliases != 1 || gets != 1 {
-		t.Fatalf("alias batches = %d, GET probes = %d; want 1 each", aliases, gets)
+	if aliases != 1 || gets != 1 || posts != 4 {
+		t.Fatalf("alias batches = %d, GET probes = %d, POST probes = %d; want 1/1/4", aliases, gets, posts)
 	}
 }
 
-// A hardened server still speaks GraphQL but refuses every exposure: no
-// introspection, no batching, a bare validation error, no GET and no text/plain
-// POST. Nothing may be reported.
+// Without AllowStateChanging, the engine must use GET for the baseline and keep
+// the GET-based exposure check. This is the method-recording test for the
+// default path: every request the fake endpoint sees is a GET.
+func TestGraphQLDefaultSendsOnlyGETAndKeepsGETCheck(t *testing.T) {
+	rec := &graphQLRecorder{}
+	srv := httptest.NewServer(exposedGraphQLHandler(rec))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/graphql", domain.MethodGET)
+	ex := newGraphQLExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil)
+	if err := ex.Handle(context.Background(), graphQLTestJob(env, ep)); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	reqs := rec.all()
+	if len(reqs) != 2 {
+		t.Fatalf("probes = %d (%+v), want 2 GETs (baseline + GET check)", len(reqs), reqs)
+	}
+	for _, r := range reqs {
+		if r.method != http.MethodGet {
+			t.Fatalf("default GraphQL pass sent %s (%+v), want GET only", r.method, r)
+		}
+		if r.body != "" || r.contentType != "" {
+			t.Fatalf("GET probe carried a body/content type: %+v", r)
+		}
+	}
+
+	tc := env.only()
+	if tc.Status != domain.TestCaseCompleted {
+		t.Fatalf("test case = %+v, want completed", tc)
+	}
+	if tc.Method != string(domain.MethodGET) {
+		t.Fatalf("test-case method = %q, want GET", tc.Method)
+	}
+	d := decodeGraphQLDetail(t, tc)
+	if !d.IsGraphQL || d.Verdict != domain.VerdictConfirmed {
+		t.Fatalf("detail = %+v, want a confirmed GraphQL endpoint", d)
+	}
+	if d.BaselineMethod != string(domain.MethodGET) {
+		t.Fatalf("baseline method = %q, want GET", d.BaselineMethod)
+	}
+	if !d.POSTChecksSkipped {
+		t.Fatal("POST checks were not marked skipped without AllowStateChanging")
+	}
+	if len(d.SkippedChecks) != 3 {
+		t.Fatalf("skipped checks = %v, want introspection/batching/verbose_errors", d.SkippedChecks)
+	}
+	if len(d.ConfirmedChecks) != 1 || d.ConfirmedChecks[0] != graphQLCheckGETQueries {
+		t.Fatalf("confirmed checks = %v, want only %s", d.ConfirmedChecks, graphQLCheckGETQueries)
+	}
+	if !strings.Contains(d.Reason, "AllowStateChanging") {
+		t.Fatalf("detail reason does not explain the skipped POST checks: %q", d.Reason)
+	}
+	if !strings.Contains(tc.Note, "POST-only checks skipped") {
+		t.Fatalf("test-case note does not explain the skipped POST checks: %q", tc.Note)
+	}
+	skipped := map[string]bool{}
+	for _, c := range d.Checks {
+		if c.Skipped {
+			skipped[c.Name] = true
+		}
+	}
+	for _, name := range []string{graphQLCheckIntrospection, graphQLCheckBatching, graphQLCheckVerboseErrors} {
+		if !skipped[name] {
+			t.Fatalf("check %q is not marked skipped: %+v", name, d.Checks)
+		}
+	}
+	findings := graphQLFindings(t, env)
+	if len(findings) != 1 || findings[0].Title != "GraphQL endpoint accepts GET-based queries" {
+		t.Fatalf("findings = %+v, want only the GET-based-query finding", findings)
+	}
+}
+
+// A POST-accepting server must not tempt the default path into a fallback: if
+// GET is refused, the baseline is skipped rather than retried as POST.
+func TestGraphQLDefaultDoesNotFallBackToPOST(t *testing.T) {
+	var mu sync.Mutex
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		methods = append(methods, r.Method)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			io.WriteString(w, `{"errors":[{"message":"GET is not allowed"}]}`)
+			return
+		}
+		io.WriteString(w, `{"data":{"__typename":"Query"}}`)
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/graphql", domain.MethodGET)
+	ex := newGraphQLExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil)
+	if err := ex.Handle(context.Background(), graphQLTestJob(env, ep)); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), methods...)
+	mu.Unlock()
+	for _, m := range got {
+		if m != http.MethodGet {
+			t.Fatalf("default path fell back to %s; methods=%v", m, got)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("methods = %v, want exactly one GET baseline", got)
+	}
+	tc := env.only()
+	if tc.Status != domain.TestCaseSkipped {
+		t.Fatalf("test case = %+v, want skipped (GET refused, no POST fallback)", tc)
+	}
+	if !strings.Contains(tc.Note, "AllowStateChanging") {
+		t.Fatalf("skip note does not explain why POST was not tried: %q", tc.Note)
+	}
+	if findings := graphQLFindings(t, env); len(findings) != 0 {
+		t.Fatalf("skipped baseline produced findings: %+v", findings)
+	}
+}
+
 func TestGraphQLRejectsHardenedEndpoint(t *testing.T) {
 	var hits int
 	var mu sync.Mutex
@@ -260,7 +393,7 @@ func TestGraphQLRejectsHardenedEndpoint(t *testing.T) {
 
 	env := newScanEnv(t)
 	ep := env.endpoint(srv.URL+"/graphql", domain.MethodGET)
-	ex := newGraphQLExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil)
+	ex := newGraphQLExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{AllowStateChanging: true}, execLog(), nil)
 	if err := ex.Handle(context.Background(), graphQLTestJob(env, ep)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -308,6 +441,9 @@ func TestGraphQLSkipsNonGraphQLEndpointAfterOneProbe(t *testing.T) {
 	if n := rec.count(); n != 1 {
 		t.Fatalf("probes = %d (%+v), want the single baseline request", n, rec.all())
 	}
+	if reqs := rec.all(); len(reqs) != 1 || reqs[0].method != http.MethodGet {
+		t.Fatalf("default baseline = %+v, want one GET", reqs)
+	}
 	if findings := graphQLFindings(t, env); len(findings) != 0 {
 		t.Fatalf("non-GraphQL endpoint produced findings: %+v", findings)
 	}
@@ -328,7 +464,7 @@ func TestGraphQLDoesNotDuplicateFindingsOnRerun(t *testing.T) {
 
 	env := newScanEnv(t)
 	ep := env.endpoint(srv.URL+"/graphql", domain.MethodGET)
-	ex := newGraphQLExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil)
+	ex := newGraphQLExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{AllowStateChanging: true}, execLog(), nil)
 	job := graphQLTestJob(env, ep)
 	if err := ex.Handle(context.Background(), job); err != nil {
 		t.Fatalf("first run: %v", err)

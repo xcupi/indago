@@ -27,6 +27,12 @@ var ErrNotImplemented = errors.New("verification: not implemented in Phase 0")
 // and bounded POST/JSON are supported). The caller treats this as not attempted.
 var ErrUnsupportedMethod = errors.New("verification: request method or body representation is not supported for browser navigation")
 
+// ErrStateChangingNotAllowed is returned when a verification attempt would
+// replay a POST candidate (form or JSON) without the scan's explicit
+// AllowStateChanging opt-in. It is defense in depth: the scan's verify
+// executor already skips such an endpoint before calling the verifier.
+var ErrStateChangingNotAllowed = errors.New("verification: POST browser replay requires the scan's AllowStateChanging opt-in")
+
 // Input is the context for one verification attempt: the candidate that
 // reflected, the exact request that produced the reflection, and the
 // scope/session under which to replay it.
@@ -87,6 +93,15 @@ type Input struct {
 	// domain.ScanConfig.ProxyPool and browser.ContextOptions.ProxyServer).
 	// "" (the default) is a direct connection.
 	ProxyServer string
+	// AllowStateChanging mirrors the scan's explicit AllowStateChanging opt-in
+	// (ExecutorConfig.AllowStateChanging). It is REQUIRED to replay a POST
+	// candidate (form or JSON), and it is the only thing that lets the
+	// verifying page itself issue a non-read-only request: with the zero value
+	// the browser context blocks every POST/PUT/PATCH/DELETE before it leaves
+	// the browser (browser.ContextOptions.AllowStateChanging). A GET candidate
+	// on a default scan therefore verifies with a non-mutating browser, even
+	// if the page's own JavaScript tries to submit a form.
+	AllowStateChanging bool
 }
 
 // ResultEvidence carries the raw artifacts a verification attempt produced. The

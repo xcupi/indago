@@ -10,21 +10,29 @@ import (
 
 func TestProfileConfigDefaults(t *testing.T) {
 	bal := scan.ProfileConfig(domain.ProfileBalanced)
-	if bal.DiscoveryConcurrency != 4 || bal.HTTPConcurrency != 10 || bal.BrowserConcurrency != 2 {
+	if bal.DiscoveryConcurrency != 4 || bal.HTTPConcurrency != 10 || bal.BrowserConcurrency != 2 || bal.RequestsPerSecond != 10 {
 		t.Fatalf("balanced defaults wrong: %+v", bal)
 	}
 	cons := scan.ProfileConfig(domain.ProfileConservative)
-	if cons.HTTPConcurrency >= bal.HTTPConcurrency {
-		t.Fatal("conservative should be lower concurrency than balanced")
+	if cons.DiscoveryConcurrency != 2 || cons.HTTPConcurrency != 4 || cons.BrowserConcurrency != 1 || cons.RequestsPerSecond != 2 {
+		t.Fatalf("conservative defaults wrong: %+v", cons)
+	}
+	if cons.HTTPConcurrency >= bal.HTTPConcurrency || cons.RequestsPerSecond >= bal.RequestsPerSecond {
+		t.Fatal("conservative should be lower concurrency/rate than balanced")
 	}
 	fast := scan.ProfileConfig(domain.ProfileFast)
-	if fast.HTTPConcurrency <= bal.HTTPConcurrency {
-		t.Fatal("fast should be higher concurrency than balanced")
+	if fast.HTTPConcurrency <= bal.HTTPConcurrency || fast.RequestsPerSecond <= bal.RequestsPerSecond {
+		t.Fatal("fast should be higher concurrency/rate than balanced")
 	}
-	// Unknown profile falls back to balanced.
-	unk := scan.ProfileConfig(domain.ProfileName("weird"))
-	if !reflect.DeepEqual(unk, bal) {
-		t.Fatalf("unknown profile should fall back to balanced, got %+v", unk)
+	// An unnamed or unknown profile falls back to the conservative default —
+	// never to the more aggressive balanced preset.
+	for _, name := range []domain.ProfileName{"", "weird"} {
+		if got := scan.ProfileConfig(name); !reflect.DeepEqual(got, cons) {
+			t.Fatalf("profile %q should fall back to conservative, got %+v", name, got)
+		}
+	}
+	if domain.DefaultProfile != domain.ProfileConservative {
+		t.Fatalf("domain.DefaultProfile = %q, want conservative", domain.DefaultProfile)
 	}
 }
 

@@ -22,7 +22,7 @@ func TestCLIScanCreateWiresWave1EngineFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := idFrom(t, out)
-	if err := run("scope", "set", "-project", project, "-include", "127.0.0.1"); err != nil {
+	if err := run("scope", "set", "-project", project, "-include", "127.0.0.1", "-origins", site.URL); err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()
@@ -87,7 +87,7 @@ func TestCLIScanCreateDefaultsLeaveWave1EnginesAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := idFrom(t, out)
-	if err := run("scope", "set", "-project", project, "-include", "127.0.0.1"); err != nil {
+	if err := run("scope", "set", "-project", project, "-include", "127.0.0.1", "-origins", site.URL); err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()

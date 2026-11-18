@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -208,11 +209,16 @@ type importedProgram struct {
 	ProjectID string   `json:"project_id"`
 	Targets   []string `json:"targets"`
 	Hosts     []string `json:"hosts"`
-	ScanID    string   `json:"scan_id,omitempty"`
-	ScanIDs   []string `json:"scan_ids,omitempty"`
-	ScanError string   `json:"scan_error,omitempty"`
-	UserAgent string   `json:"hunting_user_agent,omitempty"`
-	Skipped   []string `json:"skipped,omitempty"`
+	// SubdomainOnlyHosts lists the wildcard assets imported as "subdomains of
+	// this host, not the host itself" (domain.Scope.SubdomainOnlyHosts). It is
+	// reported separately from Hosts because the two authorize different
+	// things: a wildcard asset never authorizes its own apex.
+	SubdomainOnlyHosts []string `json:"subdomain_only_hosts,omitempty"`
+	ScanID             string   `json:"scan_id,omitempty"`
+	ScanIDs            []string `json:"scan_ids,omitempty"`
+	ScanError          string   `json:"scan_error,omitempty"`
+	UserAgent          string   `json:"hunting_user_agent,omitempty"`
+	Skipped            []string `json:"skipped,omitempty"`
 }
 
 // handleImportBountyPrograms turns selected programs into projects with an
@@ -278,9 +284,25 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 			out = append(out, importedProgram{Slug: slug, Title: detail.Title, ProjectID: existingProjectID, Skipped: []string{"already imported"}})
 			continue
 		}
-		hosts, targets, prefixes, skipped := webScopeTargets(scopes)
-		if len(hosts) == 0 {
-			out = append(out, importedProgram{Slug: slug, Title: detail.Title, Skipped: []string{"no web-application scope asset"}})
+		hosts, subdomainOnly, targets, prefixes, origins, skipped, blocked := webScopeTargets(scopes)
+		if blocked != "" {
+			// Fail closed: the program binds different paths to different
+			// hosts/origins, and a project scope has one global prefix list.
+			// Nothing is created rather than a scope that authorizes the
+			// cross product of host, scheme/port and path.
+			out = append(out, importedProgram{Slug: slug, Title: detail.Title, Skipped: append(skipped, blocked)})
+			continue
+		}
+		if len(hosts) == 0 && len(subdomainOnly) == 0 {
+			out = append(out, importedProgram{Slug: slug, Title: detail.Title, Skipped: append(skipped, "no web-application scope asset")})
+			continue
+		}
+		// Fail closed: an empty origin list means "every scheme and port" to
+		// the matcher, so an import never creates a scope without one. Every
+		// kept asset row states its own scheme, so this only fires if the
+		// asset parsing above let a host through without an origin.
+		if len(origins) == 0 {
+			out = append(out, importedProgram{Slug: slug, Title: detail.Title, Skipped: append(skipped, "no asset states an http(s) scheme; an imported scope never authorizes every scheme and port")})
 			continue
 		}
 		now := time.Now()
@@ -304,8 +326,21 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 		}
 		sc := &domain.Scope{
 			ID: domain.NewID(), ProjectID: p.ID,
-			IncludeHosts: hosts, IncludePathPrefixes: prefixes,
-			AllowSubdomains: true,
+			IncludeHosts:        hosts,
+			SubdomainOnlyHosts:  subdomainOnly,
+			IncludePathPrefixes: prefixes,
+			// The program's assets state scheme and port, so the imported
+			// scope is origin-restricted from the first scan: a host listed as
+			// https://app.example.com does not authorize http, nor :8443, nor
+			// an internal service on another port. This is the fail-closed
+			// default for a new (imported) scope.
+			AllowedOrigins: origins,
+			// Imports never widen. Every asset row is either an exact host or
+			// an explicit wildcard ("*.example.com"), and the wildcard is
+			// carried by SubdomainOnlyHosts, so the blanket "subdomains of
+			// every included host" flag stays off: an exact asset must not
+			// authorize hosts the program never listed.
+			AllowSubdomains: false,
 			CreatedAt:       now, UpdatedAt: now,
 		}
 		if err := s.store.Scopes().Create(r.Context(), sc); err != nil {
@@ -339,10 +374,12 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 					ProjectID: p.ID,
 					TargetID:  targetID,
 					Name:      "Imported: " + detail.Title + " — " + targetURLs[targetID],
-					// Balanced is the medium preset. The crawl controls are
-					// explicit so the imported scan does not look like an empty
-					// 0/0 job and can actually discover something without tuning.
-					Profile:          domain.ProfileBalanced,
+					// Conservative, not balanced: the operator did not choose
+					// this program's rate, and docs/bounty.md promises the
+					// quiet preset. The crawl controls are explicit so the
+					// imported scan does not look like an empty 0/0 job and
+					// can discover something without tuning.
+					Profile:          domain.ProfileConservative,
 					QuickScan:        false,
 					MaxDepth:         3,
 					MaxPages:         200,
@@ -372,78 +409,551 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 		if len(scanIDs) > 0 {
 			scanID = scanIDs[0]
 		}
-		out = append(out, importedProgram{Slug: slug, Title: detail.Title, ProjectID: string(p.ID), Targets: targets, Hosts: hosts, ScanID: scanID, ScanIDs: scanIDs, ScanError: scanErr, UserAgent: p.HuntingUserAgent, Skipped: skipped})
+		out = append(out, importedProgram{Slug: slug, Title: detail.Title, ProjectID: string(p.ID), Targets: targets, Hosts: hosts, SubdomainOnlyHosts: subdomainOnly, ScanID: scanID, ScanIDs: scanIDs, ScanError: scanErr, UserAgent: p.HuntingUserAgent, Skipped: skipped})
 		s.log.Info("bounty program imported", "provider", "yeswehack", "slug", slug, "hosts", len(hosts), "targets", len(targets))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"imported": out})
 }
 
-// webScopeTargets converts platform scopes into (hosts, seed targets, skipped).
-// Only web-application assets become targets: an API host or a wildcard is a
-// scope entry, not a seed URL the crawler can start from.
-func webScopeTargets(scopes []bounty.Scope) (hosts, targets, prefixes, skipped []string) {
+// bountyAsset is one concrete host an asset row points at.
+type bountyAsset struct {
+	Scheme string
+	Host   string
+	Port   int    // effective port (80/443 when the asset row omitted one)
+	Path   string // "" when the asset has no path (its host root)
+}
+
+// origin is the scope-origin spelling of this asset: scheme, host and port.
+func (a bountyAsset) origin() string {
+	return domain.ScopeOrigin{Scheme: a.Scheme, Host: a.Host, Port: a.Port}.String()
+}
+
+// targetURL is the seed URL for this asset: the asset itself when it carries a
+// path, otherwise the host root.
+func (a bountyAsset) targetURL() string {
+	host := a.Host
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	base := a.Scheme + "://" + host
+	if a.Port != 0 && a.Port != defaultPortForScheme(a.Scheme) {
+		base += ":" + strconv.Itoa(a.Port)
+	}
+	if a.Path == "" || a.Path == "/" {
+		return base + "/"
+	}
+	return base + a.Path
+}
+
+func defaultPortForScheme(scheme string) int {
+	if strings.EqualFold(scheme, "http") {
+		return 80
+	}
+	return 443
+}
+
+// importedPathIsSafe reports whether an asset's path can be stored as a scope
+// prefix. An empty path and "/" mean the host root and need no prefix. Every
+// other path must pass the same save-time validator a manual scope PUT uses;
+// import never stores a path whose decoding or segment boundary is ambiguous.
+func importedPathIsSafe(path string) bool {
+	if path == "" || path == "/" {
+		return true
+	}
+	return domain.ValidateScopePathPrefix(path) == nil
+}
+
+// importedAssetURLPathSafe checks the raw asset URL before its path is decoded
+// into a scope prefix. It is what catches an encoded slash or dot that would
+// look harmless after url.Parse: the decoded prefix is not the URL the program
+// actually declared, so the asset is skipped.
+func importedAssetURLPathSafe(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if !strings.Contains(raw, "://") {
+		return true // wildcardAsset/concreteAsset handle the missing-scheme case.
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return true // let the existing shape checks report the malformed asset.
+	}
+	_, err = domain.SafeScopePath(u)
+	return err == nil
+}
+
+// scopePathBinding is one authorization an imported asset row states: the
+// origin it was declared for and the path prefix the program scoped it to
+// (empty means the whole origin).
+//
+// It exists because domain.Scope.IncludePathPrefixes is GLOBAL: Scope.Permits
+// compares a URL's path against every stored prefix without looking at the
+// host, so two path-scoped assets on different origins would otherwise
+// authorize the cross product — assets https://a.test/app and
+// https://b.test/api would also permit https://a.test/api and
+// https://b.test/app.
+type scopePathBinding struct {
+	Origin string // canonical scope-origin spelling, wildcard included
+	Path   string // "" = the whole origin
+}
+
+// reduceScopePathPrefixes returns the minimal spelling of a set of path
+// prefixes, comparing them exactly the way Scope.Permits does (through
+// domain.ScopePathWithinPrefix: "/app" covers "/app" and "/app/x", not
+// "/application"). An empty or "/" entry means the whole origin and collapses
+// the set to "no restriction".
+//
+// The result is sorted, so the same input always produces the same list (and
+// two origins can be compared with slices.Equal).
+func reduceScopePathPrefixes(paths []string) []string {
+	for _, p := range paths {
+		if p == "" || p == "/" {
+			return nil
+		}
+	}
+	sorted := append([]string(nil), paths...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if len(sorted[i]) != len(sorted[j]) {
+			return len(sorted[i]) < len(sorted[j])
+		}
+		return sorted[i] < sorted[j]
+	})
+	out := make([]string, 0, len(sorted))
+	for _, p := range sorted {
+		covered := false
+		for _, kept := range out {
+			if domain.ScopePathWithinPrefix(p, kept) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// normalizeScopePathBindings drops a path restriction that another binding
+// already authorizes more broadly. The one such case is an exact asset under a
+// wildcard the program left UNRESTRICTED: the wildcard authorizes every path of
+// that subdomain, so its own "/app" restriction adds nothing and keeping it
+// would narrow the wildcard's scope. Everything else is left untouched — a
+// restriction is only ever dropped when the same program states the wider
+// authorization explicitly.
+func normalizeScopePathBindings(bindings []scopePathBinding) []scopePathBinding {
+	out := make([]scopePathBinding, len(bindings))
+	copy(out, bindings)
+	for i, b := range out {
+		if b.Path == "" {
+			continue
+		}
+		exact, ok := domain.ParseScopeOrigin(b.Origin)
+		if !ok || exact.Wildcard {
+			continue
+		}
+		for _, other := range out {
+			if other.Path != "" {
+				continue
+			}
+			wild, ok := domain.ParseScopeOrigin(other.Origin)
+			if !ok || !wild.Wildcard {
+				continue
+			}
+			if wild.Scheme == exact.Scheme && wild.Port == exact.Port && domain.IsStrictSubdomain(exact.Host, wild.Host) {
+				out[i].Path = ""
+				break
+			}
+		}
+	}
+	return out
+}
+
+// scopePathBindingProblem reports why the collected bindings cannot be
+// expressed by the scope's one global prefix list without widening it, or ""
+// when they can.
+//
+// The representation is faithful only when every imported origin authorizes the
+// SAME set of path prefixes, because the stored list applies to all of them at
+// once. An origin the program left unrestricted authorizes every path, so it
+// only matches a program in which no origin is path-scoped. Anything else is
+// refused instead of being flattened into a scope that authorizes combinations
+// of host, scheme/port and path the program never listed.
+func scopePathBindingProblem(bindings []scopePathBinding) string {
+	if len(bindings) == 0 {
+		return ""
+	}
+	byOrigin := map[string][]string{}
+	var order []string
+	for _, b := range bindings {
+		if _, seen := byOrigin[b.Origin]; !seen {
+			order = append(order, b.Origin)
+		}
+		byOrigin[b.Origin] = append(byOrigin[b.Origin], b.Path)
+	}
+	sort.Strings(order)
+
+	reduced := make(map[string][]string, len(order))
+	for _, origin := range order {
+		reduced[origin] = reduceScopePathPrefixes(byOrigin[origin])
+	}
+	want := reduced[order[0]]
+	for _, origin := range order[1:] {
+		if !slices.Equal(reduced[origin], want) {
+			describe := func(prefixes []string) string {
+				if len(prefixes) == 0 {
+					return "the whole origin"
+				}
+				return strings.Join(prefixes, " ")
+			}
+			parts := make([]string, 0, len(order))
+			for _, o := range order {
+				parts = append(parts, o+" is scoped to "+describe(reduced[o]))
+			}
+			return "path prefixes in a project scope apply to every host in it, so this program's assets cannot be imported without authorizing paths it never listed (" +
+				strings.Join(parts, "; ") +
+				"). Import one path-scoped asset per project, or declare the project scope manually"
+		}
+	}
+	return ""
+}
+
+// webScopeTargets converts platform scopes into the project scope's lists plus
+// the seed targets the program actually authorizes.
+//
+// The two authorization shapes are deliberately kept apart (AGENTS.md §2.1):
+//
+//   - an EXACT asset ("https://www.example.com") authorizes that host and
+//     nothing below it, so it goes into hosts and NOT into subdomainOnly. An
+//     exact asset does not authorize a subdomain the program never listed;
+//   - a WILDCARD asset ("*.example.com") authorizes subdomains of example.com
+//     and NOT example.com itself, so its parent goes into subdomainOnly. The
+//     apex is never added, and a row whose concrete asset is the apex (or a
+//     host outside the wildcard) is reported in skipped instead of widened.
+//
+// A wildcard row's concrete asset, when it is a strict subdomain of that
+// wildcard, is already authorized by the wildcard. It is kept as an exact host
+// and a seed target so the operator gets something to run and the UI's
+// include-host list is not empty — that entry only repeats authority the
+// wildcard already granted.
+//
+// Path prefixes are validated before being carried through: an asset whose
+// path cannot be a canonical scope prefix (encoded traversal, backslash,
+// duplicate slash, path parameter, or percent escape) is skipped rather than
+// stored, because dropping only its prefix would widen the host to its root.
+// The other hosts in the same program are unaffected.
+//
+// Paths are also HOST-BOUND in the source but GLOBAL in a project scope, so the
+// importer checks that every imported origin authorizes the same prefixes
+// before it returns a plan (scopePathBindingProblem). A program that scopes
+// different paths to different hosts/origins cannot be represented faithfully;
+// it is refused with a reason (blocked non-empty, nothing imported) rather than
+// flattened into a scope that authorizes the cross product.
+//
+// The scheme is never inferred. A row that states http(s) contributes exactly
+// the origin it names; a row that does not (a bare host, or a wildcard with no
+// scheme) is reported in skipped instead of being read as https, because
+// guessing would authorize an origin the program never stated. A wildcard
+// spelling is always decided as a wildcard, so an unusable one can never be
+// downgraded to its asset_value host by falling through.
+func webScopeTargets(scopes []bounty.Scope) (hosts, subdomainOnly, targets, prefixes, origins, skipped []string, blocked string) {
 	hostSeen := map[string]bool{}
+	subSeen := map[string]bool{}
 	targetSeen := map[string]bool{}
 	prefixSeen := map[string]bool{}
+	originSeen := map[string]bool{}
+	// bindings records, per imported origin, the path the source scoped it to.
+	var bindings []scopePathBinding
+	addHost := func(host string) {
+		if host == "" || hostSeen[host] {
+			return
+		}
+		hostSeen[host] = true
+		hosts = append(hosts, host)
+	}
+	addSubdomainOnly := func(host string) {
+		if host == "" || subSeen[host] {
+			return
+		}
+		subSeen[host] = true
+		subdomainOnly = append(subdomainOnly, host)
+	}
+	addPrefix := func(path string) bool {
+		if path == "" || path == "/" {
+			return true
+		}
+		if !importedPathIsSafe(path) {
+			return false
+		}
+		if prefixSeen[path] {
+			return true
+		}
+		prefixSeen[path] = true
+		prefixes = append(prefixes, path)
+		return true
+	}
+	addTarget := func(raw string) {
+		if raw == "" || targetSeen[raw] {
+			return
+		}
+		targetSeen[raw] = true
+		targets = append(targets, raw)
+	}
+	addOrigin := func(origin string) {
+		if origin == "" || originSeen[origin] {
+			return
+		}
+		originSeen[origin] = true
+		origins = append(origins, origin)
+	}
+
 	for _, sc := range scopes {
 		if sc.ScopeType != "web-application" {
 			skipped = append(skipped, sc.ScopeType+":"+sc.Scope)
 			continue
 		}
-		// The API schema puts the asset in asset_value, but the public page's
-		// transfer state puts the severity there and the asset in scope. Pick
-		// the first field that actually looks like a host, and never accept a
-		// severity word.
-		raw := ""
-		// API schema: asset_value is the asset (scope may be a wildcard).
-		// Public page: asset_value is the severity, scope is the asset. Try the
-		// asset field first and fall back to scope when it is not host-like.
-		for _, cand := range []string{sc.AssetValue, sc.Scope} {
-			if looksLikeHost(cand) {
-				raw = strings.TrimSpace(cand)
-				break
+		// A wildcard spelling is decided FIRST, even when it cannot be used:
+		// falling through to concreteAsset would read "*.example.com" through
+		// asset_value and silently downgrade the program's wildcard
+		// authorization to a single exact host.
+		if wildcardSpelling(sc.Scope) {
+			if !importedAssetURLPathSafe(sc.Scope) {
+				skipped = append(skipped, "asset path is not a canonical scope path: "+sc.Scope)
+				continue
 			}
-		}
-		if raw == "" {
-			skipped = append(skipped, "no host in scope:"+sc.Scope)
+			scheme, parent, port, path, ok := wildcardAsset(sc.Scope)
+			if !ok {
+				// Fail closed: the row names a wildcard but no http(s) scheme,
+				// and guessing https would authorize an origin the program
+				// never stated.
+				skipped = append(skipped, "wildcard asset states no http(s) scheme (an omitted scheme is never guessed): "+sc.Scope)
+				continue
+			}
+			asset, assetOK, assetErr := concreteAsset(sc)
+			if assetErr != "" {
+				skipped = append(skipped, assetErr)
+				continue
+			}
+			if !importedPathIsSafe(path) || (assetOK && !importedPathIsSafe(asset.Path)) {
+				skipped = append(skipped, "asset path is not a canonical scope path: "+sc.Scope)
+				continue
+			}
+			if !addPrefix(path) {
+				skipped = append(skipped, "asset path is not a canonical scope path: "+sc.Scope)
+				continue
+			}
+			addSubdomainOnly(parent)
+			// The wildcard row names both the subdomain pattern and (when the
+			// platform supplies one) the scheme/port it was declared under.
+			wildcardOrigin := domain.ScopeOrigin{Scheme: scheme, Host: parent, Port: port, Wildcard: true}.String()
+			addOrigin(wildcardOrigin)
+			bindings = append(bindings, scopePathBinding{Origin: wildcardOrigin, Path: path})
+			if !assetOK {
+				skipped = append(skipped, "wildcard asset (subdomains authorized, no seed host): "+sc.Scope)
+				continue
+			}
+			if !domain.IsStrictSubdomain(asset.Host, parent) {
+				skipped = append(skipped, "wildcard asset names no subdomain of "+parent+": "+sc.Scope)
+				continue
+			}
+			if !addPrefix(asset.Path) {
+				skipped = append(skipped, "asset path is not a canonical scope path: "+sc.Scope)
+				continue
+			}
+			addHost(asset.Host)
+			addTarget(asset.targetURL())
+			addOrigin(asset.origin())
+			bindings = append(bindings, scopePathBinding{Origin: asset.origin(), Path: asset.Path})
 			continue
 		}
-		if strings.HasPrefix(raw, "*.") {
-			raw = strings.TrimPrefix(raw, "*.")
-		}
-		if !strings.Contains(raw, "://") {
-			raw = "https://" + raw
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Hostname() == "" {
-			skipped = append(skipped, "unparseable:"+sc.Scope)
+		asset, ok, assetErr := concreteAsset(sc)
+		if assetErr != "" {
+			skipped = append(skipped, assetErr)
 			continue
 		}
-		host := strings.ToLower(u.Hostname())
-		if !hostSeen[host] {
-			hostSeen[host] = true
-			hosts = append(hosts, host)
+		if !ok {
+			switch {
+			case strings.HasPrefix(strings.TrimSpace(sc.Scope), "."):
+				// ".example.com" reads as "host and subdomains" on some
+				// platforms and "subdomains only" on others. Refuse to guess
+				// rather than authorize one reading the program did not mean.
+				skipped = append(skipped, "leading-dot asset spelling not interpreted: "+sc.Scope)
+			case assetHasNoScheme(sc):
+				// The row names a host but no scheme, so the origin it
+				// authorizes cannot be read from the source. Import never
+				// guesses https (see docs/bounty.md); the operator adds the
+				// origin themselves.
+				skipped = append(skipped, "asset states no http(s) scheme, so its origin cannot be read from the source: "+sc.Scope)
+			default:
+				skipped = append(skipped, "no host in scope:"+sc.Scope)
+			}
+			continue
 		}
-		// A scope can be a specific path (…/challenge-of-the-month/dojo-56),
-		// not just a host. Seed the asset itself and restrict the scope to its
-		// path, otherwise the crawler would start at / and happily leave the
-		// program's authorized area.
-		seed := u.Scheme + "://" + u.Host + u.Path
-		if u.Path == "" || u.Path == "/" {
-			seed = u.Scheme + "://" + u.Host + "/"
-		} else if !prefixSeen[u.Path] {
-			prefixSeen[u.Path] = true
-			prefixes = append(prefixes, u.Path)
+		if !importedPathIsSafe(asset.Path) || !addPrefix(asset.Path) {
+			skipped = append(skipped, "asset path is not a canonical scope path: "+sc.Scope)
+			continue
 		}
-		if !targetSeen[seed] {
-			targetSeen[seed] = true
-			targets = append(targets, seed)
-		}
+		addHost(asset.Host)
+		addTarget(asset.targetURL())
+		// An exact asset authorizes exactly the origin it names. A program
+		// that lists https://app.example.com did not authorize http, nor
+		// another port, even though Indago used to accept both.
+		addOrigin(asset.origin())
+		bindings = append(bindings, scopePathBinding{Origin: asset.origin(), Path: asset.Path})
 	}
+	bindings = normalizeScopePathBindings(bindings)
+	if problem := scopePathBindingProblem(bindings); problem != "" {
+		// Fail closed: a plan that cannot bind each path to its own origin is
+		// refused as a whole. Returning none of the lists means a caller that
+		// ignores `blocked` still cannot store a widened scope.
+		return nil, nil, nil, nil, nil, skipped, problem
+	}
+	// The stored prefix list is derived from the bindings, not from the raw
+	// addPrefix accumulation: a restriction normalized away above must not
+	// narrow the scope, and the plain-prefix reduction is what makes the one
+	// global list exact for every origin.
+	bindingPaths := make([]string, 0, len(bindings))
+	for _, b := range bindings {
+		bindingPaths = append(bindingPaths, b.Path)
+	}
+	prefixes = reduceScopePathPrefixes(bindingPaths)
 	sort.Strings(hosts)
+	sort.Strings(subdomainOnly)
 	sort.Strings(targets)
 	sort.Strings(prefixes)
-	return hosts, targets, prefixes, skipped
+	sort.Strings(origins)
+	return hosts, subdomainOnly, targets, prefixes, origins, skipped, ""
+}
+
+// wildcardSpelling reports whether a row's scope field is written as a
+// wildcard asset: "*.example.com", "*.example.com:8443", or the same with a
+// scheme and path. It is checked before concreteAsset so an unusable wildcard
+// (one that names no scheme) is skipped instead of being silently downgraded to
+// the single host in asset_value.
+func wildcardSpelling(raw string) bool {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	return strings.HasPrefix(raw, "*.") || strings.Contains(raw, "://*.")
+}
+
+// assetHasNoScheme reports whether the row describes a host but states no
+// http(s) scheme, so its origin cannot be read from the source. Guessing https
+// for such a row would authorize an origin the program never named, which is
+// exactly the widening the importer must not do (docs/bounty.md).
+func assetHasNoScheme(sc bounty.Scope) bool {
+	for _, cand := range []string{sc.AssetValue, sc.Scope} {
+		cand = strings.TrimSpace(cand)
+		if cand == "" || strings.Contains(cand, "://") {
+			continue
+		}
+		if wildcardSpelling(cand) || looksLikeHost(cand) {
+			return true
+		}
+	}
+	return false
+}
+
+// wildcardAsset reads the wildcard spelling of a row's scope field:
+// "https://*.example.com", "https://*.example.com/path",
+// "https://*.example.com:8443/path" or "https://*.example.com:8443". ok is
+// false for anything else — including a wildcard written WITHOUT a scheme:
+// the source did not state http or https, so no origin can be derived from it
+// (fail closed; the operator declares the origin themselves).
+func wildcardAsset(raw string) (scheme, host string, port int, path string, ok bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", 0, "", false
+	}
+	if !strings.Contains(raw, "://") {
+		return "", "", 0, "", false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || u.User != nil {
+		return "", "", 0, "", false
+	}
+	path, pathErr := domain.SafeScopePath(u)
+	if pathErr != nil {
+		return "", "", 0, "", false
+	}
+	if !strings.HasPrefix(u.Hostname(), "*.") {
+		return "", "", 0, "", false
+	}
+	parent := strings.TrimPrefix(strings.ToLower(u.Hostname()), "*.")
+	if parent == "" || strings.Contains(parent, "*") {
+		return "", "", 0, "", false
+	}
+	scheme = strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", "", 0, "", false
+	}
+	port = defaultPortForScheme(scheme)
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
+			return "", "", 0, "", false
+		}
+		port = n
+	}
+	if path == "/" {
+		path = ""
+	}
+	return scheme, parent, port, path, true
+}
+
+// concreteAsset picks the row's concrete host. The API schema puts the asset in
+// asset_value, while the public page's transfer state puts the severity there
+// and the asset in scope, so the first field that actually parses as a host
+// wins. A wildcard spelling is never a concrete host: wildcardAsset handles it
+// separately, and treating "*." as an exact name would authorize the wrong
+// thing.
+//
+// The value must state http or https: an asset written as a bare host cannot
+// say which origin the program authorized, and defaulting to https would widen
+// the imported scope beyond the source (fail closed — the row is skipped with a
+// reason and the operator declares the origin).
+func concreteAsset(sc bounty.Scope) (bountyAsset, bool, string) {
+	for _, cand := range []string{sc.AssetValue, sc.Scope} {
+		cand = strings.TrimSpace(cand)
+		if cand == "" || strings.HasPrefix(cand, "*.") || strings.HasPrefix(cand, ".") {
+			continue
+		}
+		if !looksLikeHost(cand) {
+			continue
+		}
+		raw := cand
+		if !strings.Contains(raw, "://") {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Hostname() == "" || u.User != nil {
+			continue
+		}
+		// A wildcard spelling is never a concrete host: wildcardAsset handles
+		// it, and adopting "*.example.com" as an exact include entry would
+		// authorize nothing while looking like it authorized something.
+		if strings.Contains(u.Hostname(), "*") {
+			continue
+		}
+		scheme := strings.ToLower(u.Scheme)
+		if scheme != "http" && scheme != "https" {
+			continue
+		}
+		path, pathErr := domain.SafeScopePath(u)
+		if pathErr != nil {
+			return bountyAsset{}, false, "asset path is not a canonical scope path: " + pathErr.Error()
+		}
+		port := defaultPortForScheme(scheme)
+		if p := u.Port(); p != "" {
+			n, err := strconv.Atoi(p)
+			if err != nil || n < 1 || n > 65535 {
+				continue
+			}
+			port = n
+		}
+		if path == "/" {
+			path = ""
+		}
+		return bountyAsset{Scheme: scheme, Host: strings.ToLower(u.Hostname()), Port: port, Path: path}, true, ""
+	}
+	return bountyAsset{}, false, ""
 }
 
 // looksLikeHost rejects the severity words that occupy asset_value on the

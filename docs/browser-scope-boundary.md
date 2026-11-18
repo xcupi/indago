@@ -155,9 +155,9 @@ Events/EventSource, WebTransport and service workers' own fetches (blocked, not
 re-measured here) were not tried, and the connection gap was observed only through
 Indago's launch, not traced inside Chromium.
 
-What the scope matcher compares (hostname only; port and scheme ignored; loose
-path prefixes; no IP-level policy in the browser) is documented in
-[scope-semantics.md](scope-semantics.md).
+What the scope matcher compares (hostname + optional declared scheme/port;
+legacy scopes ignore port and scheme; loose path prefixes; no IP-level policy in
+the browser) is documented in [scope-semantics.md](scope-semantics.md).
 
 ## Compatibility and deliberate limits
 
@@ -187,6 +187,49 @@ path prefixes; no IP-level policy in the browser) is documented in
 - This slice does **not** fix UI or candidate grammar findings from the
   readiness audit. Verdict provenance/isolation, logout crawl policy and CSRF
   refresh are covered by [verdict-provenance.md](verdict-provenance.md).
+
+## Method gate (non-mutating default)
+
+Scope answers *where* a request may go; the method gate answers *what it may do*.
+Both are enforced before network dispatch, and the method gate fails closed:
+
+- A browser context created without `ContextOptions.AllowStateChanging` (the zero
+  value, so every scan context by default) aborts every request whose method is
+  not `GET`/`HEAD`/`OPTIONS` — including an unrecognized or empty method. This
+  covers the page's own navigation, its `fetch`/XHR, an auto-submitted form, a
+  popup target's requests, and (at the CDP response stage) a `307`/`308` hop that
+  would repeat a non-read-only method. `301`/`302`/`303` rewrite the method to
+  `GET`, so the initial-request check already covers them.
+- The method gate is installed even when no `AllowRequest` scope gate is given,
+  so a popup's or a page's POST cannot escape through an unscoped context.
+- `Page.NavigateForm`/`Page.NavigateJSON` return
+  `browser.ErrStateChangingBlocked` before sending anything when the context did
+  not opt in; the JSON path additionally re-checks inside the route, because it
+  converts the browser's initial `GET` into a `route.Fetch` POST that the
+  request-stage check cannot see.
+- Opt-in is explicit and per purpose: `verification.Input.AllowStateChanging`
+  (from `ExecutorConfig.AllowStateChanging`) lets browser verification replay a
+  POST candidate and lets that verifying page issue its own writes; the
+  operator-requested interactive/password login contexts always allow it because
+  a login flow must POST its form; discovery rendering (`Manager.Render`) never
+  opts in. The DOM engine mirrors the scan's opt-in, and its comment-form
+  clobbering probe is recorded skipped (not attempted) when the opt-in is off.
+- The gate does not make a scan read-only in some other sense: an allowed `GET`
+  can still change state on a poorly designed target. It removes the scanner's
+  own ability to send write-method requests unless the operator asked for them.
+- Blocked-method requests are refused inside the browser and are not currently
+  persisted as their own evidence row; the page observes a failed fetch, and the
+  navigation/test-case outcome records the effect. There is no retry through
+  another path: the JSON override and form replay both consult the same policy.
+
+Evidence: `TestIntegrationDefaultContextBlocksPageInitiatedPOST` (GET control
+reaches the server, page-initiated POST does not),
+`TestIntegrationStateChangingOptInAllowsPagePOST` (same fixture with the opt-in),
+`TestIntegrationExplicitPOSTReplayNeedsOptIn` (form, JSON and a `307`-preserving
+replay), `TestIntegrationPopupPOSTBlockedByMethodGate` (unscoped context, popup
+allowed, popup POST refused), the pure redirect/classification tests in
+`playwright_scope_test.go`, and
+`TestIntegrationVerifyContextMethodPolicy` in `internal/verification`.
 
 ## Regression and required runtime contract
 

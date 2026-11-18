@@ -1603,6 +1603,13 @@ type domXSSExecutor struct {
 	// test and any caller that constructs the executor without attaching an
 	// engine keeps the old "unknown type, so probe it" behavior.
 	httpEngine httpengine.Engine
+	// allowStateChanging mirrors the scan's ExecutorConfig.AllowStateChanging
+	// opt-in. false (the default, including every direct construction in tests)
+	// keeps each DOM browser context non-mutating: the page may not issue
+	// POST/PUT/PATCH/DELETE, and the one probe that must write (the
+	// comment-form clobbering probe) is recorded as skipped instead of being
+	// attempted and failing at the gate.
+	allowStateChanging bool
 }
 
 func newDOMXSSExecutor(st store.Store, mgr *browser.Manager, ev evidence.Store, scope domain.Scope, log *slog.Logger, findingsMu *sync.Mutex) *domXSSExecutor {
@@ -1809,7 +1816,7 @@ func (e *domXSSExecutor) handleDOMXSSSource(ctx context.Context, job *domain.Tes
 	sessionStatePath := e.sessionStatePathFor(ctx, job.ScanID)
 	proxy := e.nextProxy() // one proxy per job, shared by every per-selector context below
 	newContext := func() (*browser.Context, error) {
-		opts := browser.ContextOptions{AllowRequest: allow, StorageStatePath: sessionStatePath, ProxyServer: proxy}
+		opts := browser.ContextOptions{AllowRequest: allow, StorageStatePath: sessionStatePath, ProxyServer: proxy, AllowStateChanging: e.allowStateChanging}
 		if e.userAgent != "" {
 			opts.ExtraHeaders = map[string]string{"User-Agent": e.userAgent}
 		}
@@ -2496,6 +2503,11 @@ func (e *domXSSExecutor) probeDOMXSSMarkup(ctx context.Context, bctx *browser.Co
 // the bare marker identifier, in the main frame), never by matching
 // page-controlled error or console text.
 func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, source detection.DOMXSSSource, selector, marker string, sink detection.DOMXSSSink, hashActivated bool, cand detection.Candidate, findingID domain.ID, label string) (bool, error) {
+	// Page-derived free text (the browser's own signal/dialog text) is withheld
+	// for an authenticated or unknown-auth scan, exactly like the raw
+	// screenshot/DOM/log artifacts — see evidence_privacy.go. The verdict, the
+	// signal semantics and the finding correlation are untouched.
+	privacyWithhold, privacyReason := scanUsesAuthenticatedSession(ctx, e.store, job.ScanID)
 	act := domXSSActivationForSink(sink, hashActivated)
 	var obs2 domXSSObservation
 	var payloadNavURL string
@@ -2589,7 +2601,8 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 		if msg, ok := verification.MarkerDialog(marker, obs2.Dialogs); ok {
 			dialogConfirmed = true
 			verdict, confidence = domain.VerdictConfirmed, domain.ConfidenceHigh
-			notes = "outcome=sandbox_escape_executed: the candidate's code EXECUTED in the browser — a JavaScript dialog carried this scan's marker, which only running code can produce; evidence: " + msg
+			notes = "outcome=sandbox_escape_executed: the candidate's code EXECUTED in the browser — a JavaScript dialog carried this scan's marker, which only running code can produce; evidence: " +
+				domXSSDialogTextNote(msg, privacyWithhold, privacyReason)
 		} else {
 			cspViolations := parseDOMXSSCSPViolations(harness2)
 			cspBlocked, violation := domXSSEvalBlockedByCSP(cspViolations)
@@ -2615,7 +2628,7 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 		notes += "; execution was attributed to the child frame this page created from the element.src write (the main-frame harness saw the marker reach element.src); this is a frame execution, not a main-frame one"
 	}
 	if sink != detection.DOMSinkAngularExpression && matched && sigText != "" {
-		notes = notes + " (" + sigText + ")"
+		notes += domXSSSignalTextNote(sigText, privacyWithhold, privacyReason)
 	}
 	if matched {
 		observed := parseDOMXSSReachability(harness2, marker)
@@ -2658,7 +2671,12 @@ func (e *domXSSExecutor) verifyDOMXSSShape(ctx context.Context, bctx *browser.Co
 		if raw, err := json.Marshal(obs2.Runtime); err == nil {
 			logLines = append(logLines, "__INDAGO_RUNTIME_PROVENANCE__"+string(raw))
 		}
-		evidenceIDs = e.persistDOMXSSEvidence(ctx, job.ScanID, verifyTC.ID, obs2.Screenshot, obs2.HTML, logLines)
+		var withheldNote string
+		evidenceIDs, withheldNote = e.persistDOMXSSEvidence(ctx, job.ScanID, verifyTC.ID, obs2.Screenshot, obs2.HTML, logLines)
+		// The verdict/report/notes and correlation below are unaffected; this
+		// only records that page-derived artifacts were withheld for an
+		// authenticated scan (see evidence_privacy.go).
+		notes += withheldNote
 	}
 	verifyTC.EvidenceIDs = evidenceIDs
 	e.finishTestCase(ctx, verifyTC, nil, notes)
@@ -3648,34 +3666,15 @@ func (e *domXSSExecutor) finishTestCase(ctx context.Context, tc *domain.TestCase
 }
 
 // persistDOMXSSEvidence stores the verification phase's screenshot,
-// rendered DOM, and browser log as evidence blobs — the SAME shared
-// putEvidenceBlob free function verifyExecutor.persistVerificationEvidence
-// uses.
-func (e *domXSSExecutor) persistDOMXSSEvidence(ctx context.Context, scanID, tcID domain.ID, screenshot []byte, html string, logLines []string) []domain.ID {
-	var ids []domain.ID
-	note := "test_case=" + string(tcID)
-	if len(screenshot) > 0 {
-		if id, err := putEvidenceBlob(ctx, e.store, e.evidence, scanID, domain.EvidenceScreenshot, ".png", "image/png", screenshot, note+" screenshot"); err == nil {
-			ids = append(ids, id)
-		} else {
-			e.log.Warn("dom-xss: persist screenshot evidence", "err", err)
-		}
-	}
-	if html != "" {
-		if id, err := putEvidenceBlob(ctx, e.store, e.evidence, scanID, domain.EvidenceDOM, ".html", "text/html", []byte(html), note+" rendered DOM"); err == nil {
-			ids = append(ids, id)
-		} else {
-			e.log.Warn("dom-xss: persist DOM evidence", "err", err)
-		}
-	}
-	if len(logLines) > 0 {
-		if id, err := putEvidenceBlob(ctx, e.store, e.evidence, scanID, domain.EvidenceBrowserLog, ".log", "text/plain", []byte(joinLines(logLines)), note+" browser log"); err == nil {
-			ids = append(ids, id)
-		} else {
-			e.log.Warn("dom-xss: persist browser log evidence", "err", err)
-		}
-	}
-	return ids
+// rendered DOM, and browser log as evidence blobs. It shares the SAME
+// putEvidenceBlob free function and the SAME privacy gate as
+// verifyExecutor.persistVerificationEvidence: an authenticated scan keeps the
+// verdict and a non-sensitive summary, never the raw page-derived artifacts
+// (see evidence_privacy.go). The second return value is the TestCase note
+// suffix describing a withholding (empty when the artifacts were stored).
+func (e *domXSSExecutor) persistDOMXSSEvidence(ctx context.Context, scanID, tcID domain.ID, screenshot []byte, html string, logLines []string) ([]domain.ID, string) {
+	return persistBrowserArtifacts(ctx, e.store, e.evidence, e.log, scanID, tcID,
+		browserArtifacts{Screenshot: screenshot, DOMHTML: html, BrowserLog: logLines}, "dom-xss: ")
 }
 
 // domXSSChildFrameExecution accepts a marker execution that happened in a
@@ -3763,7 +3762,7 @@ func (e *domXSSExecutor) probeClientOpenRedirect(ctx context.Context, bctx *brow
 	}
 	html, _ := page.Content(ctx)
 	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
-	evIDs := e.persistDOMXSSEvidence(ctx, job.ScanID, tc.ID, shot, html, []string{"open redirect target: " + target})
+	evIDs, _ := e.persistDOMXSSEvidence(ctx, job.ScanID, tc.ID, shot, html, []string{"open redirect target: " + target})
 	detail, _ := json.Marshal(map[string]any{
 		"source": "dom_link_onclick", "target": target, "canary": canary,
 		"test_case_ids": []domain.ID{tc.ID},
@@ -3871,7 +3870,7 @@ func (e *domXSSExecutor) probeCookieReflection(ctx context.Context, bctx *browse
 	}
 	html, _ := obsPage.Content(ctx)
 	shot, _ := obsPage.Screenshot(ctx, browser.ScreenshotOptions{})
-	evIDs := e.persistDOMXSSEvidence(ctx, job.ScanID, tc.ID, shot, html, []string{"poisoned cookie: " + poisoned})
+	evIDs, _ := e.persistDOMXSSEvidence(ctx, job.ScanID, tc.ID, shot, html, []string{"poisoned cookie: " + poisoned})
 	detail, _ := json.Marshal(map[string]any{
 		"source": "cookie", "sink": "html_attribute", "cookie": poisoned,
 		"test_case_ids": []domain.ID{tc.ID},
@@ -3914,6 +3913,17 @@ func domXSSClobberingPayload(html, marker string) (payload, fragment string) {
 }
 
 func (e *domXSSExecutor) probeDOMClobbering(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, marker, pageHTML string) {
+	// This probe is the DOM engine's only write: it persists the clobbering
+	// payload as a comment through the page's own POST form. A default scan
+	// must not do that, and the browser context's method gate would refuse the
+	// POST anyway — record the policy boundary as a skipped test case instead
+	// of navigating into a guaranteed block.
+	if !e.allowStateChanging {
+		tc := e.newTestCase(ctx, job, ep.URL)
+		tc.Status = domain.TestCaseSkipped
+		e.finishTestCase(ctx, tc, nil, "DOM clobbering probe skipped: it must persist a comment through a browser POST, and AllowStateChanging is off")
+		return
+	}
 	// The persisted payload must not share the DOM probes' marker: once it is
 	// in the page, every later source probe would otherwise see it execute and
 	// confirm itself from the clobbering comment.
@@ -3994,7 +4004,7 @@ func (e *domXSSExecutor) probeDOMClobbering(ctx context.Context, bctx *browser.C
 	}
 	out, _ := obsPage.Content(ctx)
 	shot, _ := obsPage.Screenshot(ctx, browser.ScreenshotOptions{})
-	evIDs := e.persistDOMXSSEvidence(ctx, job.ScanID, tc.ID, shot, out, []string{"clobbering payload persisted: " + payload})
+	evIDs, _ := e.persistDOMXSSEvidence(ctx, job.ScanID, tc.ID, shot, out, []string{"clobbering payload persisted: " + payload})
 	detail, _ := json.Marshal(map[string]any{
 		"source": "comment_html", "sink": "dom_clobbering", "payload": payload,
 		"test_case_ids": []domain.ID{tc.ID},

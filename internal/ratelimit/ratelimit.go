@@ -8,18 +8,27 @@ package ratelimit
 
 import (
 	"context"
+	"math/rand/v2"
 	"sync"
 	"time"
 )
 
-// Limiter spaces permits evenly (one per 1/rps). A nil *Limiter, or one with a
+// Limiter spaces permits evenly (one per 1/rps), or with randomized ±jitter
+// when configured for human-like pacing. A nil *Limiter, or one with a
 // rate <= 0, is unlimited. It is safe for concurrent use. No lock is held while
 // a caller sleeps or does I/O: a caller reserves its slot under the lock and
 // then waits outside it.
+//
+// Spacing is measured between actual grants, not between reserved slots: a
+// reservation only names the earliest time a permit may be used, and a grant
+// that lands late (scheduler pressure, -race overhead) pushes the ones behind
+// it back by the same amount instead of letting them burst to catch up.
 type Limiter struct {
 	mu       sync.Mutex
 	interval time.Duration // 0 = unlimited
-	next     time.Time     // earliest time the next permit may be used
+	jitter   float64       // [0, 0.9] fraction of interval for ±randomization
+	next     time.Time     // earliest time the next reserved permit is due
+	floor    time.Time     // earliest time the next actual grant may happen
 	changed  chan struct{} // closed (and replaced) by every SetRate
 }
 
@@ -28,6 +37,29 @@ func New(rps float64) *Limiter {
 	l := &Limiter{changed: make(chan struct{})}
 	l.interval = intervalFor(rps)
 	return l
+}
+
+// NewWithJitter returns a limiter allowing rps permits per second with ±jitter
+// (clamped to [0, 0.9]) randomized spacing around 1/rps for human-like pacing.
+func NewWithJitter(rps, jitter float64) *Limiter {
+	l := New(rps)
+	l.SetJitter(jitter)
+	return l
+}
+
+// SetJitter sets the randomized pacing fraction in [0, 0.9].
+func (l *Limiter) SetJitter(jitter float64) {
+	if l == nil {
+		return
+	}
+	if jitter < 0 {
+		jitter = 0
+	} else if jitter > 0.9 {
+		jitter = 0.9
+	}
+	l.mu.Lock()
+	l.jitter = jitter
+	l.mu.Unlock()
 }
 
 func intervalFor(rps float64) time.Duration {
@@ -52,6 +84,20 @@ func (l *Limiter) SetRate(rps float64) {
 	l.mu.Unlock()
 }
 
+// stepLocked returns the spacing this permit opens once it is granted,
+// randomized by ±jitter when configured. l.mu must be held.
+func (l *Limiter) stepLocked() time.Duration {
+	if l.jitter <= 0 {
+		return l.interval
+	}
+	delta := (rand.Float64()*2 - 1) * l.jitter
+	step := time.Duration(float64(l.interval) * (1 + delta))
+	if step < time.Millisecond {
+		step = time.Millisecond
+	}
+	return step
+}
+
 // Wait blocks until the caller's permit is due, or ctx is done. Unlimited
 // limiters return immediately.
 func (l *Limiter) Wait(ctx context.Context) error {
@@ -64,33 +110,62 @@ func (l *Limiter) Wait(ctx context.Context) error {
 		return nil
 	}
 	now := time.Now()
-	if l.next.Before(now) {
-		l.next = now
+	// A permit is never due before now, nor before the spacing floor left by
+	// the last actual grant: an idle gap must not be repaid as a burst, and a
+	// late grant must not be caught up by the permits queued behind it.
+	earliest := now
+	if l.floor.After(earliest) {
+		earliest = l.floor
 	}
-	wait := l.next.Sub(now)
-	l.next = l.next.Add(l.interval)
+	if l.next.Before(earliest) {
+		l.next = earliest
+	}
+	due := l.next
+	step := l.stepLocked()
+	l.next = due.Add(step)
 	changed := l.changed
 	l.mu.Unlock()
 
-	if wait <= 0 {
-		return nil
-	}
-	t := time.NewTimer(wait)
-	defer t.Stop()
 	for {
-		select {
-		case <-t.C:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-changed:
-			l.mu.Lock()
-			unlimited := l.interval <= 0
-			changed = l.changed
-			l.mu.Unlock()
-			if unlimited {
-				return nil
+		timer := time.NewTimer(time.Until(due))
+	wait:
+		for {
+			select {
+			case <-timer.C:
+				break wait
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-changed:
+				l.mu.Lock()
+				unlimited := l.interval <= 0
+				changed = l.changed
+				l.mu.Unlock()
+				if unlimited {
+					timer.Stop()
+					return nil
+				}
 			}
 		}
+
+		l.mu.Lock()
+		if l.interval <= 0 {
+			l.mu.Unlock()
+			return nil
+		}
+		now = time.Now()
+		// The reserved slot is due, but a grant may only happen a full step
+		// after the previous ACTUAL grant. Waking late therefore delays this
+		// permit (and everything queued behind it) rather than shortening the
+		// gap that follows it.
+		if l.floor.After(now) {
+			due = l.floor
+			changed = l.changed
+			l.mu.Unlock()
+			continue
+		}
+		l.floor = now.Add(step)
+		l.mu.Unlock()
+		return nil
 	}
 }

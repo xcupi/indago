@@ -387,12 +387,12 @@ script posts a transcript to `/download-transcript` and the answer is
 identifiers are then the arithmetic around that number, which the application
 itself named.
 
-The slice runs automatically for an authenticated scan once the server has been
-started with `-allow-state-changing` (the server-wide authorization to send
-non-GET requests); `-object-family-probe` / `enable_object_family_probe` remains
-as a narrower per-scan opt-in for a server started without it. Either way the
-first request POSTs a document the scan authored, which is why a session is
-required. It reads the page's own bytes only:
+The slice requires **both** the server's `-allow-state-changing` opt-in (the
+server-wide authorization to send non-GET requests) and the per-scan
+`-object-family-probe` / `enable_object_family_probe` opt-in. `skip_write_endpoints`
+suppresses it as well; the per-scan flag alone never authorizes the POST. The first
+request POSTs a document the scan authored, which is why a session is required. It
+reads the page's own bytes only:
 
 1. inline and linked same-origin scripts are fetched (bounded: 3),
 2. the free-text form field name comes from the page's own `FormData` calls,

@@ -2,12 +2,11 @@ package domain
 
 // Characterization of what Scope.Permits does and does not decide. These cases
 // are the factual basis of docs/scope-semantics.md: each row is one statement in
-// that document. They pin CURRENT behaviour, including behaviour that is
-// surprising or loose, so that changing the matcher (for example to compare
-// ports) is a deliberate decision that updates the document, not an accident.
+// that document. They pin CURRENT behaviour, including the fail-closed path
+// rules (segment-bound includes and over-blocking exclusions), so changing the
+// matcher is a deliberate decision, not an accident.
 //
-// "want" is the Allowed verdict. A few rows are marked unsafe: they are cases
-// where the matcher is more permissive than an operator might assume.
+// "want" is the Allowed verdict.
 
 import "testing"
 
@@ -81,23 +80,31 @@ func TestScopeSemanticsPaths(t *testing.T) {
 		return Scope{IncludeHosts: []string{"example.com"}, ExcludePathPrefixes: p}
 	}
 	cases := []scopeCase{
-		// Prefixes are plain string prefixes, with no segment boundary.
+		// Includes are segment-bounded: "/app" is a directory, not a string
+		// prefix. This is narrower than the historical matcher on purpose.
 		{"include /app matches /app", inc("/app"), "http://example.com/app", true, ""},
 		{"include /app matches /app/x", inc("/app"), "http://example.com/app/x", true, ""},
-		{"include /app matches /application (unsafe)", inc("/app"), "http://example.com/application", true, "no segment boundary: WIDER than intended"},
+		{"include /app rejects /application", inc("/app"), "http://example.com/application", false, "segment boundary"},
+		{"include /app rejects /app-admin", inc("/app"), "http://example.com/app-admin", false, "segment boundary"},
 		{"include /app/ rejects /app", inc("/app/"), "http://example.com/app", false, "no trailing-slash equivalence"},
 		{"include /app/ matches /app/x", inc("/app/"), "http://example.com/app/x", true, ""},
 		{"include is case-sensitive", inc("/app"), "http://example.com/App", false, "paths are case-sensitive; hosts are not"},
 		{"empty path is /", inc("/"), "http://example.com", true, ""},
-		// Exclusions use the same prefix rule.
+		// Exclusions deliberately over-block. A trailing slash no longer
+		// narrows an exclusion, and the comparison is ASCII case-insensitive.
 		{"exclude /admin blocks /administrator", exc("/admin"), "http://example.com/administrator", false, "over-blocks: safe direction"},
-		{"exclude /admin/ does not block /admin (unsafe)", exc("/admin/"), "http://example.com/admin", true, "trailing slash makes the exclusion NARROWER"},
-		{"exclude is case-sensitive (unsafe)", exc("/admin"), "http://example.com/Admin", true, "case variants are not excluded"},
+		{"exclude /admin/ blocks /admin", exc("/admin/"), "http://example.com/admin", false, "trailing slash is ignored"},
+		{"exclude /admin blocks /Admin", exc("/admin"), "http://example.com/Admin", false, "ASCII case-insensitive exclusion"},
 		{"exclude beats include", Scope{IncludeHosts: []string{"example.com"}, IncludePathPrefixes: []string{"/app"}, ExcludePathPrefixes: []string{"/app/private"}}, "http://example.com/app/private/x", false, ""},
-		// The matcher does not canonicalise the path: dot-segments are not collapsed.
-		{"dot-segments are not collapsed (unsafe)", inc("/app"), "http://example.com/app/../secret", true, "Permits sees /app/../secret; discovery.Normalize collapses it before requests are built, browsers canonicalise before the gate"},
-		{"encoded dot-segments are decoded, not collapsed (unsafe)", inc("/app"), "http://example.com/app/%2e%2e/secret", true, "same; a server may decode %2e%2e itself"},
-		{"encoded slash is not a prefix break", inc("/app"), "http://example.com/app%2fx", true, "u.Path is the decoded path"},
+		// Ambiguous traversal/encoding is denied before include/exclude rules.
+		{"literal dot segment rejected", inc("/app"), "http://example.com/app/../secret", false, "SafeScopePath rejects dot segments"},
+		{"encoded dot segment rejected", inc("/app"), "http://example.com/app/%2e%2e/secret", false, "SafeScopePath rejects %2e"},
+		{"encoded slash rejected", inc("/app"), "http://example.com/app%2fx", false, "SafeScopePath rejects %2f"},
+		{"encoded backslash rejected", inc("/app"), "http://example.com/app/%5c..%5csecret", false, "SafeScopePath rejects %5c"},
+		{"double encoded dot rejected", inc("/app"), "http://example.com/app/%252e%252e/secret", false, "residual %XX is double encoding"},
+		{"duplicate slash rejected", inc("/app"), "http://example.com/app//x", false, "ambiguous slash"},
+		{"dot path parameter rejected", inc("/app"), "http://example.com/app/..;/secret", false, "path parameter can change routing"},
+		{"host-only still rejects ambiguous path", hosts("example.com"), "http://example.com/app/%2e%2e/secret", false, "SafeScopePath applies even without include prefixes"},
 		// Query and fragment never take part.
 		{"query ignored", inc("/app"), "http://example.com/other?next=/app", false, ""},
 		{"fragment ignored", inc("/app"), "http://example.com/other#/app", false, ""},

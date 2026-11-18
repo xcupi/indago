@@ -191,7 +191,12 @@ the state-changing safeguard, calls the `Verifier`, and on completion:
 
 - persists the verification `Report` into the `TestCase.Detail` and the
   screenshot/DOM/browser-log as `Evidence` rows (`EvidenceScreenshot`,
-  `EvidenceDOM`, `EvidenceBrowserLog`);
+  `EvidenceDOM`, `EvidenceBrowserLog`). **For a scan that runs with an
+  authenticated session those raw, page-derived artifacts are withheld**: the
+  Report, verdict and Finding correlation are still stored, plus one
+  non-sensitive summary row (`EvidenceOther`, JSON) recording what was
+  captured and why it was withheld. Both this path and DOM XSS go through
+  `internal/scan/evidence_privacy.go`;
 - updates the `Finding`'s `Verdict`, `Confidence`, `EvidenceIDs`, and
   `Provenance.VerifiedAt` — the **only** place a Finding leaves `pending`.
 

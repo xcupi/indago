@@ -295,6 +295,9 @@ func TestVerifyExecutorPassesPOSTJSONRequestToBrowserVerifier(t *testing.T) {
 	if in.Method != http.MethodPost || in.Location != domain.LocationJSON || in.ContentType != contentType {
 		t.Fatalf("verifier request metadata = method %q location %q content-type %q", in.Method, in.Location, in.ContentType)
 	}
+	if !in.AllowStateChanging {
+		t.Fatal("the scan's AllowStateChanging opt-in did not reach verification.Input; the browser context would refuse the POST")
+	}
 	var got map[string]json.RawMessage
 	if err := json.Unmarshal(in.JSONBody, &got); err != nil {
 		t.Fatalf("verifier JSON body is invalid: %v", err)
@@ -567,8 +570,8 @@ func TestVerifyHandlePostFormReachesVerifier(t *testing.T) {
 	}
 	if len(fv.calls) == 1 {
 		in := fv.calls[0]
-		if in.Method != "POST" || in.Location != domain.LocationForm || in.FormValues == nil {
-			t.Fatalf("verification.Input not populated for form POST: %+v", in)
+		if in.Method != "POST" || in.Location != domain.LocationForm || in.FormValues == nil || !in.AllowStateChanging {
+			t.Fatalf("verification.Input not populated for form POST (or the state-changing opt-in was lost): %+v", in)
 		}
 	}
 }
@@ -607,6 +610,9 @@ func TestVerifyPassesScopeAndSession(t *testing.T) {
 	}
 	if in.Marker != "mk" || in.Candidate.Value != basicCandidate().Value {
 		t.Fatalf("candidate/marker not passed through: %+v", in)
+	}
+	if in.AllowStateChanging {
+		t.Fatal("a default scan's GET verification must not allow state-changing browser requests")
 	}
 }
 

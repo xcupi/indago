@@ -63,6 +63,17 @@ type Scope struct {
 	// IncludeHosts lists hosts that are in scope. A leading dot ("example.com"
 	// vs ".example.com") combined with AllowSubdomains controls subdomains.
 	IncludeHosts []string `json:"include_hosts"`
+	// SubdomainOnlyHosts lists hosts whose SUBDOMAINS are in scope while the
+	// host itself is not — the shape a bug-bounty wildcard asset
+	// ("*.example.com") declares. It cannot be expressed with IncludeHosts:
+	// a leading dot there always includes the base host too, which a wildcard
+	// scope does not authorize. It cannot be expressed with an exclusion
+	// either, because ExcludeHosts honours AllowSubdomains and would then drop
+	// the subdomains as well. Entries are bare hostnames; an entry with a
+	// leading dot or a "*." prefix is rejected at save time rather than being
+	// silently reinterpreted. Exclusions still win over this list, and
+	// IncludePathPrefixes still applies to what it authorizes.
+	SubdomainOnlyHosts []string `json:"subdomain_only_hosts,omitempty"`
 	// ExcludeHosts lists hosts that are always out of scope (takes precedence).
 	ExcludeHosts []string `json:"exclude_hosts,omitempty"`
 	// IncludePathPrefixes, when non-empty, restricts in-scope URLs to those
@@ -72,6 +83,27 @@ type Scope struct {
 	ExcludePathPrefixes []string `json:"exclude_path_prefixes,omitempty"`
 	// AllowSubdomains permits subdomains of included hosts.
 	AllowSubdomains bool `json:"allow_subdomains"`
+	// AllowedOrigins, when non-empty, additionally restricts what this scope
+	// authorizes to the listed origins ("scheme://host[:port]"; "*.example.com"
+	// means strict subdomains only). An omitted port is the scheme default
+	// (http 80, https 443). It is an extra requirement on top of the host and
+	// path rules, so it can only narrow the scope, never widen it. Empty means
+	// the legacy behaviour: every scheme and every port of an in-scope host.
+	//
+	// The list is an operator statement: every write surface requires it (or an
+	// explicit AllowAnySchemePorts) for a new scope, never derives it from the
+	// host lists, and keeps each entry's exact scheme and port across saves, so
+	// editing a path prefix or adding a host cannot widen the scope.
+	// See docs/scope-semantics.md.
+	AllowedOrigins []string `json:"allowed_origins,omitempty"`
+	// AllowAnySchemePorts records that the operator explicitly chose the legacy
+	// host-only behaviour (any scheme, any port) for a scope saved after origin
+	// rules existed. It never widens a scope that has AllowedOrigins: a
+	// non-empty origin list is always enforced. It exists so the choice is
+	// visible and so a scope PUT that omits the field can preserve it; the
+	// empty-list-plus-false shape it replaces is reserved for scopes saved
+	// before the feature (Scope.LegacySchemePorts), never created by a save.
+	AllowAnySchemePorts bool `json:"allow_any_scheme_ports,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -85,8 +117,16 @@ type ScopeDecision struct {
 }
 
 // Permits reports whether the given raw URL is within this scope. It FAILS
-// CLOSED: unparseable URLs, empty scopes, and anything not explicitly included
-// are denied. Exclusions always win over inclusions.
+// CLOSED: unparseable URLs, empty scopes, ambiguous paths, and anything not
+// explicitly included are denied. Exclusions always win over inclusions.
+//
+// Host and path rules are the historical decision (hostname + decoded path),
+// with two path hardening rules on top: the path may not contain an ambiguous
+// traversal/encoding form (see SafeScopePath), and an include path is matched
+// on a segment boundary rather than as a bare string prefix. When
+// AllowedOrigins is non-empty the URL must ALSO match one of those origins
+// (scheme + effective port + host pattern): this only narrows the decision and
+// never changes path-prefix semantics.
 //
 // This is pure matching logic (no network access) and is safe in Phase 0.
 func (s Scope) Permits(rawURL string) ScopeDecision {
@@ -95,12 +135,12 @@ func (s Scope) Permits(rawURL string) ScopeDecision {
 		return ScopeDecision{false, "unparseable or hostless URL"}
 	}
 	host := strings.ToLower(u.Hostname())
-	path := u.Path
-	if path == "" {
-		path = "/"
+	path, pathErr := SafeScopePath(u)
+	if pathErr != nil {
+		return ScopeDecision{false, "unsafe path: " + pathErr.Error()}
 	}
 
-	if len(s.IncludeHosts) == 0 {
+	if len(s.IncludeHosts) == 0 && len(s.SubdomainOnlyHosts) == 0 {
 		return ScopeDecision{false, "empty scope denies all (fail closed)"}
 	}
 
@@ -111,12 +151,14 @@ func (s Scope) Permits(rawURL string) ScopeDecision {
 		}
 	}
 	for _, ep := range s.ExcludePathPrefixes {
-		if strings.HasPrefix(path, ep) {
+		if ScopePathExcludedByPrefix(path, ep) {
 			return ScopeDecision{false, "path excluded: " + ep}
 		}
 	}
 
-	// Host must be included.
+	// Host must be included. A host in IncludeHosts is matched with the
+	// subdomain rules; a host in SubdomainOnlyHosts only matches a STRICT
+	// subdomain of it, never the host itself.
 	hostOK := false
 	for _, in := range s.IncludeHosts {
 		if hostMatches(host, strings.ToLower(in), s.AllowSubdomains) {
@@ -125,19 +167,40 @@ func (s Scope) Permits(rawURL string) ScopeDecision {
 		}
 	}
 	if !hostOK {
+		for _, in := range s.SubdomainOnlyHosts {
+			if IsStrictSubdomain(host, in) {
+				hostOK = true
+				break
+			}
+		}
+	}
+	if !hostOK {
 		return ScopeDecision{false, "host not in scope: " + host}
 	}
 
-	// If path-prefix inclusion is configured, the path must match one.
+	// If path-prefix inclusion is configured, the path must match one on a
+	// segment boundary. "/app" therefore authorizes "/app" and "/app/x", but
+	// not "/application" or "/app-admin".
 	if len(s.IncludePathPrefixes) > 0 {
 		for _, ip := range s.IncludePathPrefixes {
-			if strings.HasPrefix(path, ip) {
-				return ScopeDecision{true, "in scope"}
+			if ScopePathWithinPrefix(path, ip) {
+				return s.afterHostAndPath(host, u)
 			}
 		}
 		return ScopeDecision{false, "path not in scope: " + path}
 	}
 
+	return s.afterHostAndPath(host, u)
+}
+
+// afterHostAndPath applies the scheme/port requirement, which is the only
+// decision layered on top of the historical host + path match. An empty origin
+// list is the documented legacy behaviour (any scheme, any port) so scopes
+// saved before origin rules existed keep working unchanged.
+func (s Scope) afterHostAndPath(host string, u *url.URL) ScopeDecision {
+	if s.originRulesActive() {
+		return s.permitsOriginURL(host, u)
+	}
 	return ScopeDecision{true, "in scope"}
 }
 
@@ -161,6 +224,25 @@ func hostMatches(host, pattern string, allowSubdomains bool) bool {
 	return false
 }
 
+// IsStrictSubdomain reports whether host is a STRICT subdomain of base: a
+// deeper name that needs the dot boundary, never base itself. Both sides are
+// compared lower-cased and trimmed, matching how Permits compares hosts.
+//
+// This is the one definition of "subdomains only" in the tree. Scope.Permits
+// and Scope.PermitsHost both use it, so the URL boundary and the host-only
+// boundary cannot drift, and the bug-bounty importer uses it to decide whether
+// a concrete asset sits under a wildcard asset.
+func IsStrictSubdomain(host, base string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	base = strings.ToLower(strings.TrimSpace(base))
+	if host == "" || base == "" || host == base {
+		return false
+	}
+	// A trailing dot ("a.example.com.") is a different string and does not
+	// match: the matcher never normalises, so the decision fails closed.
+	return strings.HasSuffix(host, "."+base)
+}
+
 // ProfileName identifies a scan concurrency/rate preset.
 type ProfileName string
 
@@ -180,6 +262,12 @@ func (p ProfileName) IsValid() bool {
 		return false
 	}
 }
+
+// DefaultProfile is the preset a new scan gets when the caller names no profile
+// (or an unrecognized one). It is deliberately the conservative preset — 2
+// requests/second — so an omitted profile can never silently run the faster
+// presets. Balanced and Fast remain available when asked for explicitly.
+const DefaultProfile ProfileName = ProfileConservative
 
 // ScanConfig holds a scan's concurrency, rate, and crawl-extent controls.
 //

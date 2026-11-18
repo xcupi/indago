@@ -236,7 +236,17 @@ func TestStress_RepeatedCrashRestartRecoversEveryInjectionPoint(t *testing.T) {
 		}
 	}
 	defer db.Close()
-	done := waitStatus(t, ctrl, sc.ID, 30*time.Second, isCompleted)
+	// The completion budget is sized for the -race build, not the wall clock of
+	// an un-instrumented run. Measured on this fixture: ~2.4s without -race and
+	// ~30s with it (252 SQLite-backed jobs in the no-crash run; 72 of them are
+	// browserless JobVerify skips serialised on the browser group's single
+	// worker, which alone costs ~15s under -race at the measured ~213ms per
+	// job). The crashes also requeue in-flight work, so the tail after the
+	// last resume can exceed the fixture's own baseline. A bigger budget alone
+	// would hide a real wedge, so the wait also fails early when outstanding
+	// jobs exist and no worker holds any of them for longer than stallAfter
+	// (see completionWatch).
+	done := waitCompletedProgressing(t, ctrl, sc.ID, 2*time.Minute, 20*time.Second)
 	if crashes < 3 {
 		t.Fatalf("stress setup: only %d crashes landed before completion", crashes)
 	}
@@ -425,4 +435,112 @@ func TestStress_SessionExpiryReauthCycles(t *testing.T) {
 		t.Fatalf("%d of %d requests were sent without the session", total.Load()-authed.Load(), total.Load())
 	}
 	assertScanIntegrity(t, st, nil, q, sc.ID, 4*pages+3, pages) // only the pages' own query params reflect; the default Header IPs never do ("sid" is excluded as the session's own auth cookie)
+}
+
+// completionWatch distinguishes a slow-but-advancing scan from a wedged one.
+//
+// The failure that motivated it looked identical in the status view: queued
+// jobs, one or more running, zero failed/dead. The difference is whether the
+// queue is still ADVANCING. A settled job (succeeded/failed/canceled/dead) or a
+// worker holding a lease resets the clock; a pending queue that no worker holds
+// for the whole stall window is the shape of a real wedge (nothing will ever
+// lease it), and it is reported immediately instead of being masked by a large
+// completion budget. A handler that hangs while HOLDING a lease is bounded
+// separately by the worker pool's JobTimeout.
+type completionWatch struct {
+	stallAfter time.Duration
+	lastDone   int
+	idleSince  time.Time
+	started    bool
+}
+
+// stalled reports whether the queue has been pending-but-unowned for longer
+// than the watch's window.
+func (w *completionWatch) stalled(now time.Time, s queue.Stats) bool {
+	done := s.Succeeded + s.Failed + s.Canceled + s.Dead
+	if !w.started || done != w.lastDone {
+		w.started = true
+		w.lastDone = done
+		w.idleSince = now
+		return false
+	}
+	if s.Pending() == 0 {
+		return false
+	}
+	if s.Leased+s.Running > 0 {
+		w.idleSince = now
+		return false
+	}
+	return now.Sub(w.idleSince) > w.stallAfter
+}
+
+// waitCompletedProgressing waits for a scan to complete within budget while
+// failing early when the queue stops moving. budget must include the -race
+// overhead of the fixture (see the caller's comment); the watchdog, not the
+// budget, is what catches a real stall.
+func waitCompletedProgressing(t *testing.T, c *scan.Controller, id domain.ID, budget, stallAfter time.Duration) *scan.Status {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	watch := &completionWatch{stallAfter: stallAfter}
+	var last *scan.Status
+	for time.Now().Before(deadline) {
+		st, err := c.Status(context.Background(), id)
+		if err == nil {
+			last = st
+			if st.Scan.State == domain.ScanCompleted {
+				return st
+			}
+			if watch.stalled(time.Now(), st.Jobs) {
+				t.Fatalf("scan %s wedged: %d job(s) outstanding and none leased/running for over %s (last: state=%s discovery=%s jobs=%+v)",
+					id, st.Jobs.Pending(), stallAfter, st.Scan.State, st.Discovery.State, st.Jobs)
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if last == nil {
+		t.Fatalf("status never available within %s", budget)
+	}
+	t.Fatalf("scan not completed within %s; last: state=%s discovery=%s jobs=%+v",
+		budget, last.Scan.State, last.Discovery.State, last.Jobs)
+	return nil
+}
+
+func TestCompletionWatchDistinguishesProgressFromStall(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	const stallAfter = 20 * time.Second
+
+	// Queued work that no worker ever leases is a wedge once the window passes.
+	w := &completionWatch{stallAfter: stallAfter}
+	queued := queue.Stats{Queued: 3}
+	if w.stalled(start, queued) {
+		t.Fatal("the first observation must not be a stall")
+	}
+	if w.stalled(start.Add(19*time.Second), queued) {
+		t.Fatal("stall reported before the window elapsed")
+	}
+	if !w.stalled(start.Add(21*time.Second), queued) {
+		t.Fatal("queued work with no leased/running worker must be reported")
+	}
+
+	// A settled job resets the clock: the queue is advancing.
+	w = &completionWatch{stallAfter: stallAfter}
+	w.stalled(start, queue.Stats{Queued: 1, Running: 1})
+	if w.stalled(start.Add(10*time.Second), queue.Stats{Queued: 0, Succeeded: 1}) {
+		t.Fatal("a freshly settled job must reset the stall clock")
+	}
+
+	// A worker holding a lease also resets the clock; its handler is bounded by
+	// the pool's JobTimeout instead.
+	w = &completionWatch{stallAfter: stallAfter}
+	w.stalled(start, queue.Stats{Queued: 1, Running: 1})
+	if w.stalled(start.Add(30*time.Second), queue.Stats{Queued: 1, Running: 1}) {
+		t.Fatal("a running job is the pool deadline's concern, not the watchdog's")
+	}
+
+	// Nothing pending is never a stall, however long it takes.
+	w = &completionWatch{stallAfter: stallAfter}
+	w.stalled(start, queue.Stats{Succeeded: 5})
+	if w.stalled(start.Add(time.Hour), queue.Stats{Succeeded: 5}) {
+		t.Fatal("an empty queue must not be reported as stalled")
+	}
 }

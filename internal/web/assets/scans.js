@@ -56,7 +56,7 @@ async function openNewScanModal() {
   const name = input("f_name", "text", "initial sweep");
   const target = select("f_target", targets.map((t) => [t.id, t.name + " — " + t.base_url]));
   const seeds = textarea("f_seeds", 2, "one URL per line; default: the target base URL");
-  const profile = select("f_profile", [["conservative", "Conservative"], ["balanced", "Balanced"], ["fast", "Fast"], ["custom", "Custom"]], "balanced");
+  const profile = select("f_profile", [["conservative", "Conservative"], ["balanced", "Balanced"], ["fast", "Fast"], ["custom", "Custom"]], "conservative");
   const depth = input("f_depth", "number", "default"); depth.min = 0; depth.max = 20;
   const maxPages = input("f_maxpages", "number", "default"); maxPages.min = 0;
   const maxEndpoints = input("f_maxendpoints", "number", "default"); maxEndpoints.min = 0;
@@ -902,12 +902,16 @@ function readinessBanner() {
   return b;
 }
 
-// coverageBanner renders a coverage response's warnings. null when the scan has
-// nothing to flag (the all-clear is a statement the UI should only make once).
+// coverageBanner renders the warnings that make coverage_gaps true: medium and
+// high severity only. Informational warnings are explanations, not alarms, and
+// go through coverageNotes below; a scan whose only warnings are informational
+// must never read as "Partly tested". null when there is no gap warning (the
+// all-clear is a statement the UI should only make once).
 function coverageBanner(cov, scanId) {
-  if (!cov || !cov.warnings || !cov.warnings.length) return null;
+  const flagged = (cov && cov.warnings ? cov.warnings : []).filter((w) => w.severity !== "info");
+  if (!flagged.length) return null;
   const wrap = el("div"); wrap.className = "coverage-warnings";
-  cov.warnings.forEach((w) => {
+  flagged.forEach((w) => {
     const b = el("div", undefined, "banner" + (w.severity === "high" ? " bad" : ""));
     b.dataset.code = w.code;
     b.appendChild(el("strong", w.severity === "high" ? "Not fully tested" : "Partly tested"));
@@ -917,6 +921,24 @@ function coverageBanner(cov, scanId) {
       b.appendChild(link("Show them →", "#/scans/" + encodeURIComponent(scanId) + "/endpoints"));
     }
     wrap.appendChild(b);
+  });
+  return wrap;
+}
+
+// coverageNotes renders informational warnings as plain notes. They explain a
+// declared choice (an optional engine is off) or an identity limit, and by
+// contract never set coverage_gaps, so they stay visible without the alarm
+// banner treatment used for real gaps.
+function coverageNotes(cov) {
+  const notes = (cov && cov.warnings ? cov.warnings : []).filter((w) => w.severity === "info");
+  if (!notes.length) return null;
+  const wrap = el("div"); wrap.className = "coverage-notes";
+  notes.forEach((w) => {
+    const n = el("div", undefined, "warning-line");
+    n.dataset.code = w.code;
+    n.appendChild(el("span", "info", "pill info"));
+    n.appendChild(el("span", w.message, "hint"));
+    wrap.appendChild(n);
   });
   return wrap;
 }
@@ -941,11 +963,19 @@ function loadCoverage(scanId, state, force) {
 }
 
 // coverageBannerHost returns a placeholder that fills in once coverage loads.
+// Gap warnings keep the alarm banner (and the skip link); informational notes
+// render underneath it without either.
 function coverageBannerHost(scanId, state) {
   const host = el("div"); host.id = "coverageHost";
   loadCoverage(scanId, state).then((cov) => {
     const b = coverageBanner(cov, scanId);
-    if (b) host.replaceChildren(b, link("See what was skipped and why →", "#/scans/" + encodeURIComponent(scanId) + "/coverage"));
+    const n = coverageNotes(cov);
+    if (!b && !n) return;
+    const kids = [];
+    if (b) kids.push(b);
+    if (n) kids.push(n);
+    if (b) kids.push(link("See what was skipped and why →", "#/scans/" + encodeURIComponent(scanId) + "/coverage"));
+    host.replaceChildren(...kids);
   }).catch(() => {});
   return host;
 }
@@ -988,6 +1018,8 @@ function coveragePanel(scanId, state) {
     }
     const banner = coverageBanner(cov, scanId);
     if (banner) kids.push(banner);
+    const notes = coverageNotes(cov);
+    if (notes) kids.push(notes);
     if (cov.reasons.length) {
       const rows = cov.reasons.map((r) => {
         const tr = el("tr");

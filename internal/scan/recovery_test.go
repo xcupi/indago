@@ -6,8 +6,11 @@ package scan_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -242,6 +245,99 @@ func TestRestartedScanCanBeCanceled(t *testing.T) {
 	}
 }
 
+// waitCompleted waits for a scan to reach Completed and, when it does not,
+// fails with a TIMELINE of what the scan actually did. The difference between
+// "still working" and "stuck" is the entire question a restart test asks, and
+// a plain counters dump cannot answer it: a scan that has drained its queue but
+// not yet recorded completion looks exactly like one that died mid-run.
+//
+// The deadline is deliberately loose. A resumed scan re-runs the one-time probe
+// pipeline (DOM-XSS, disclosure, CORS, open-redirect, access-control, …), and
+// each pass is enqueued only once the queue is otherwise quiet, so completing
+// costs the SUM of every pass's real HTTP work against the fixture: seconds
+// locally, roughly 2-3x that under -race (the default test gate: Makefile's
+// `test` target runs `go test -race -p 1`, and CI runs `make check`). A
+// deadline tuned to the un-raced runtime fails a scan that is demonstrably
+// progressing — every job succeeded, counters still moving — which is the
+// opposite of the stall these tests exist to catch.
+func waitCompleted(t *testing.T, c *scan.Controller, q queue.Queue, id domain.ID, d time.Duration) *scan.Status {
+	t.Helper()
+	ctx := context.Background()
+	start := time.Now()
+	var timeline []string
+	var last string
+	var lastChange time.Time
+	for {
+		st, err := c.Status(ctx, id)
+		if err == nil {
+			cur := fmt.Sprintf("scan=%s discovery=%s jobs=%+v", st.Scan.State, st.Discovery.State, st.Jobs)
+			if cur != last {
+				last, lastChange = cur, time.Now()
+				timeline = append(timeline, fmt.Sprintf("%9s  %s",
+					time.Since(start).Round(10*time.Millisecond), cur))
+			}
+			if st.Scan.State == domain.ScanCompleted {
+				return st
+			}
+		}
+		if time.Since(start) >= d {
+			t.Fatalf("scan %s did not complete within %s.\n"+
+				"last observed: %s (scan error %q)\n"+
+				"%d distinct status snapshots since resume; the last one appeared %s before the deadline.\n"+
+				"last snapshots:\n  %s\n"+
+				"jobs by type/state: %s",
+				id, d, last, lastStatusError(t, c, ctx, id),
+				len(timeline), time.Since(lastChange).Round(time.Millisecond),
+				strings.Join(tailOf(timeline, 12), "\n  "), jobBreakdown(ctx, q, id))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// lastStatusError returns the scan's persisted error, or "" when the status
+// cannot be read (in which case the timeline already carries the failure).
+func lastStatusError(t *testing.T, c *scan.Controller, ctx context.Context, id domain.ID) string {
+	t.Helper()
+	st, err := c.Status(ctx, id)
+	if err != nil || st.Scan == nil {
+		return ""
+	}
+	return st.Scan.Error
+}
+
+// tailOf returns at most the last n entries of v.
+func tailOf(v []string, n int) []string {
+	if len(v) <= n {
+		return v
+	}
+	return v[len(v)-n:]
+}
+
+// jobBreakdown renders a scan's persisted jobs grouped by type/state, so a
+// timeout report shows WHICH pipeline stage was outstanding — or that every job
+// had already succeeded and only the final completion step was missing (the
+// signature of a scan stuck after draining its queue).
+func jobBreakdown(ctx context.Context, q queue.Queue, id domain.ID) string {
+	jobs, err := q.Jobs(ctx, id)
+	if err != nil {
+		return "unavailable: " + err.Error()
+	}
+	counts := map[string]int{}
+	for _, j := range jobs {
+		counts[fmt.Sprintf("%v/%v", j.Type, j.State)]++
+	}
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, counts[k]))
+	}
+	return fmt.Sprintf("%d total [%s]", len(jobs), strings.Join(parts, " "))
+}
+
 // A scan whose discovery already finished must NOT crawl again after a restart:
 // only its remaining jobs are processed.
 func TestRestartSkipsCompletedDiscovery(t *testing.T) {
@@ -280,7 +376,15 @@ func TestRestartSkipsCompletedDiscovery(t *testing.T) {
 	if err := ctrl2.Resume(ctx, sc.ID); err != nil {
 		t.Fatal(err)
 	}
-	done := waitStatus(t, ctrl2, sc.ID, 8*time.Second, isCompleted)
+	// 60s, not 8s: this scan re-runs the whole one-time probe pipeline after the
+	// restart, and the measured wall time for the same fixture is ~7.7s under
+	// -race on an idle workstation (all 93 jobs: test 48, disclosure 11,
+	// open_redirect 11, cors 10, dom_xss 10, access_control 3). With 8s the
+	// test was timing the race detector, not the recovery it exists to check —
+	// it failed with every job already succeeded and the queue empty, i.e. a
+	// scan that was still finishing. waitCompleted reports the timeline, so a
+	// genuine stall is still obvious.
+	done := waitCompleted(t, ctrl2, q2, sc.ID, 60*time.Second)
 
 	if s.hitCount("/robots.txt") != hitsAtCrash {
 		t.Fatalf("discovery re-ran after restart (robots.txt hits %d -> %d)", hitsAtCrash, s.hitCount("/robots.txt"))

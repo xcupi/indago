@@ -111,7 +111,13 @@ func TestDOMPolicyProxySessionReferrerAndScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	fs := sourceSelectionFindings(t, env.st, env.scanID, ep.ID)
-	if len(fs) != 1 || fs[0].Verdict != domain.VerdictConfirmed || len(fs[0].EvidenceIDs) == 0 || !strings.Contains(fs[0].Summary, "is not defined") {
+	// This scan carries a session state path, so the page-derived signal text in
+	// the persisted note is replaced by the withholding placeholder (see
+	// evidence_privacy.go). The deterministic signal itself is still recorded —
+	// as the verdict — and must not be lost.
+	signalRecorded := len(fs) == 1 && (strings.Contains(fs[0].Summary, "is not defined") ||
+		strings.Contains(fs[0].Summary, "signal text withheld"))
+	if len(fs) != 1 || fs[0].Verdict != domain.VerdictConfirmed || len(fs[0].EvidenceIDs) == 0 || !signalRecorded {
 		t.Fatalf("proxy/session/referrer confirmation with evidence missing: %+v", fs)
 	}
 	mu.Lock()

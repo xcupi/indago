@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,13 +109,22 @@ func testSite(t *testing.T) *httptest.Server {
 }
 
 // setupScan creates a project, target, and scope over the API and returns the
-// project and target IDs.
+// project and target IDs. The scope states the target's exact origin: an
+// httptest server listens on a random high port, and a scope never guesses a
+// scheme or port for a host.
 func setupScan(a api, baseURL string) (projectID, targetID string) {
 	a.t.Helper()
 	var p, tg map[string]any
 	a.mustJSON(a.do("POST", "/api/projects", map[string]string{"name": "p"}), 201, &p)
 	projectID = p["id"].(string)
-	a.mustJSON(a.do("PUT", "/api/projects/"+projectID+"/scope", map[string]any{"include_hosts": []string{"127.0.0.1"}}), 201, nil)
+	origin := baseURL
+	if u, err := url.Parse(baseURL); err == nil {
+		origin = u.Scheme + "://" + u.Host
+	}
+	a.mustJSON(a.do("PUT", "/api/projects/"+projectID+"/scope", map[string]any{
+		"include_hosts":   []string{"127.0.0.1"},
+		"allowed_origins": []string{origin},
+	}), 201, nil)
 	a.mustJSON(a.do("POST", "/api/projects/"+projectID+"/targets", map[string]string{"name": "t", "base_url": baseURL}), 201, &tg)
 	return projectID, tg["id"].(string)
 }
@@ -273,6 +283,34 @@ func TestCreateScanValidation(t *testing.T) {
 	}
 }
 
+// TestCreateScanProfileDefaultsOverHTTP: an omitted profile reaches the
+// controller's conservative default, while an explicit preset is still
+// honoured.
+func TestCreateScanProfileDefaultsOverHTTP(t *testing.T) {
+	a := newAPI(t, nil)
+	site := testSite(t)
+	projectID, targetID := setupScan(a, site.URL)
+
+	var def domain.Scan
+	a.mustJSON(a.do("POST", "/api/scans", map[string]any{
+		"project_id": projectID, "target_id": targetID,
+	}), 201, &def)
+	if def.Profile != domain.ProfileConservative {
+		t.Fatalf("omitted profile = %q, want conservative", def.Profile)
+	}
+	if def.Config.RequestsPerSecond != 2 || def.Config.HTTPConcurrency != 4 {
+		t.Fatalf("omitted profile config = %+v, want the conservative preset", def.Config)
+	}
+
+	var bal domain.Scan
+	a.mustJSON(a.do("POST", "/api/scans", map[string]any{
+		"project_id": projectID, "target_id": targetID, "profile": "balanced",
+	}), 201, &bal)
+	if bal.Profile != domain.ProfileBalanced || bal.Config.RequestsPerSecond != 10 {
+		t.Fatalf("explicit balanced profile = %q config=%+v, want balanced/10 rps", bal.Profile, bal.Config)
+	}
+}
+
 func TestScopeAndTargetValidation(t *testing.T) {
 	a := newAPI(t, nil)
 	var p map[string]any
@@ -283,11 +321,13 @@ func TestScopeAndTargetValidation(t *testing.T) {
 	if rec := a.do("PUT", "/api/projects/"+pid+"/scope", map[string]any{"include_hosts": []string{"  ", ""}}); rec.Code != 400 {
 		t.Fatalf("empty include_hosts: %d", rec.Code)
 	}
-	// Upsert: first PUT creates, second replaces.
-	a.mustJSON(a.do("PUT", "/api/projects/"+pid+"/scope", map[string]any{"include_hosts": []string{"a.example"}}), 201, nil)
+	// Upsert: first PUT creates, second replaces. The scheme/port policy is
+	// stated explicitly because this API never guesses one.
+	a.mustJSON(a.do("PUT", "/api/projects/"+pid+"/scope", map[string]any{"include_hosts": []string{"a.example"}, "allow_any_scheme_ports": true}), 201, nil)
 	var sc domain.Scope
 	a.mustJSON(a.do("PUT", "/api/projects/"+pid+"/scope", map[string]any{
 		"include_hosts": []string{"b.example"}, "exclude_path_prefixes": []string{"/admin"}, "allow_subdomains": true,
+		"allow_any_scheme_ports": true,
 	}), 200, &sc)
 	if len(sc.IncludeHosts) != 1 || sc.IncludeHosts[0] != "b.example" || !sc.AllowSubdomains {
 		t.Fatalf("scope not replaced: %+v", sc)

@@ -108,7 +108,7 @@ func TestCLIWorkflowAndStatus(t *testing.T) {
 
 	must("project", "create", "Acme")
 	project := idFrom(t, out)
-	must("scope", "set", "-project", project, "-include", "127.0.0.1")
+	must("scope", "set", "-project", project, "-include", "127.0.0.1", "-origins", site.URL)
 	if !strings.Contains(out.String(), "127.0.0.1") {
 		t.Fatalf("scope output: %q", out.String())
 	}
@@ -187,7 +187,7 @@ func TestCLIPauseResumeCancel(t *testing.T) {
 	}
 	run("project", "create", "p")
 	project := idFrom(t, out)
-	run("scope", "set", "-project", project, "-include", "127.0.0.1")
+	run("scope", "set", "-project", project, "-include", "127.0.0.1", "-origins", slow.URL)
 	out.Reset()
 	run("target", "add", "-project", project, "-name", "t", "-url", slow.URL)
 	target := idFrom(t, out)
@@ -219,13 +219,17 @@ func TestCLIErrorsAreActionable(t *testing.T) {
 	// Server-side validation error is surfaced verbatim.
 	c.runClient("project", []string{"create", "p"})
 	project := idFrom(t, out)
-	err = c.runClient("scope", []string{"set", "-project", project, "-include", " , "})
+	err = c.runClient("scope", []string{"set", "-project", project, "-include", "https://oops.example", "-allow-any-scheme-port"})
 	if err == nil {
-		t.Fatal("expected an error for an empty include list")
+		t.Fatal("expected an error for a host entry carrying a scheme")
 	}
 	var ae *apiError
 	if !asAPIError(err, &ae) || ae.Status != 400 {
 		t.Fatalf("expected a 400 apiError, got %v", err)
+	}
+	// An empty include list is refused locally, before any request.
+	if err := c.runClient("scope", []string{"set", "-project", project, "-include", " , ", "-allow-any-scheme-port"}); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("expected a usage error for an empty include list, got %v", err)
 	}
 
 	// Missing flags give usage, not a confusing server error.
@@ -260,7 +264,7 @@ func TestCLIAmbiguousPrefix(t *testing.T) {
 	site := targetSite(t)
 	c.runClient("project", []string{"create", "p"})
 	project := idFrom(t, out)
-	c.runClient("scope", []string{"set", "-project", project, "-include", "127.0.0.1"})
+	c.runClient("scope", []string{"set", "-project", project, "-include", "127.0.0.1", "-origins", site.URL})
 	out.Reset()
 	c.runClient("target", []string{"add", "-project", project, "-name", "t", "-url", site.URL})
 	target := idFrom(t, out)
@@ -361,7 +365,7 @@ func TestCLIScanCreateExistingSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := idFrom(t, out)
-	if err := run("scope", "set", "-project", project, "-include", "127.0.0.1"); err != nil {
+	if err := run("scope", "set", "-project", project, "-include", "127.0.0.1", "-origins", site.URL); err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()

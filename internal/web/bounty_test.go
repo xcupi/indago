@@ -30,7 +30,7 @@ func TestImportBountyProgramCreatesScopedProject(t *testing.T) {
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
-			{"scope": "*.acme.test", "scope_type": "web-application", "asset_value": "https://app.acme.test"},
+			{"scope": "https://*.acme.test", "scope_type": "web-application", "asset_value": "https://app.acme.test"},
 			{"scope": "api.acme.test", "scope_type": "api", "asset_value": "https://api.acme.test"},
 		}})
 	})
@@ -86,6 +86,22 @@ func TestImportBountyProgramCreatesScopedProject(t *testing.T) {
 	}
 	if d := sc.Permits("https://other.test/"); d.Allowed {
 		t.Fatal("imported scope allows an unrelated host")
+	}
+	// The row is a wildcard asset ("*.acme.test"). Its parent is authorized
+	// for subdomains, but the apex and a subdomain of the concrete asset are
+	// not: the old importer turned this row into "app.acme.test + any
+	// subdomain", which authorized hosts the program never listed.
+	if sc.AllowSubdomains {
+		t.Fatal("wildcard import set allow_subdomains; exact assets must not inherit it")
+	}
+	if d := sc.Permits("https://acme.test/"); d.Allowed {
+		t.Fatal(`wildcard import authorized the apex ("*.acme.test" does not scope "acme.test")`)
+	}
+	if d := sc.Permits("https://a.app.acme.test/"); !d.Allowed {
+		t.Fatalf("wildcard import must still cover a deeper name under the wildcard: %+v", d)
+	}
+	if d := sc.Permits("https://x.acme.test/"); !d.Allowed {
+		t.Fatalf("wildcard import denies a subdomain it authorizes: %+v", d)
 	}
 }
 
@@ -228,7 +244,7 @@ func TestImportKeepsPathScopedAsset(t *testing.T) {
 	}
 }
 
-func TestImportCreatesBalancedScanWithUsableDefaults(t *testing.T) {
+func TestImportCreatesConservativeScanWithUsableDefaults(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/programs/acme", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"slug": "acme", "title": "ACME Program", "type": "bug-bounty"})
@@ -272,8 +288,11 @@ func TestImportCreatesBalancedScanWithUsableDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sc.Profile != domain.ProfileBalanced {
-		t.Fatalf("profile = %q, want balanced", sc.Profile)
+	if sc.Profile != domain.ProfileConservative {
+		t.Fatalf("profile = %q, want conservative (docs/bounty.md: an imported program was not rate-approved by the operator)", sc.Profile)
+	}
+	if sc.Config.RequestsPerSecond != 2 {
+		t.Fatalf("requests_per_second = %v, want the conservative 2", sc.Config.RequestsPerSecond)
 	}
 	if sc.Config.MaxDepth != 3 || sc.Config.MaxPages != 200 || sc.Config.MaxEndpoints != 500 {
 		t.Fatalf("crawl defaults = depth %d pages %d endpoints %d, want 3/200/500",

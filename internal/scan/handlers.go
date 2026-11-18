@@ -66,6 +66,10 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	dom.userAgent = ua
 	dom.limiter = limiter
 	dom.proxyPool = append([]string(nil), proxyPool...)
+	// The DOM engine's browser contexts obey the same method policy as every
+	// other scan context: non-mutating unless the operator explicitly allowed
+	// state-changing requests.
+	dom.allowStateChanging = execCfg.AllowStateChanging
 	// The SAME scope-enforcing engine every other job uses, so the DOM pass's
 	// content-type preflight is rate-limited, carries the scan's session, and is
 	// scope-checked exactly like its browser navigations are. nil is tolerated

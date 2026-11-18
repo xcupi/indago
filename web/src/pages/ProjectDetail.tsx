@@ -32,10 +32,13 @@ export default function ProjectDetail({ id }: { id: string }) {
   const [targetErr, setTargetErr] = useState("");
   const [scopeDraft, setScopeDraft] = useState({
     include: "",
+    wildcard: "",
     exclude: "",
     includePaths: "",
     excludePaths: "",
     subdomains: false,
+    origins: "",
+    anySchemePort: false,
   });
   const [scopeErr, setScopeErr] = useState("");
   const [saved, setSaved] = useState(false);
@@ -78,10 +81,16 @@ export default function ProjectDetail({ id }: { id: string }) {
     if (!scope.data) return;
     setScopeDraft({
       include: (scope.data.include_hosts ?? []).join("\n"),
+      // The API returns this list separately from include_hosts; showing it in
+      // its own field is what keeps a review from reading a wildcard asset as
+      // an exact host (it does not authorize the apex).
+      wildcard: (scope.data.subdomain_only_hosts ?? []).join("\n"),
       exclude: (scope.data.exclude_hosts ?? []).join("\n"),
       includePaths: (scope.data.include_path_prefixes ?? []).join("\n"),
       excludePaths: (scope.data.exclude_path_prefixes ?? []).join("\n"),
       subdomains: Boolean(scope.data.allow_subdomains),
+      origins: (scope.data.allowed_origins ?? []).join("\n"),
+      anySchemePort: Boolean(scope.data.allow_any_scheme_ports),
     });
   }, [scope.data]);
 
@@ -177,10 +186,20 @@ export default function ProjectDetail({ id }: { id: string }) {
         method: "PUT",
         body: {
           include_hosts: lines(scopeDraft.include),
+          // Sent explicitly on every save: the server treats an absent field as
+          // "keep", and this form is the place the operator edits it.
+          subdomain_only_hosts: lines(scopeDraft.wildcard),
           exclude_hosts: lines(scopeDraft.exclude),
           include_path_prefixes: lines(scopeDraft.includePaths),
           exclude_path_prefixes: lines(scopeDraft.excludePaths),
           allow_subdomains: scopeDraft.subdomains,
+          // Sent explicitly on every save, like the wildcard list. This list is
+          // the scheme/port statement itself: the server never derives one, and
+          // it keeps each entry's exact scheme and port across saves. Sending a
+          // non-empty list together with the opt-out is a 400, so the switch
+          // wins and the textarea is ignored while it is on.
+          allowed_origins: scopeDraft.anySchemePort ? [] : lines(scopeDraft.origins),
+          allow_any_scheme_ports: scopeDraft.anySchemePort,
         },
       });
       setSaved(true);
@@ -189,6 +208,14 @@ export default function ProjectDetail({ id }: { id: string }) {
       setScopeErr((e as Error).message);
     }
   }
+
+  // Scope drafts are text areas; these derived values drive the summary and the
+  // wildcard preview so an operator (or a reviewer) can tell exactly what the
+  // scope will authorize before saving it.
+  const scopeIncludeEntries = lines(scopeDraft.include);
+  const scopeWildcardEntries = lines(scopeDraft.wildcard);
+  const wildcardBadSpelling = scopeWildcardEntries.find((h) => h.startsWith("*") || h.startsWith("."));
+  const wildcardSample = scopeWildcardEntries.find((h) => !h.startsWith("*") && !h.startsWith(".")) ?? "";
 
   const projectScans = (scans.data ?? []).filter((s) => s.project_id === id);
   const pagedScans = usePagination(projectScans);
@@ -434,8 +461,13 @@ export default function ProjectDetail({ id }: { id: string }) {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
+            <p className="text-[11px] text-muted-foreground">
+              {scopeIncludeEntries.length === 0 && scopeWildcardEntries.length === 0
+                ? "No hosts yet: this scope authorizes nothing, so every scan refuses to start."
+                : `${scopeIncludeEntries.length} exact host${scopeIncludeEntries.length === 1 ? "" : "s"} · ${scopeWildcardEntries.length} wildcard host${scopeWildcardEntries.length === 1 ? "" : "s"} (subdomains only — the wildcard host itself stays out of scope)`}
+            </p>
             <div className="grid gap-2 sm:grid-cols-2">
-              <Field label="Include hosts" hint="One per line. Hostnames only, no ports.">
+              <Field label="Include hosts" hint="One per line. Hostnames only, no ports. Each host here authorizes that host and nothing below it.">
                 <Textarea
                   rows={4}
                   value={scopeDraft.include}
@@ -451,7 +483,10 @@ export default function ProjectDetail({ id }: { id: string }) {
                   placeholder="billing.example.com"
                 />
               </Field>
-              <Field label="Include path prefixes" hint="Optional. '/' means the whole host.">
+              <Field
+                label="Include path prefixes"
+                hint={"Optional. '/' means the whole host. Prefixes apply to EVERY host in this scope, not to one host: /app on app.example.com and /api on api.example.com would also authorize app.example.com/api and api.example.com/app."}
+              >
                 <Textarea
                   rows={3}
                   value={scopeDraft.includePaths}
@@ -468,12 +503,60 @@ export default function ProjectDetail({ id }: { id: string }) {
                 />
               </Field>
             </div>
+            <div className="rounded-md border border-border bg-muted/30 p-2.5">
+              <Field
+                label="Wildcard hosts (subdomains only)"
+                hint="Bare hostnames, one per line — example.com, not *.example.com. Each host covers every subdomain (app.example.com, a.b.example.com) and NOT the host itself; a host you need scanned goes in Include hosts above. This is where an imported program's wildcard assets land, and it is independent of the subdomain switch below."
+              >
+                <Textarea
+                  rows={2}
+                  value={scopeDraft.wildcard}
+                  onChange={(e) => setScopeDraft({ ...scopeDraft, wildcard: e.target.value })}
+                  placeholder="example.com"
+                />
+                {wildcardBadSpelling ? (
+                  <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                    Write the bare host ({wildcardBadSpelling.replace(/^\*\./, "")}), not “{wildcardBadSpelling}”: this list already means “subdomains only”.
+                  </p>
+                ) : null}
+                {wildcardSample ? (
+                  <p className="text-[11px] text-muted-foreground">
+                    In scope: {wildcardSample} subdomains, such as app.{wildcardSample} — {wildcardSample} itself is not.
+                  </p>
+                ) : null}
+              </Field>
+            </div>
+            <div className="rounded-md border border-border bg-muted/30 p-2.5">
+              <Field
+                label="Allowed origins (scheme and port)"
+                hint="One per line: scheme://host[:port], or scheme://*.host for subdomains. An omitted port means 80 for http and 443 for https. This is the scheme/port statement itself: every entry keeps its exact scheme and port, nothing is derived from the host lists, and a host you add stays unreachable until an origin covers it. Required unless you turn on the any-scheme/port switch below."
+              >
+                <Textarea
+                  rows={3}
+                  value={scopeDraft.origins}
+                  onChange={(e) => setScopeDraft({ ...scopeDraft, origins: e.target.value })}
+                  placeholder={"https://app.example.com\nhttps://app.example.com:8443"}
+                />
+                {scope.data && (scope.data.allowed_origins ?? []).length === 0 && !scope.data.allow_any_scheme_ports ? (
+                  <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                    This scope predates origin rules: it currently authorizes every scheme and port of its hosts. Saving it requires an explicit choice — declare the origins you are authorized to test, or turn on the legacy switch below. Saving never guesses a scheme or port.
+                  </p>
+                ) : null}
+              </Field>
+            </div>
             <label className="flex items-center gap-2 text-xs text-foreground">
               <Switch
                 checked={scopeDraft.subdomains}
                 onCheckedChange={(v) => setScopeDraft({ ...scopeDraft, subdomains: v })}
               />
               Allow subdomains of the included hosts
+            </label>
+            <label className="flex items-center gap-2 text-xs text-foreground">
+              <Switch
+                checked={scopeDraft.anySchemePort}
+                onCheckedChange={(v) => setScopeDraft({ ...scopeDraft, anySchemePort: v })}
+              />
+              Authorize every scheme and port of these hosts (legacy; ignores the origin list)
             </label>
             {scopeErr ? <Alert>{scopeErr}</Alert> : null}
             {saved ? <p className="text-[11px] text-emerald-700 dark:text-emerald-400">Scope saved.</p> : null}

@@ -320,15 +320,33 @@ func (c *Collector) Counts() (endpoints, params, jobs int) {
 	return c.endpointCount, c.paramCount, c.jobCount
 }
 
-// AllowFetch implements fetchGuard: on an authenticated scan a discovered URL
-// that names a session-termination action must be neither registered nor
-// requested. The guard (logout_guard.go) covers the action in the path
-// (/logout, /auth/sign-out), in a query parameter (?logout=1, ?action=logout)
-// and in an SPA route fragment (#/logout). An operator-provided seed is
-// explicit intent and always allowed; an unauthenticated scan has no session
-// to lose.
-func (c *Collector) AllowFetch(rawURL string, source domain.DiscoverySource) bool {
-	return !(c.authenticated && source != domain.SourceUserProvided && looksSessionTerminating(rawURL))
+// AllowFetch implements fetchGuard: a discovered URL that names a guarded
+// action must be neither registered nor requested. Two guards apply, and an
+// operator-provided seed (explicit intent) bypasses both:
+//
+//   - session termination (logout_guard.go), authenticated scans only:
+//     /logout, ?action=logout, #/logout;
+//   - data mutation (mutating_guard.go), every scan but read methods only:
+//     /delete?id=1, /users/7/update, ?action=delete. A POST form target is
+//     still allowed through: discovery never sends it, and the executor's
+//     state-changing opt-ins remain the gate for that request.
+func (c *Collector) AllowFetch(rawURL string, source domain.DiscoverySource, method domain.HTTPMethod) bool {
+	return c.linkGuardReason(rawURL, source, method) == ""
+}
+
+// linkGuardReason returns a short, loggable reason when the URL must not be
+// fetched or registered with this method, or "" when it may.
+func (c *Collector) linkGuardReason(rawURL string, source domain.DiscoverySource, method domain.HTTPMethod) string {
+	if source == domain.SourceUserProvided {
+		return "" // explicit operator intent
+	}
+	if c.authenticated && looksSessionTerminating(rawURL) {
+		return "session-termination: " + sessionTerminationReason(rawURL)
+	}
+	if isReadMethod(method) && looksDataMutating(rawURL) {
+		return "data-mutation: " + dataMutationReason(rawURL)
+	}
+	return ""
 }
 
 // AnyEndpoint implements endpointLookup: it reports whether the scan already
@@ -377,21 +395,18 @@ func (c *Collector) AddEndpoint(ctx context.Context, ep EndpointCandidate) (doma
 		return "", nil
 	}
 
-	// An authenticated scan's crawler-style sources (crawler, forms, browser
-	// network capture, sitemap, robots, content discovery) must not follow a
-	// link that logs the session out — e.g. a "Logout" link present in the
-	// nav of almost every authenticated page, a ?action=logout query, or an
-	// SPA route such as #/logout. Doing so would silently end the session
-	// mid-scan: every test after that point runs unauthenticated and the scan
-	// never finds anything behind the login it was specifically given a
-	// session to get past. An operator-provided seed URL is NEVER skipped
-	// here, even if it happens to match — that is explicit intent (e.g.
-	// deliberately testing the logout endpoint itself), not an accidental
-	// link-follow. Unauthenticated scans have no session to lose, so nothing
-	// is skipped for them either.
-	if !c.AllowFetch(info.Canonical, ep.Source) {
-		c.log.Debug("discovery: skipping session-terminating link",
-			"url", info.Canonical, "source", ep.Source, "reason", sessionTerminationReason(info.Canonical))
+	// Crawler-style sources (crawler, forms, browser network capture, sitemap,
+	// robots, content discovery) must not register a URL the fetch guards
+	// refuse. The session-termination guard keeps an authenticated scan from
+	// ending its own session mid-crawl; the data-mutation guard keeps any scan
+	// from registering a GET that would delete or update a record. A
+	// non-read method (a form's POST target) is still registered: discovery
+	// never sends it, and the executor's opt-ins decide. An operator-provided
+	// seed is NEVER skipped here, even if it matches — that is explicit
+	// intent (e.g. deliberately testing the endpoint itself).
+	if reason := c.linkGuardReason(info.Canonical, ep.Source, method); reason != "" {
+		c.log.Debug("discovery: skipping guarded link",
+			"url", info.Canonical, "source", ep.Source, "method", method, "reason", reason)
 		return "", nil
 	}
 

@@ -9,6 +9,36 @@ import (
 	"testing"
 )
 
+// requiredRoots returns the test names scripts/ci-browser-check.py requires,
+// read from the script's own literal `required` set. The fixture below must
+// synthesize an event stream for exactly those roots; a second copy here is
+// what let this parser test fall behind when the real gate's required coverage
+// grew. Failing to read the set fails the test instead of silently exercising
+// nothing.
+func requiredRoots(t *testing.T, python string) []string {
+	t.Helper()
+	const extract = `import ast, sys
+with open("../scripts/ci-browser-check.py", encoding="utf-8") as fh:
+    tree = ast.parse(fh.read(), filename="ci-browser-check.py")
+for node in tree.body:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "required"
+        for target in node.targets
+    ):
+        print("\n".join(sorted(ast.literal_eval(node.value))))
+        sys.exit(0)
+sys.exit("ci-browser-check.py has no literal 'required' set")`
+	out, err := exec.Command(python, "-c", extract).CombinedOutput()
+	if err != nil {
+		t.Fatalf("read required roots from ../scripts/ci-browser-check.py: %v (output: %s)", err, out)
+	}
+	roots := strings.Fields(string(out))
+	if len(roots) == 0 {
+		t.Fatal("../scripts/ci-browser-check.py declares no required roots")
+	}
+	return roots
+}
+
 // Synthetic event streams test the preflight parser, not browser coverage.
 // The real preflight is separately exercised with Go and Chromium.
 func TestCIRuntimeRejectsMissingSkippedFailedRootsAndDescendants(t *testing.T) {
@@ -16,7 +46,7 @@ func TestCIRuntimeRejectsMissingSkippedFailedRootsAndDescendants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots := []string{"TestIntegrationCreateScanLoginScope", "TestIntegrationLoginScopeBoundary", "TestUILoginCarriesProjectScope", "TestIntegrationRenderRealBrowser", "TestIntegrationRenderCapturesJSONPostDataForDiscovery", "TestIntegrationRequestObserverDoesNotWaitForResponse", "TestIntegrationNetworkJSONBodyDiscovery", "TestIntegrationVerifyExecutableCandidateIsConfirmed", "TestIntegrationVerifyReflectionOnlyIsRejected", "TestE2E_FullPipelineAgainstCorpus", "TestUINavigation", "TestUICooldownClock", "TestUICoverageBrowserlessScanIsNotShownAsClean", "TestUIScanHeaderFollowsStateChange", "TestUINewScanActionsStayReachableOnShortViewport", "TestUIEndpointsTabShowsFoundButUntestedParameters", "TestUIScopeFormRefusesEntriesThatCanNeverMatch", "TestIntegrationResourceHintControlsOpenConnectionsWhereExpected", "TestIntegrationResourceHintsDoNotReachAnOutOfScopeHost", "TestIntegrationRedirectSurfacesControlReachesTheSecondHost", "TestIntegrationScopeGateStopsRedirectSurfaces", "TestUIEndpointsLiveRefreshKeepsKeyboardFocus", "TestUIFailedScanOverviewWarnsEvenThoughEverythingRecordedPassed", "TestDOMHTMLSourceMatrix", "TestDOMStringTimerSourceMatrix", "TestIntegrationDefaultConfigRendererIsSandboxed", "TestIntegrationDisableSandboxIsExplicitOptOut", "TestDOMXSSFragmentRouteTestsRouteParameterAndConfirms", "TestDOMXSSFragmentRouteCapturesPostLoadSink", "TestDOMXSSScriptLiteralParameterConfirmsOnQuerySource", "TestIntegrationScopeGateAllowsInScopeRedirect", "TestIntegrationScopeGateBlocksOutOfScopeNavigationRedirect", "TestIntegrationScopeGateBlocksOutOfScopeSubresourceRedirect", "TestIntegrationScopeGateBlocksBackslashPathRedirect", "TestIntegrationScopeGateBlocksParserDifferentialRedirects", "TestIntegrationParserDifferentialControlReachesTheSecondHost", "TestIntegrationScopeGateBlocksWebSocketTraffic", "TestIntegrationScopeGateBlocksServiceWorkerTraffic", "TestIntegrationScopeGateBlocksPopupRedirect", "TestIntegrationScopeGateRejectsUnmanagedTargets", "TestIntegrationScopeGateManagedFramesAndSubresources", "TestIntegrationScopeGatePreservesBodyReplay", "TestIntegrationRejectFabricatedMarkerException", "TestIntegrationRejectConsoleOnlyMarker", "TestDOMXSSGenuineInnerHTMLExecutionIsStillConfirmed", "TestDOMXSSForgedSignalsAreNotConfirmed", "TestDOMXSSStorageKeysAreIsolatedPerAttempt", "TestDOMXSSFragmentRouteSelectorsAreSeparateFindings", "TestIntegrationRejectCarriageReturnLineMappingForgery", "TestIntegrationConfirmsDespiteErrorAndScriptFlood", "TestDOMXSSSurvivesPageNeutralizingConsoleAndJSON", "TestDOMXSSStringTimerThrowingEveryTickStillConfirms", "TestDOMXSSMarkerWindowRetention", "TestDOMXSSMarkerWindowSinkPaths", "TestDOMXSSHarnessMarkerSnippetBounded", "TestDOMXSSMarkerWindowExcerptNatives", "TestDOMXSSWorkerRetriesTransientVerificationFailure", "TestDOMXSSWorkerCancellationAndConfirmedDurability", "TestDOMAttributeBreakoutInQuotedAttributeIsConfirmed", "TestDOMBodylessDocumentIsNotApplicable", "TestDOMDocumentWriteInsideSelectIsAlreadyConfirmed", "TestReflectedCanonicalLinkVectorIsPlannedButNeedsActivation", "TestReflectedVariationPacksConfirmAfterFirstVariantIsBlocked", "TestAutomaticEvasionConfirmsFilterAllowListLabs", "TestDOMXSSReflectedJSONPipelineConfirms", "TestReflectedJSStringContexts", "TestDOMJQueryAnchorHrefSinkIsActivated", "TestDOMJQuerySelectorHashchangeSinkIsActivated", "TestDOMJQuerySinkNativeContract", "TestDOMXSSHarnessEvalAttribution", "TestDOMXSSExternalScriptES5StaticAnalysis", "TestAngularCSPBypassIsPlannedOnlyForCSPWithoutUnsafeInlineAndAngular", "TestVendoredAngularEvaluatesNGFocusUnderCSPWithoutReferenceError", "TestCSPReportURIParamInjectionConfirmsOnlyWhenThePolicyIsInjectable", "TestDanglingFormCaptureConfirmsOnlyWhenTheParseIsBroken"}
+	roots := requiredRoots(t, python)
 	for _, tc := range []struct {
 		name, root, action, child string
 		wantPass                  bool

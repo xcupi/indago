@@ -65,11 +65,11 @@ func objectFamilyServer(t *testing.T, siblingBody string) http.HandlerFunc {
 	}
 }
 
-func runObjectFamilyJob(t *testing.T, target string) (*scanEnv, idorDetail, []*domain.Finding) {
+func runObjectFamilyJob(t *testing.T, target string, cfg ExecutorConfig) (*scanEnv, idorDetail, []*domain.Finding) {
 	t.Helper()
 	env := newScanEnv(t)
 	ep := env.endpoint(target, domain.MethodGET)
-	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, ExecutorConfig{}, execLog(), nil, nil, idor.EnumerationOptions{})
+	ex := newIDORExecutor(env.st, scopedClient(t, openScope()), env.ev, cfg, execLog(), nil, nil, idor.EnumerationOptions{})
 	job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobIDOR,
 		Target: domain.JobTarget{EndpointID: ep.ID, URL: target}, MaxAttempts: 1,
 		Payload: idorModePayload(idorModeObjectFamily)}
@@ -87,7 +87,7 @@ func TestObjectFamilyConfirmsCredentialSibling(t *testing.T) {
 	srv := httptest.NewServer(objectFamilyServer(t, "CONNECTED: -- Now chatting with Hal Pline --\nYou: Ok so my password is 8au5aj8yoahk0x1ewp9y. Is that right?\n"))
 	defer srv.Close()
 
-	_, d, findings := runObjectFamilyJob(t, srv.URL+"/chat")
+	_, d, findings := runObjectFamilyJob(t, srv.URL+"/chat", ExecutorConfig{AllowStateChanging: true})
 	if d.Verdict != domain.VerdictConfirmed {
 		t.Fatalf("verdict = %q (%s), want confirmed", d.Verdict, d.Reason)
 	}
@@ -112,7 +112,7 @@ func TestObjectFamilyWithoutCredentialStaysInconclusive(t *testing.T) {
 	srv := httptest.NewServer(objectFamilyServer(t, "CONNECTED: -- Now chatting with Hal Pline --\nYou: hello there\n"))
 	defer srv.Close()
 
-	_, d, findings := runObjectFamilyJob(t, srv.URL+"/chat")
+	_, d, findings := runObjectFamilyJob(t, srv.URL+"/chat", ExecutorConfig{AllowStateChanging: true})
 	if d.Verdict == domain.VerdictConfirmed {
 		t.Fatalf("a sibling with no credential must never be confirmed: %s", d.Reason)
 	}
@@ -128,9 +128,67 @@ func TestObjectFamilyWithoutScriptEndpointSkips(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, d, findings := runObjectFamilyJob(t, srv.URL+"/chat")
+	_, d, findings := runObjectFamilyJob(t, srv.URL+"/chat", ExecutorConfig{AllowStateChanging: true})
 	if !d.Skipped {
 		t.Fatalf("detail = %+v, want a skip when the page names no endpoint", d)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("findings = %+v, want none", findings)
+	}
+}
+
+// A queued object-family job must fail closed when the server's state-changing
+// opt-in is gone. The guard runs before even the page GET, so the target sees
+// nothing.
+func TestObjectFamilyRequiresAllowStateChanging(t *testing.T) {
+	var mu sync.Mutex
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, d, findings := runObjectFamilyJob(t, srv.URL+"/chat", ExecutorConfig{})
+	mu.Lock()
+	got := hits
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("object-family probe sent %d request(s) without AllowStateChanging", got)
+	}
+	if !d.Skipped || !strings.Contains(d.SkipReason, "AllowStateChanging") {
+		t.Fatalf("detail = %+v, want a skip naming AllowStateChanging", d)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("findings = %+v, want none", findings)
+	}
+}
+
+func TestObjectFamilyRequiresSkipWriteEndpointsOff(t *testing.T) {
+	var mu sync.Mutex
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, d, findings := runObjectFamilyJob(t, srv.URL+"/chat", ExecutorConfig{
+		AllowStateChanging: true,
+		SkipWriteEndpoints: true,
+	})
+	mu.Lock()
+	got := hits
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("object-family probe sent %d request(s) despite skip_write_endpoints", got)
+	}
+	if !d.Skipped || !strings.Contains(d.SkipReason, "skip_write_endpoints") {
+		t.Fatalf("detail = %+v, want a skip naming skip_write_endpoints", d)
 	}
 	if len(findings) != 0 {
 		t.Fatalf("findings = %+v, want none", findings)

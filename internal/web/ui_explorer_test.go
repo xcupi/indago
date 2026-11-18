@@ -76,6 +76,9 @@ func TestUIOverviewLinksUntestedParametersToTheExplorer(t *testing.T) {
 	u, w := explorerUIWorld(t, web.Capabilities{BrowserEnabled: true})
 	u.openScanTab(w.scan, "overview")
 	u.waitUI("untested banner", `document.querySelector('#coverageHost .banner[data-code="parameters_untested"] a')`)
+	if u.evalBool(`document.querySelector('#coverageHost .coverage-notes [data-code="parameters_untested"]')`) {
+		t.Fatal("a medium-severity coverage gap must stay an alarm banner, never an informational note")
+	}
 	if !u.evalBool(`document.querySelector('#coverageHost .banner[data-code="parameters_untested"] a').getAttribute('href').endsWith('/endpoints')`) {
 		t.Fatal("the warning must link to the Endpoints tab")
 	}

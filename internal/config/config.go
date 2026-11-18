@@ -80,7 +80,7 @@ func Default() Config {
 	return Config{
 		DataDir:        DefaultDataDir,
 		Server:         ServerConfig{Addr: DefaultServerAddr, APIRate: DefaultAPIRate, APIBurst: DefaultAPIBurst},
-		DefaultProfile: domain.ProfileBalanced,
+		DefaultProfile: domain.DefaultProfile,
 		AI:             AIConfig{Enabled: false},
 	}
 }

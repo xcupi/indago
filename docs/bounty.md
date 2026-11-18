@@ -90,23 +90,70 @@ drive a fresh scan, import the program and scan the new project instead.
 `POST /api/bounty/import {"slugs":["acme","globex"]}` creates, per program:
 
 - a **project** named after the program (notes record the platform slug);
-- a **scope** whose `include_hosts` are the program's `web-application` assets
-  (wildcards become the parent host, subdomains allowed), and
-- one **seed target** per host root (`https://host/`), and
+- a **scope** built from the program's `web-application` assets, which keeps the
+  two authorization shapes apart instead of flattening them into one:
+
+  | asset row | goes into | authorizes | does **not** authorize |
+  |---|---|---|---|
+  | exact, `https://www.example.com` | `include_hosts` + `allowed_origins: ["https://www.example.com"]` | `https://www.example.com` on port 443 | `http://www.example.com`, `:8443`, `a.www.example.com` or any other host |
+  | exact, `http://www.example.com:8080` | `include_hosts` + `allowed_origins: ["http://www.example.com:8080"]` | that exact origin | `https`, the default ports, or any other host |
+  | wildcard, `https://*.example.com` | `subdomain_only_hosts` + `allowed_origins: ["https://*.example.com"]` | `https://a.example.com`, `https://a.b.example.com` | `example.com` (a wildcard never covers its apex), `http`, or another port |
+
+  Import never sets `allow_subdomains`: that flag would turn every exact asset
+  into a wildcard, authorizing hosts the program never listed. A wildcard row's
+  concrete asset (`app.example.com` in the API's `asset_value`) is already
+  authorized by the wildcard, so it is also kept as an exact host and as a seed;
+  a row whose asset is the apex, or a host outside the wildcard, is **not**
+  adopted — it is reported in `skipped` and only the wildcard is kept. A
+  leading-dot row (`.example.com`) is ambiguous across platforms and is skipped
+  rather than guessed at. Import also never sets `allow_any_scheme_ports`: each
+  row's own scheme and port becomes the `allowed_origins` entry, so the imported
+  scope cannot reach a sibling service on another port of the same host. A
+  wildcard row must state its scheme (`https://*.example.com`); a scheme-less
+  `*.example.com` is **skipped and reported**, because neither its scheme nor
+  its port is in the source and Indago does not guess one.
+- one **seed target** per concrete asset the scope permits: an exact host, or
+  the concrete asset of a wildcard row. A wildcard with no concrete asset
+  authorizes its subdomains but seeds nothing — add the host you are testing as
+  a target, and it will be in scope;
 - one **draft scan** for the first target the imported scope permits, profile
-  `conservative`, auth mode `anonymous`. It stays in `created` state until the
-  operator starts it.
+  `conservative` (2 requests/second, the quiet preset — the operator did not
+  choose this program's rate), auth mode `anonymous`. It stays in `created`
+  state until the operator starts it.
 
 Assets of other scope types (api, mobile, …) are listed in `skipped`, not turned
 into targets. An asset that is a **path**, not a host root (for example
 `https://target.test/challenge/one`), becomes a seed on that path and adds
-`include_path_prefixes: ["/challenge/one"]`, so the crawler cannot leave the
-program's authorized area. The draft scan gives the operator a one-click next
-step; they still review the targets, set the program's hunting User-Agent, and
-start it manually. Rate/profile controls and scope enforcement stay where they
-already were. Out-of-scope hosts never run
-because the scan's scope rejects them — not because the importer remembered to
-filter.
+`include_path_prefixes: ["/challenge/one"]`.
+
+Path prefixes belong to the **scope**, not to one host: the matcher applies
+every stored prefix to every in-scope origin. A program that scopes different
+paths to different hosts would therefore be flattened into a cross product —
+`https://a.test/app` plus `https://b.test/api` would also permit
+`https://a.test/api` and `https://b.test/app`, which the program never listed.
+The importer refuses that program instead of storing the wider scope: **nothing
+is created** (no project, no scope, no scan) and the reason is reported in
+`skipped`, naming each origin and the path it is scoped to.
+
+A program is imported with paths only when every origin it names authorizes the
+**same** path set. Paths are compared the way the scope matcher compares them (a
+prefix covers its own segment and everything below it: `/app` covers
+`/app/admin`, not `/application`), and the stored list is the reduced set. The
+one redundant shape the importer normalises away is an exact asset's path when
+an **unrestricted** wildcard in the same program already authorizes that
+subdomain on every path — dropping the narrower statement keeps the wildcard's
+authority intact instead of narrowing it. Everything else is either imported
+exactly or refused; the importer never picks one host's path and applies it to
+another. Import one path-scoped asset per project, or declare the scope manually
+when the program is not expressible.
+
+An import always creates a **new** project and scope and never edits an existing
+one, so exclusions and path prefixes you configured elsewhere are untouched. The
+draft scan gives the operator a one-click next step; they still review the
+targets, set the program's hunting User-Agent, and start it manually.
+Rate/profile controls and scope enforcement stay where they already were.
+Out-of-scope hosts never run because the scan's scope rejects them — not because
+the importer remembered to filter.
 
 ## Hunting User-Agent
 

@@ -77,11 +77,12 @@ func TestScopeRejectsBadExcludeAndPathEntriesToo(t *testing.T) {
 func TestScopeAcceptsRealEntriesAndKeepsEarlierScopeWhenAReplacementIsRejected(t *testing.T) {
 	a, pid := newScopeProject(t)
 	good := map[string]any{
-		"include_hosts":         []string{"example.com", ".api.example.com", "127.0.0.1", "::1", "localhost"},
-		"exclude_hosts":         []string{"admin.example.com"},
-		"include_path_prefixes": []string{"/app/"},
-		"exclude_path_prefixes": []string{"/app/private", "/app/private/"},
-		"allow_subdomains":      true,
+		"include_hosts":          []string{"example.com", ".api.example.com", "127.0.0.1", "::1", "localhost"},
+		"exclude_hosts":          []string{"admin.example.com"},
+		"include_path_prefixes":  []string{"/app/"},
+		"exclude_path_prefixes":  []string{"/app/private", "/app/private/"},
+		"allow_subdomains":       true,
+		"allow_any_scheme_ports": true,
 	}
 	if code, body := scopePut(a, pid, good); code != http.StatusCreated {
 		t.Fatalf("valid scope status %d: %s", code, body)

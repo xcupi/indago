@@ -208,7 +208,8 @@ func TestIntegrationVerifyJSONPOSTCandidateIsConfirmed(t *testing.T) {
 	res, err := v.Verify(context.Background(), verification.Input{
 		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: candidateValue},
 		Marker:    m, Method: http.MethodPost, URL: srv.URL + "/api/search", Location: domain.LocationJSON,
-		ContentType: "application/vnd.api+json; charset=utf-8", JSONBody: body,
+		AllowStateChanging: true,
+		ContentType:        "application/vnd.api+json; charset=utf-8", JSONBody: body,
 		Scope: openScope(),
 	})
 	if err != nil {
@@ -262,7 +263,8 @@ func TestIntegrationVerifyJSONPOSTEscapedReflectionIsRejected(t *testing.T) {
 	res, err := v.Verify(context.Background(), verification.Input{
 		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLAttr, Value: candidateValue},
 		Marker:    m, Method: http.MethodPost, URL: srv.URL + "/api/search", Location: domain.LocationJSON,
-		ContentType: "application/vnd.search+json", JSONBody: body, Scope: openScope(),
+		AllowStateChanging: true,
+		ContentType:        "application/vnd.search+json", JSONBody: body, Scope: openScope(),
 	})
 	if err != nil {
 		t.Fatalf("verify escaped POST/JSON: %v", err)
@@ -298,7 +300,8 @@ func TestIntegrationVerifyJSONPOSTDoesNotFollowInScopeRedirect(t *testing.T) {
 	res, err := v.Verify(context.Background(), verification.Input{
 		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: value},
 		Marker:    m, Method: http.MethodPost, URL: srv.URL + "/api/search", Location: domain.LocationJSON,
-		ContentType: "application/json", JSONBody: body, Scope: openScope(),
+		AllowStateChanging: true,
+		ContentType:        "application/json", JSONBody: body, Scope: openScope(),
 	})
 	if err != nil {
 		t.Fatalf("verify POST/JSON redirect response: %v", err)
@@ -328,7 +331,8 @@ func TestIntegrationVerifyJSONPOSTRedirectRemainsScopeGated(t *testing.T) {
 	res, err := v.Verify(context.Background(), verification.Input{
 		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: "<svg onload=marker>"},
 		Marker:    "marker", Method: http.MethodPost, URL: srv.URL + "/api/search", Location: domain.LocationJSON,
-		ContentType: "application/json", JSONBody: []byte(`{"q":"<svg onload=marker>"}`),
+		AllowStateChanging: true,
+		ContentType:        "application/json", JSONBody: []byte(`{"q":"<svg onload=marker>"}`),
 		Scope: domain.Scope{IncludeHosts: []string{"127.0.0.1"}, IncludePathPrefixes: []string{"/api/"}},
 	})
 	if err == nil && res.Verdict == domain.VerdictConfirmed {
@@ -626,7 +630,8 @@ func TestIntegrationVerifyJSONPOSTUsesAuthenticatedSession(t *testing.T) {
 	res, err := v.Verify(context.Background(), verification.Input{
 		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: value},
 		Marker:    m, Method: http.MethodPost, URL: srv.URL + "/api/search", Location: domain.LocationJSON,
-		ContentType: "application/json", JSONBody: body, Scope: openScope(), SessionStatePath: statePath,
+		AllowStateChanging: true,
+		ContentType:        "application/json", JSONBody: body, Scope: openScope(), SessionStatePath: statePath,
 	})
 	if err != nil {
 		t.Fatalf("verify authenticated POST/JSON: %v", err)
@@ -772,5 +777,73 @@ func TestIntegrationVerifyCancellation(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("cancellation did not interrupt verification")
+	}
+}
+
+// --- scan method policy (non-mutating verification default) ---
+
+// A verification browser context obeys the scan's method policy. The fixture
+// page issues a GET control and a POST from its own script, synchronously, so
+// each request has completed (or been refused) before `load` fires — i.e. before
+// Verify returns and tears the context down. On a default scan (AllowStateChanging
+// false) the GET reaches the server and the POST does not; with the explicit
+// opt-in the same POST does. The marker is reflected as inert text, so both
+// cases still end in a Rejected verdict from the unchanged signal rule.
+func TestIntegrationVerifyContextMethodPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		allow     bool
+		wantPosts int64
+	}{
+		{"default-scan-blocks-page-post", false, 0},
+		{"explicit-opt-in-allows-page-post", true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var control, posts atomic.Int64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/page":
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = fmt.Fprintf(w, `<!doctype html><html><body><p>%s</p><script>
+(function () {
+  var get = new XMLHttpRequest(); get.open('GET', '/control', false); try { get.send(); } catch (e) {}
+  var post = new XMLHttpRequest(); post.open('POST', '/mutate', false); try { post.send('k=v'); } catch (e) {}
+})();
+</script></body></html>`, r.URL.Query().Get("q"))
+				case "/control":
+					control.Add(1)
+					_, _ = fmt.Fprint(w, "ok")
+				case "/mutate":
+					posts.Add(1)
+					_, _ = fmt.Fprint(w, "ok")
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			mgr := newManagerOrSkip(t)
+			defer mgr.Close()
+			v := verification.NewBrowserVerifier(mgr, verification.BrowserVerifierConfig{})
+			m := marker(t)
+			res, err := v.Verify(context.Background(), verification.Input{
+				Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: m},
+				Marker:    m, Method: "GET", URL: queryURL(srv.URL+"/page", m), Scope: openScope(),
+				AllowStateChanging: tc.allow,
+			})
+			if err != nil {
+				t.Fatalf("verify: %v", err)
+			}
+			if got := control.Load(); got != 1 {
+				t.Fatalf("GET control reached the server %d times, want 1 (the page's script must have run)", got)
+			}
+			if got := posts.Load(); got != tc.wantPosts {
+				t.Fatalf("page-initiated POST reached the server %d times, want %d (AllowStateChanging=%v)", got, tc.wantPosts, tc.allow)
+			}
+			if res.Verdict != domain.VerdictRejected {
+				t.Fatalf("verdict = %s, want rejected (inert reflected marker); report=%+v", res.Verdict, res.Report)
+			}
+			t.Logf("RESULT allow_state_changing=%v control=%d posts=%d verdict=%s", tc.allow, control.Load(), posts.Load(), res.Verdict)
+		})
 	}
 }

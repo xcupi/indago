@@ -37,8 +37,11 @@ func TestUIScopeFormRefusesEntriesThatCanNeverMatch(t *testing.T) {
 		t.Fatalf("a refused scope must not appear as the current scope: %q", got)
 	}
 
-	// Writing it the suggested way saves.
+	// Writing it the suggested way saves. The origin list is the second half of
+	// a scope declaration (it is never derived), so the entry that will be
+	// authorized has to be stated too.
 	u.setVal("s_inchosts", "127.0.0.1\napp.example.com")
+	u.setVal("s_origins", "https://127.0.0.1\nhttps://app.example.com")
 	u.mustClickText("button", "Save scope")
 	u.waitUI("saved", `Array.from(document.querySelectorAll('.ok-msg')).some(n => /Scope saved/.test(n.textContent))`)
 	if !u.evalBool(`document.querySelector('.detail').textContent.indexOf('app.example.com') >= 0`) {

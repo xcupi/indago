@@ -251,33 +251,38 @@ type scopeRepo struct{ db *sql.DB }
 func (r *scopeRepo) Create(ctx context.Context, s *domain.Scope) error {
 	inc, _ := jsonEncode(s.IncludeHosts)
 	exc, _ := jsonEncode(s.ExcludeHosts)
+	sub, _ := jsonEncode(s.SubdomainOnlyHosts)
 	incP, _ := jsonEncode(s.IncludePathPrefixes)
 	excP, _ := jsonEncode(s.ExcludePathPrefixes)
+	orig, _ := jsonEncode(s.AllowedOrigins)
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO scopes (id, project_id, include_hosts, exclude_hosts, include_path_prefixes, exclude_path_prefixes, allow_subdomains, created_at, updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?)`,
-		s.ID, s.ProjectID, inc, exc, incP, excP, boolToInt(s.AllowSubdomains), ts(s.CreatedAt), ts(s.UpdatedAt))
+		`INSERT INTO scopes (id, project_id, include_hosts, exclude_hosts, subdomain_only_hosts, include_path_prefixes, exclude_path_prefixes, allow_subdomains, allowed_origins, allow_any_scheme_ports, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		s.ID, s.ProjectID, inc, exc, sub, incP, excP, boolToInt(s.AllowSubdomains), orig, boolToInt(s.AllowAnySchemePorts), ts(s.CreatedAt), ts(s.UpdatedAt))
 	return err
 }
 
 func scanScope(sc scanner) (*domain.Scope, error) {
 	var s domain.Scope
-	var inc, exc, incP, excP, created, updated string
-	var allow int
-	if err := sc.Scan(&s.ID, &s.ProjectID, &inc, &exc, &incP, &excP, &allow, &created, &updated); err != nil {
+	var inc, exc, sub, incP, excP, orig, created, updated string
+	var allow, allowAny int
+	if err := sc.Scan(&s.ID, &s.ProjectID, &inc, &exc, &sub, &incP, &excP, &allow, &orig, &allowAny, &created, &updated); err != nil {
 		return nil, err
 	}
 	_ = jsonDecode(inc, &s.IncludeHosts)
 	_ = jsonDecode(exc, &s.ExcludeHosts)
+	_ = jsonDecode(sub, &s.SubdomainOnlyHosts)
 	_ = jsonDecode(incP, &s.IncludePathPrefixes)
 	_ = jsonDecode(excP, &s.ExcludePathPrefixes)
+	_ = jsonDecode(orig, &s.AllowedOrigins)
 	s.AllowSubdomains = allow != 0
+	s.AllowAnySchemePorts = allowAny != 0
 	s.CreatedAt, _ = parseTS(created)
 	s.UpdatedAt, _ = parseTS(updated)
 	return &s, nil
 }
 
-const scopeCols = `id, project_id, include_hosts, exclude_hosts, include_path_prefixes, exclude_path_prefixes, allow_subdomains, created_at, updated_at`
+const scopeCols = `id, project_id, include_hosts, exclude_hosts, subdomain_only_hosts, include_path_prefixes, exclude_path_prefixes, allow_subdomains, allowed_origins, allow_any_scheme_ports, created_at, updated_at`
 
 func (r *scopeRepo) Get(ctx context.Context, id domain.ID) (*domain.Scope, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+scopeCols+` FROM scopes WHERE id=?`, id)
@@ -294,11 +299,13 @@ func (r *scopeRepo) GetByProject(ctx context.Context, projectID domain.ID) (*dom
 func (r *scopeRepo) Update(ctx context.Context, s *domain.Scope) error {
 	inc, _ := jsonEncode(s.IncludeHosts)
 	exc, _ := jsonEncode(s.ExcludeHosts)
+	sub, _ := jsonEncode(s.SubdomainOnlyHosts)
 	incP, _ := jsonEncode(s.IncludePathPrefixes)
 	excP, _ := jsonEncode(s.ExcludePathPrefixes)
+	orig, _ := jsonEncode(s.AllowedOrigins)
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE scopes SET project_id=?, include_hosts=?, exclude_hosts=?, include_path_prefixes=?, exclude_path_prefixes=?, allow_subdomains=?, updated_at=? WHERE id=?`,
-		s.ProjectID, inc, exc, incP, excP, boolToInt(s.AllowSubdomains), ts(s.UpdatedAt), s.ID)
+		`UPDATE scopes SET project_id=?, include_hosts=?, exclude_hosts=?, subdomain_only_hosts=?, include_path_prefixes=?, exclude_path_prefixes=?, allow_subdomains=?, allowed_origins=?, allow_any_scheme_ports=?, updated_at=? WHERE id=?`,
+		s.ProjectID, inc, exc, sub, incP, excP, boolToInt(s.AllowSubdomains), orig, boolToInt(s.AllowAnySchemePorts), ts(s.UpdatedAt), s.ID)
 	return affected(res, err)
 }
 

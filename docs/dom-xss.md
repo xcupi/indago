@@ -1163,7 +1163,11 @@ SAME scope-enforcing `browser.Manager` the rest of the product uses
 (including the new neutral `about:blank` hop for window.name, itself never
 subject to or evading the scope gate — `about:` URLs simply never leave
 the browser), and evidence (screenshot, rendered DOM, browser log) is
-always captured and never fabricated.
+always captured and never fabricated. For a scan that runs with an
+authenticated session those raw artifacts are not persisted: the verdict,
+the runtime report and a non-sensitive summary survive instead (see
+`internal/scan/evidence_privacy.go`), so a logged-in page's content never
+lands in the evidence store.
 
 ---
 

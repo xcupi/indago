@@ -190,7 +190,7 @@ func TestInteractiveLoginEndpoint(t *testing.T) {
 		})
 	})
 	pid, _ := setupScan(b, "http://127.0.0.1/")
-	b.mustJSON(b.do("PUT", "/api/projects/"+pid+"/scope", map[string]any{"include_hosts": []string{"app.example.com"}}), 200, nil)
+	b.mustJSON(b.do("PUT", "/api/projects/"+pid+"/scope", map[string]any{"include_hosts": []string{"app.example.com"}, "allow_any_scheme_ports": true}), 200, nil)
 	var out map[string]string
 	b.mustJSON(b.do("POST", "/api/auth/login", map[string]string{
 		"project_id": pid,

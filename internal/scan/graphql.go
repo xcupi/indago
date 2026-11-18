@@ -32,11 +32,13 @@ package scan
 // the probe asked for. A response that merely echoes the request is not
 // evidence, and nothing here is decided by an LLM.
 //
-// The state-changing opt-in is not consulted: POST is GraphQL's only transport
-// (a GET is itself one of the checks), and the documents above are read-only
-// queries, so this engine never sends a state-changing operation even when it
-// sends a POST. That is the same boundary every other engine keeps — no
-// mutation is sent — enforced here at the document level rather than by method.
+// The state-changing opt-in is consulted for POST transport. Without
+// AllowStateChanging, the engine runs a GET baseline and the GET query check
+// only; the POST-only checks (introspection, batching, verbose errors, and the
+// text/plain GET-check fallback) are recorded as skipped. With
+// AllowStateChanging, those read-only POST probes run too. Every document above
+// is still a constant read-only query, so even the opt-in path never sends a
+// mutation; the opt-in gates the transport method, not a change in intent.
 
 import (
 	"context"
@@ -64,6 +66,11 @@ const (
 	graphQLCheckBatching      = "batching"
 	graphQLCheckVerboseErrors = "verbose_errors"
 	graphQLCheckGETQueries    = "get_queries"
+
+	// graphQLPostChecksSkippedReason is recorded on every check that needs a
+	// POST transport when the operator has not opted into state-changing
+	// methods. It is a coverage statement, not a verdict.
+	graphQLPostChecksSkippedReason = "POST transport requires AllowStateChanging; check skipped"
 )
 
 // Probe documents. Constant on purpose — see the file header.
@@ -96,22 +103,27 @@ const maxGraphQLTypeExamples = 6
 type graphQLCheckResult struct {
 	Name      string      `json:"name"`
 	Confirmed bool        `json:"confirmed"`
+	Skipped   bool        `json:"skipped,omitempty"`
 	Status    int         `json:"status,omitempty"`
 	Signal    string      `json:"signal,omitempty"`
+	Reason    string      `json:"reason,omitempty"`
 	Evidence  []domain.ID `json:"evidence_ids,omitempty"`
 }
 
 type graphQLDetail struct {
-	Engine          string               `json:"engine"`
-	Endpoint        string               `json:"endpoint"`
-	IsGraphQL       bool                 `json:"graphql_endpoint"`
-	BaselineStatus  int                  `json:"baseline_status,omitempty"`
-	TypeName        string               `json:"root_typename,omitempty"`
-	Checks          []graphQLCheckResult `json:"checks,omitempty"`
-	ConfirmedChecks []string             `json:"confirmed_checks,omitempty"`
-	Verdict         domain.Verdict       `json:"verdict"`
-	Reason          string               `json:"reason,omitempty"`
-	EvidenceIDs     []domain.ID          `json:"evidence_ids,omitempty"`
+	Engine            string               `json:"engine"`
+	Endpoint          string               `json:"endpoint"`
+	IsGraphQL         bool                 `json:"graphql_endpoint"`
+	BaselineMethod    string               `json:"baseline_method,omitempty"`
+	POSTChecksSkipped bool                 `json:"post_checks_skipped,omitempty"`
+	SkippedChecks     []string             `json:"skipped_checks,omitempty"`
+	BaselineStatus    int                  `json:"baseline_status,omitempty"`
+	TypeName          string               `json:"root_typename,omitempty"`
+	Checks            []graphQLCheckResult `json:"checks,omitempty"`
+	ConfirmedChecks   []string             `json:"confirmed_checks,omitempty"`
+	Verdict           domain.Verdict       `json:"verdict"`
+	Reason            string               `json:"reason,omitempty"`
+	EvidenceIDs       []domain.ID          `json:"evidence_ids,omitempty"`
 }
 
 type graphQLExecutor struct {
@@ -154,13 +166,14 @@ func (e *graphQLExecutor) Handle(ctx context.Context, job *domain.TestJob) error
 	}
 
 	d := graphQLDetail{Engine: graphQLEngine, Endpoint: ep.URL}
-	baseReq, err := graphQLPOST(ep.URL, graphQLTypenameQuery)
+	baseReq, err := e.graphQLBaselineRequest(ep)
 	if err != nil {
 		return fmt.Errorf("build graphql baseline: %w", err)
 	}
+	d.BaselineMethod = baseReq.Method
 	baseResp, outcome, reqErr := e.send(ctx, job, baseReq, "graphql baseline", &d)
 	if outcome != domain.OutcomeSuccess || baseResp == nil {
-		return e.finishGraphQLError(ctx, job, started, ep, outcome, reqErr)
+		return e.finishGraphQLError(ctx, job, started, ep, baseReq.Method, outcome, reqErr)
 	}
 	d.BaselineStatus = baseResp.Status
 	typename, isGraphQL := graphQLTypename(baseResp.Body)
@@ -170,11 +183,19 @@ func (e *graphQLExecutor) Handle(ctx context.Context, job *domain.TestJob) error
 		// endpoint that never asked for them.
 		d.Verdict = domain.VerdictInconclusive
 		d.Reason = "endpoint did not answer the __typename probe as a GraphQL API"
+		if !e.cfg.AllowStateChanging {
+			d.POSTChecksSkipped = true
+			d.Reason += " over GET; the POST baseline and POST-only checks are skipped because AllowStateChanging is off"
+		}
 		e.persistGraphQLCase(ctx, job, ep, d, domain.TestCaseSkipped, domain.OutcomeSuccess, "graphql skipped: "+d.Reason)
 		return nil
 	}
 	d.IsGraphQL = true
 	d.TypeName = typename
+	if !e.cfg.AllowStateChanging {
+		d.POSTChecksSkipped = true
+		d.SkippedChecks = []string{graphQLCheckIntrospection, graphQLCheckBatching, graphQLCheckVerboseErrors}
+	}
 
 	d.Checks = append(d.Checks,
 		e.checkIntrospection(ctx, job, ep, &d),
@@ -191,20 +212,55 @@ func (e *graphQLExecutor) Handle(ctx context.Context, job *domain.TestJob) error
 	if len(d.ConfirmedChecks) == 0 {
 		d.Verdict = domain.VerdictRejected
 		d.Reason = "the endpoint speaks GraphQL but none of the exposure checks succeeded"
-		e.persistGraphQLCase(ctx, job, ep, d, domain.TestCaseCompleted, domain.OutcomeSuccess, "graphql: no exposure check confirmed")
+		if d.POSTChecksSkipped {
+			d.Reason += "; POST-only checks skipped because AllowStateChanging is off"
+		}
+		e.persistGraphQLCase(ctx, job, ep, d, domain.TestCaseCompleted, domain.OutcomeSuccess, graphQLCaseNote("graphql: no exposure check confirmed", d))
 		return nil
 	}
 	d.Verdict = domain.VerdictConfirmed
 	d.Reason = "confirmed GraphQL exposure: " + strings.Join(d.ConfirmedChecks, ", ")
-	e.persistGraphQLCase(ctx, job, ep, d, domain.TestCaseCompleted, domain.OutcomeSuccess, "confirmed GraphQL exposure: "+strings.Join(d.ConfirmedChecks, ", "))
+	if d.POSTChecksSkipped {
+		d.Reason += "; POST-only checks skipped because AllowStateChanging is off"
+	}
+	e.persistGraphQLCase(ctx, job, ep, d, domain.TestCaseCompleted, domain.OutcomeSuccess, graphQLCaseNote("confirmed GraphQL exposure: "+strings.Join(d.ConfirmedChecks, ", "), d))
 	e.correlateGraphQL(ctx, job, ep, d)
 	return nil
+}
+
+// graphQLBaselineRequest is the one probe that decides whether the endpoint is
+// GraphQL at all. Without the state-changing opt-in it must be a GET: a POST
+// baseline would violate the default no-state-changing contract before any
+// check could be skipped.
+func (e *graphQLExecutor) graphQLBaselineRequest(ep *domain.Endpoint) (*httpengine.Request, error) {
+	if e.cfg.AllowStateChanging {
+		return graphQLPOST(ep.URL, graphQLTypenameQuery)
+	}
+	getURL, err := graphQLGETURL(ep.URL)
+	if err != nil {
+		return nil, err
+	}
+	return httpengine.GET(getURL), nil
+}
+
+// graphQLCaseNote makes the transport policy visible in the TestCase note, not
+// only in the JSON detail.
+func graphQLCaseNote(note string, d graphQLDetail) string {
+	if d.POSTChecksSkipped {
+		return note + " (POST-only checks skipped: AllowStateChanging is off)"
+	}
+	return note
 }
 
 // checkIntrospection asks for the type system. Confirmed only when the parsed
 // response actually carries a non-empty __schema.types array.
 func (e *graphQLExecutor) checkIntrospection(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, d *graphQLDetail) graphQLCheckResult {
 	res := graphQLCheckResult{Name: graphQLCheckIntrospection}
+	if !e.cfg.AllowStateChanging {
+		res.Skipped = true
+		res.Reason = graphQLPostChecksSkippedReason
+		return res
+	}
 	req, err := graphQLPOST(ep.URL, graphQLIntrospectionQuery)
 	if err != nil {
 		return res
@@ -236,6 +292,11 @@ func (e *graphQLExecutor) checkIntrospection(ctx context.Context, job *domain.Te
 // the probe demonstrates the primitive without any amplification.
 func (e *graphQLExecutor) checkBatching(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, d *graphQLDetail) graphQLCheckResult {
 	res := graphQLCheckResult{Name: graphQLCheckBatching}
+	if !e.cfg.AllowStateChanging {
+		res.Skipped = true
+		res.Reason = graphQLPostChecksSkippedReason
+		return res
+	}
 	req, err := graphQLPOST(ep.URL, graphQLAliasBatchQuery)
 	if err != nil {
 		return res
@@ -280,6 +341,11 @@ func (e *graphQLExecutor) checkBatching(ctx context.Context, job *domain.TestJob
 // schema and its internals; a bare validation error is not enough to confirm.
 func (e *graphQLExecutor) checkVerboseErrors(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, d *graphQLDetail) graphQLCheckResult {
 	res := graphQLCheckResult{Name: graphQLCheckVerboseErrors}
+	if !e.cfg.AllowStateChanging {
+		res.Skipped = true
+		res.Reason = graphQLPostChecksSkippedReason
+		return res
+	}
 	req, err := graphQLPOST(ep.URL, graphQLVerboseErrorQuery)
 	if err != nil {
 		return res
@@ -322,6 +388,10 @@ func (e *graphQLExecutor) checkGETQueries(ctx context.Context, job *domain.TestJ
 			res.Signal = "a query supplied in the URL query string was executed"
 			return res
 		}
+	}
+	if !e.cfg.AllowStateChanging {
+		res.Reason = "text/plain POST fallback skipped: AllowStateChanging is off"
+		return res
 	}
 	// text/plain is the other "simple request" content type: no preflight, so
 	// a cross-site form can send it.
@@ -394,10 +464,14 @@ func (e *graphQLExecutor) resolveEndpoint(ctx context.Context, job *domain.TestJ
 func (e *graphQLExecutor) persistGraphQLCase(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, d graphQLDetail, status domain.TestCaseStatus, outcome domain.TestOutcome, note string) {
 	now := time.Now()
 	detail, _ := json.Marshal(d)
+	method := d.BaselineMethod
+	if method == "" {
+		method = string(domain.MethodGET)
+	}
 	tc := &domain.TestCase{
 		ID: domain.NewID(), ScanID: job.ScanID, JobID: job.ID, Attempt: job.Attempts,
 		InjectionPointID: job.Target.InjectionPointID, VulnClass: domain.VulnGraphQL,
-		Status: status, Outcome: outcome, Method: string(domain.MethodPOST), URL: job.Target.URL,
+		Status: status, Outcome: outcome, Method: method, URL: job.Target.URL,
 		HTTPStatus: d.BaselineStatus, Note: note, EvidenceIDs: d.EvidenceIDs, Detail: detail,
 		StartedAt: &now, FinishedAt: &now, CreatedAt: now, UpdatedAt: now,
 	}
@@ -410,17 +484,17 @@ func (e *graphQLExecutor) persistGraphQLCase(ctx context.Context, job *domain.Te
 }
 
 func (e *graphQLExecutor) finishGraphQLUnavailable(ctx context.Context, job *domain.TestJob, started time.Time, ep *domain.Endpoint, reason string) error {
-	e.persistGraphQLSkip(ctx, job, ep, started, reason)
+	e.persistGraphQLSkip(ctx, job, ep, started, string(domain.MethodGET), reason)
 	return nil
 }
 
-func (e *graphQLExecutor) finishGraphQLError(ctx context.Context, job *domain.TestJob, started time.Time, ep *domain.Endpoint, outcome domain.TestOutcome, reqErr error) error {
+func (e *graphQLExecutor) finishGraphQLError(ctx context.Context, job *domain.TestJob, started time.Time, ep *domain.Endpoint, method string, outcome domain.TestOutcome, reqErr error) error {
 	if isOutOfScopeRedirectError(reqErr) {
-		e.persistGraphQLSkip(ctx, job, ep, started, "redirect target is outside the scan scope")
+		e.persistGraphQLSkip(ctx, job, ep, started, method, "redirect target is outside the scan scope")
 		return nil
 	}
 	if isTLSRedirectMismatch(reqErr) {
-		e.persistGraphQLSkip(ctx, job, ep, started, "HTTP/HTTPS redirect points at a service that does not speak TLS on this port")
+		e.persistGraphQLSkip(ctx, job, ep, started, method, "HTTP/HTTPS redirect points at a service that does not speak TLS on this port")
 		return nil
 	}
 	now := time.Now()
@@ -430,7 +504,7 @@ func (e *graphQLExecutor) finishGraphQLError(ctx context.Context, job *domain.Te
 	}
 	tc := &domain.TestCase{ID: domain.NewID(), ScanID: job.ScanID, JobID: job.ID, Attempt: job.Attempts,
 		VulnClass: domain.VulnGraphQL, Status: domain.TestCaseFailed, Outcome: outcome,
-		Method: string(domain.MethodPOST), URL: job.Target.URL, Error: msg, Note: "graphql baseline failed: " + msg,
+		Method: method, URL: job.Target.URL, Error: msg, Note: "graphql baseline failed: " + msg,
 		StartedAt: &started, FinishedAt: &now, CreatedAt: started, UpdatedAt: now}
 	if err := e.store.TestCases().Create(ctx, tc); err != nil {
 		return fmt.Errorf("persist failed graphql case: %w", err)
@@ -441,11 +515,14 @@ func (e *graphQLExecutor) finishGraphQLError(ctx context.Context, job *domain.Te
 	return fmt.Errorf("graphql baseline failed: %s", msg)
 }
 
-func (e *graphQLExecutor) persistGraphQLSkip(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, started time.Time, reason string) {
+func (e *graphQLExecutor) persistGraphQLSkip(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, started time.Time, method, reason string) {
+	if method == "" {
+		method = string(domain.MethodGET)
+	}
 	now := time.Now()
 	tc := &domain.TestCase{ID: domain.NewID(), ScanID: job.ScanID, JobID: job.ID, Attempt: job.Attempts,
 		VulnClass: domain.VulnGraphQL, Status: domain.TestCaseSkipped, Outcome: domain.OutcomeSuccess,
-		Method: string(domain.MethodPOST), URL: ep.URL, Note: "graphql skipped: " + reason,
+		Method: method, URL: ep.URL, Note: "graphql skipped: " + reason,
 		StartedAt: &started, FinishedAt: &now, CreatedAt: started, UpdatedAt: now}
 	if err := e.store.TestCases().Create(ctx, tc); err != nil {
 		e.log.Warn("graphql: persist skipped case", "scan", job.ScanID, "err", err)

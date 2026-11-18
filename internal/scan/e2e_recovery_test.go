@@ -126,7 +126,16 @@ func TestE2E_RestartRecoversInterruptedVerification(t *testing.T) {
 	if err := ctrl2.Resume(ctx, sc.ID); err != nil {
 		t.Fatal(err)
 	}
-	done := waitStatus(t, ctrl2, sc.ID, 20*time.Second, isCompleted)
+	// Completion, not merely verification: Resume re-runs discovery, which
+	// re-enqueues the one-time passes, and the DOM-XSS probes alone hold the
+	// single browser worker for ~17s on this fixture (each endpoint's
+	// postMessage source waits out its 4s fallback). Measured post-restart
+	// completion is ~19s on an idle machine and crosses 20s under
+	// `go test -race -p 1 ./...`; the old 20s bound then reported a healthy,
+	// still-progressing scan as stuck (jobs={Running:1} was the last DOM-XSS
+	// probe, not a wedged verify job). The condition is completion, not speed,
+	// so the deadline carries real margin.
+	done := waitStatus(t, ctrl2, sc.ID, 60*time.Second, isCompleted)
 
 	findings, err := db2.Findings().ListByScan(ctx, sc.ID)
 	if err != nil {
@@ -209,7 +218,18 @@ func TestE2E_RepeatedCrashRestartDuringVerification(t *testing.T) {
 	defer mgr.Close()
 	waitStatus(t, ctrl, sc.ID, 30*time.Second, isCompleted)
 
-	findings := assertScanIntegrity(t, db, ev, q, sc.ID, 7, 1) // root "/" (3 default Header IPs, none reflecting) + "/confirmed" (1 reflecting query "q" + 3 default Header IPs, none reflecting)
+	// Ten injection points, not seven: discovery registers THREE endpoints on
+	// this fixture — "/" (the operator seed), "/confirmed?q=hi" (the crawler's
+	// link) and "/confirmed" (the browser-network source, after the SPA
+	// path-route renderer derives that route from the same link and navigates
+	// to it). Each endpoint gets the 3 default Header injection points; only
+	// the crawler's "/confirmed?q=hi" also gets the reflecting query "q".
+	//
+	// The third endpoint is ordinary discovery, not state duplicated by the
+	// restarts: a crash-free run of this same fixture registers the identical
+	// three endpoints and ten injection points, so repeating the crash neither
+	// adds nor loses a registration.
+	findings := assertScanIntegrity(t, db, ev, q, sc.ID, 10, 1)
 	if len(findings) != 1 || findings[0].Verdict != domain.VerdictConfirmed || findings[0].Provenance.VerifiedAt == nil {
 		t.Fatalf("want one confirmed, verified finding after %d crashes, got %+v", crashes, findings)
 	}

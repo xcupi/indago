@@ -133,13 +133,15 @@ Measured live: PortSwigger case 28 (`Access control: header path override reache
 /admin`) and case 29 (`Access control: method-based bypass at GET /admin-roles`),
 both confirmed; a fixture that denies both records Rejected and creates no finding.
 
-## Cases 35/36: the admin ACTION step (opt-in, non-mutating)
+## Cases 35/36: the admin ACTION step (double opt-in)
 
 Both labs change a role through a request the caller should not be able to make.
-The probe names a username that **does not exist** (`indago-probe-nonexistent-user`),
-so whatever the server answers, no role can change. It is opt-in
-(`-admin-step-probe` / `enable_admin_step_probe`) and requires an authenticated
-session.
+The probe names a username that **does not exist**
+(`indago-probe-nonexistent-user`); that is the detection premise, not a mutation
+guarantee. It requires **both** the server's `-allow-state-changing` opt-in and
+the per-scan `-admin-step-probe` / `enable_admin_step_probe` opt-in, plus an
+authenticated session. `skip_write_endpoints` suppresses it as well; the per-scan
+flag alone never authorizes a POST.
 
     baseline   POST <origin>/admin-roles  action=upgrade&username=<probe>   → refused (401/403)
     confirm    + confirmed=true                                           → case 35
