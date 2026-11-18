@@ -37,7 +37,10 @@ type ExecutorConfig struct {
 	// AllowStateChanging permits executing methods other than GET/HEAD/OPTIONS
 	// (POST, PUT, PATCH, DELETE). Off by default: replaying discovered forms
 	// against a live target can change its state, so it is an explicit opt-in.
-	// Jobs for such endpoints are recorded as SKIPPED, not failed.
+	// Jobs for such endpoints are recorded as SKIPPED, not failed. The same flag
+	// gates the GraphQL POST probes and the access-control POST/TRACE bypass
+	// probes: without it those engines run their GET checks and record the
+	// non-GET probes as skipped.
 	AllowStateChanging bool
 	// SkipWriteEndpoints keeps payload-bearing jobs away from endpoints that
 	// look like writes even when AllowStateChanging is on. Set from
@@ -787,6 +790,7 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 	q := u.Query()
 	form := url.Values{}
 	jsonBody := map[string]json.RawMessage{}
+	jsonVars := map[string]json.RawMessage{}
 	var headerOverride map[string]string
 	var cookieOverride []*http.Cookie
 	// rawQuery/hasRawQuery carry a raw query-string injection (LocationRawQuery):
@@ -828,15 +832,21 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 		case domain.LocationForm:
 			form.Set(p.Name, val)
 		case domain.LocationJSON:
-			if !injected && p.Source == domain.SourceBrowserNetwork && json.Valid([]byte(p.Example)) {
-				// Network discovery stores a bounded raw JSON value in Example so
-				// non-focused fields keep their original JSON type/shape.
-				jsonBody[p.Name] = json.RawMessage(p.Example)
+			var raw json.RawMessage
+			if !injected && (p.Source == domain.SourceBrowserNetwork || strings.HasPrefix(p.FormGroup, "gql:")) && json.Valid([]byte(p.Example)) {
+				// Network discovery and GraphQL introspection store typed JSON
+				// literals in Example so non-focused fields keep their original type/shape.
+				raw = json.RawMessage(p.Example)
 			} else {
-				raw, err := json.Marshal(val)
+				var err error
+				raw, err = json.Marshal(val)
 				if err != nil {
 					return nil, err
 				}
+			}
+			if varName, ok := strings.CutPrefix(p.Name, "variables."); ok && varName != "" {
+				jsonVars[varName] = raw
+			} else {
 				jsonBody[p.Name] = raw
 			}
 		case domain.LocationHeader:
@@ -921,7 +931,14 @@ func buildRequest(ep *domain.Endpoint, params []*domain.Parameter, inj *injectio
 	case len(form) > 0:
 		req.Body = []byte(form.Encode())
 		req.ContentType = "application/x-www-form-urlencoded"
-	case len(jsonBody) > 0:
+	case len(jsonBody) > 0 || len(jsonVars) > 0:
+		if len(jsonVars) > 0 {
+			rawVars, err := json.Marshal(jsonVars)
+			if err != nil {
+				return nil, err
+			}
+			jsonBody["variables"] = rawVars
+		}
 		b, err := json.Marshal(jsonBody) // map keys are marshaled sorted
 		if err != nil {
 			return nil, err
@@ -1153,6 +1170,7 @@ func dumpRequest(c *httpengine.CapturedRequest) []byte {
 	var b bytes.Buffer
 	headers := c.Headers.Clone()
 	redactAuthorizationHeader(headers)
+	redactRequestCookieValues(headers)
 	target := c.URL
 	host := ""
 	if u, err := url.Parse(c.URL); err == nil {
@@ -1191,7 +1209,9 @@ func dumpResponse(r *httpengine.Response) []byte {
 	}
 	statusText := strings.TrimSpace(strings.TrimPrefix(r.StatusText, fmt.Sprint(r.Status)))
 	fmt.Fprintf(&b, "%s %d %s\r\n", proto, r.Status, statusText)
-	writeHeaders(&b, r.Headers)
+	headers := r.Headers.Clone()
+	redactSetCookieValues(headers)
+	writeHeaders(&b, headers)
 	b.WriteString("\r\n")
 	b.Write(r.Body)
 	return b.Bytes()

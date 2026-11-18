@@ -106,6 +106,11 @@ func (s *wellKnownSource) Run(ctx context.Context, in Input, sink Sink) error {
 			return err
 		}
 	}
+	if !s.cfg.SkipGraphQLProbe && s.cfg.ReconLevel != ReconOff {
+		if err := s.introspectGraphQLEndpoints(ctx, in, sink, map[string]bool{}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -138,7 +143,7 @@ func (s *wellKnownSource) readSelfDescribingDocuments(ctx context.Context, in In
 			if !sameHost(base, info) || !in.Scope.Permits(info.Canonical).Allowed {
 				continue
 			}
-			if !allowFetch(sink, info.Canonical, domain.SourceWellKnown) {
+			if !allowFetch(sink, info.Canonical, domain.SourceWellKnown, domain.MethodGET) {
 				continue
 			}
 			seen[info.Canonical] = true
@@ -192,7 +197,7 @@ func (s *wellKnownSource) probeGraphQL(ctx context.Context, in Input, sink Sink,
 		}
 		// Same pre-request veto every other source honours: a session-
 		// terminating path must not be requested just to classify it.
-		if !allowFetch(sink, info.Canonical, domain.SourceWellKnown) {
+		if !allowFetch(sink, info.Canonical, domain.SourceWellKnown, domain.MethodGET) {
 			continue
 		}
 		if err := in.wait(ctx); err != nil {
