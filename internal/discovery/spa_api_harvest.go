@@ -21,6 +21,11 @@ package discovery
 //     "/community/") and with the root "/". The prefix is evidence, not a
 //     guess: when the browser has already called "/identity/api/v2/...", a
 //     bundle literal "api/v2/user" means "/identity/api/v2/user".
+//   - when a view's own API call was never observed, the service prefixes a
+//     bundle declares itself (a quoted "workshop/" base, an absolute
+//     "/workshop/api/..." path). Those are weaker evidence, so they are only
+//     tried after every observed prefix and the probe still has to confirm
+//     the derived path; the combined prefix set is bounded (maxServicePrefixes).
 //
 // Safety boundaries:
 //
@@ -63,9 +68,10 @@ const (
 	// linear, but a bundle can hold thousands of quoted strings and only the
 	// first few thousand are worth examining.
 	maxBundleAPIMatchScan = 4096
-	// maxObservedServicePrefixes bounds how many service prefixes one page's
-	// network log may contribute.
-	maxObservedServicePrefixes = 8
+	// maxServicePrefixes bounds how many service prefixes one page may
+	// contribute, whether the browser observed them, a bundle declared them,
+	// or both: every prefix multiplies the relative "api/..." probe set.
+	maxServicePrefixes = 8
 	// maxServicePrefixLen bounds a derived prefix ("/workshop/") so a deep path
 	// cannot become a prefix.
 	maxServicePrefixLen = 64
@@ -92,7 +98,25 @@ var (
 	// servicePrefixRE keeps a prefix derived from an observed URL path
 	// path-shaped: ASCII, no markup, no spaces.
 	servicePrefixRE = regexp.MustCompile(`^/[A-Za-z0-9._~!$&()*+,;=:@%/-]+$`)
+	// bundleServiceLitRE matches a quoted single-segment literal ending in a
+	// slash ("workshop/", 'identity/') — the shape a bundle writes when it
+	// keeps a per-service base URL. It is only consulted for a bundle that
+	// also carries a relative "api/..." literal.
+	bundleServiceLitRE = regexp.MustCompile(`[\"']([a-z][a-z0-9_-]{1,20})/[\"']`)
+	// bundleServiceAbsPrefixRE matches an absolute service-prefixed API path,
+	// where the service segment sits directly in front of "/api/"
+	// ("/workshop/api/...").
+	bundleServiceAbsPrefixRE = regexp.MustCompile(`[\"']/([a-z][a-z0-9_-]{1,20})/api/`)
 )
+
+// bundleServiceSegmentReserved lists first segments that name build output,
+// asset folders or the API surface itself rather than a service. Probing them
+// would buy nothing and blur the "this prefix is a service" claim.
+var bundleServiceSegmentReserved = map[string]struct{}{
+	"api": {}, "apis": {}, "graphql": {}, "static": {}, "assets": {}, "asset": {},
+	"public": {}, "dist": {}, "build": {}, "src": {}, "node_modules": {},
+	"img": {}, "image": {}, "images": {}, "fonts": {}, "css": {}, "js": {}, "scripts": {},
+}
 
 // extractBundleAPIPaths returns the API-shaped path literals one JavaScript
 // bundle names, in source order and deduplicated. Absolute and relative
@@ -244,7 +268,7 @@ func observedServicePrefixes(network []browser.NetworkEvent, base string) []stri
 		if _, dup := seen[prefix]; dup {
 			return
 		}
-		if len(out) >= maxObservedServicePrefixes {
+		if len(out) >= maxServicePrefixes {
 			return
 		}
 		seen[prefix] = struct{}{}
@@ -264,10 +288,100 @@ func observedServicePrefixes(network []browser.NetworkEvent, base string) []stri
 	return out
 }
 
+// bundleServicePrefixes reads the service prefixes a bundle declares itself.
+// It only answers for a bundle that also carries a relative "api/..." literal:
+// without one there is nothing to prefix. Two shapes are evidence of a service
+// base: an absolute service-prefixed API path ("/workshop/api/shop/products")
+// and a quoted single-segment literal ending in a slash ("identity/",
+// 'community/') — the shape a per-service base URL takes in code.
+//
+// This is weaker evidence than observedServicePrefixes: a quoted "workshop/"
+// could be a folder or a translation key. The caller therefore keeps observed
+// prefixes first, and every derived path still has to be confirmed by a probe
+// before it is registered.
+func bundleServicePrefixes(bodies []string) []string {
+	out := make([]string, 0, maxServicePrefixes)
+	seen := make(map[string]struct{}, maxServicePrefixes)
+	add := func(segment string) {
+		if len(out) >= maxServicePrefixes {
+			return
+		}
+		segment = strings.ToLower(strings.TrimSpace(segment))
+		if !usableBundleServiceSegment(segment) {
+			return
+		}
+		prefix := "/" + segment + "/"
+		if _, dup := seen[prefix]; dup {
+			return
+		}
+		seen[prefix] = struct{}{}
+		out = append(out, prefix)
+	}
+	for _, body := range bodies {
+		if !bundleAPIRelativeLitRE.MatchString(body) {
+			continue // no relative API literal: a prefix has nothing to carry
+		}
+		// A full service path is the stronger shape, so it is read first.
+		for _, m := range bundleServiceAbsPrefixRE.FindAllStringSubmatch(body, maxBundleAPIMatchScan) {
+			add(m[1])
+		}
+		for _, m := range bundleServiceLitRE.FindAllStringSubmatch(body, maxBundleAPIMatchScan) {
+			add(m[1])
+		}
+		if len(out) >= maxServicePrefixes {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// usableBundleServiceSegment rejects a candidate service segment that cannot be
+// a service name: reserved build/asset words, an API version, or anything the
+// quoting scan may have mistaken for a path.
+func usableBundleServiceSegment(segment string) bool {
+	if len(segment) < 2 || len(segment) > 21 {
+		return false
+	}
+	if apiVersionSegmentRE.MatchString(segment) {
+		return false
+	}
+	_, reserved := bundleServiceSegmentReserved[segment]
+	return !reserved
+}
+
+// mergeServicePrefixes puts the browser-observed prefixes first — they are
+// evidence, the application really served those paths — and appends the
+// bundle-declared ones, deduplicated and bounded. Observed-first is what keeps
+// a bundle-only guess from displacing a prefix the page proved.
+func mergeServicePrefixes(observed, declared []string) []string {
+	out := make([]string, 0, len(observed)+len(declared))
+	seen := make(map[string]struct{}, cap(out))
+	for _, group := range [][]string{observed, declared} {
+		for _, prefix := range group {
+			if prefix == "" {
+				continue
+			}
+			if _, dup := seen[prefix]; dup {
+				continue
+			}
+			if len(out) >= maxServicePrefixes {
+				return out
+			}
+			seen[prefix] = struct{}{}
+			out = append(out, prefix)
+		}
+	}
+	return out
+}
+
 // bundleAPIProbeCandidates expands harvested literals into concrete
 // root-relative paths to probe. Absolute literals are already complete.
-// Relative "api/..." literals are combined with each observed service prefix
-// first (the evidence-backed reading) and with the root last (the fallback).
+// Relative "api/..." literals are combined with each service prefix first
+// (observed prefixes before bundle-declared ones, the evidence-backed reading)
+// and with the root last (the fallback).
 func bundleAPIProbeCandidates(literals []bundleAPILiteral, prefixes []string) []string {
 	out := make([]string, 0, len(literals)*(len(prefixes)+1))
 	seen := make(map[string]struct{}, cap(out))
@@ -385,7 +499,10 @@ func (n *networkSource) harvestScriptAPIs(ctx context.Context, in Input, sink Si
 	if len(literals) == 0 {
 		return nil
 	}
-	candidates := bundleAPIProbeCandidates(literals, observedServicePrefixes(network, base))
+	candidates := bundleAPIProbeCandidates(literals, mergeServicePrefixes(
+		observedServicePrefixes(network, base),
+		bundleServicePrefixes(bundles),
+	))
 	if len(candidates) == 0 {
 		return nil
 	}
