@@ -130,6 +130,13 @@ func TestIntegrationScopeGatePreservesBodyReplay(t *testing.T) {
 				}
 				seen <- request{r.Method, string(body), r.Header.Get("Content-Type"), value}
 				w.Header().Set("Content-Type", "text/html")
+				if r.Method != http.MethodPost {
+					// The same-origin warm-up GET only needs a document. Keep it
+					// script-free so the execution assertion below can only be
+					// satisfied by the replayed POST response.
+					fmt.Fprint(w, `<!doctype html><body>warm-up</body>`)
+					return
+				}
 				fmt.Fprint(w, `<!doctype html><body>replayed<script>indScopeReplayMarker</script>`)
 			}))
 			t.Logf("OWNED_LISTENER=%s", srv.URL)
@@ -156,19 +163,42 @@ func TestIntegrationScopeGatePreservesBodyReplay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			select {
-			case got := <-seen:
-				body, media := "q=one+%26+two", "application/x-www-form-urlencoded"
-				if kind == "json" {
-					body, media = `{"q":"one & two","n":2}`, "application/json"
+			// A POST/form replay first warms the page up on the target's own
+			// origin with one readable GET (without it the form would be
+			// submitted cross-site from about:blank and lose SameSite=Lax
+			// cookies — see browser.Page.NavigateForm), so the fixture
+			// legitimately sees that GET before the POST asserted on here.
+			var warmUps []request
+			var got request
+			deadline := time.After(2 * time.Second)
+		readEvents:
+			for {
+				select {
+				case ev := <-seen:
+					if ev.method == "POST" {
+						got = ev
+						break readEvents
+					}
+					warmUps = append(warmUps, ev)
+				case <-deadline:
+					t.Fatal("replay did not reach fixture")
 				}
-				if got.method != "POST" || got.body != body || !strings.HasPrefix(got.contentType, media) || got.cookie != "dummy" {
-					t.Fatalf("replay mismatch: %+v", got)
-				}
-				t.Logf("RESULT method=%s body=%q media=%s cookie_present=%v", got.method, got.body, got.contentType, got.cookie != "")
-			case <-time.After(time.Second):
-				t.Fatal("replay did not reach fixture")
 			}
+			if kind == "form" {
+				if len(warmUps) != 1 || warmUps[0].method != "GET" {
+					t.Fatalf("form replay warm-up requests = %+v, want exactly one same-origin GET", warmUps)
+				}
+			} else if len(warmUps) != 0 {
+				t.Fatalf("unexpected requests before the JSON replay: %+v", warmUps)
+			}
+			body, media := "q=one+%26+two", "application/x-www-form-urlencoded"
+			if kind == "json" {
+				body, media = `{"q":"one & two","n":2}`, "application/json"
+			}
+			if got.method != "POST" || got.body != body || !strings.HasPrefix(got.contentType, media) || got.cookie != "dummy" {
+				t.Fatalf("replay mismatch: %+v", got)
+			}
+			t.Logf("RESULT kind=%s warmUps=%d method=%s body=%q media=%s cookie_present=%v", kind, len(warmUps), got.method, got.body, got.contentType, got.cookie != "")
 			if !strings.Contains(strings.Join(p.PageErrors(), "\n"), "indScopeReplayMarker is not defined") {
 				t.Fatalf("replayed response did not execute: %v", p.PageErrors())
 			}

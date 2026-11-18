@@ -469,6 +469,13 @@ func (p *pwPage) GotoJSON(rawURL string, body []byte, contentType, waitUntil str
 	return status, finalURL, nil
 }
 
+// CurrentURL reports the URL of the document the page currently has loaded
+// (Playwright's Page.URL — "about:blank" for a fresh page). NavigateForm uses
+// it through the OPTIONAL currentURLReporter interface to tell whether the page
+// is already on the form target's origin, so a caller that navigated there
+// first does not pay for a second warm-up (see manager.go warmUpFormOrigin).
+func (p *pwPage) CurrentURL() string { return p.p.URL() }
+
 // GotoForm submits a real, top-level POST navigation by rendering a throwaway
 // auto-submitting <form> (method=POST, action=url) whose hidden inputs carry
 // fields, then letting the BROWSER submit it — the same mechanism an ordinary
