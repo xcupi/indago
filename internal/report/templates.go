@@ -109,13 +109,13 @@ var classIntelByClass = map[domain.VulnClass]classIntel{
 		References: []string{"https://cwe.mitre.org/data/definitions/639.html", "https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/"},
 	},
 	domain.VulnAccessControl: {
-		CWE:  "CWE-284",
+		CWE:  "CWE-862",
 		Name: "Broken access control",
 		Impact: "A privileged surface or action is reachable by a caller who should be denied, enabling " +
 			"function-level escalation (admin actions, role changes, protected endpoints).",
 		Remediation: "Enforce authorization server-side on every route and method (deny by default), and do " +
 			"not trust client-supplied path/method/header overrides for the decision.",
-		References: []string{"https://cwe.mitre.org/data/definitions/284.html", "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/05-Authorization_Testing/"},
+		References: []string{"https://cwe.mitre.org/data/definitions/862.html", "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/05-Authorization_Testing/"},
 	},
 	domain.VulnOpenRedirect: {
 		CWE:  "CWE-601",
