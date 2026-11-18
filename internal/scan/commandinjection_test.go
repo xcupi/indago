@@ -267,3 +267,72 @@ func TestCommandInjectionBaselineGateStatuses(t *testing.T) {
 		}
 	}
 }
+
+// The output-redirection confirmation writes a marker file into a directory the
+// target serves, so it is a persistent side effect and must be gated behind
+// AllowStateChanging && !SkipWriteEndpoints. The enabled case is the control:
+// it proves the gate, not an early return, is what keeps the requests off the
+// wire in the two suppressed cases.
+func TestCommandInjectionOutputRedirectionRequiresStateChangingOptIn(t *testing.T) {
+	var hits atomic.Int32
+	var expected atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if strings.Contains(strings.ToLower(r.URL.Path), "image") {
+			value, _ := expected.Load().(string)
+			fmt.Fprint(w, value)
+			return
+		}
+		// The write payload computes indago<N>$((17*23)); remember what the
+		// read of the file it names must return.
+		if m := commandExpr.FindStringSubmatch(r.URL.Query().Get("cmd")); m != nil {
+			a, _ := strconv.Atoi(m[2])
+			b, _ := strconv.Atoi(m[3])
+			expected.Store(fmt.Sprintf("indago%s%d", m[1], a*b))
+		}
+		fmt.Fprint(w, "stock available")
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/product?cmd=1", domain.MethodGET)
+	focus := env.param(ep, "cmd", domain.LocationQuery, "1")
+	reader := env.endpoint(srv.URL+"/images/show?file=x.jpg", domain.MethodGET)
+	env.param(reader, "file", domain.LocationQuery, "x.jpg")
+
+	cases := []struct {
+		name    string
+		cfg     ExecutorConfig
+		enabled bool
+	}{
+		{"AllowStateChanging off", ExecutorConfig{}, false},
+		{"SkipWriteEndpoints on", ExecutorConfig{AllowStateChanging: true, SkipWriteEndpoints: true}, false},
+		{"both opt-ins on", ExecutorConfig{AllowStateChanging: true}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hits.Store(0)
+			expected.Store("")
+			ex := newCommandInjectionExecutor(env.st, scopedClient(t, openScope()), env.ev, tc.cfg, execLog(), nil)
+			if got := ex.outputRedirectionEnabled(); got != tc.enabled {
+				t.Fatalf("outputRedirectionEnabled = %v, want %v", got, tc.enabled)
+			}
+			job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobCommandInjection}
+			d := commandInjectionDetail{}
+			got := ex.tryOutputRedirection(context.Background(), job, ep, focus, "1", &d)
+
+			if tc.enabled {
+				if !got || hits.Load() == 0 {
+					t.Fatalf("tryOutputRedirection = %v with %d requests, want it to run and confirm when both opt-ins are on", got, hits.Load())
+				}
+				return
+			}
+			if got {
+				t.Fatal("tryOutputRedirection confirmed, want false")
+			}
+			if hits.Load() != 0 {
+				t.Fatalf("requests = %d, want 0: the file-creating probe must not reach the target", hits.Load())
+			}
+		})
+	}
+}

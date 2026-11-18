@@ -70,6 +70,9 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	// other scan context: non-mutating unless the operator explicitly allowed
 	// state-changing requests.
 	dom.allowStateChanging = execCfg.AllowStateChanging
+	// SkipWriteEndpoints suppresses the engine's one persistent write (the
+	// comment-form clobbering probe) even when AllowStateChanging is on.
+	dom.skipWriteEndpoints = execCfg.SkipWriteEndpoints
 	// The SAME scope-enforcing engine every other job uses, so the DOM pass's
 	// content-type preflight is rate-limited, carries the scan's session, and is
 	// scope-checked exactly like its browser navigations are. nil is tolerated
