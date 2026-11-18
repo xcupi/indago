@@ -642,7 +642,19 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 		// leading slash as a path-based route.
 		hashRoutes := append(extractSPARoutes(res.HTML), n.harvestRouteAPIs(ctx, in, sink, info.Canonical, res.Network)...)
 		routes := hashRouteEntries(hashRoutes)
-		routes = append(routes, n.harvestScriptRoutes(ctx, in, sink, info.Canonical, res.HTML, res.Network)...)
+		// The application's own bundles are downloaded ONCE here and inspected
+		// for three things: router declarations (route harvest), declared
+		// XHR/fetch shapes (registered passively), and API path literals
+		// (probed read-only). Re-fetching them per concern would multiply the
+		// scan's traffic against a target that serves identical bytes.
+		bundleBodies := n.inspectScriptBundles(ctx, in, sink, info.Canonical, res.Network)
+		routes = append(routes, harvestScriptRoutes(res.HTML, bundleBodies)...)
+		if err := n.harvestScriptAPIs(ctx, in, sink, info.Canonical, res.Network, bundleBodies); err != nil {
+			if errors.Is(err, ErrLimitReached) {
+				return nil
+			}
+			return err
+		}
 		if err := n.renderSPARoutes(ctx, in, sink, info.Canonical, routes, seenHTML, observedGETs); err != nil {
 			if errors.Is(err, ErrLimitReached) {
 				return nil
@@ -1129,41 +1141,64 @@ func spaWantsScriptPathRoutes(html string, routes int) bool {
 	return routes < maxSPARouteRenders || looksLikeSPAShell(html)
 }
 
+// inspectScriptBundles downloads up to maxSPAScriptBundles same-origin,
+// non-vendor JavaScript assets once and returns their inspected bodies.
+//
+// The bodies feed the caller's route and API-path harvesters, and are scanned
+// here for declared XHR/fetch shapes. Reading a bundle is the only way to
+// recover a request shape whose method and body are declared in code rather
+// than observed on the wire, and the browser network log names the bundle but
+// never its contents.
+//
+// Bounded and fail-soft: a per-render bundle count, a per-bundle body cap, the
+// extractor's own per-source cap, and scope + fetch guards on every bundle. No
+// error is returned — losing the harvest costs candidates, not the scan.
+// Registration is passive: no declared endpoint is requested here, and a
+// body-carrying method it names is still gated by the executor's opt-in.
+func (n *networkSource) inspectScriptBundles(ctx context.Context, in Input, sink Sink, base string, network []browser.NetworkEvent) []string {
+	bodies := make([]string, 0, maxSPAScriptBundles)
+	if n.engine == nil {
+		return bodies
+	}
+	for _, script := range spaScriptBundles(base, network) {
+		if !in.Scope.Permits(script).Allowed || !allowFetch(sink, script, domain.SourceBrowserNetwork, domain.MethodGET) {
+			continue
+		}
+		if err := in.wait(ctx); err != nil {
+			return bodies
+		}
+		resp, err := n.engine.Do(ctx, httpengine.GET(script))
+		if err != nil || resp == nil || resp.Status >= 400 || len(resp.Body) == 0 {
+			continue
+		}
+		body := resp.Body
+		if len(body) > maxSPAScriptBodyBytes {
+			body = body[:maxSPAScriptBodyBytes]
+		}
+		bodies = append(bodies, string(body))
+		if err := emitDeclaredRequestShapes(ctx, in, sink, base, ExtractScriptRequestsFromJS(string(body))); err != nil {
+			return bodies
+		}
+	}
+	return bodies
+}
+
 // harvestScriptRoutes reads the application's own JavaScript for routes the
 // seed HTML does not link. A React/Vue/Angular bundle declares its router as
 // path literals ("path: 'dashboard'") and often embeds hash routes; the browser
 // network log names the bundles but never their contents.
 //
-// Up to maxSPAScriptBundles same-origin, non-vendor bundles are fetched through
-// the scan's scoped, authenticated engine (never a second identity) and
-// inspected, bounded to maxSPAScriptBodyBytes each. The seed document's inline
-// script and links are inspected too.
+// bundles are the bodies inspectScriptBundles already downloaded for this
+// render (bounded to maxSPAScriptBodyBytes each); the seed document's inline
+// script and links are inspected too. Nothing is fetched here.
 //
 // The result is ready for renderSPARoutes: hash entries keep their '#' marker,
 // path routes stay "/slug". When the page or its bundle uses hash routing the
 // fragments are offered first; a BrowserRouter-style page offers its path
 // routes first. Nothing here registers an endpoint or makes a verdict.
-func (n *networkSource) harvestScriptRoutes(ctx context.Context, in Input, sink Sink, base, html string, network []browser.NetworkEvent) []string {
-	bodies := make([]string, 0, maxSPAScriptBundles+1)
-	if n.engine != nil {
-		for _, script := range spaScriptBundles(base, network) {
-			if !in.Scope.Permits(script).Allowed || !allowFetch(sink, script, domain.SourceBrowserNetwork, domain.MethodGET) {
-				continue
-			}
-			if err := in.wait(ctx); err != nil {
-				return nil
-			}
-			resp, err := n.engine.Do(ctx, httpengine.GET(script))
-			if err != nil || resp == nil || resp.Status >= 400 || len(resp.Body) == 0 {
-				continue
-			}
-			body := resp.Body
-			if len(body) > maxSPAScriptBodyBytes {
-				body = body[:maxSPAScriptBodyBytes]
-			}
-			bodies = append(bodies, string(body))
-		}
-	}
+func harvestScriptRoutes(html string, bundles []string) []string {
+	bodies := make([]string, 0, len(bundles)+1)
+	bodies = append(bodies, bundles...)
 	// The shell's own inline script is a router declaration too: many SPA
 	// templates inline the route table before any bundle loads.
 	bodies = append(bodies, html)

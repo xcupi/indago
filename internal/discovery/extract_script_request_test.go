@@ -81,6 +81,45 @@ fetch('/api/ping');
 	}
 }
 
+// An SPA ships its API calls in an external bundle, not in an inline <script>
+// tag: the raw JavaScript must parse exactly like a document's script body.
+func TestExtractScriptRequestsFromJSRawBundle(t *testing.T) {
+	js := `!function(){var x=new XMLHttpRequest();x.open("POST","/workshop/api/report");` +
+		`x.setRequestHeader("Content-Type","application/json");x.send("a=1");}();` +
+		`var login=function(){return fetch("api/v2/user/login",{` +
+		`method:"PUT",headers:{"Content-Type":"application/json"},body:"{}"})};` +
+		`fetch("/community/api/v2/community/posts");`
+
+	got := discovery.ExtractScriptRequestsFromJS(js)
+	if len(got) != 3 {
+		t.Fatalf("requests = %+v, want 3", got)
+	}
+	if got[0].URL != "/workshop/api/report" || got[0].Method != domain.MethodPOST ||
+		got[0].ContentType != "application/json" || got[0].Body != "a=1" {
+		t.Fatalf("XHR shape = %+v", got[0])
+	}
+	if got[1].URL != "api/v2/user/login" || got[1].Method != domain.MethodPUT || got[1].Body != "{}" {
+		t.Fatalf("relative fetch shape = %+v", got[1])
+	}
+	if got[2].URL != "/community/api/v2/community/posts" || got[2].Method != domain.MethodGET {
+		t.Fatalf("fetch GET shape = %+v", got[2])
+	}
+}
+
+// The raw-JS entry point must not require (or invent) <script> wrappers, and it
+// must be bounded and deduplicated exactly like the document extractor.
+func TestExtractScriptRequestsFromJSBoundsAndDedupes(t *testing.T) {
+	js := `fetch("/api/x");fetch('/api/x');` +
+		`var a=new XMLHttpRequest();a.open("POST","/api/x");a.send("<x/>");`
+	got := discovery.ExtractScriptRequestsFromJS(js)
+	if len(got) != 2 { // GET /api/x and POST /api/x are distinct shapes
+		t.Fatalf("requests = %+v, want 2", got)
+	}
+	if got := discovery.ExtractScriptRequestsFromJS(""); got != nil {
+		t.Fatalf("empty input = %+v, want nil", got)
+	}
+}
+
 func TestExtractScriptRequestsSkipsComputedShapes(t *testing.T) {
 	// A URL held in a variable, a template-literal URL and an absolute
 	// third-party URL are not literal same-origin shapes this extractor can
