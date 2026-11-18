@@ -174,6 +174,50 @@ func TestEnqueueVerificationOnReflectedCandidate(t *testing.T) {
 	}
 }
 
+// A candidate whose site was classified in a non-markup response must never
+// become a finding. The planner no longer plans one (see
+// detection.PlanCandidates), but a scan upgraded while such a candidate job was
+// already queued would still execute it: this gate keeps that stale job from
+// creating a Pending finding and a browser verification that can only end as an
+// inert reflection — or, whenever the replay does not reproduce the echo, as the
+// misleading "marker was not found in the rendered page" Inconclusive.
+func TestEnqueueVerificationSkipsNonMarkupCandidate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<p>"+r.URL.Query().Get("q")+"</p>")
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/s", domain.MethodGET)
+	focus := env.param(ep, "q", domain.LocationQuery, "hi")
+	ip := env.injection(ep, focus)
+	m := detection.NewProbe(env.scanID, ip.ID).Token
+
+	q := queue.NewMemory()
+	ex := env.executorQ(scopedClient(t, openScope()), q, ExecutorConfig{})
+	cand := detection.Candidate{
+		Source: detection.SourceBuiltin, Category: detection.CatUnknown,
+		Context: detection.CtxUnknown, ContextSub: detection.SubNonHTMLResponse,
+		Value: "<svg onload=" + m + ">", Priority: 30, DedupKey: "non-markup",
+	}
+	job := env.candJob(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, cand)
+	if err := ex.Handle(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+
+	findings, err := env.st.Findings().ListByScan(context.Background(), env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("a non-markup candidate must not create a finding; got %+v", findings)
+	}
+	if st, _ := q.Stats(context.Background(), env.scanID); st.Total() != 0 {
+		t.Fatalf("no verify job may be enqueued for a non-markup candidate, queue total = %d", st.Total())
+	}
+}
+
 // A candidate reflecting on a state-changing JSON endpoint still gets a
 // Pending finding and a browser-verify job when state-changing requests are
 // explicitly enabled. The verifier must replay the same JSON request in a real

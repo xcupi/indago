@@ -49,6 +49,19 @@ library:
 | `css` | `<style>` body, `style=""` attribute | `</style><svg onload=M>` for the element body; quote-aware `"><svg onload=M>` for the attribute (closing the attribute's quote and the tag reaches markup regardless of whether the CSS before it is valid — same mechanism as any other attribute breakout) |
 | `unknown_mixed` | unclassifiable / ambiguous | generic low-priority markup probes |
 
+A reflection site whose response is **not a markup document at all** (JSON,
+plain text, images, binary — the analyzer's `unknown:non_html_response` with
+high confidence) is recorded as evidence but **never planned**: the browser
+never parses those bytes as HTML/JS/CSS, so no breakout can execute there. This
+is what keeps an API response that echoes a probe out of the finding list —
+without it, each such site produced generic breakouts whose browser verification
+could only end as an inert reflection or, whenever the replay did not reproduce
+the echo, as a misleading `inconclusive` finding. The rule follows the actual
+media type, not the body's shape: the same JSON-looking body served as
+`text/html` *is* parsed as HTML and is planned and verified normally. A client
+that consumes a JSON response into an HTML sink is DOM XSS and belongs to the
+DOM-XSS engine, which tests the HTML page performing the fetch.
+
 ### Trigger classes and what "rejected" means
 
 Every built-in candidate carries a `Trigger`:

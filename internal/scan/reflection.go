@@ -162,6 +162,9 @@ func (e *executor) runReflection(ctx context.Context, tc *domain.TestCase, ep *d
 		if n := len(report.Plan.Candidates); n > 0 {
 			r.note += fmt.Sprintf("; planned %d candidate(s)", n)
 		}
+		if n := report.Plan.NonMarkupSites; n > 0 && len(report.Plan.Candidates) == 0 {
+			r.note += nonMarkupNote(&report)
+		}
 		if suspected {
 			r.note += note2
 		}
@@ -235,6 +238,20 @@ func contextSummary(rep *detection.ReflectionReport) string {
 		}
 	}
 	return "context: " + strings.Join(out, ", ")
+}
+
+// nonMarkupNote explains a reflected marker that produced no candidate because
+// its response is not a markup document (see
+// detection.ContextAnalysis.NonMarkupResponse). The reflection is still kept as
+// evidence — the probe, the site, the context and the response are all recorded —
+// but nothing a browser parses can execute it, so there is no reflected-XSS
+// candidate to send (and no browser verification to run).
+func nonMarkupNote(rep *detection.ReflectionReport) string {
+	ct := strings.TrimSpace(rep.ContentType)
+	if ct == "" {
+		ct = "non-markup"
+	}
+	return fmt.Sprintf("; no reflected-XSS candidate planned: the response Content-Type is %q, which a browser does not parse as markup, so a reflected value there cannot execute (a client-side consumer of it would be DOM XSS, not reflected XSS)", ct)
 }
 
 // finalizeReflection attaches the evidence references to the report — including

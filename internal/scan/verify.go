@@ -85,6 +85,19 @@ func (e *executor) enqueueVerification(ctx context.Context, job *domain.TestJob,
 	if e.store == nil {
 		return
 	}
+	// A reflection site in a response the browser does not parse as markup
+	// (JSON, plain text, binary) cannot execute a breakout — see
+	// detection.ContextAnalysis.NonMarkupResponse. The planner no longer plans
+	// candidates for such a site, but a candidate job queued by an earlier scan
+	// can still reach here after an upgrade, so the finding gate enforces the
+	// same rule: a Pending finding would only feed a verification that must end
+	// as an inert reflection, or as a misleading Inconclusive whenever the
+	// replay does not reproduce the echo.
+	if cand.NonMarkupResponse() {
+		e.log.Info("enqueue verification: candidate response is not markup; no finding created",
+			"job", job.ID, "candidate", cand.DedupKey, "context_sub", cand.ContextSub)
+		return
+	}
 	// A finding is only ever created from a PLANNED breakout, which always
 	// embeds this injection point's unique marker. A value without it — an
 	// ordinary baseline value such as the observed "hello" — is not a candidate

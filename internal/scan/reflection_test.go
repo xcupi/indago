@@ -19,6 +19,7 @@ import (
 
 	"github.com/indago/indago/internal/detection"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/queue"
 )
 
 // reflector echoes one parameter back, in a configurable way, and records what it
@@ -498,8 +499,89 @@ func TestReflectionContextForNonHTMLResponse(t *testing.T) {
 		t.Fatalf("outcome=%s reflected=%v", tc.Outcome, rep.Reflected)
 	}
 	a := rep.Locations[0].Context
-	if a.Context != detection.CtxUnknown || a.Sub != "non_html_response" {
+	if a.Context != detection.CtxUnknown || a.Sub != detection.SubNonHTMLResponse {
 		t.Fatalf("a JSON response is not markup; got %s/%s (%s)", a.Context, a.Sub, a.Reason)
+	}
+}
+
+// A reflection in a non-markup response is evidence, not a reflected-XSS
+// candidate. The probe is still sent and recorded (with its site and context),
+// but nothing is planned, nothing is queued, and the note says why — instead of
+// shipping the generic unknown-context breakouts and later recording them as
+// "marker was not found in the rendered page" Inconclusive findings, which is
+// what a JSON endpoint produced for every candidate before this rule existed.
+func TestReflectionNonMarkupResponsePlansNoCandidates(t *testing.T) {
+	srv := contextServer(t, "application/json", func(v string) string { return `{"echo":"` + v + `"}` })
+	env := newExecEnv(t)
+	ep := env.endpoint(srv.URL+"/s?q=obs", domain.MethodGET)
+	q := env.param(ep, "q", domain.LocationQuery, "obs")
+	ip := env.injection(ep, q)
+
+	qu := queue.NewMemory()
+	if err := env.executorQ(scopedClient(t, openScope()), qu, ExecutorConfig{}).Handle(context.Background(),
+		env.job(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID})); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	tc := env.only()
+	rep, err := detection.ParseReflection(tc.Detail)
+	if err != nil || rep == nil {
+		t.Fatalf("parse reflection detail: %v", err)
+	}
+	if !rep.Reflected || rep.Plan == nil {
+		t.Fatalf("reflection/plan missing: %+v", rep)
+	}
+	if len(rep.Plan.Candidates) != 0 {
+		t.Fatalf("non-markup response planned candidates: %+v", rep.Plan.Candidates)
+	}
+	if rep.Plan.NonMarkupSites != 1 {
+		t.Fatalf("NonMarkupSites = %d, want 1", rep.Plan.NonMarkupSites)
+	}
+	if !strings.Contains(tc.Note, "no reflected-XSS candidate planned") || !strings.Contains(tc.Note, "application/json") {
+		t.Fatalf("note does not explain the decision: %q", tc.Note)
+	}
+	jobs, err := qu.Jobs(context.Background(), env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("no candidate job may be enqueued for a non-markup response; got %d", len(jobs))
+	}
+}
+
+// The control for the rule above: the same JSON-looking body served as
+// text/html IS parsed as HTML by a browser, so it must still be planned and
+// queued. This is the shape a client-side consumer page relies on (the HTML
+// document is what the browser parses — the DOM-XSS engine owns the fetch →
+// innerHTML variant separately).
+func TestReflectionMarkupResponseStillPlansCandidates(t *testing.T) {
+	srv := contextServer(t, "text/html", func(v string) string { return `{"echo":"` + v + `"}` })
+	env := newExecEnv(t)
+	ep := env.endpoint(srv.URL+"/s?q=obs", domain.MethodGET)
+	q := env.param(ep, "q", domain.LocationQuery, "obs")
+	ip := env.injection(ep, q)
+
+	qu := queue.NewMemory()
+	if err := env.executorQ(scopedClient(t, openScope()), qu, ExecutorConfig{}).Handle(context.Background(),
+		env.job(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID})); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	tc := env.only()
+	rep, err := detection.ParseReflection(tc.Detail)
+	if err != nil || rep == nil {
+		t.Fatalf("parse reflection detail: %v", err)
+	}
+	if rep.Plan == nil || len(rep.Plan.Candidates) == 0 {
+		t.Fatal("a text/html response must still plan candidates")
+	}
+	if rep.Plan.NonMarkupSites != 0 {
+		t.Fatalf("NonMarkupSites = %d, want 0 for text/html", rep.Plan.NonMarkupSites)
+	}
+	jobs, err := qu.Jobs(context.Background(), env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) == 0 {
+		t.Fatal("candidate jobs should be enqueued for a text/html reflection")
 	}
 }
 

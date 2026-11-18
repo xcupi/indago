@@ -64,8 +64,9 @@ and signal, when the model is approximate:
   **both ways**; if they disagree the site is `mixed` with both readings in
   `Alternatives` — it never guesses.
 - **`unknown`**: non-HTML response (JSON, plain text, images — `non_html_response`,
-  high confidence that there is no markup context), DOCTYPE, an offset that does
-  not address the token.
+  high confidence that there is no markup context — and such a site is never
+  planned as a candidate; see `docs/reflection-candidates.md`), DOCTYPE, an offset
+  that does not address the token.
 
 ## Known approximations
 

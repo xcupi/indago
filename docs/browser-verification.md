@@ -55,6 +55,15 @@ a candidate that DECLARES the interaction trigger earns exactly one bounded
 click (see Boundaries), and the verdict still requires the marker-specific
 signal afterwards.
 
+`inconclusive` therefore means the observation itself is missing: **the replay
+did not reproduce the reflection at all** (a session that expired mid-scan, a
+redirect to a login page, a state-dependent error path), or execution provenance
+could not be enabled for the attempt. It is not reachable for a reflection site
+in a non-markup response (JSON, plain text, binary): such a site is never
+planned as a candidate and never becomes a finding, because a browser does not
+parse that document and no breakout there can execute — see
+`docs/reflection-candidates.md`.
+
 ## What actually happens (`BrowserVerifier.Verify`)
 
 1. The candidate URL is checked against scope and replayed in a fresh,
