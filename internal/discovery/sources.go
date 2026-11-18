@@ -649,13 +649,23 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 		// scan's traffic against a target that serves identical bytes.
 		bundleBodies := n.inspectScriptBundles(ctx, in, sink, info.Canonical, res.Network)
 		routes = append(routes, harvestScriptRoutes(res.HTML, bundleBodies)...)
-		if err := n.harvestScriptAPIs(ctx, in, sink, info.Canonical, res.Network, bundleBodies); err != nil {
+		// The routes are rendered FIRST so the API calls their views make are
+		// part of the network log harvestScriptAPIs reads. Those calls name the
+		// service prefix a relative bundle literal ("api/v2/user") has to be
+		// served under ("/workshop/api/v2/user"); probing before the views ran
+		// only knew the prefixes the seed page itself used, which silently
+		// dropped every API a lazily mounted view would have revealed.
+		routeNetwork, err := n.renderSPARoutes(ctx, in, sink, info.Canonical, routes, seenHTML, observedGETs)
+		if err != nil {
 			if errors.Is(err, ErrLimitReached) {
 				return nil
 			}
 			return err
 		}
-		if err := n.renderSPARoutes(ctx, in, sink, info.Canonical, routes, seenHTML, observedGETs); err != nil {
+		observedNetwork := make([]browser.NetworkEvent, 0, len(res.Network)+len(routeNetwork))
+		observedNetwork = append(observedNetwork, res.Network...)
+		observedNetwork = append(observedNetwork, routeNetwork...)
+		if err := n.harvestScriptAPIs(ctx, in, sink, info.Canonical, observedNetwork, bundleBodies); err != nil {
 			if errors.Is(err, ErrLimitReached) {
 				return nil
 			}
@@ -1279,12 +1289,18 @@ func harvestScriptRoutes(html string, bundles []string) []string {
 // crawler's URL set: fragments are client-side state, so ordinary HTTP
 // discovery would only request the same document again; a path route is a real
 // view the browser has to load to reveal the API calls behind it.
-func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink, base string, routes []string, seenHTML, observedGETs map[string]struct{}) error {
+//
+// The network events of every rendered view are returned (in render order) so
+// the caller can derive the service prefixes those views used; they are
+// observations, not evidence, and the caller re-checks scope before probing.
+func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink, base string, routes []string, seenHTML, observedGETs map[string]struct{}) ([]browser.NetworkEvent, error) {
 	rendered := 0
-	return n.renderSPARoutesWithBudget(ctx, in, sink, base, routes, seenHTML, observedGETs, make(map[string]struct{}, len(routes)), &rendered, true)
+	observed := make([]browser.NetworkEvent, 0, len(routes))
+	err := n.renderSPARoutesWithBudget(ctx, in, sink, base, routes, seenHTML, observedGETs, make(map[string]struct{}, len(routes)), &rendered, true, &observed)
+	return observed, err
 }
 
-func (n *networkSource) renderSPARoutesWithBudget(ctx context.Context, in Input, sink Sink, base string, routes []string, seenHTML, observedGETs, seen map[string]struct{}, rendered *int, allowNestedHash bool) error {
+func (n *networkSource) renderSPARoutesWithBudget(ctx context.Context, in Input, sink Sink, base string, routes []string, seenHTML, observedGETs, seen map[string]struct{}, rendered *int, allowNestedHash bool, observed *[]browser.NetworkEvent) error {
 	if len(routes) == 0 || *rendered >= maxSPARouteRenders {
 		return nil
 	}
@@ -1326,6 +1342,7 @@ func (n *networkSource) renderSPARoutesWithBudget(ctx context.Context, in Input,
 		if res == nil {
 			return nil
 		}
+		*observed = append(*observed, res.Network...)
 		recordObservedGETs(observedGETs, res.Network, in)
 		if err := n.emitNetworkWithHTML(ctx, in, sink, res.Network, seenHTML); err != nil {
 			return err
@@ -1387,7 +1404,7 @@ func (n *networkSource) renderSPARoutesWithBudget(ctx context.Context, in Input,
 		if allowNestedHash && !strings.Contains(routeURL, "#") {
 			nested := hashRouteEntries(append(extractSPARoutes(res.HTML), n.harvestRouteAPIs(ctx, in, sink, routeURL, res.Network)...))
 			if len(nested) > 0 {
-				if err := n.renderSPARoutesWithBudget(ctx, in, sink, routeURL, nested, seenHTML, observedGETs, seen, rendered, false); err != nil {
+				if err := n.renderSPARoutesWithBudget(ctx, in, sink, routeURL, nested, seenHTML, observedGETs, seen, rendered, false, observed); err != nil {
 					return err
 				}
 			}

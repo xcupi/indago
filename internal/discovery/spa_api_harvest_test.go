@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -217,6 +218,202 @@ func TestHarvestScriptAPIsSkipsSoft404AndPlaceholders(t *testing.T) {
 			t.Fatalf("placeholder path was probed: %s", r)
 		}
 	}
+}
+
+func TestBundleServicePrefixes(t *testing.T) {
+	// A bundle that keeps per-service base URLs as quoted single-segment
+	// literals, plus an absolute service-prefixed API path. Reserved
+	// build/asset words, a bare version segment, the API segment itself and
+	// an uppercase literal must not become prefixes. A full service path is
+	// read before the quoted literals, so it comes first.
+	js := `var a="api/v2/user",b="workshop/",c='identity/',d="/community/api/v2/posts",` +
+		`e="static/",f="node_modules/",g="v2/",h="Workshop/",i="api/";`
+
+	want := []string{"/community/", "/workshop/", "/identity/"}
+	if got := bundleServicePrefixes([]string{js}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("bundleServicePrefixes = %v, want %v", got, want)
+	}
+}
+
+func TestBundleServicePrefixesNeedsRelativeAPILiteral(t *testing.T) {
+	// A quoted base literal is only useful when the same bundle carries a
+	// relative "api/..." path for it to prefix; otherwise it is just a string.
+	for _, js := range []string{
+		`var a="workshop/";`,
+		`var a="/community/api/v2/posts";`,
+		`var a="/workshop/api/shop/products";`,
+	} {
+		if got := bundleServicePrefixes([]string{js}); got != nil {
+			t.Fatalf("bundleServicePrefixes(%q) = %v, want nil", js, got)
+		}
+	}
+}
+
+func TestBundleServicePrefixesBounded(t *testing.T) {
+	parts := []string{`var rel="api/v2/user";`}
+	for i := 0; i < 12; i++ {
+		parts = append(parts, `var s`+strconv.Itoa(i)+`="svc`+strconv.Itoa(i)+`/";`)
+	}
+	got := bundleServicePrefixes([]string{strings.Join(parts, "")})
+	if len(got) != maxServicePrefixes {
+		t.Fatalf("bundleServicePrefixes returned %d prefixes, want the %d cap: %v", len(got), maxServicePrefixes, got)
+	}
+	if got[0] != "/svc0/" || got[maxServicePrefixes-1] != "/svc7/" {
+		t.Fatalf("bundleServicePrefixes = %v, want the first %d source-order prefixes", got, maxServicePrefixes)
+	}
+}
+
+func TestMergeServicePrefixesKeepsObservedFirstAndBounded(t *testing.T) {
+	// The prefix the page proved must survive both dedup and the cap, ahead of
+	// any bundle-declared literal.
+	got := mergeServicePrefixes(
+		[]string{"/shop/", "/identity/"},
+		[]string{"/shop/", "/community/", "/workshop/", "/forum/", "/billing/"},
+	)
+	want := []string{"/shop/", "/identity/", "/community/", "/workshop/", "/forum/", "/billing/"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mergeServicePrefixes = %v, want %v", got, want)
+	}
+
+	many := mergeServicePrefixes(
+		[]string{"/a/", "/b/", "/c/", "/d/", "/e/"},
+		[]string{"/f/", "/g/", "/h/", "/i/"},
+	)
+	if len(many) != maxServicePrefixes || many[maxServicePrefixes-1] != "/h/" {
+		t.Fatalf("mergeServicePrefixes bound = %v, want %d prefixes ending at /h/", many, maxServicePrefixes)
+	}
+}
+
+func TestHarvestScriptAPIsProbesObservedThenBundlePrefixes(t *testing.T) {
+	base := "http://app.test/"
+	// The relative literal "api/v2/user" needs a prefix. The network log
+	// proves "/workshop/"; the bundle itself declares "/identity/" and an
+	// absolute "/community/api/..." path.
+	js := `var a="api/v2/user",b="identity/",c="/community/api/v2/posts";`
+	eng := &recordingBundleEngine{responses: map[string]*httpengine.Response{
+		"GET " + base + "workshop/api/v2/user":  jsonBundleResponse(`{}`),
+		"GET " + base + "identity/api/v2/user":  jsonBundleResponse(`{}`),
+		"GET " + base + "community/api/v2/user": jsonBundleResponse(`{}`),
+	}}
+	network := []browser.NetworkEvent{{URL: base + "workshop/api/mechanic", Method: "GET"}}
+	sink := &formTestSink{}
+	n := &networkSource{engine: eng, cfg: DefaultConfig()}
+	in := Input{Scope: domain.Scope{IncludeHosts: []string{"app.test"}}}
+
+	if err := n.harvestScriptAPIs(context.Background(), in, sink, base, network, []string{js}); err != nil {
+		t.Fatalf("harvestScriptAPIs: %v", err)
+	}
+
+	want := map[string]bool{
+		base + "workshop/api/v2/user":  true,
+		base + "identity/api/v2/user":  true,
+		base + "community/api/v2/user": true,
+	}
+	got := make(map[string]bool, len(sink.endpoints))
+	for _, ep := range sink.endpoints {
+		got[ep.URL] = true
+		if ep.Source != domain.SourceScriptLiteral {
+			t.Errorf("endpoint %s source = %s, want script_literal", ep.URL, ep.Source)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("registered endpoints = %v, want %v (requests: %v)", got, want, eng.requests)
+	}
+
+	// The observed prefix is evidence and must be probed before a
+	// bundle-only declaration.
+	index := func(target string) int {
+		for i, r := range eng.requests {
+			if r == target {
+				return i
+			}
+		}
+		return -1
+	}
+	observed := index("GET " + base + "workshop/api/v2/user")
+	for _, bundled := range []string{
+		"GET " + base + "identity/api/v2/user",
+		"GET " + base + "community/api/v2/user",
+	} {
+		at := index(bundled)
+		if at < 0 || observed < 0 || observed > at {
+			t.Fatalf("probe order = %v, want the observed /workshop/ probe before %s", eng.requests, bundled)
+		}
+	}
+}
+
+// spaPrefixBrowser renders canned pages, so a test can prove which URLs the
+// route renderer actually visited.
+type spaPrefixBrowser struct {
+	pages   map[string]*browser.RenderResult
+	visited []string
+}
+
+func (b *spaPrefixBrowser) Render(_ context.Context, url string, _ browser.RenderOptions) (*browser.RenderResult, error) {
+	b.visited = append(b.visited, url)
+	if res, ok := b.pages[url]; ok {
+		return res, nil
+	}
+	return &browser.RenderResult{FinalURL: url, Status: http.StatusOK}, nil
+}
+
+func (b *spaPrefixBrowser) Close() error { return nil }
+
+// TestRunHarvestsBundleAPIsWithPrefixesFromRenderedViews is the regression
+// guard for the ordering bug: the bundle is downloaded on the seed page, but
+// the service prefix its relative "api/..." literal needs is only named by the
+// API call a later route view makes. The harvest must run AFTER the routes are
+// rendered and must see their network log.
+func TestRunHarvestsBundleAPIsWithPrefixesFromRenderedViews(t *testing.T) {
+	base := "http://app.test/"
+	b := &spaPrefixBrowser{pages: map[string]*browser.RenderResult{
+		base: {
+			FinalURL: base,
+			Status:   http.StatusOK,
+			HTML:     `<html><body><a href="/dashboard">Dashboard</a></body></html>`,
+			Network:  []browser.NetworkEvent{{URL: base + "static/app.js", Method: "GET", ResourceType: "script"}},
+		},
+		base + "dashboard": {
+			FinalURL: base + "dashboard",
+			Status:   http.StatusOK,
+			HTML:     `<div id="app">dashboard</div>`,
+			// The rendered view is what names the /shop/ service prefix.
+			Network: []browser.NetworkEvent{{URL: base + "shop/api/cart", Method: "GET"}},
+		},
+	}}
+	eng := &recordingBundleEngine{responses: map[string]*httpengine.Response{
+		"GET " + base + "static/app.js": {
+			Status:  http.StatusOK,
+			Headers: http.Header{"Content-Type": []string{"application/javascript"}},
+			Body:    []byte(`var a="api/v2/user";`),
+		},
+		"GET " + base + "shop/api/v2/user": jsonBundleResponse(`{"user":"x"}`),
+	}}
+	src := NewNetworkSourceWithEngine(b, eng, Config{})
+	sink := &formTestSink{}
+	if err := src.Run(context.Background(), Input{
+		Scope:    domain.Scope{IncludeHosts: []string{"app.test"}},
+		SeedURLs: []string{base},
+	}, sink); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	renderedDashboard := false
+	for _, u := range b.visited {
+		if u == base+"dashboard" {
+			renderedDashboard = true
+		}
+	}
+	if !renderedDashboard {
+		t.Fatalf("SPA route /dashboard was not rendered; visited %v", b.visited)
+	}
+
+	for _, ep := range sink.endpoints {
+		if ep.URL == base+"shop/api/v2/user" && ep.Source == domain.SourceScriptLiteral {
+			return
+		}
+	}
+	t.Fatalf("bundle API under the view-observed /shop/ prefix was not registered; endpoints %+v, requests %v", sink.endpoints, eng.requests)
 }
 
 // TestInspectScriptBundlesRegistersDeclaredRequests proves the external bundle
