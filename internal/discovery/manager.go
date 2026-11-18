@@ -73,6 +73,11 @@ type RunParams struct {
 	// authenticated scan does not discover the logged-out site.
 	SessionStatePath string
 	Wordlist         string
+	// OpenAPISpecJSON / OpenAPISpecURL are the operator-supplied OpenAPI 3.x /
+	// Swagger 2.0 document (or its URL) to register endpoints from — see
+	// domain.ScanConfig.OpenAPISpecJSON and NewOpenAPISource.
+	OpenAPISpecJSON string
+	OpenAPISpecURL  string
 }
 
 // RunResult summarizes a completed discovery run.
@@ -104,6 +109,8 @@ func (m *Manager) Run(ctx context.Context, p RunParams) (*RunResult, error) {
 		SessionID:        p.SessionID,
 		SessionStatePath: p.SessionStatePath,
 		Wordlist:         p.Wordlist,
+		OpenAPISpecJSON:  p.OpenAPISpecJSON,
+		OpenAPISpecURL:   p.OpenAPISpecURL,
 		Gate:             m.gate,
 	}
 

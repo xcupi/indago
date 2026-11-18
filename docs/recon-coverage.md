@@ -85,6 +85,18 @@ the target hostname is disclosed to archive.org.
 Both sources emit new provenance values (`well_known`, `archive`) so the
 endpoint list shows where a URL came from.
 
+`internal/discovery/openapi.go` (registered on every scan, inert unless asked)
+imports an OpenAPI 3.x or Swagger 2.0 **JSON** document the operator supplies —
+inline (`OpenAPISpecJSON`) or by URL (`OpenAPISpecURL`, read with one GET through
+the scan's scope-enforcing engine). It registers every declared operation,
+resolving local `#/components/schemas/...` and `#/definitions/...` refs (depth
+guarded) to synthesize a concrete path (`{id}` from the parameter's own
+example), a query string, and a JSON body skeleton per operation. Endpoints it
+declares are *registered, never requested*: discovery sends nothing to them, and
+the executor's own state-changing opt-in still decides what may be sent later.
+Registration is scope-checked like every other source and capped at 200
+endpoints per document. Provenance is `openapi`.
+
 ## Why this is the right cut for bug bounty
 
 Bug-bounty platforms (YesWeHack, HackerOne, Bugcrowd, Intigriti) already hand the

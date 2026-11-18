@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -604,13 +605,15 @@ func (c *cli) scanCreate(args []string) error {
 	maxPages := fs.Int("max-pages", 0, "cap on pages fetched by the crawler (0 = server default)")
 	maxEndpoints := fs.Int("max-endpoints", 0, "cap on endpoints discovered (0 = server default)")
 	reconLevel := fs.String("recon-level", "off", "wordlist content/parameter discovery: off | safe (paths) | standard (paths+params+extensions) | aggressive (+ extended paths, directory recursion); OFF by default — see docs/recon-wordlists.md")
+	openAPISpecFile := fs.String("openapi-spec-file", "", "OpenAPI 3.x / Swagger 2.0 JSON document on disk whose declared endpoints discovery should register (read here, sent inline; max "+strconv.Itoa(discovery.MaxOpenAPISpecBytes)+" bytes)")
+	openAPISpecURL := fs.String("openapi-spec-url", "", "URL of an OpenAPI 3.x / Swagger 2.0 JSON document for the SERVER to read with one GET through the scan's scope-enforcing engine (must be in scope); alternative to -openapi-spec-file")
 	var seeds stringList
 	fs.Var(&seeds, "seed", "discovery seed URL (repeatable; default: the target base URL)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-sqli] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-path-traversal] [-skip-cors] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-openapi-spec-file FILE | -openapi-spec-url URL] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-sqli] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-path-traversal] [-skip-cors] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
@@ -715,6 +718,34 @@ func (c *cli) scanCreate(args []string) error {
 	}
 	if *reconLevel != "" && !strings.EqualFold(*reconLevel, "off") {
 		req["recon_level"] = *reconLevel
+	}
+	// OpenAPI/Swagger import. The file is read HERE and sent inline (the
+	// server never reads an operator's local disk); the URL is left to the
+	// server, which fetches it with one GET through the scan's own
+	// scope-enforcing engine. They are alternatives: sending both would make
+	// which document discovery used invisible.
+	if *openAPISpecFile != "" && *openAPISpecURL != "" {
+		return errors.New("-openapi-spec-file and -openapi-spec-url are alternatives: supply the document itself or its URL, not both")
+	}
+	if *openAPISpecFile != "" {
+		data, err := os.ReadFile(*openAPISpecFile)
+		if err != nil {
+			return fmt.Errorf("-openapi-spec-file: %w", err)
+		}
+		if len(data) == 0 {
+			return fmt.Errorf("-openapi-spec-file %s is empty", *openAPISpecFile)
+		}
+		if len(data) > discovery.MaxOpenAPISpecBytes {
+			return fmt.Errorf("-openapi-spec-file %s is %d bytes, limit is %d",
+				*openAPISpecFile, len(data), discovery.MaxOpenAPISpecBytes)
+		}
+		if !json.Valid(data) {
+			return fmt.Errorf("-openapi-spec-file %s is not valid JSON", *openAPISpecFile)
+		}
+		req["openapi_spec_json"] = string(data)
+	}
+	if *openAPISpecURL != "" {
+		req["openapi_spec_url"] = *openAPISpecURL
 	}
 	if len(idorCandidates) > 0 {
 		req["idor_candidates"] = []string(idorCandidates)

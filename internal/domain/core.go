@@ -410,6 +410,20 @@ type ScanConfig struct {
 	// discovery.Config.ReconLevel and docs/recon-wordlists.md.
 	ReconLevel string `json:"recon_level,omitempty"`
 
+	// OpenAPISpecJSON / OpenAPISpecURL hand discovery a machine-readable API
+	// description (OpenAPI 3.x or Swagger 2.0, JSON) to register endpoints
+	// from. They are an OPERATOR input, not something the scanner hunts for:
+	// the spec is either supplied inline (the document itself, bounded by
+	// discovery.MaxOpenAPISpecBytes) or fetched with ONE read-only GET through
+	// the scan's own scope-enforcing engine. Every endpoint the document
+	// declares is then registered passively for the ordinary test pipeline —
+	// discovery never sends a request to a declared endpoint on its account,
+	// never fabricates a method the document did not declare, and never
+	// registers a URL outside scope. Both empty (the default) leaves
+	// discovery byte-identical for every existing scan.
+	OpenAPISpecJSON string `json:"openapi_spec_json,omitempty"`
+	OpenAPISpecURL  string `json:"openapi_spec_url,omitempty"`
+
 	// CandidateProfile selects how many/which of the planner's candidates are
 	// sent per injection point: "minimal", "standard" (default when empty), or
 	// "thorough" (see internal/detection/profile.go). MaxCandidates, when > 0,

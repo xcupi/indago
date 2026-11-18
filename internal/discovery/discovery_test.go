@@ -16,19 +16,24 @@ func TestRealRegistrySources(t *testing.T) {
 	eng := httpengine.NewDefault()
 
 	// Without a browser: seed, crawl, sitemap, robots, content, well-known,
-	// archive = 7.
+	// archive, openapi = 8.
 	r := discovery.NewRealRegistry(eng, nil, discovery.DefaultConfig())
-	if len(r.Names()) != 7 {
-		t.Fatalf("expected 7 sources without browser, got %d: %v", len(r.Names()), r.Names())
+	if len(r.Names()) != 8 {
+		t.Fatalf("expected 8 sources without browser, got %d: %v", len(r.Names()), r.Names())
 	}
 	if _, ok := r.Get(domain.SourceCrawler); !ok {
 		t.Fatal("crawler source missing")
 	}
+	// The OpenAPI source is registered unconditionally and is inert until an
+	// operator supplies a spec (see discovery.NewOpenAPISource).
+	if _, ok := r.Get(domain.SourceOpenAPI); !ok {
+		t.Fatal("openapi source missing")
+	}
 
-	// With a browser: + network = 8.
+	// With a browser: + network = 9.
 	rb := discovery.NewRealRegistry(eng, browser.Stub{}, discovery.DefaultConfig())
-	if len(rb.Names()) != 8 {
-		t.Fatalf("expected 8 sources with browser, got %d", len(rb.Names()))
+	if len(rb.Names()) != 9 {
+		t.Fatalf("expected 9 sources with browser, got %d", len(rb.Names()))
 	}
 	if _, ok := rb.Get(domain.SourceBrowserNetwork); !ok {
 		t.Fatal("network source missing")

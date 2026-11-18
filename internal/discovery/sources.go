@@ -29,6 +29,10 @@ func NewRealRegistry(engine httpengine.Engine, b browser.Browser, cfg Config) *R
 	r.Register(NewContentSource(engine, cfg))
 	r.Register(NewWellKnownSource(engine, cfg))
 	r.Register(NewArchiveSource(cfg))
+	// The OpenAPI source only does anything when the operator supplied a spec
+	// (Config/Input OpenAPISpecJSON or OpenAPISpecURL); otherwise it is a
+	// no-op, so every scan that supplies none is unchanged.
+	r.Register(NewOpenAPISource(engine))
 	if b != nil {
 		r.Register(NewNetworkSourceWithEngine(b, engine, cfg))
 	}

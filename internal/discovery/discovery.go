@@ -145,6 +145,12 @@ type Input struct {
 	// Wordlist is an optional file path for content/parameter discovery (used
 	// when the Config wordlists are empty).
 	Wordlist string
+	// OpenAPISpecJSON / OpenAPISpecURL are the operator-supplied API description
+	// (OpenAPI 3.x or Swagger 2.0, JSON) the OpenAPI source registers endpoints
+	// from — see NewOpenAPISource and domain.ScanConfig.OpenAPISpecJSON. Empty
+	// means the source does nothing at all.
+	OpenAPISpecJSON string
+	OpenAPISpecURL  string
 	// Gate lets a Source cooperatively pause before network work. It is nil when
 	// pausing is not wired; sources must tolerate that.
 	Gate *Gate
