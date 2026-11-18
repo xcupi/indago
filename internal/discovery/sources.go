@@ -574,6 +574,7 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 		return nil
 	}
 	seenHTML := make(map[string]struct{})
+	observedGETs := make(map[string]struct{})
 	for _, s := range in.SeedURLs {
 		info, err := Normalize(s)
 		if err != nil || !in.Scope.Permits(info.Canonical).Allowed {
@@ -602,6 +603,7 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			}
 			continue
 		}
+		recordObservedGETs(observedGETs, res.Network, in)
 		if err := n.emitNetworkWithHTML(ctx, in, sink, res.Network, seenHTML); err != nil {
 			if errors.Is(err, ErrLimitReached) {
 				return nil
@@ -620,12 +622,18 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 		hashRoutes := append(extractSPARoutes(res.HTML), n.harvestRouteAPIs(ctx, in, sink, info.Canonical, res.Network)...)
 		routes := hashRouteEntries(hashRoutes)
 		routes = append(routes, n.harvestScriptRoutes(ctx, in, sink, info.Canonical, res.HTML, res.Network)...)
-		if err := n.renderSPARoutes(ctx, in, sink, info.Canonical, routes, seenHTML); err != nil {
+		if err := n.renderSPARoutes(ctx, in, sink, info.Canonical, routes, seenHTML, observedGETs); err != nil {
 			if errors.Is(err, ErrLimitReached) {
 				return nil
 			}
 			return err
 		}
+	}
+	if err := n.hydratePlaceholderEndpoints(ctx, in, sink, observedGETs); err != nil {
+		if errors.Is(err, ErrLimitReached) {
+			return nil
+		}
+		return err
 	}
 	return nil
 }
@@ -1215,7 +1223,7 @@ func (n *networkSource) harvestScriptRoutes(ctx context.Context, in Input, sink 
 // crawler's URL set: fragments are client-side state, so ordinary HTTP
 // discovery would only request the same document again; a path route is a real
 // view the browser has to load to reveal the API calls behind it.
-func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink, base string, routes []string, seenHTML map[string]struct{}) error {
+func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink, base string, routes []string, seenHTML, observedGETs map[string]struct{}) error {
 	if len(routes) == 0 {
 		return nil
 	}
@@ -1258,6 +1266,7 @@ func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink
 			continue
 		}
 		rendered++
+		recordObservedGETs(observedGETs, res.Network, in)
 		if err := n.emitNetworkWithHTML(ctx, in, sink, res.Network, seenHTML); err != nil {
 			return err
 		}
