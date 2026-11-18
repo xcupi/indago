@@ -177,6 +177,8 @@ func TestCoverageClassifiesIntentionalWriteAndDownloadSkipsAsInfo(t *testing.T) 
 	a, id := coverageAPI(t, web.Capabilities{BrowserEnabled: true})
 	seedTest(t, a, id, domain.VulnReflectedXSS, domain.TestCaseSkipped, "", "http://127.0.0.1:1/form", "reflection; parameter q (form) skipped: write-like endpoint POST /form is disabled by skip_write_endpoints")
 	seedTest(t, a, id, domain.VulnReflectedXSS, domain.TestCaseSkipped, "", "http://127.0.0.1:1/export", "reflection; parameter q (query) skipped: export/download endpoint GET /export is disabled by skip_download_endpoints")
+	seedTest(t, a, id, domain.VulnPathTraversal, domain.TestCaseSkipped, "", "http://127.0.0.1:1/view/1",
+		"path traversal skipped: path-segment injection point cannot carry a traversal payload: the scope validator refuses dot segments, encoded slashes, NUL bytes and duplicate slashes in the request path")
 
 	var c coverageResp
 	a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
@@ -184,7 +186,7 @@ func TestCoverageClassifiesIntentionalWriteAndDownloadSkipsAsInfo(t *testing.T) 
 	for _, r := range c.Reasons {
 		by[r.Code] = r.Severity
 	}
-	if by["write_endpoints_skipped"] != "info" || by["download_endpoints_skipped"] != "info" {
+	if by["write_endpoints_skipped"] != "info" || by["download_endpoints_skipped"] != "info" || by["path_segment_not_testable"] != "info" {
 		t.Fatalf("intentional policy skips must be info: %+v", c.Reasons)
 	}
 	if c.CoverageGaps {
@@ -223,8 +225,8 @@ func TestCoverageReportsCapabilityMatrix(t *testing.T) {
 	}
 	var c coverageResp
 	a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
-	if len(c.Capabilities) != 13 {
-		t.Fatalf("capabilities = %d, want 13", len(c.Capabilities))
+	if len(c.Capabilities) != 14 {
+		t.Fatalf("capabilities = %d, want 14", len(c.Capabilities))
 	}
 	byKey := map[string]bool{}
 	labels := map[string]string{}
@@ -239,7 +241,7 @@ func TestCoverageReportsCapabilityMatrix(t *testing.T) {
 			t.Fatalf("%s is disabled for this scan but reported enabled: %+v", k, byKey)
 		}
 	}
-	for _, k := range []string{"dom_xss", "access_control", "information_disclosure", "open_redirect"} {
+	for _, k := range []string{"dom_xss", "access_control", "information_disclosure", "open_redirect", "path_traversal"} {
 		if !byKey[k] {
 			t.Fatalf("%s is enabled for this scan but reported disabled: %+v", k, byKey)
 		}

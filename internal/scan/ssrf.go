@@ -715,7 +715,7 @@ var ssrfURLParamSinks = map[string]bool{
 var ssrfTrailingSinks = []string{"url", "uri", "href", "link", "src", "feed", "callback", "webhook", "proxy", "redirect"}
 
 func ssrfURLParamName(name string) bool {
-	words := ssrfNameWords(name)
+	words := paramNameWords(name)
 	for _, w := range words {
 		if ssrfURLParamSinks[w] {
 			return true
@@ -730,12 +730,13 @@ func ssrfURLParamName(name string) bool {
 	return false
 }
 
-// ssrfNameWords splits a parameter name into lowercase words on any non
+// paramNameWords splits a parameter name into lowercase words on any non
 // alphanumeric separator and on camelCase boundaries, so "callback_url",
 // "callbackURL" and "callbackUrl" all yield ["callback","url"]. Splitting (as
 // opposed to substring matching) is what keeps "security" from looking like it
-// contains "uri".
-func ssrfNameWords(name string) []string {
+// contains "uri". Shared by the URL-sink and file-path-sink applicability
+// checks.
+func paramNameWords(name string) []string {
 	var b strings.Builder
 	prevLower := false
 	for _, r := range name {

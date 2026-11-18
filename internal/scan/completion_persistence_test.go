@@ -189,6 +189,7 @@ func newCompletionEnv(t *testing.T) *completionEnv {
 		SkipIDOR:           true,
 		SkipInfoDisclosure: true,
 		SkipSSRF:           true,
+		SkipPathTraversal:  true,
 		SkipCORS:           true,
 		SkipOpenRedirect:   true,
 		SkipGraphQL:        true,
