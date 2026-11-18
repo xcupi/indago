@@ -40,15 +40,18 @@ const commandInjectionEngine = "command_injection"
 const maxCommandInjectionProbes = 4
 
 type commandInjectionExecutor struct {
-	store           store.Store
-	engine          httpengine.Engine
-	evidence        evidence.Store
-	cfg             ExecutorConfig
-	log             *slog.Logger
-	findingsMu      *sync.Mutex
-	tokenMu         *sync.Mutex
-	callbackURL     string
-	callbackPollURL string
+	store                store.Store
+	engine               httpengine.Engine
+	evidence             evidence.Store
+	cfg                  ExecutorConfig
+	log                  *slog.Logger
+	findingsMu           *sync.Mutex
+	tokenMu              *sync.Mutex
+	refreshMu            sync.Mutex
+	formSourceByEndpoint map[string]string
+	failedRefreshPages   map[string]bool
+	callbackURL          string
+	callbackPollURL      string
 }
 
 // NewCommandInjectionExecutorForTest exposes the executor to the external
@@ -321,6 +324,21 @@ func (e *commandInjectionExecutor) refreshParams(ctx context.Context, ep *domain
 		return params
 	}
 	out := refreshDynamicParams(ctx, e.engine, e.cfg.RequestTimeout, ep, params, focus)
+	if ep == nil {
+		return out
+	}
+	epKey := strings.TrimSuffix(ep.URL, "/")
+
+	if cachedPage, ok := e.cachedFormSource(epKey); ok {
+		if cachedPage == "" || e.isFailedRefreshPage(cachedPage) {
+			return out
+		}
+		if refreshed, hit := e.refreshFromPage(ctx, cachedPage, epKey, out, focus); hit {
+			return refreshed
+		}
+		return out
+	}
+
 	pages, err := e.store.Endpoints().ListByScan(ctx, ep.ScanID)
 	if err != nil {
 		return out
@@ -330,7 +348,7 @@ func (e *commandInjectionExecutor) refreshParams(ctx context.Context, ep *domain
 		if page == nil || trace >= 10 || (page.Method != "" && page.Method != domain.MethodGET) {
 			continue
 		}
-		if page.ID == ep.ID {
+		if page.ID == ep.ID || e.isFailedRefreshPage(page.URL) {
 			continue
 		}
 		pageURL, err := url.Parse(page.URL)
@@ -338,63 +356,113 @@ func (e *commandInjectionExecutor) refreshParams(ctx context.Context, ep *domain
 			continue
 		}
 		trace++
-		resp, outcome, _ := e.do(ctx, httpengine.GET(page.URL))
-		if outcome != domain.OutcomeSuccess || resp == nil || len(resp.Body) == 0 {
-			continue
+		if refreshed, hit := e.refreshFromPage(ctx, page.URL, epKey, out, focus); hit {
+			e.setFormSource(epKey, page.URL)
+			return refreshed
 		}
-		values := map[string]string{}
-		var actionForms []discovery.Form
-		for _, form := range discovery.ExtractForms(string(resp.Body)) {
-			action := form.Action
-			if action == "" {
-				action = page.URL
-			}
-			ref, err := url.Parse(action)
-			if err != nil {
-				continue
-			}
-			target := pageURL.ResolveReference(ref).String()
-			if strings.TrimSuffix(target, "/") != strings.TrimSuffix(ep.URL, "/") {
-				continue
-			}
-			actionForms = append(actionForms, form)
-		}
-		// Prefer the form the focused parameter belongs to: this page can hold
-		// several forms posting to the same action, and only one of them issued
-		// this request's token. Falls back to every matching form when the group
-		// is not on this page (see currentFormValues for the same reasoning).
-		if group := formGroupOf(focus); group != "" {
-			var grouped []discovery.Form
-			for _, form := range actionForms {
-				if form.Group == group {
-					grouped = append(grouped, form)
-				}
-			}
-			if len(grouped) > 0 {
-				actionForms = grouped
-			}
-		}
-		for _, form := range actionForms {
-			for _, in := range form.Inputs {
-				values[in.Name] = in.Value
-			}
-		}
-		if len(values) == 0 {
-			continue
-		}
-		for i, p := range out {
-			if p == focus || !isDynamicTokenName(p.Name) {
-				continue
-			}
-			if v, ok := values[p.Name]; ok {
-				cp := *p
-				cp.Example = v
-				out[i] = &cp
-			}
-		}
-		return out
 	}
+	e.setFormSource(epKey, "")
 	return out
+}
+
+func (e *commandInjectionExecutor) cachedFormSource(epKey string) (string, bool) {
+	e.refreshMu.Lock()
+	defer e.refreshMu.Unlock()
+	if e.formSourceByEndpoint == nil {
+		return "", false
+	}
+	v, ok := e.formSourceByEndpoint[epKey]
+	return v, ok
+}
+
+func (e *commandInjectionExecutor) setFormSource(epKey, pageURL string) {
+	e.refreshMu.Lock()
+	defer e.refreshMu.Unlock()
+	if e.formSourceByEndpoint == nil {
+		e.formSourceByEndpoint = make(map[string]string)
+	}
+	e.formSourceByEndpoint[epKey] = pageURL
+}
+
+func (e *commandInjectionExecutor) isFailedRefreshPage(pageURL string) bool {
+	e.refreshMu.Lock()
+	defer e.refreshMu.Unlock()
+	return e.failedRefreshPages[pageURL]
+}
+
+func (e *commandInjectionExecutor) markFailedRefreshPage(pageURL string) {
+	e.refreshMu.Lock()
+	defer e.refreshMu.Unlock()
+	if e.failedRefreshPages == nil {
+		e.failedRefreshPages = make(map[string]bool)
+	}
+	e.failedRefreshPages[pageURL] = true
+}
+
+func (e *commandInjectionExecutor) refreshFromPage(ctx context.Context, rawPageURL, epKey string, params []*domain.Parameter, focus *domain.Parameter) ([]*domain.Parameter, bool) {
+	pageURL, err := url.Parse(rawPageURL)
+	if err != nil {
+		return params, false
+	}
+	resp, outcome, _ := e.do(ctx, httpengine.GET(rawPageURL))
+	if outcome != domain.OutcomeSuccess || resp == nil || len(resp.Body) == 0 {
+		if outcome != domain.OutcomeSuccess {
+			e.markFailedRefreshPage(rawPageURL)
+		}
+		return params, false
+	}
+	var actionForms []discovery.Form
+	for _, form := range discovery.ExtractForms(string(resp.Body)) {
+		action := form.Action
+		if action == "" {
+			action = rawPageURL
+		}
+		ref, err := url.Parse(action)
+		if err != nil {
+			continue
+		}
+		target := pageURL.ResolveReference(ref).String()
+		if strings.TrimSuffix(target, "/") != epKey {
+			continue
+		}
+		actionForms = append(actionForms, form)
+	}
+	// Prefer the form the focused parameter belongs to: this page can hold
+	// several forms posting to the same action, and only one of them issued
+	// this request's token. Falls back to every matching form when the group
+	// is not on this page (see currentFormValues for the same reasoning).
+	if group := formGroupOf(focus); group != "" {
+		var grouped []discovery.Form
+		for _, form := range actionForms {
+			if form.Group == group {
+				grouped = append(grouped, form)
+			}
+		}
+		if len(grouped) > 0 {
+			actionForms = grouped
+		}
+	}
+	values := map[string]string{}
+	for _, form := range actionForms {
+		for _, in := range form.Inputs {
+			values[in.Name] = in.Value
+		}
+	}
+	if len(values) == 0 {
+		return params, false
+	}
+	out := append([]*domain.Parameter(nil), params...)
+	for i, p := range out {
+		if p == focus || !isDynamicTokenName(p.Name) {
+			continue
+		}
+		if v, ok := values[p.Name]; ok {
+			cp := *p
+			cp.Example = v
+			out[i] = &cp
+		}
+	}
+	return out, true
 }
 
 func commandInjectionBaseValue(name string) string {
