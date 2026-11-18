@@ -12,6 +12,11 @@ package scan
 // A verdict is CONFIRMED only when two independent payloads produce their own
 // computed markers. A baseline, one marker, transport errors or no marker are
 // never promoted to a finding. No command that changes target state is sent.
+//
+// A baseline that is itself denied (401/403) or unavailable (404/405/410) is
+// recorded as a bounded coverage skip, never as a negative result: the target
+// answered before the parameter was evaluated, so the payload set would only
+// spend requests against a gate it cannot change.
 
 import (
 	"context"
@@ -132,6 +137,14 @@ func (e *commandInjectionExecutor) Handle(ctx context.Context, job *domain.TestJ
 		BaselineStatus: baseResp.Status}
 	baselineEvidence, _ := e.persistEvidence(ctx, job.ScanID, baseResp, "command-injection baseline")
 	d.EvidenceIDs = append(d.EvidenceIDs, baselineEvidence...)
+
+	// An endpoint that refuses the unmutated baseline never evaluated the
+	// focused parameter, so the bounded payload set cannot change that
+	// decision. Sending it anyway would spend requests against a gate and
+	// record a negative-looking result for a sink that was never reached.
+	if gate, gated := commandInjectionGateFor(baseResp.Status); gated {
+		return e.finishBaselineGate(ctx, job, started, ep, baseResp.Status, gate, baselineEvidence)
+	}
 
 	baseValue := strings.TrimSpace(focus.Example)
 	if baseValue == "" {
@@ -486,6 +499,40 @@ func isCommandInjectionLocation(loc domain.ParamLocation) bool {
 	}
 }
 
+// commandInjectionBaselineGate classifies an unmutated baseline status that
+// means the endpoint answered before the focused parameter was evaluated.
+//
+// "baseline was denied" (401/403) is an authorization or
+// prerequisite/consent gate: the session must complete it before this
+// parameter can be tested. "baseline was unavailable" (404/405/410) says the
+// endpoint does not serve this request at all. In both cases a payload cannot
+// change the answer, so probing is pointless and noisy. 400 is deliberately
+// NOT included: plenty of targets reject the baseline's shape but still
+// process a payload, which is exactly the distinction this engine exists to
+// make.
+type commandInjectionBaselineGate struct {
+	// Note is the literal phrase written into the skipped test case and
+	// matched by the web coverage classifier ("baseline was denied" /
+	// "baseline was unavailable").
+	Note   string
+	Reason string
+}
+
+func commandInjectionGateFor(status int) (commandInjectionBaselineGate, bool) {
+	switch status {
+	case http.StatusUnauthorized:
+		return commandInjectionBaselineGate{Note: "baseline was denied",
+			Reason: "the endpoint requires authentication the scan session does not satisfy"}, true
+	case http.StatusForbidden:
+		return commandInjectionBaselineGate{Note: "baseline was denied",
+			Reason: "an authorization or prerequisite gate refused the unmutated request"}, true
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusGone:
+		return commandInjectionBaselineGate{Note: "baseline was unavailable",
+			Reason: "the endpoint does not serve this method and path"}, true
+	}
+	return commandInjectionBaselineGate{}, false
+}
+
 func (e *commandInjectionExecutor) persistEvidence(ctx context.Context, scanID domain.ID, resp *httpengine.Response, role string) ([]domain.ID, error) {
 	return persistHTTPExchange(ctx, e.store, e.evidence, scanID, resp, role)
 }
@@ -513,6 +560,26 @@ func (e *commandInjectionExecutor) finishUnavailable(ctx context.Context, job *d
 		StartedAt: &started, FinishedAt: &now, CreatedAt: started, UpdatedAt: now}
 	if err := e.store.TestCases().Create(ctx, tc); err != nil {
 		return fmt.Errorf("persist skipped command-injection case: %w", err)
+	}
+	return nil
+}
+
+// finishBaselineGate records a bounded payload pass that was NOT run because
+// the target answered the unmutated request with a gate status. It is a
+// coverage result, not a negative one: the endpoint must be completed (login,
+// acknowledgement, or whatever the gate requires) in the scan's own session
+// before this parameter can be tested.
+func (e *commandInjectionExecutor) finishBaselineGate(ctx context.Context, job *domain.TestJob, started time.Time, ep *domain.Endpoint, status int, gate commandInjectionBaselineGate, evidenceIDs []domain.ID) error {
+	now := time.Now()
+	note := fmt.Sprintf("command-injection skipped: %s (HTTP %d): %s; no command payload was sent", gate.Note, status, gate.Reason)
+	tc := &domain.TestCase{ID: domain.NewID(), ScanID: job.ScanID, JobID: job.ID, Attempt: job.Attempts,
+		InjectionPointID: job.Target.InjectionPointID, VulnClass: domain.VulnCommandInjection,
+		Status: domain.TestCaseSkipped, Outcome: domain.OutcomeSuccess,
+		Method: string(ep.Method), URL: job.Target.URL, HTTPStatus: status,
+		Note: note, EvidenceIDs: evidenceIDs,
+		StartedAt: &started, FinishedAt: &now, CreatedAt: started, UpdatedAt: now}
+	if err := e.store.TestCases().Create(ctx, tc); err != nil {
+		return fmt.Errorf("persist gated command-injection case: %w", err)
 	}
 	return nil
 }
