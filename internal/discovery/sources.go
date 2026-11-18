@@ -573,6 +573,7 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 	if n.browser == nil {
 		return nil
 	}
+	seenHTML := make(map[string]struct{})
 	for _, s := range in.SeedURLs {
 		info, err := Normalize(s)
 		if err != nil || !in.Scope.Permits(info.Canonical).Allowed {
@@ -601,7 +602,7 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			}
 			continue
 		}
-		if err := n.emitNetwork(ctx, in, sink, res.Network); err != nil {
+		if err := n.emitNetworkWithHTML(ctx, in, sink, res.Network, seenHTML); err != nil {
 			if errors.Is(err, ErrLimitReached) {
 				return nil
 			}
@@ -619,7 +620,7 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 		hashRoutes := append(extractSPARoutes(res.HTML), n.harvestRouteAPIs(ctx, in, sink, info.Canonical, res.Network)...)
 		routes := hashRouteEntries(hashRoutes)
 		routes = append(routes, n.harvestScriptRoutes(ctx, in, sink, info.Canonical, res.HTML, res.Network)...)
-		if err := n.renderSPARoutes(ctx, in, sink, info.Canonical, routes); err != nil {
+		if err := n.renderSPARoutes(ctx, in, sink, info.Canonical, routes, seenHTML); err != nil {
 			if errors.Is(err, ErrLimitReached) {
 				return nil
 			}
@@ -629,9 +630,15 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 	return nil
 }
 
+const maxNetworkHTMLFormFetches = 128
+
 // emitNetwork turns browser observations into endpoints and JSON body
 // parameters. It is shared by the initial seed render and each SPA route render.
 func (n *networkSource) emitNetwork(ctx context.Context, in Input, sink Sink, network []browser.NetworkEvent) error {
+	return n.emitNetworkWithHTML(ctx, in, sink, network, nil)
+}
+
+func (n *networkSource) emitNetworkWithHTML(ctx context.Context, in Input, sink Sink, network []browser.NetworkEvent, seenHTML map[string]struct{}) error {
 	for _, ev := range network {
 		if !in.Scope.Permits(ev.URL).Allowed {
 			continue // never persist or enqueue an out-of-scope observation
@@ -644,7 +651,8 @@ func (n *networkSource) emitNetwork(ctx context.Context, in Input, sink Sink, ne
 		// here keeps the sink from even considering the noise. JavaScript is
 		// not exempt from the filter either — the crawler mines literals from
 		// script assets, the browser network only sees the request.
-		if asset, err := Normalize(ev.URL); err == nil && IsStaticAssetPath(asset.Path) {
+		info, normErr := Normalize(ev.URL)
+		if normErr == nil && IsStaticAssetPath(info.Path) {
 			continue
 		}
 		method := domain.HTTPMethod(strings.ToUpper(ev.Method))
@@ -657,6 +665,20 @@ func (n *networkSource) emitNetwork(ctx context.Context, in Input, sink Sink, ne
 		}
 		if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: ev.URL, Method: method, Source: domain.SourceBrowserNetwork, ContentType: ev.ContentType, RequestBody: body}); err != nil {
 			return err
+		}
+		if method == domain.MethodGET && seenHTML != nil && n.engine != nil && normErr == nil && len(seenHTML) < maxNetworkHTMLFormFetches {
+			if _, ok := seenHTML[info.Canonical]; !ok && allowFetch(sink, info.Canonical, domain.SourceBrowserNetwork, domain.MethodGET) {
+				seenHTML[info.Canonical] = struct{}{}
+				if err := in.wait(ctx); err != nil {
+					return err
+				}
+				resp, err := n.engine.Do(ctx, httpengine.GET(info.Canonical))
+				if err == nil && resp != nil && len(resp.Body) > 0 && strings.Contains(strings.ToLower(resp.Headers.Get("Content-Type")), "html") {
+					if err := n.emitForms(ctx, in, sink, info.Canonical, string(resp.Body)); err != nil {
+						return err
+					}
+				}
+			}
 		}
 		if ev.PostData == "" || !isJSONContentType(ev.ContentType) {
 			continue
@@ -1193,7 +1215,7 @@ func (n *networkSource) harvestScriptRoutes(ctx context.Context, in Input, sink 
 // crawler's URL set: fragments are client-side state, so ordinary HTTP
 // discovery would only request the same document again; a path route is a real
 // view the browser has to load to reveal the API calls behind it.
-func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink, base string, routes []string) error {
+func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink, base string, routes []string, seenHTML map[string]struct{}) error {
 	if len(routes) == 0 {
 		return nil
 	}
@@ -1236,7 +1258,7 @@ func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink
 			continue
 		}
 		rendered++
-		if err := n.emitNetwork(ctx, in, sink, res.Network); err != nil {
+		if err := n.emitNetworkWithHTML(ctx, in, sink, res.Network, seenHTML); err != nil {
 			return err
 		}
 		if err := n.emitForms(ctx, in, sink, routeURL, res.HTML); err != nil {
