@@ -35,10 +35,21 @@ import (
 // recognized either; its option bag is the same shape as fetch's but its call
 // forms vary too much to parse with the same bounded rules.
 //
-// Only the DOCUMENT's inline scripts are read. The crawler already mines an
-// external bundle's path literals (as GET endpoints); a method or body declared
-// inside a bundle is not inferred from it, because acting on a bundle-wide
-// declaration would multiply body-carrying requests against a scan target.
+// Two entry points share one parser:
+//
+//   - ExtractScriptRequests reads a DOCUMENT and parses each inline <script>
+//     body. This is what a server-rendered page needs.
+//   - ExtractScriptRequestsFromJS reads one raw JavaScript SOURCE (an external
+//     SPA bundle) with no <script> wrapper to unwrap. A modern SPA declares its
+//     API calls in the bundle it ships, not in the HTML shell, so the browser
+//     never reports a fetch bound to a click and the crawler's path-literal
+//     scan (ExtractScriptEndpointLiterals) only sees bare GET paths. Reading
+//     the declaration recovers the method and body the bundle itself declares.
+//
+// A bundle is read from a body the caller already fetched for its route
+// harvest, so this adds no request of its own. The per-source cap
+// (maxScriptRequests) bounds how much one bundle can contribute, and callers
+// only inspect the same small, non-vendor bundle set they already fetch.
 //
 // Nothing here sends a request or decides anything: the result is discovery
 // input. The collector scope-checks and deduplicates every candidate, and the
@@ -86,6 +97,51 @@ var (
 	scriptFetchBodyRE        = regexp.MustCompile(`\bbody\s*:\s*("[^"]*"|'[^']*')`)
 )
 
+// scriptRequestSet accumulates parsed shapes under the extractor's shared cap
+// and dedup rule, so both entry points behave identically.
+type scriptRequestSet struct {
+	out  []ScriptRequest
+	seen map[string]struct{}
+}
+
+func (s *scriptRequestSet) full() bool { return len(s.out) >= maxScriptRequests }
+
+func (s *scriptRequestSet) add(req ScriptRequest) {
+	if s.full() {
+		return
+	}
+	req = sanitizeScriptRequest(req)
+	if req.URL == "" || !req.Method.IsValid() {
+		return
+	}
+	key := string(req.Method) + " " + req.URL
+	if _, dup := s.seen[key]; dup {
+		return
+	}
+	s.seen[key] = struct{}{}
+	s.out = append(s.out, req)
+}
+
+// collectSource parses one JavaScript source text — an inline <script> body or
+// a whole external bundle — for XHR/fetch declarations. It is the single
+// parsing path both extractors use.
+func (s *scriptRequestSet) collectSource(script string) {
+	for _, m := range scriptXHRHandleRE.FindAllStringSubmatch(script, maxScriptMatches) {
+		if s.full() {
+			return
+		}
+		if req, ok := scriptXHRRequest(script, m[1]); ok {
+			s.add(req)
+		}
+	}
+	for _, req := range scriptFetchRequests(script) {
+		if s.full() {
+			return
+		}
+		s.add(req)
+	}
+}
+
 // ExtractScriptRequests returns the request shapes a document's inline scripts
 // declare with literal arguments, in source order and deduplicated by method +
 // URL. It is bounded and syntax-light: an unparseable or computed call is
@@ -94,46 +150,33 @@ func ExtractScriptRequests(body string) []ScriptRequest {
 	if body == "" {
 		return nil
 	}
-	var out []ScriptRequest
-	seen := make(map[string]struct{})
-	add := func(req ScriptRequest) {
-		if len(out) >= maxScriptRequests {
-			return
-		}
-		req = sanitizeScriptRequest(req)
-		if req.URL == "" || !req.Method.IsValid() {
-			return
-		}
-		key := string(req.Method) + " " + req.URL
-		if _, dup := seen[key]; dup {
-			return
-		}
-		seen[key] = struct{}{}
-		out = append(out, req)
-	}
-
+	set := &scriptRequestSet{seen: make(map[string]struct{}, maxScriptRequests)}
 	for _, block := range scriptBlockRE.FindAllStringSubmatch(body, maxScriptBlocks) {
-		if len(out) >= maxScriptRequests {
+		if set.full() {
 			break
 		}
-		script := block[1]
-		for _, m := range scriptXHRHandleRE.FindAllStringSubmatch(script, maxScriptMatches) {
-			req, ok := scriptXHRRequest(script, m[1])
-			if ok {
-				add(req)
-			}
-			if len(out) >= maxScriptRequests {
-				break
-			}
-		}
-		for _, req := range scriptFetchRequests(script) {
-			add(req)
-			if len(out) >= maxScriptRequests {
-				break
-			}
-		}
+		set.collectSource(block[1])
 	}
-	return out
+	return set.out
+}
+
+// ExtractScriptRequestsFromJS returns the request shapes one raw JavaScript
+// source declares with literal arguments — the same bounded XHR/fetch parse as
+// ExtractScriptRequests, without requiring <script> tags. It exists for
+// external SPA bundles, where the application's API calls live and the page's
+// HTML shell carries none of them.
+//
+// The caller is expected to hand it a body it already fetched for another
+// purpose (route-literal mining), and to respect its own per-bundle and
+// per-render caps. Like the document extractor, it registers nothing and sends
+// nothing.
+func ExtractScriptRequestsFromJS(js string) []ScriptRequest {
+	if js == "" {
+		return nil
+	}
+	set := &scriptRequestSet{seen: make(map[string]struct{}, maxScriptRequests)}
+	set.collectSource(js)
+	return set.out
 }
 
 // scriptXHRRequest reads one XMLHttpRequest handle's open/setRequestHeader/send
