@@ -578,3 +578,26 @@ func TestEngineInterfaceSatisfied(t *testing.T) {
 	var _ httpengine.Engine = httpengine.NewDefault()
 	var _ httpengine.Engine = httpengine.Stub{}
 }
+
+func TestNoRedirectsPreservesMalformedLocation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header()["Location"] = []string{"bad\tredirect"}
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	cfg := httpengine.DefaultConfig()
+	cfg.FollowRedirects = false
+	c := mustClient(t, cfg)
+
+	resp, err := c.Do(context.Background(), httpengine.GET(srv.URL+"/redir"))
+	if err != nil {
+		t.Fatalf("expected 302 response, got error: %v", err)
+	}
+	if resp.Status != http.StatusFound {
+		t.Fatalf("status = %d, want 302", resp.Status)
+	}
+	if got := resp.Headers.Get("Location"); got != "bad\tredirect" {
+		t.Fatalf("Location = %q, want %q", got, "bad\tredirect")
+	}
+}

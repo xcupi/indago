@@ -157,6 +157,26 @@ func TestScopedEngineNoRedirectsReturnsTheRedirectItself(t *testing.T) {
 	}
 }
 
+func TestScopedEngineMalformedLocationHandsBack3xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header()["Location"] = []string{"bad\tredirect"}
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	eng := newScopedEngine(noFollowClient(t), appScope())
+	resp, err := eng.Do(context.Background(), httpengine.GET(srv.URL+"/app/redir"))
+	if err != nil {
+		t.Fatalf("expected 302 response, got error: %v", err)
+	}
+	if resp.Status != http.StatusFound {
+		t.Fatalf("status = %d, want 302", resp.Status)
+	}
+	if got := resp.Headers.Get("Location"); got != "bad\tredirect" {
+		t.Fatalf("Location = %q, want %q", got, "bad\tredirect")
+	}
+}
+
 func TestScopedEngineRedirectMethodSemantics(t *testing.T) {
 	var log pathLog
 	srv := scopedTestServer(t, &log)

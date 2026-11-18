@@ -299,33 +299,48 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 		// Cookies (Jarless/NoJar) is the only cookie state that reaches it.
 		jar = nil
 	}
-	client := &http.Client{
-		Transport: c.transport,
-		Jar:       jar,
-		CheckRedirect: func(r *http.Request, via []*http.Request) error {
-			chain = append(chain, r.URL.String())
-			if isolated {
-				// Fail closed. Go's client copies an explicit Cookie header to
-				// any same-host redirect, which includes a changed port and an
-				// HTTPS->HTTP downgrade: exactly the hops an isolation mode did
-				// not authorise. The mode's cookies were declared for THIS
-				// request; the next hop gets none of them. (The scope-enforcing
-				// engine follows redirects itself and re-derives the cookies it
-				// sends per hop, so this only affects direct Client use.)
-				r.Header.Del("Cookie")
-			}
-			if !c.followRedirects || req.NoRedirects {
-				return http.ErrUseLastResponse
-			}
-			if len(via) >= c.maxRedirects {
-				return fmt.Errorf("%w (limit %d)", ErrTooManyRedirects, c.maxRedirects)
-			}
-			return nil
-		},
-	}
-
 	start := time.Now()
-	resp, err := client.Do(hr)
+	var resp *http.Response
+	if !c.followRedirects || req.NoRedirects {
+		// Execute a single hop directly on the transport when redirects are
+		// disabled: Go's http.Client.Do parses resp.Location() before calling
+		// CheckRedirect and errors on 3xx responses with control characters in
+		// Location, discarding the response instead of returning it.
+		if jar != nil {
+			for _, ck := range jar.Cookies(hr.URL) {
+				hr.AddCookie(ck)
+			}
+		}
+		resp, err = c.transport.RoundTrip(hr)
+		if err == nil && jar != nil {
+			if rc := resp.Cookies(); len(rc) > 0 {
+				jar.SetCookies(hr.URL, rc)
+			}
+		}
+	} else {
+		client := &http.Client{
+			Transport: c.transport,
+			Jar:       jar,
+			CheckRedirect: func(r *http.Request, via []*http.Request) error {
+				chain = append(chain, r.URL.String())
+				if isolated {
+					// Fail closed. Go's client copies an explicit Cookie header to
+					// any same-host redirect, which includes a changed port and an
+					// HTTPS->HTTP downgrade: exactly the hops an isolation mode did
+					// not authorise. The mode's cookies were declared for THIS
+					// request; the next hop gets none of them. (The scope-enforcing
+					// engine follows redirects itself and re-derives the cookies it
+					// sends per hop, so this only affects direct Client use.)
+					r.Header.Del("Cookie")
+				}
+				if len(via) >= c.maxRedirects {
+					return fmt.Errorf("%w (limit %d)", ErrTooManyRedirects, c.maxRedirects)
+				}
+				return nil
+			},
+		}
+		resp, err = client.Do(hr)
+	}
 	if err != nil {
 		// Context and redirect-limit errors propagate (errors.Is sees the
 		// sentinels through the *url.Error wrapper).

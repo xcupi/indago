@@ -152,6 +152,15 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 		}
 	}
 
+	if reason := wireValueSkipReason(focus.Location, cand.Value); reason != "" {
+		return result{skipped: true, note: fmt.Sprintf("%s (skipped: %s)", note, reason), vulnClass: domain.VulnReflectedXSS}
+	}
+	if focusB != nil {
+		if reason := wireValueSkipReason(focusB.Location, cand.ValueB); reason != "" {
+			return result{skipped: true, note: fmt.Sprintf("%s (skipped: %s)", note, reason), vulnClass: domain.VulnReflectedXSS}
+		}
+	}
+
 	// Baseline (shared with the reflection step via the same per-endpoint cache).
 	baseReq, err := buildRequest(ep, params, nil)
 	if err != nil {
@@ -268,4 +277,39 @@ func (e *executor) runCandidate(ctx context.Context, tc *domain.TestCase, ep *do
 	r.reflection = &report
 	r.baselineReq, r.baselineResp = bl.reqEvidence, bl.respEvidence
 	return r
+}
+
+func validHTTPHeaderValue(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if (b < ' ' && b != '\t') || b == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func hasControlBytes(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < ' ' || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// wireValueSkipReason reports whether a candidate value contains control bytes
+// that cannot be transmitted on the wire for Header or Cookie injection points.
+func wireValueSkipReason(loc domain.ParamLocation, val string) string {
+	switch loc {
+	case domain.LocationHeader:
+		if !validHTTPHeaderValue(val) {
+			return "header value contains control characters invalid on the wire"
+		}
+	case domain.LocationCookie:
+		if hasControlBytes(val) {
+			return "cookie value contains control characters disallowed in HTTP cookies"
+		}
+	}
+	return ""
 }

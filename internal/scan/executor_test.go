@@ -804,3 +804,25 @@ func TestPoolPauseResumeGatesExecution(t *testing.T) {
 	pool.Resume()
 	waitUntil(t, 3*time.Second, "execution after resume", func() bool { return hits.Load() == 4 })
 }
+
+func TestWireValueSkipReason(t *testing.T) {
+	if reason := wireValueSkipReason(domain.LocationHeader, "normal\tvalue"); reason != "" {
+		t.Fatalf("unexpected skip for tab in header: %q", reason)
+	}
+	for _, bad := range []string{"a\nb", "a\rb", "a\x00b"} {
+		if reason := wireValueSkipReason(domain.LocationHeader, bad); reason == "" {
+			t.Fatalf("expected skip for header value %q", bad)
+		}
+	}
+	if reason := wireValueSkipReason(domain.LocationCookie, "plain"); reason != "" {
+		t.Fatalf("unexpected skip for plain cookie: %q", reason)
+	}
+	for _, bad := range []string{"a\x00b", "a\tb"} {
+		if reason := wireValueSkipReason(domain.LocationCookie, bad); reason == "" {
+			t.Fatalf("expected skip for cookie value %q", bad)
+		}
+	}
+	if reason := wireValueSkipReason(domain.LocationQuery, "a\x00b\nc"); reason != "" {
+		t.Fatalf("unexpected skip for query value: %q", reason)
+	}
+}

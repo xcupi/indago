@@ -369,6 +369,11 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 			Scope:            e.scope,
 			SessionStatePath: statePath,
 			ProxyServer:      e.nextProxy(),
+			// The browser gate's method policy follows the scan's own opt-in:
+			// off by default, so a reflected GET candidate is verified in a
+			// non-mutating browser; on only when the operator allowed
+			// state-changing requests (POST candidates need it to replay).
+			AllowStateChanging: e.cfg.AllowStateChanging,
 		}
 		if req.Method == "POST" && focus.Location == domain.LocationForm {
 			if vals, perr := url.ParseQuery(string(req.Body)); perr == nil {
@@ -397,6 +402,14 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 		// BrowserVerifier.Verify). A combined candidate's SECOND parameter
 		// gets the identical treatment, independently of the first (either
 		// half, or both, can be Header/Cookie).
+		if reason := wireValueSkipReason(focus.Location, vj.Candidate.Value); reason != "" {
+			return
+		}
+		if focusB != nil {
+			if reason := wireValueSkipReason(focusB.Location, vj.Candidate.ValueB); reason != "" {
+				return
+			}
+		}
 		if e.userAgent != "" {
 			in.ExtraHeaders = map[string]string{"User-Agent": e.userAgent}
 		}
@@ -429,6 +442,14 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 	}
 	if !canBrowserVerify(ep.Method, focus.Location) {
 		return verifyResult{skipped: true, note: note + ": browser verification supports GET/HEAD, POST/form, or bounded POST/JSON document replay only in this phase"}
+	}
+	if reason := wireValueSkipReason(focus.Location, vj.Candidate.Value); reason != "" {
+		return verifyResult{skipped: true, note: note + ": " + reason}
+	}
+	if focusB != nil {
+		if reason := wireValueSkipReason(focusB.Location, vj.Candidate.ValueB); reason != "" {
+			return verifyResult{skipped: true, note: note + ": " + reason}
+		}
 	}
 	if verifyErr != nil {
 		switch {
@@ -536,13 +557,33 @@ func (e *verifyExecutor) finish(ctx context.Context, job *domain.TestJob, tc *do
 
 	var evidenceIDs []domain.ID
 	if r.result != nil {
-		if detail, err := json.Marshal(r.result.Report); err == nil {
+		// The report's DOMExcerpt and SignalText are page-derived free text
+		// (a window of the rendered DOM and the browser's own error text). For
+		// an authenticated or unknown-auth scan they are omitted from the
+		// persisted report even when no evidence store is configured — the
+		// verdict, the Signal enum and the finding correlation keep working
+		// from the untouched in-memory Result. See evidence_privacy.go.
+		report := r.result.Report
+		if withhold, reason := scanUsesAuthenticatedSession(ctx, e.store, tc.ScanID); withhold {
+			var redacted bool
+			report, redacted = verificationReportForPersistence(report, withhold)
+			if redacted {
+				tc.Note += fmt.Sprintf(browserReportWithheldNote, reason,
+					r.result.Report.DOMExcerpt != "", r.result.Report.SignalText != "")
+			}
+		}
+		if detail, err := json.Marshal(report); err == nil {
 			tc.Detail = detail
 		} else {
 			e.log.Warn("marshal verification report", "job", tc.JobID, "err", err)
 		}
 		if e.evidence != nil {
-			evidenceIDs = e.persistVerificationEvidence(ctx, tc.ScanID, tc.ID, r.result.Evidence)
+			var withheldNote string
+			evidenceIDs, withheldNote = e.persistVerificationEvidence(ctx, tc.ScanID, tc.ID, r.result.Evidence)
+			// The verdict, report and correlation above are unaffected; this
+			// only records that the page-derived artifacts were withheld for
+			// an authenticated scan (see evidence_privacy.go).
+			tc.Note += withheldNote
 		}
 	}
 	tc.EvidenceIDs = evidenceIDs
@@ -563,33 +604,13 @@ func (e *verifyExecutor) finish(ctx context.Context, job *domain.TestJob, tc *do
 }
 
 // persistVerificationEvidence stores the screenshot, rendered DOM, and browser
-// log as evidence blobs, returning the IDs of whichever were captured.
-func (e *verifyExecutor) persistVerificationEvidence(ctx context.Context, scanID, tcID domain.ID, ev verification.ResultEvidence) []domain.ID {
-	var ids []domain.ID
-	note := "test_case=" + string(tcID)
-	if len(ev.Screenshot) > 0 {
-		if id, err := putEvidenceBlob(ctx, e.store, e.evidence, scanID, domain.EvidenceScreenshot, ".png", "image/png", ev.Screenshot, note+" screenshot"); err == nil {
-			ids = append(ids, id)
-		} else {
-			e.log.Warn("persist screenshot evidence", "err", err)
-		}
-	}
-	if ev.DOMHTML != "" {
-		if id, err := putEvidenceBlob(ctx, e.store, e.evidence, scanID, domain.EvidenceDOM, ".html", "text/html", []byte(ev.DOMHTML), note+" rendered DOM"); err == nil {
-			ids = append(ids, id)
-		} else {
-			e.log.Warn("persist DOM evidence", "err", err)
-		}
-	}
-	if len(ev.BrowserLog) > 0 {
-		data := []byte(joinLines(ev.BrowserLog))
-		if id, err := putEvidenceBlob(ctx, e.store, e.evidence, scanID, domain.EvidenceBrowserLog, ".log", "text/plain", data, note+" browser log"); err == nil {
-			ids = append(ids, id)
-		} else {
-			e.log.Warn("persist browser log evidence", "err", err)
-		}
-	}
-	return ids
+// log as evidence blobs, returning the IDs of whichever were captured. For an
+// authenticated scan the raw artifacts are withheld and only a non-sensitive
+// summary is stored — see evidence_privacy.go; the second return value is the
+// TestCase note suffix describing that decision (empty for anonymous scans).
+func (e *verifyExecutor) persistVerificationEvidence(ctx context.Context, scanID, tcID domain.ID, ev verification.ResultEvidence) ([]domain.ID, string) {
+	return persistBrowserArtifacts(ctx, e.store, e.evidence, e.log, scanID, tcID,
+		browserArtifacts{Screenshot: ev.Screenshot, DOMHTML: ev.DOMHTML, BrowserLog: ev.BrowserLog}, "")
 }
 
 func joinLines(lines []string) string {

@@ -213,7 +213,9 @@ func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpen
 		}
 		next, err := resolveRedirect(cur.URL, loc)
 		if err != nil {
-			return nil, fmt.Errorf("%w: bad redirect Location %q", httpengine.ErrInvalidRequest, loc)
+			resp.RedirectChain = chain
+			resp.FinalURL = cur.URL
+			return resp, nil // unparseable Location cannot be followed; hand the 3xx back
 		}
 		if hop >= maxScopedRedirects {
 			return nil, httpengine.ErrTooManyRedirects
