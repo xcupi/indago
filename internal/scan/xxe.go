@@ -55,6 +55,11 @@ const (
 	// so a triager can tell a fully local proof from a collaborator hit.
 	xxeModeInBand    = "in_band"
 	xxeModeOutOfBand = "out_of_band"
+
+	// defaultXXEProbeBody is used only when discovery observed an explicit XML
+	// endpoint (e.g. a form declaring contentType/enctype="application/xml")
+	// without a captured request body.
+	defaultXXEProbeBody = "<indago>probe</indago>"
 )
 
 var xxeRootRe = regexp.MustCompile(`<([A-Za-z_][A-Za-z0-9_.:-]*)(\s[^>]*)?>`)
@@ -131,19 +136,27 @@ func xxeProfile(ep *domain.Endpoint, resp *httpengine.Response) fingerprint.Prof
 	return fingerprint.Analyze(obs)
 }
 
+func isExplicitXMLMediaType(raw string) bool {
+	mt := strings.ToLower(strings.TrimSpace(strings.SplitN(raw, ";", 2)[0]))
+	return mt == "application/xml" || mt == "text/xml" || strings.HasSuffix(mt, "+xml")
+}
+
 func isXMLBodyEndpoint(ep *domain.Endpoint) bool {
-	if ep == nil || strings.TrimSpace(ep.RequestBody) == "" {
-		return false
-	}
-	if !strings.Contains(strings.ToLower(ep.ContentType), "xml") {
+	if ep == nil {
 		return false
 	}
 	switch ep.Method {
 	case domain.MethodPOST, domain.MethodPUT, domain.MethodPATCH:
-		return strings.Contains(ep.RequestBody, "<")
 	default:
 		return false
 	}
+	if strings.TrimSpace(ep.RequestBody) == "" {
+		return isExplicitXMLMediaType(ep.ContentType)
+	}
+	if !strings.Contains(strings.ToLower(ep.ContentType), "xml") {
+		return false
+	}
+	return strings.Contains(ep.RequestBody, "<")
 }
 
 func (e *xxeExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
@@ -157,10 +170,14 @@ func (e *xxeExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	if e.cfg.SkipWriteEndpoints || !e.cfg.AllowStateChanging {
 		return e.finishXXEUnavailable(ctx, job, "state-changing XML endpoint skipped by policy")
 	}
+	reqBody := ep.RequestBody
+	if strings.TrimSpace(reqBody) == "" {
+		reqBody = defaultXXEProbeBody
+	}
 	req := &httpengine.Request{
 		Method:      string(ep.Method),
 		URL:         ep.URL,
-		Body:        []byte(ep.RequestBody),
+		Body:        []byte(reqBody),
 		ContentType: ep.ContentType,
 	}
 	baseResp, baseOutcome, _ := e.do(ctx, req)
@@ -172,7 +189,7 @@ func (e *xxeExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	// response that was just fetched plus the endpoint's own request shape and
 	// sends nothing; a JSON-only request/response pair with no XML anywhere is
 	// refused here even if the stored content type merely contained "xml".
-	if !fingerprint.ShouldProbeXXE(xxeProfile(ep, baseResp), ep.ContentType, ep.RequestBody) {
+	if !fingerprint.ShouldProbeXXE(xxeProfile(ep, baseResp), ep.ContentType, reqBody) {
 		return e.finishXXEUnavailable(ctx, job, "fingerprint found no XML surface on this endpoint")
 	}
 	d := xxeDetail{Engine: xxeEngine}
@@ -263,7 +280,7 @@ func (e *xxeExecutor) tryInBand(ctx context.Context, job *domain.TestJob, ep *do
 	expanded := 0
 	for i := 0; i < 2; i++ {
 		probe := newXXEEntityProbe()
-		payload, ok := injectXXEInternal(ep.RequestBody, probe)
+		payload, ok := injectXXEInternal(string(req.Body), probe)
 		if !ok {
 			return res
 		}
@@ -334,7 +351,7 @@ func (e *xxeExecutor) tryOutOfBand(ctx context.Context, job *domain.TestJob, ep 
 	d.Mode = xxeModeOutOfBand
 	marker := fmt.Sprintf("indago-xxe-%d", time.Now().UnixNano()%1000000000)
 	callback := strings.TrimRight(e.callback, "/") + "/" + marker
-	payload, ok := injectXXE(ep.RequestBody, callback)
+	payload, ok := injectXXE(string(req.Body), callback)
 	if !ok {
 		return e.finishXXEUnavailable(ctx, job, "XML body has no injectable root element")
 	}

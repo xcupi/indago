@@ -234,7 +234,7 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 		if err != nil || !in.Scope.Permits(actionInfo.Canonical).Allowed {
 			continue
 		}
-		if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: actionInfo.Canonical, Method: f.Method, Source: domain.SourceForm}); err != nil {
+		if _, err := sink.AddEndpoint(ctx, EndpointCandidate{URL: actionInfo.Canonical, Method: f.Method, Source: domain.SourceForm, ContentType: f.ContentType}); err != nil {
 			return nil, err
 		}
 		loc := domain.LocationQuery
@@ -1363,7 +1363,7 @@ func (n *networkSource) emitForms(ctx context.Context, in Input, sink Sink, base
 			continue
 		}
 		if _, err := sink.AddEndpoint(ctx, EndpointCandidate{
-			URL: info.Canonical, Method: method, Source: domain.SourceBrowserNetwork,
+			URL: info.Canonical, Method: method, Source: domain.SourceBrowserNetwork, ContentType: form.ContentType,
 		}); err != nil {
 			return err
 		}

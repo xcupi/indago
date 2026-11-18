@@ -25,6 +25,7 @@ type Form struct {
 	Action            string // raw action or handler target ("" means the current page URL)
 	ActionFromHandler bool   // target derived from an inline submit handler
 	Method            domain.HTTPMethod
+	ContentType       string // declared contentType or non-default enctype attribute, if any
 	Inputs            []FormField
 	// Group identifies the set of fields THIS form submits (see FormGroupKey).
 	// Two forms on one page can share an action URL, and their fields must
@@ -113,6 +114,14 @@ func parseForm(form *html.Node) Form {
 	if v, ok := attrValue(form, "method"); ok {
 		if strings.EqualFold(strings.TrimSpace(v), "post") {
 			f.Method = domain.MethodPOST
+		}
+	}
+	if v, ok := attrValue(form, "contenttype"); ok {
+		f.ContentType = strings.TrimSpace(v)
+	} else if v, ok := attrValue(form, "enctype"); ok {
+		ct := strings.TrimSpace(v)
+		if ct != "" && !strings.EqualFold(ct, "application/x-www-form-urlencoded") {
+			f.ContentType = ct
 		}
 	}
 	handler, hasSubmitHandler := attrValue(form, "onsubmit")

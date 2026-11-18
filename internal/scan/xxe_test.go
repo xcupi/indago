@@ -492,3 +492,59 @@ func TestXXEEntityExpansionNeedsStrictNonReflection(t *testing.T) {
 		}
 	}
 }
+
+func TestXXEExplicitXMLContentTypeWithoutObservedBody(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		s := string(body)
+		if !strings.Contains(s, "<indago>") {
+			http.Error(w, "missing fallback xml", http.StatusBadRequest)
+			return
+		}
+		// Simulate an XML parser that expands a declared internal entity.
+		if idx := strings.Index(s, "<!ENTITY "); idx >= 0 {
+			rest := s[idx+len("<!ENTITY "):]
+			if sp := strings.IndexByte(rest, ' '); sp > 0 {
+				q1 := strings.IndexByte(rest[sp:], '"')
+				if q1 >= 0 {
+					afterQ1 := rest[sp+q1+1:]
+					if q2 := strings.IndexByte(afterQ1, '"'); q2 >= 0 {
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprintf(w, `{"output":%q}`, afterQ1[:q2])
+						return
+					}
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"output":"probe"}`)
+	}))
+	defer target.Close()
+
+	env := newScanEnv(t)
+	ep := &domain.Endpoint{
+		ID: domain.NewID(), ScanID: env.scanID, URL: target.URL + "/xxe/simple",
+		Method: domain.MethodPOST, Source: domain.SourceBrowserNetwork,
+		ContentType: "application/xml", RequestBody: "", CreatedAt: time.Now(),
+	}
+	if err := env.st.Endpoints().Create(context.Background(), ep); err != nil {
+		t.Fatal(err)
+	}
+	if !isXMLBodyEndpoint(ep) {
+		t.Fatal("isXMLBodyEndpoint() = false, want true for explicit application/xml without body")
+	}
+	ex := newXXEExecutor(env.st, scopedClient(t, openScope()), env.ev,
+		ExecutorConfig{AllowStateChanging: true, SkipWriteEndpoints: false}, execLog(), nil)
+	job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobXXE,
+		Target: domain.JobTarget{EndpointID: ep.ID, URL: ep.URL}, Attempts: 1, MaxAttempts: 1}
+	if err := ex.Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	findings, err := env.st.Findings().ListByScan(context.Background(), env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].VulnClass != domain.VulnXXE || findings[0].Verdict != domain.VerdictConfirmed {
+		t.Fatalf("findings = %+v, want one confirmed XXE", findings)
+	}
+}

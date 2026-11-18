@@ -96,6 +96,27 @@ func TestExtractForms(t *testing.T) {
 	}
 }
 
+func TestExtractFormsContentType(t *testing.T) {
+	html := `<html><body>
+		<form action="/xxe/simple" method="POST" contentType="application/xml"><input name="comment"></form>
+		<form action="/xxe/enctype" method="POST" enctype="text/xml"><input name="xml"></form>
+		<form action="/login" method="POST" enctype="application/x-www-form-urlencoded"><input name="user"></form>
+	</body></html>`
+	forms := discovery.ExtractForms(html)
+	if len(forms) != 3 {
+		t.Fatalf("len(forms) = %d, want 3", len(forms))
+	}
+	if forms[0].ContentType != "application/xml" {
+		t.Fatalf("forms[0].ContentType = %q, want application/xml", forms[0].ContentType)
+	}
+	if forms[1].ContentType != "text/xml" {
+		t.Fatalf("forms[1].ContentType = %q, want text/xml", forms[1].ContentType)
+	}
+	if forms[2].ContentType != "" {
+		t.Fatalf("forms[2].ContentType = %q, want empty for default urlencoded", forms[2].ContentType)
+	}
+}
+
 func fieldNames(f discovery.Form) []string {
 	var out []string
 	for _, in := range f.Inputs {
