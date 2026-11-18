@@ -284,6 +284,112 @@ func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*
 	return res, nil
 }
 
+// RenderHashRoutes implements HashRouteRenderer: it opens one isolated context
+// and loads baseURL once, then switches window.location.hash for each fragment
+// in fragments and returns per-fragment observations (HTML + newly observed
+// network requests).
+func (m *Manager) RenderHashRoutes(ctx context.Context, baseURL string, fragments []string, opts RenderOptions) ([]*RenderResult, error) {
+	if len(fragments) == 0 {
+		return nil, nil
+	}
+	var extra map[string]string
+	if strings.TrimSpace(opts.UserAgent) != "" {
+		extra = map[string]string{"User-Agent": opts.UserAgent}
+	}
+	c, err := m.NewContext(ctx, ContextOptions{
+		StorageStatePath:   opts.SessionStatePath,
+		AllowRequest:       opts.AllowRequest,
+		ExtraHeaders:       extra,
+		AllowStateChanging: false,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	page, err := c.NewPage(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	nav, err := page.Navigate(ctx, baseURL, NavOptions{WaitUntil: opts.WaitUntil, Timeout: opts.Timeout, Limiter: opts.Limiter})
+	if err != nil {
+		return nil, err
+	}
+
+	window := opts.ObservationWindow
+	if window <= 0 {
+		window = 500 * time.Millisecond
+	}
+	if err := waitForSettle(ctx, page, window); err != nil {
+		return nil, err
+	}
+
+	prevNetLen := len(page.NetworkEvents())
+	results := make([]*RenderResult, 0, len(fragments))
+	for _, frag := range fragments {
+		if err := ctx.Err(); err != nil {
+			return results, err
+		}
+		if err := opts.Limiter.Wait(ctx); err != nil {
+			return results, err
+		}
+		if !strings.HasPrefix(frag, "#") {
+			frag = "#" + frag
+		}
+		if _, err := page.EvaluateArg(ctx, "(h) => { window.location.hash = h; }", frag); err != nil {
+			if ctx.Err() != nil {
+				return results, ctx.Err()
+			}
+			results = append(results, nil)
+			continue
+		}
+		if err := waitForSettle(ctx, page, window); err != nil {
+			return results, err
+		}
+
+		html, err := page.Content(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return results, ctx.Err()
+			}
+			results = append(results, nil)
+			continue
+		}
+		allNet := page.NetworkEvents()
+		var deltaNet []NetworkEvent
+		if prevNetLen < len(allNet) {
+			deltaNet = append([]NetworkEvent(nil), allNet[prevNetLen:]...)
+			prevNetLen = len(allNet)
+		}
+		results = append(results, &RenderResult{
+			FinalURL:       strings.SplitN(baseURL, "#", 2)[0] + frag,
+			Status:         nav.Status,
+			HTML:           html,
+			Network:        deltaNet,
+			PageErrors:     page.PageErrors(),
+			DialogMessages: page.DialogMessages(),
+			Blocked:        page.BlockedRequests(),
+		})
+	}
+	return results, nil
+}
+
+func waitForSettle(ctx context.Context, page *Page, window time.Duration) error {
+	if _, idleErr := page.WaitNetworkIdle(ctx, 200*time.Millisecond, window); errors.Is(idleErr, ErrNetworkIdleUnsupported) {
+		timer := time.NewTimer(window)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	} else if idleErr != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return nil
+}
+
 // InteractiveLogin launches a VISIBLE browser so the operator can authenticate
 // (including MFA), waits for the success URL (or ctx/timeout), saves the session
 // to StorageStatePath, and tears the browser down. The saved path can later seed
@@ -867,6 +973,11 @@ func (p *Page) PressKeyChord(ctx context.Context, chord string) error {
 // scope checks of its own.
 func (p *Page) Evaluate(ctx context.Context, script string) (any, error) {
 	return callCtx(ctx, func() (any, error) { return p.handle.Evaluate(automationTag+script, nil) })
+}
+
+// EvaluateArg executes a JS function with one JSON-serializable argument.
+func (p *Page) EvaluateArg(ctx context.Context, script string, arg any) (any, error) {
+	return callCtx(ctx, func() (any, error) { return p.handle.Evaluate(automationTag+script, arg) })
 }
 
 // Screenshot captures a PNG screenshot.

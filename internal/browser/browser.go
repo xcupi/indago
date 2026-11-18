@@ -31,6 +31,11 @@ var (
 	ErrClosed = errors.New("browser: closed")
 	// ErrNoBrowser indicates the pool has no available browser.
 	ErrNoBrowser = errors.New("browser: no browser available")
+	// ErrStateChangingBlocked is returned when a caller asks a context to send
+	// a request whose method is not read-only while that context has not been
+	// granted the explicit state-changing opt-in (see
+	// ContextOptions.AllowStateChanging). The request is never sent.
+	ErrStateChangingBlocked = errors.New("browser: state-changing request blocked by the context's non-mutating policy")
 )
 
 // Load-state values for navigation readiness.
@@ -160,6 +165,23 @@ type ContextOptions struct {
 	// so a header reflection gets the same real-browser confirmation chance
 	// a query/form/JSON reflection already gets. nil/empty changes nothing.
 	ExtraHeaders map[string]string
+	// AllowStateChanging permits this context's pages to issue a request with a
+	// method other than GET/HEAD/OPTIONS (POST, PUT, PATCH, DELETE, …).
+	//
+	// The zero value BLOCKS every such request before it leaves the browser:
+	// a scan must never write to a target unless the operator explicitly opted
+	// in, so the default is fail-closed rather than permissive. The block
+	// applies to page-initiated XHR/fetch and form submissions, requests made
+	// by popups, and every redirect hop — a 307/308 that would preserve a
+	// non-read-only method is refused at the response stage (CDP) as well as
+	// at the initial request (Playwright route). It does NOT replace
+	// AllowRequest: a request must pass the scope gate too.
+	//
+	// Set it only where the operator's own opt-in applies: browser verification
+	// replaying a POST candidate (verification.Input.AllowStateChanging), and an
+	// operator-requested login (which must POST its login form). Discovery
+	// rendering never sets it — crawling a page needs no state change.
+	AllowStateChanging bool
 }
 
 // NavOptions control a single navigation.
@@ -295,6 +317,14 @@ type Browser interface {
 	Render(ctx context.Context, url string, opts RenderOptions) (*RenderResult, error)
 	// Close releases browser resources.
 	Close() error
+}
+
+// HashRouteRenderer is an optional Browser capability that renders multiple
+// hash fragments ("#lesson/...", "#/basket") within a single loaded document
+// instead of opening a fresh browser context and reloading the SPA shell for
+// each fragment.
+type HashRouteRenderer interface {
+	RenderHashRoutes(ctx context.Context, baseURL string, fragments []string, opts RenderOptions) ([]*RenderResult, error)
 }
 
 // Stub is a no-op browser. Render returns ErrNotImplemented so no browser is

@@ -1224,18 +1224,32 @@ func (n *networkSource) harvestScriptRoutes(ctx context.Context, in Input, sink 
 // discovery would only request the same document again; a path route is a real
 // view the browser has to load to reveal the API calls behind it.
 func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink, base string, routes []string, seenHTML, observedGETs map[string]struct{}) error {
-	if len(routes) == 0 {
+	rendered := 0
+	return n.renderSPARoutesWithBudget(ctx, in, sink, base, routes, seenHTML, observedGETs, make(map[string]struct{}, len(routes)), &rendered, true)
+}
+
+func (n *networkSource) renderSPARoutesWithBudget(ctx context.Context, in Input, sink Sink, base string, routes []string, seenHTML, observedGETs, seen map[string]struct{}, rendered *int, allowNestedHash bool) error {
+	if len(routes) == 0 || *rendered >= maxSPARouteRenders {
 		return nil
 	}
 	base = strings.SplitN(base, "#", 2)[0]
-	rendered := 0
-	seen := make(map[string]struct{}, len(routes))
+	opts := browser.RenderOptions{
+		Limiter:           n.cfg.Limiter,
+		WaitUntil:         browser.WaitLoad,
+		ObservationWindow: 750 * time.Millisecond,
+		AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
+		SessionStatePath:  in.SessionStatePath,
+		UserAgent:         n.cfg.HuntingUserAgent,
+	}
+
+	var hashFrags []string
+	var otherURLs []string
 	for _, route := range routes {
 		if _, ok := seen[route]; ok {
 			continue
 		}
 		seen[route] = struct{}{}
-		if rendered >= maxSPARouteRenders {
+		if *rendered+len(hashFrags)+len(otherURLs) >= maxSPARouteRenders {
 			break
 		}
 		routeURL, ok := spaRouteURL(base, route)
@@ -1245,17 +1259,62 @@ func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink
 		if !in.Scope.Permits(routeURL).Allowed || !allowFetch(sink, routeURL, domain.SourceBrowserNetwork, domain.MethodGET) {
 			continue
 		}
+		if strings.HasPrefix(route, "#") {
+			hashFrags = append(hashFrags, route)
+		} else {
+			otherURLs = append(otherURLs, routeURL)
+		}
+	}
+
+	recordResult := func(routeURL string, res *browser.RenderResult) error {
+		if res == nil {
+			return nil
+		}
+		recordObservedGETs(observedGETs, res.Network, in)
+		if err := n.emitNetworkWithHTML(ctx, in, sink, res.Network, seenHTML); err != nil {
+			return err
+		}
+		return n.emitForms(ctx, in, sink, routeURL, res.HTML)
+	}
+
+	if hr, ok := n.browser.(browser.HashRouteRenderer); ok && len(hashFrags) > 1 {
 		if err := in.wait(ctx); err != nil {
 			return err
 		}
-		res, err := n.browser.Render(ctx, routeURL, browser.RenderOptions{
-			Limiter:           n.cfg.Limiter,
-			WaitUntil:         browser.WaitLoad,
-			ObservationWindow: 750 * time.Millisecond,
-			AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
-			SessionStatePath:  in.SessionStatePath,
-			UserAgent:         n.cfg.HuntingUserAgent,
-		})
+		results, err := hr.RenderHashRoutes(ctx, base, hashFrags, opts)
+		if err != nil {
+			if errors.Is(err, browser.ErrNotImplemented) {
+				return nil
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+		} else {
+			*rendered += len(results)
+			for i, res := range results {
+				if i >= len(hashFrags) {
+					break
+				}
+				if err := recordResult(base+hashFrags[i], res); err != nil {
+					return err
+				}
+			}
+			hashFrags = nil
+		}
+	}
+
+	for _, frag := range hashFrags {
+		otherURLs = append(otherURLs, base+frag)
+	}
+
+	for _, routeURL := range otherURLs {
+		if *rendered >= maxSPARouteRenders {
+			break
+		}
+		if err := in.wait(ctx); err != nil {
+			return err
+		}
+		res, err := n.browser.Render(ctx, routeURL, opts)
 		if err != nil {
 			if errors.Is(err, browser.ErrNotImplemented) {
 				return nil
@@ -1265,13 +1324,17 @@ func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink
 			}
 			continue
 		}
-		rendered++
-		recordObservedGETs(observedGETs, res.Network, in)
-		if err := n.emitNetworkWithHTML(ctx, in, sink, res.Network, seenHTML); err != nil {
+		*rendered++
+		if err := recordResult(routeURL, res); err != nil {
 			return err
 		}
-		if err := n.emitForms(ctx, in, sink, routeURL, res.HTML); err != nil {
-			return err
+		if allowNestedHash && !strings.Contains(routeURL, "#") {
+			nested := hashRouteEntries(append(extractSPARoutes(res.HTML), n.harvestRouteAPIs(ctx, in, sink, routeURL, res.Network)...))
+			if len(nested) > 0 {
+				if err := n.renderSPARoutesWithBudget(ctx, in, sink, routeURL, nested, seenHTML, observedGETs, seen, rendered, false); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
