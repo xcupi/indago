@@ -548,3 +548,179 @@ func TestXXEExplicitXMLContentTypeWithoutObservedBody(t *testing.T) {
 		t.Fatalf("findings = %+v, want one confirmed XXE", findings)
 	}
 }
+
+// An external reference in element content is only resolved once a parser reads
+// that content. An endpoint whose real XML schema was never observed rejects a
+// synthesized probe body at its root element first, so the content reference is
+// never reached. The DTD-level reference is resolved while the DTD is processed,
+// before any element is validated, and must therefore still confirm.
+func TestXXEConfirmsDTDReferenceWhenSchemaRejectsProbeBody(t *testing.T) {
+	var callbackMu sync.Mutex
+	var callbackPath string
+	callback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/poll" {
+			callbackMu.Lock()
+			path := callbackPath
+			callbackMu.Unlock()
+			if path == "" {
+				fmt.Fprint(w, "[]")
+				return
+			}
+			fmt.Fprintf(w, `{"callback":%q}`, path)
+			return
+		}
+		callbackMu.Lock()
+		callbackPath = r.URL.Path
+		callbackMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer callback.Close()
+
+	parameterEntity := regexp.MustCompile(`<!ENTITY % \w+ SYSTEM "([^"]+)"`)
+	externalSubset := regexp.MustCompile(`<!DOCTYPE\s+[\w.:-]+\s+SYSTEM "([^"]+)"`)
+	generalEntity := regexp.MustCompile(`<!ENTITY \w+ SYSTEM "([^"]+)"`)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		doc := string(body)
+		// Model a schema-strict application: the parser processes the DTD (and
+		// anything the DTD itself dereferences) before it validates the root, so
+		// a DTD-level reference resolves even for a document the application then
+		// rejects. A reference in element content only resolves for a document
+		// whose root the application actually accepts.
+		switch {
+		case parameterEntity.MatchString(doc):
+			_, _ = http.Get(parameterEntity.FindStringSubmatch(doc)[1])
+		case externalSubset.MatchString(doc):
+			_, _ = http.Get(externalSubset.FindStringSubmatch(doc)[1])
+		case strings.Contains(doc, "<comment>") && generalEntity.MatchString(doc):
+			_, _ = http.Get(generalEntity.FindStringSubmatch(doc)[1])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"assignment":"SimpleXXE","attemptWasMade":true,"output":"","feedback":"rejected"}`)
+	}))
+	defer target.Close()
+
+	env := newScanEnv(t)
+	// The exact scan condition: a form declaring application/xml whose body is
+	// assembled by page script and was never observed, so the engine falls back
+	// to its synthesized probe document.
+	ep := &domain.Endpoint{ID: domain.NewID(), ScanID: env.scanID, URL: target.URL + "/xxe/simple",
+		Method: domain.MethodPOST, Source: domain.SourceForm, ContentType: "application/xml",
+		RequestBody: "", CreatedAt: time.Now()}
+	if err := env.st.Endpoints().Create(context.Background(), ep); err != nil {
+		t.Fatal(err)
+	}
+	ex := newXXEExecutor(env.st, scopedClient(t, openScope()), env.ev,
+		ExecutorConfig{AllowStateChanging: true, SkipWriteEndpoints: false}, execLog(), nil)
+	ex.withCallback(callback.URL, callback.URL+"/poll")
+	ex.pollTries = 1
+
+	handleXXEJob(t, ex, env, ep)
+
+	findings, err := env.st.Findings().ListByScan(context.Background(), env.scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].VulnClass != domain.VulnXXE || findings[0].Verdict != domain.VerdictConfirmed {
+		t.Fatalf("findings = %+v, want one confirmed XXE via the DTD-level reference", findings)
+	}
+	detail, _ := xxeCaseDetail(t, env)
+	if detail.Mode != xxeModeOutOfBand {
+		t.Fatalf("mode = %q, want %q", detail.Mode, xxeModeOutOfBand)
+	}
+	if len(detail.Attempts) != 2 {
+		t.Fatalf("attempts = %+v, want the content probe then the DTD probe", detail.Attempts)
+	}
+	if detail.Attempts[0].Shape != xxeShapeContentReference || detail.Attempts[0].Callback {
+		t.Fatalf("first attempt = %+v, want an unconfirmed %s probe", detail.Attempts[0], xxeShapeContentReference)
+	}
+	if detail.Attempts[1].Shape != xxeShapeDTDReference || !detail.Attempts[1].Callback {
+		t.Fatalf("second attempt = %+v, want the confirming %s probe", detail.Attempts[1], xxeShapeDTDReference)
+	}
+}
+
+// The extra probe shape is bounded: one content request and one DTD request, no
+// retries, and a target that resolves neither is still reported as not confirmed.
+func TestXXEDTDReferenceIsBoundedAndStillRejects(t *testing.T) {
+	var probes atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if strings.Contains(string(body), "indago-xxe-") {
+			probes.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"output":"","feedback":"rejected"}`)
+	}))
+	defer target.Close()
+	poll := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "[]")
+	}))
+	defer poll.Close()
+
+	env := newScanEnv(t)
+	ep := &domain.Endpoint{ID: domain.NewID(), ScanID: env.scanID, URL: target.URL + "/xxe/simple",
+		Method: domain.MethodPOST, Source: domain.SourceForm, ContentType: "application/xml",
+		RequestBody: "", CreatedAt: time.Now()}
+	if err := env.st.Endpoints().Create(context.Background(), ep); err != nil {
+		t.Fatal(err)
+	}
+	ex := newXXEExecutor(env.st, scopedClient(t, openScope()), env.ev,
+		ExecutorConfig{AllowStateChanging: true, SkipWriteEndpoints: false}, execLog(), nil)
+	ex.withCallback(poll.URL, poll.URL+"/poll")
+	ex.pollTries = 1
+
+	handleXXEJob(t, ex, env, ep)
+
+	if got := probes.Load(); got != 2 {
+		t.Fatalf("out-of-band requests = %d, want exactly one per probe shape", got)
+	}
+	detail, tc := xxeCaseDetail(t, env)
+	if detail.Verdict != domain.VerdictRejected {
+		t.Fatalf("verdict = %q, want %q", detail.Verdict, domain.VerdictRejected)
+	}
+	if detail.Reason != "no external entity callback observed" {
+		t.Fatalf("reason = %q", detail.Reason)
+	}
+	if tc.Status != domain.TestCaseCompleted || tc.Outcome != domain.OutcomeSuccess {
+		t.Fatalf("case = %+v, want a completed successful XXE case", tc)
+	}
+}
+
+func TestInjectXXEDTDReferencesCollaboratorFromDTD(t *testing.T) {
+	const cb = "http://collab.example.test/indago-xxe-1"
+
+	// No DOCTYPE in the observed body: the external DTD subset is inserted
+	// before the root element and needs no internal-subset support.
+	got, ok := injectXXEDTD(`<?xml version="1.0"?><indago>probe</indago>`, cb)
+	if !ok {
+		t.Fatal("injectXXEDTD reported no injectable document")
+	}
+	if n := strings.Count(got, "<!DOCTYPE"); n != 1 {
+		t.Fatalf("payload has %d DOCTYPE declarations, want 1: %q", n, got)
+	}
+	if want := `<?xml version="1.0"?><!DOCTYPE indago SYSTEM "` + cb + `"><indago>`; !strings.Contains(got, want) {
+		t.Fatalf("payload = %q, want the external subset before the root (%q)", got, want)
+	}
+	// A self-closing root has no content for the classic probe, but the DTD
+	// reference does not need any.
+	if _, ok := injectXXEDTD(`<indago/>`, cb); !ok {
+		t.Fatal("the DTD-level reference must be buildable for a self-closing root")
+	}
+
+	// An existing DOCTYPE is reused: a second DOCTYPE would be invalid, so the
+	// reference becomes a parameter entity inside the existing subset.
+	withDocType := `<?xml version="1.0"?><!DOCTYPE root [<!ENTITY keep "kept">]><root><v>x</v></root>`
+	got, ok = injectXXEDTD(withDocType, cb)
+	if !ok {
+		t.Fatal("injectXXEDTD reported no injectable document for an existing DOCTYPE")
+	}
+	if n := strings.Count(got, "<!DOCTYPE"); n != 1 {
+		t.Fatalf("payload has %d DOCTYPE declarations, want 1: %q", n, got)
+	}
+	if want := `<!ENTITY % indago SYSTEM "` + cb + `">%indago;`; !strings.Contains(got, want) {
+		t.Fatalf("payload = %q, want the parameter-entity reference (%q)", got, want)
+	}
+	if _, ok := injectXXEDTD("not xml at all", cb); ok {
+		t.Fatal("a body with no element must not produce a DTD payload")
+	}
+}

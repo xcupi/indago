@@ -23,7 +23,13 @@ package scan
 //     EXTERNAL entity pointing at the collaborator. This remains the only path
 //     that detects a parser which resolves external entities without ever
 //     reflecting document content, so it is preserved whenever configured and
-//     used after in-band produced no signal.
+//     used after in-band produced no signal. The external reference is placed
+//     at two ordered positions, one request each: first in element content (the
+//     classic probe), and — when that produced no callback — in the document's
+//     DTD. A parser processes the DTD before it validates the document's root
+//     element, so the DTD position still resolves when the application rejects
+//     a synthesized probe body outright because its real schema was never
+//     observed. Only the collaborator's own hit confirms either position.
 //
 // The in-band probe cannot become a resource-exhaustion payload: it declares
 // two single-level entities holding short hex literals, never a SYSTEM or
@@ -60,13 +66,43 @@ const (
 	// endpoint (e.g. a form declaring contentType/enctype="application/xml")
 	// without a captured request body.
 	defaultXXEProbeBody = "<indago>probe</indago>"
+
+	// xxeShapeContentReference / xxeShapeDTDReference name where an out-of-band
+	// probe placed its external reference, so a triager can tell which position
+	// the target's parser actually honoured.
+	xxeShapeContentReference = "content_reference"
+	xxeShapeDTDReference     = "dtd_reference"
+
+	// xxePollTries bounds how long (seconds) one probe waits for the
+	// collaborator to record the hit.
+	xxePollTries = 8
 )
 
+// xxeOOBShapes is the bounded, ordered set of out-of-band reference positions.
+// The content reference is sent first: it is the classic shape and reflects the
+// document the endpoint was actually observed sending. The DTD reference is the
+// schema-independent fallback — an endpoint whose real XML schema was never
+// observed rejects a synthesized body before it reads any element content, and
+// a content-only reference is then never dereferenced.
+var xxeOOBShapes = []struct {
+	Name  string
+	Build func(body, callback string) (string, bool)
+}{
+	{xxeShapeContentReference, injectXXE},
+	{xxeShapeDTDReference, injectXXEDTD},
+}
+
 var xxeRootRe = regexp.MustCompile(`<([A-Za-z_][A-Za-z0-9_.:-]*)(\s[^>]*)?>`)
+
+// xxeRootElementRe also matches a self-closing root. The content probes cannot
+// use such a document (there is no content to put a reference in), but a
+// DTD-level reference does not need any.
+var xxeRootElementRe = regexp.MustCompile(`<([A-Za-z_][A-Za-z0-9_.:-]*)(\s[^>]*)?/?>`)
 
 // xxeAttempt is one out-of-band probe.
 type xxeAttempt struct {
 	Payload  string `json:"payload"`
+	Shape    string `json:"shape,omitempty"`
 	Status   int    `json:"status,omitempty"`
 	Callback bool   `json:"callback"`
 }
@@ -99,6 +135,7 @@ type xxeExecutor struct {
 	findingsMu *sync.Mutex
 	callback   string
 	poll       string
+	pollTries  int
 }
 
 func NewXXEExecutorForTest(st store.Store, eng httpengine.Engine, ev evidence.Store, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex) *xxeExecutor {
@@ -109,7 +146,7 @@ func newXXEExecutor(st store.Store, eng httpengine.Engine, ev evidence.Store, cf
 	if findingsMu == nil {
 		findingsMu = &sync.Mutex{}
 	}
-	return &xxeExecutor{store: st, engine: eng, evidence: ev, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu}
+	return &xxeExecutor{store: st, engine: eng, evidence: ev, cfg: cfg.withDefaults(), log: log, findingsMu: findingsMu, pollTries: xxePollTries}
 }
 
 func (e *xxeExecutor) withCallback(url, poll string) {
@@ -345,60 +382,56 @@ func xxeEntityExpanded(respBody, baseBody string, p xxeEntityProbe) bool {
 	return !xxeMarkupEchoed(respBody, p)
 }
 
-// tryOutOfBand sends the external-entity probe and polls the collaborator. Used
-// only when the operator configured both a callback and a poll URL.
+// tryOutOfBand sends the external-entity probes and polls the collaborator. Used
+// only when the operator configured both a callback and a poll URL. Each probe
+// shape is sent at most once, in the fixed xxeOOBShapes order, and the loop stops
+// on the first collaborator hit.
 func (e *xxeExecutor) tryOutOfBand(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, req *httpengine.Request, d *xxeDetail) error {
 	d.Mode = xxeModeOutOfBand
 	marker := fmt.Sprintf("indago-xxe-%d", time.Now().UnixNano()%1000000000)
 	callback := strings.TrimRight(e.callback, "/") + "/" + marker
-	payload, ok := injectXXE(string(req.Body), callback)
-	if !ok {
-		return e.finishXXEUnavailable(ctx, job, "XML body has no injectable root element")
-	}
-	attempt := xxeAttempt{Payload: truncate(payload, 300)}
-	probe := *req
-	probe.Body = []byte(payload)
-	resp, outcome, _ := e.do(ctx, &probe)
-	if resp != nil {
-		attempt.Status = resp.Status
-		if ev, err := e.persistEvidence(ctx, job.ScanID, resp, "xxe entity request"); err == nil {
-			d.EvidenceIDs = append(d.EvidenceIDs, ev...)
-		}
-	}
-	d.Attempts = append(d.Attempts, attempt)
-	if outcome != domain.OutcomeSuccess {
-		d.Verdict = domain.VerdictInconclusive
-		d.Reason = "XXE request did not complete"
-		e.persistXXECase(ctx, job, *d, domain.TestCaseCompleted, domain.OutcomeError, "xxe request did not complete")
-		return nil
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	for i := 0; i < 8; i++ {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(time.Second):
-		}
-		pollReq, err := http.NewRequestWithContext(ctx, http.MethodGet, e.poll, nil)
-		if err != nil {
-			break
-		}
-		pollResp, err := client.Do(pollReq)
-		if err != nil {
+	sent, completed := 0, 0
+	for _, shape := range xxeOOBShapes {
+		payload, ok := shape.Build(string(req.Body), callback)
+		if !ok {
 			continue
 		}
-		body := make([]byte, 1<<20)
-		n, _ := pollResp.Body.Read(body)
-		pollResp.Body.Close()
-		if strings.Contains(string(body[:n]), marker) {
-			attempt.Callback = true
-			d.Attempts = append(d.Attempts, attempt)
+		sent++
+		attempt := xxeAttempt{Payload: truncate(payload, 300), Shape: shape.Name}
+		probe := *req
+		probe.Body = []byte(payload)
+		resp, outcome, _ := e.do(ctx, &probe)
+		if resp != nil {
+			attempt.Status = resp.Status
+			if ev, err := e.persistEvidence(ctx, job.ScanID, resp, "xxe "+shape.Name+" request"); err == nil {
+				d.EvidenceIDs = append(d.EvidenceIDs, ev...)
+			}
+		}
+		d.Attempts = append(d.Attempts, attempt)
+		if outcome != domain.OutcomeSuccess {
+			continue
+		}
+		completed++
+		if e.pollForCallback(ctx, marker) {
+			d.Attempts[len(d.Attempts)-1].Callback = true
 			d.Verdict = domain.VerdictConfirmed
 			d.Reason = "the XML parser resolved an external entity and called the collaborator"
 			e.persistXXECase(ctx, job, *d, domain.TestCaseCompleted, domain.OutcomeSuccess, "confirmed XML external entity processing")
 			e.correlateXXE(ctx, job, ep, *d)
 			return nil
 		}
+		if ctx.Err() != nil {
+			return nil
+		}
+	}
+	switch {
+	case sent == 0:
+		return e.finishXXEUnavailable(ctx, job, "XML body has no injectable root element")
+	case completed == 0:
+		d.Verdict = domain.VerdictInconclusive
+		d.Reason = "XXE request did not complete"
+		e.persistXXECase(ctx, job, *d, domain.TestCaseCompleted, domain.OutcomeError, "xxe request did not complete")
+		return nil
 	}
 	d.Verdict = domain.VerdictRejected
 	d.Reason = "no external entity callback observed"
@@ -419,6 +452,39 @@ func (e *xxeExecutor) tryOutOfBand(ctx context.Context, job *domain.TestJob, ep 
 	return nil
 }
 
+// pollForCallback waits for the collaborator to report the probe's marker. It is
+// the only thing that can confirm an out-of-band probe: the target's own request
+// to the collaborator, never the target's response status.
+func (e *xxeExecutor) pollForCallback(ctx context.Context, marker string) bool {
+	client := &http.Client{Timeout: 10 * time.Second}
+	tries := e.pollTries
+	if tries <= 0 {
+		tries = xxePollTries
+	}
+	for i := 0; i < tries; i++ {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(time.Second):
+		}
+		pollReq, err := http.NewRequestWithContext(ctx, http.MethodGet, e.poll, nil)
+		if err != nil {
+			return false
+		}
+		pollResp, err := client.Do(pollReq)
+		if err != nil {
+			continue
+		}
+		body := make([]byte, 1<<20)
+		n, _ := pollResp.Body.Read(body)
+		pollResp.Body.Close()
+		if strings.Contains(string(body[:n]), marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // injectXXE inserts an EXTERNAL entity declaration pointing at the collaborator
 // and places its reference right after the root element's opening tag.
 func injectXXE(body, callback string) (string, bool) {
@@ -427,6 +493,36 @@ func injectXXE(body, callback string) (string, bool) {
 		return "", false
 	}
 	return injectXMLRefAfterRoot(out, "&xxe;")
+}
+
+// injectXXEDTD references the collaborator from the document's DTD rather than
+// from element content. A parser processes the DTD before it validates or
+// unmarshals the document's root element, so this reference is still resolved
+// when the application rejects a synthesized probe body outright — exactly the
+// case where a content-only reference is never read.
+//
+// A document that already carries a DOCTYPE gets a parameter-entity reference
+// inside that subset (a second DOCTYPE would be invalid); otherwise the external
+// DTD subset is used, which needs no internal-subset support at all and is the
+// most widely honoured DTD-level reference. Either way the payload is one short
+// URL and one reference: no nesting, no entity expansion chain.
+func injectXXEDTD(body, callback string) (string, bool) {
+	url := xmlEntityEscape(callback)
+	if strings.Contains(body, "<!DOCTYPE") {
+		return injectXMLDTD(body, `<!ENTITY % indago SYSTEM "`+url+`">%indago;`)
+	}
+	m := xxeRootElementRe.FindStringSubmatchIndex(body)
+	if m == nil {
+		return "", false
+	}
+	name := body[m[2]:m[3]]
+	insert := m[0]
+	if strings.HasPrefix(strings.TrimSpace(body), "<?xml") {
+		if idx := strings.Index(body, "?>"); idx >= 0 {
+			insert = idx + 2
+		}
+	}
+	return body[:insert] + `<!DOCTYPE ` + name + ` SYSTEM "` + url + `">` + body[insert:], true
 }
 
 // injectXXEInternal inserts one INTERNAL entity — a short literal, never a
