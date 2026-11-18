@@ -242,7 +242,7 @@ func (e *commandInjectionExecutor) Handle(ctx context.Context, job *domain.TestJ
 		}
 	}
 
-	if timeConfirmed >= 2 {
+	if timeConfirmed >= 2 && e.outputRedirectionEnabled() {
 		if e.tryOutputRedirection(ctx, job, ep, focus, baseValue, &d) {
 			d.Verdict = domain.VerdictConfirmed
 			d.ConfirmMethod = "redirect"
@@ -678,6 +678,16 @@ func (e *commandInjectionExecutor) tryOutOfBand(ctx context.Context, job *domain
 	return false
 }
 
+// outputRedirectionEnabled reports whether the file-creating redirection
+// confirmation may run. The probe writes a marker file into a directory the
+// target serves, which is a persistent side effect on someone else's host, so
+// it is fail-closed: the server's explicit AllowStateChanging opt-in is
+// mandatory and SkipWriteEndpoints suppresses it as well — the same pair every
+// other write in this package is gated behind.
+func (e *commandInjectionExecutor) outputRedirectionEnabled() bool {
+	return e.cfg.AllowStateChanging && !e.cfg.SkipWriteEndpoints
+}
+
 // tryOutputRedirection turns blind execution into observable evidence when the
 // target serves a writable directory through an image/file endpoint. The
 // command writes a computed marker (not the raw payload) to a randomized file,
@@ -685,6 +695,12 @@ func (e *commandInjectionExecutor) tryOutOfBand(ctx context.Context, job *domain
 // deliberately attempted only after two independent time delays have already
 // confirmed command execution.
 func (e *commandInjectionExecutor) tryOutputRedirection(ctx context.Context, job *domain.TestJob, ep *domain.Endpoint, focus *domain.Parameter, baseValue string, d *commandInjectionDetail) bool {
+	// Defense in depth: the call site already gates this, but the function's
+	// only effect is a file on the target, so it refuses to run on its own
+	// unless it was explicitly authorized.
+	if !e.outputRedirectionEnabled() {
+		return false
+	}
 	pages, err := e.store.Endpoints().ListByScan(ctx, ep.ScanID)
 	if err != nil {
 		return false

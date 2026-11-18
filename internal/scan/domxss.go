@@ -1610,6 +1610,12 @@ type domXSSExecutor struct {
 	// comment-form clobbering probe) is recorded as skipped instead of being
 	// attempted and failing at the gate.
 	allowStateChanging bool
+	// skipWriteEndpoints mirrors the scan's ExecutorConfig.SkipWriteEndpoints
+	// policy. true suppresses the clobbering probe even when the operator
+	// allowed state-changing requests: that probe persists a comment on the
+	// target, so a scan configured to keep payloads away from write behavior
+	// must not perform it.
+	skipWriteEndpoints bool
 }
 
 func newDOMXSSExecutor(st store.Store, mgr *browser.Manager, ev evidence.Store, scope domain.Scope, log *slog.Logger, findingsMu *sync.Mutex) *domXSSExecutor {
@@ -3917,11 +3923,17 @@ func (e *domXSSExecutor) probeDOMClobbering(ctx context.Context, bctx *browser.C
 	// payload as a comment through the page's own POST form. A default scan
 	// must not do that, and the browser context's method gate would refuse the
 	// POST anyway — record the policy boundary as a skipped test case instead
-	// of navigating into a guaranteed block.
-	if !e.allowStateChanging {
+	// of navigating into a guaranteed block. SkipWriteEndpoints suppresses the
+	// same write even when AllowStateChanging is on: the persisted comment
+	// outlives the scan, so a read-only scan must never create it.
+	if !e.allowStateChanging || e.skipWriteEndpoints {
+		reason := "AllowStateChanging is off"
+		if e.allowStateChanging {
+			reason = "SkipWriteEndpoints is on"
+		}
 		tc := e.newTestCase(ctx, job, ep.URL)
 		tc.Status = domain.TestCaseSkipped
-		e.finishTestCase(ctx, tc, nil, "DOM clobbering probe skipped: it must persist a comment through a browser POST, and AllowStateChanging is off")
+		e.finishTestCase(ctx, tc, nil, "DOM clobbering probe skipped: it must persist a comment through a browser POST, and "+reason)
 		return
 	}
 	// The persisted payload must not share the DOM probes' marker: once it is

@@ -534,8 +534,13 @@ type ScanConfig struct {
 	// that does NOT exist, once with the confirmation flag and once with the
 	// administrative Referer, and a finding needs the caller to be refused on
 	// the ordinary request while the variant reaches the application handler
-	// and the anonymous control is refused too. Nothing can change: the named
-	// user never exists. Off by default; requires an authenticated session.
+	// and the anonymous control is refused too. The named user never exists,
+	// but the probe is still a state-changing probe — it sends a POST through
+	// runMutationProbe — so it is fail-closed gated: it runs only when the
+	// server's AllowStateChanging opt-in is on AND this scan's
+	// SkipWriteEndpoints is off, and either gate records the probe as skipped
+	// instead of sending it (see internal/scan/accesscontrol_bypass.go). Off
+	// by default; requires an authenticated session.
 	EnableAdminStepProbe bool `json:"enable_admin_step_probe,omitempty"`
 
 	// EnableObjectFamilyProbe opts this scan into the object-family slice

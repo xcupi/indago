@@ -38,3 +38,31 @@ func TestDOMClobberingProbeSkippedWithoutStateChangingOptIn(t *testing.T) {
 		t.Fatalf("skipped probe recorded outcome=%q error=%q, want neither", tc.Outcome, tc.Error)
 	}
 }
+
+// SkipWriteEndpoints suppresses the same probe even when AllowStateChanging is
+// on: the comment it persists outlives the scan, so a read-only scan must not
+// create it.
+func TestDOMClobberingProbeSkippedWithSkipWriteEndpoints(t *testing.T) {
+	env := newScanEnv(t)
+	ep := env.endpoint("http://target.example/post", domain.MethodGET)
+	job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobDOMXSS, Attempts: 1}
+
+	// nil browser context again proves the guard runs before any page work.
+	exec := newDOMXSSExecutor(env.st, nil, env.ev,
+		domain.Scope{IncludeHosts: []string{"target.example"}}, execLog(), &sync.Mutex{})
+	exec.allowStateChanging = true
+	exec.skipWriteEndpoints = true
+	exec.probeDOMClobbering(context.Background(), nil, job, ep, "indmarker",
+		"<html>loadComments post/comment dompurify</html>")
+
+	tc := env.only()
+	if tc.Status != domain.TestCaseSkipped {
+		t.Fatalf("status = %s, want skipped when SkipWriteEndpoints is on", tc.Status)
+	}
+	if !strings.Contains(tc.Note, "SkipWriteEndpoints") {
+		t.Fatalf("skip note %q does not name SkipWriteEndpoints", tc.Note)
+	}
+	if tc.Outcome != "" || tc.Error != "" {
+		t.Fatalf("skipped probe recorded outcome=%q error=%q, want neither", tc.Outcome, tc.Error)
+	}
+}
