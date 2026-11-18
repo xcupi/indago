@@ -495,6 +495,32 @@ func TestSSTIUnknownStackIsSkippedWithoutPayloads(t *testing.T) {
 	}
 }
 
+func TestSSTIUnknownStackWithReflectionConfirmsERB(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		msg := r.URL.Query().Get("message")
+		switch {
+		case strings.Contains(msg, "<%= 7*7 %>"):
+			msg = strings.ReplaceAll(msg, "<%= 7*7 %>", "49")
+		case strings.Contains(msg, "<%= 11*13 %>"):
+			msg = strings.ReplaceAll(msg, "<%= 11*13 %>", "143")
+		}
+		fmt.Fprintf(w, "<html><body><div>%s</div></body></html>", msg)
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/?message=Unfortunately+this+product+is+out+of+stock", domain.MethodGET)
+	focus := env.param(ep, "message", domain.LocationQuery, "Unfortunately this product is out of stock")
+	ip := env.injection(ep, focus)
+	ex := sstiExecutorFor(t, env, ExecutorConfig{})
+	runSSTIJob(t, ex, env, ep, focus, ip)
+
+	if findings := sstiFindings(t, env); len(findings) != 1 || findings[0].Verdict != domain.VerdictConfirmed {
+		t.Fatalf("findings = %+v, want confirmed SSTI on reflected unlabelled HTML stack", findings)
+	}
+}
+
 func TestSSTIReflectionIsNotConfirmed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Powered-By", "PHP/8.2")

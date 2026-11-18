@@ -88,7 +88,7 @@ type fakeBrowser struct {
 	contexts []*fakeContext
 }
 
-func (b *fakeBrowser) NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(string) bool) (contextHandle, error) {
+func (b *fakeBrowser) NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(string) bool, allowStateChanging bool) (contextHandle, error) {
 	if b.drv.createDelay > 0 {
 		time.Sleep(b.drv.createDelay)
 	}
@@ -97,7 +97,7 @@ func (b *fakeBrowser) NewContext(storageStatePath, proxyServer string, extraHead
 	if b.closed {
 		return nil, errors.New("browser closed")
 	}
-	c := &fakeContext{br: b, gated: allow != nil, storagePath: storageStatePath, proxyServer: proxyServer, extraHeaders: extraHeaders, cookies: map[string]Cookie{}, gotoDelay: b.drv.gotoDelay}
+	c := &fakeContext{br: b, gated: allow != nil, storagePath: storageStatePath, proxyServer: proxyServer, extraHeaders: extraHeaders, cookies: map[string]Cookie{}, gotoDelay: b.drv.gotoDelay, allowStateChanging: allowStateChanging}
 	b.contexts = append(b.contexts, c)
 	return c, nil
 }
@@ -142,10 +142,13 @@ type fakeContext struct {
 	extraHeaders map[string]string
 	savedPath    string
 	gotoDelay    time.Duration
-	mu           sync.Mutex
-	closed       bool
-	cookies      map[string]Cookie
-	pages        []*fakePage
+	// allowStateChanging records the method policy the Manager passed down, so
+	// tests can assert the wiring without a real browser.
+	allowStateChanging bool
+	mu                 sync.Mutex
+	closed             bool
+	cookies            map[string]Cookie
+	pages              []*fakePage
 }
 
 func (c *fakeContext) NewPage() (pageHandle, error) {
@@ -214,7 +217,9 @@ type fakePage struct {
 	errFn        func(string)
 	localStorage map[string]string
 	initScripts  []string
-	lastReferer  string // records the referer passed to the most recent Goto, for TestNavigateThreadsRefererToGoto
+	lastReferer   string // records the referer passed to the most recent Goto, for TestNavigateThreadsRefererToGoto
+	lastGotoAt    time.Time
+	contentReadAt time.Time
 }
 
 func (p *fakePage) Goto(url, referer, waitUntil string, timeout time.Duration) (int, string, error) {
@@ -223,6 +228,7 @@ func (p *fakePage) Goto(url, referer, waitUntil string, timeout time.Duration) (
 	}
 	p.mu.Lock()
 	p.lastReferer = referer
+	p.lastGotoAt = time.Now()
 	p.mu.Unlock()
 	if p.reqFn != nil {
 		p.reqFn(NetworkEvent{URL: url, Method: "GET", ResourceType: "document", At: time.Now()})
@@ -239,7 +245,12 @@ func (p *fakePage) Goto(url, referer, waitUntil string, timeout time.Duration) (
 	return 200, url, nil
 }
 
-func (p *fakePage) Content() (string, error)        { return "<html>fake</html>", nil }
+func (p *fakePage) Content() (string, error) {
+	p.mu.Lock()
+	p.contentReadAt = time.Now()
+	p.mu.Unlock()
+	return "<html>fake</html>", nil
+}
 func (p *fakePage) Screenshot(bool) ([]byte, error) { return []byte("\x89PNG-fake"), nil }
 
 func (p *fakePage) Evaluate(script string, arg any) (any, error) {
@@ -1000,5 +1011,92 @@ func TestCloseReturnsPromptlyDespiteAWedgedDriver(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Close did not return within ShutdownTimeout + slack; it is waiting on the wedged driver forever")
+	}
+}
+
+// The Manager must pass ContextOptions.AllowStateChanging down unchanged: the
+// method gate lives in the driver, so a wiring mistake would silently make
+// every context permissive again.
+func TestNewContextPropagatesStateChangingPolicy(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+	ctx := context.Background()
+
+	if _, err := m.NewContext(ctx, ContextOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.NewContext(ctx, ContextOptions{AllowStateChanging: true}); err != nil {
+		t.Fatal(err)
+	}
+	contexts := d.browsers[0].contexts
+	if len(contexts) != 2 {
+		t.Fatalf("created %d contexts, want 2", len(contexts))
+	}
+	if contexts[0].allowStateChanging {
+		t.Fatal("the zero-value ContextOptions must reach the driver as a non-mutating context")
+	}
+	if !contexts[1].allowStateChanging {
+		t.Fatal("ContextOptions.AllowStateChanging=true did not reach the driver")
+	}
+}
+
+// Render backs discovery (and other page loads that only observe). It must never
+// opt into state-changing requests, whatever the scan's own posture is: there is
+// no RenderOptions field for it, and this test pins that boundary.
+func TestRenderUsesNonMutatingContext(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+	if _, err := m.Render(context.Background(), "https://target.example/page", RenderOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	contexts := d.browsers[0].contexts
+	if len(contexts) != 1 {
+		t.Fatalf("created %d contexts, want 1", len(contexts))
+	}
+	if contexts[0].allowStateChanging {
+		t.Fatal("Render created a state-changing context; discovery rendering must stay non-mutating")
+	}
+}
+
+// A POST/form or POST/JSON replay must be refused before it reaches the driver
+// (and therefore the network) unless the context carries the explicit opt-in.
+func TestNavigateFormAndJSONRefuseWithoutStateChangingOptIn(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+	ctx := context.Background()
+	c, err := m.NewContext(ctx, ContextOptions{AllowRequest: func(string) bool { return true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	p, err := c.NewPage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.NavigateForm(ctx, "POST", "https://target.example/form", map[string]string{"q": "x"}, NavOptions{}); !errors.Is(err, ErrStateChangingBlocked) {
+		t.Fatalf("NavigateForm err = %v, want ErrStateChangingBlocked", err)
+	}
+	if _, err := p.NavigateJSON(ctx, "https://target.example/api", []byte(`{"q":"x"}`), "application/json", NavOptions{}); !errors.Is(err, ErrStateChangingBlocked) {
+		t.Fatalf("NavigateJSON err = %v, want ErrStateChangingBlocked", err)
+	}
+}
+
+func TestRenderReadsContentAfterObservationWindow(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+
+	window := 30 * time.Millisecond
+	if _, err := m.Render(context.Background(), "https://target.example/spa", RenderOptions{
+		ObservationWindow: window,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := d.browsers[0].contexts[0].pages[0]
+	if gap := p.contentReadAt.Sub(p.lastGotoAt); gap < window {
+		t.Fatalf("Content() read %v after Goto, want >= ObservationWindow (%v)", gap, window)
 	}
 }

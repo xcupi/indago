@@ -327,6 +327,36 @@ func sstiStackFor(url string, resp *httpengine.Response) sstiStack {
 	return stack
 }
 
+// sstiAllFamilies returns every template family supported by sstiVariants so a
+// reflected HTML input on an unlabelled stack can still be probed safely.
+func sstiAllFamilies() map[string]string {
+	return map[string]string{
+		sstiFamilyRuby:   "reflected parameter on unlabelled HTML stack",
+		sstiFamilyPython: "reflected parameter on unlabelled HTML stack",
+		sstiFamilyPHP:    "reflected parameter on unlabelled HTML stack",
+		sstiFamilyNode:   "reflected parameter on unlabelled HTML stack",
+		sstiFamilyJava:   "reflected parameter on unlabelled HTML stack",
+	}
+}
+
+// sstiHasReflectedInput reports whether the observed parameter value (min 3
+// chars to avoid coincidental digit matches) is echoed in the baseline body.
+func sstiHasReflectedInput(baseBody, baseValue string) bool {
+	trimmed := strings.TrimSpace(baseValue)
+	if len(trimmed) < 3 {
+		return false
+	}
+	if strings.Contains(baseBody, trimmed) {
+		return true
+	}
+	if strings.Contains(trimmed, "+") {
+		if unspaced := strings.ReplaceAll(trimmed, "+", " "); strings.Contains(baseBody, unspaced) {
+			return true
+		}
+	}
+	return false
+}
+
 // sstiFamiliesForEngines maps a fingerprint engine recommendation onto the
 // variant families that can express it.
 func sstiFamiliesForEngines(engines []string) map[string]string {
@@ -492,6 +522,11 @@ func (e *sstiExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
 	d.EvidenceIDs = append(d.EvidenceIDs, baseEvidence...)
 	baseBody := string(baseResp.Body)
 	stack := sstiStackFor(ep.URL, baseResp)
+	if !stack.probe && stack.reason == "no supported template stack fingerprint" && sstiHasReflectedInput(baseBody, baseValue) {
+		stack.probe = true
+		stack.families = sstiAllFamilies()
+		stack.reason = ""
+	}
 	if !stack.probe {
 		return e.finishSSTIUnavailable(ctx, job, started, ep, stack.reason)
 	}

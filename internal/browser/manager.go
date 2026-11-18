@@ -126,13 +126,13 @@ func (m *Manager) NewContext(ctx context.Context, opts ContextOptions) (*Context
 	ch, err := callCtxCreate(ctx, func() (contextHandle, error) {
 		m.createMu.Lock()
 		defer m.createMu.Unlock()
-		return b.NewContext(opts.StorageStatePath, opts.ProxyServer, opts.ExtraHeaders, opts.AllowRequest)
+		return b.NewContext(opts.StorageStatePath, opts.ProxyServer, opts.ExtraHeaders, opts.AllowRequest, opts.AllowStateChanging)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("browser: new context: %w", err)
 	}
 
-	c := &Context{mgr: m, handle: ch, allow: opts.AllowRequest, pages: make(map[*Page]struct{})}
+	c := &Context{mgr: m, handle: ch, allow: opts.AllowRequest, allowStateChanging: opts.AllowStateChanging, pages: make(map[*Page]struct{})}
 
 	m.mu.Lock()
 	if m.closed {
@@ -220,7 +220,14 @@ func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*
 	if strings.TrimSpace(opts.UserAgent) != "" {
 		extra = map[string]string{"User-Agent": opts.UserAgent}
 	}
-	c, err := m.NewContext(ctx, ContextOptions{StorageStatePath: opts.SessionStatePath, AllowRequest: opts.AllowRequest, ExtraHeaders: extra})
+	c, err := m.NewContext(ctx, ContextOptions{
+		StorageStatePath: opts.SessionStatePath,
+		AllowRequest:     opts.AllowRequest,
+		ExtraHeaders:     extra,
+		// Discovery/UI rendering never opts into state-changing requests: the
+		// browser is loading a page to observe it, not to write to the target.
+		AllowStateChanging: false,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -236,10 +243,6 @@ func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*
 		return nil, err
 	}
 
-	html, err := page.Content(ctx)
-	if err != nil {
-		return nil, err
-	}
 	if opts.ObservationWindow > 0 {
 		timer := time.NewTimer(opts.ObservationWindow)
 		defer timer.Stop()
@@ -248,6 +251,11 @@ func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*
 			return nil, ctx.Err()
 		case <-timer.C:
 		}
+	}
+
+	html, err := page.Content(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	res := &RenderResult{
@@ -312,7 +320,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", loginHeaders(opts.UserAgent), opts.AllowRequest) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
+	ch, err := b.NewContext("", "", loginHeaders(opts.UserAgent), opts.AllowRequest, true) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed. AllowStateChanging is TRUE here because a login flow is an explicit operator action that must POST its credentials: it is the one deliberate exception to the scan's non-mutating default, and it is decided at this call site, not silently inside the gate.
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}
@@ -453,7 +461,7 @@ func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginR
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", loginHeaders(opts.UserAgent), opts.AllowRequest) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed
+	ch, err := b.NewContext("", "", loginHeaders(opts.UserAgent), opts.AllowRequest, true) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed. AllowStateChanging is TRUE for the same reason as InteractiveLogin: an explicit, operator-requested login must POST its form.
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}
@@ -513,6 +521,9 @@ type Context struct {
 	mgr    *Manager
 	handle contextHandle
 	allow  func(url string) bool // scope gate (nil = allow all)
+	// allowStateChanging is this context's method policy. false (the default)
+	// refuses every non-read-only request (see ContextOptions.AllowStateChanging).
+	allowStateChanging bool
 
 	mu     sync.Mutex
 	pages  map[*Page]struct{}
@@ -713,6 +724,12 @@ var ErrFormPostUnsupported = errors.New("browser: this driver cannot submit a fo
 // step already sent (including the parameter holding the candidate's own
 // breakout), nothing new is chosen or clicked.
 func (p *Page) NavigateForm(ctx context.Context, method, url string, fields map[string]string, opts NavOptions) (*NavResult, error) {
+	if !p.ctxp.allowStateChanging && !isReadOnlyMethod(method) {
+		// Fail here with a named error instead of letting the browser's own
+		// request get aborted later: a caller that did not pass the scan's
+		// AllowStateChanging opt-in must not believe a POST was replayed.
+		return nil, ErrStateChangingBlocked
+	}
 	fp, ok := p.handle.(formPoster)
 	if !ok {
 		return nil, ErrFormPostUnsupported
@@ -760,6 +777,9 @@ type jsonPoster interface {
 // execution is observed by the normal verifier. State-changing policy remains
 // the caller's responsibility.
 func (p *Page) NavigateJSON(ctx context.Context, url string, body []byte, contentType string, opts NavOptions) (*NavResult, error) {
+	if !p.ctxp.allowStateChanging {
+		return nil, ErrStateChangingBlocked
+	}
 	if len(body) == 0 || len(body) > MaxJSONNavigationBodyBytes || !json.Valid(body) || !isJSONRequestContentType(contentType) {
 		return nil, ErrInvalidJSONPostBody
 	}
@@ -912,6 +932,18 @@ func (p *Page) BlockedRequests() []string {
 // leave the browser and are not subject to the scope gate).
 func isNetworkURL(u string) bool {
 	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
+}
+
+// isReadOnlyMethod reports whether method cannot change server state. Anything
+// else — POST, PUT, PATCH, DELETE, and any unrecognized/empty method — is
+// state-changing for the browser method gate, which fails closed: only these
+// three methods are allowed without an explicit operator opt-in.
+func isReadOnlyMethod(method string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case "GET", "HEAD", "OPTIONS":
+		return true
+	}
+	return false
 }
 
 // ConsoleMessages returns a copy of observed console messages.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
-	"fmt"
 	"mime"
 	"path"
 	"regexp"
@@ -267,7 +266,7 @@ func (c *crawlSource) fetchPage(ctx context.Context, in Input, sink Sink, pageUR
 		// Ask before queueing: a link queued for the next level is requested
 		// by fetchPage before the sink ever sees it, so a registration refusal
 		// alone would still send the request.
-		if !allowFetch(sink, info.Canonical, domain.SourceCrawler) {
+		if !allowFetch(sink, info.Canonical, domain.SourceCrawler, domain.MethodGET) {
 			continue
 		}
 		// A referenced stylesheet, image, font or media file has no reflection
@@ -335,7 +334,7 @@ func (c *crawlSource) harvestScriptEndpoints(ctx context.Context, in Input, sink
 		if IsStaticAssetPath(ref.Path) {
 			continue
 		}
-		if !allowFetch(sink, ref.Canonical, domain.SourceCrawler) {
+		if !allowFetch(sink, ref.Canonical, domain.SourceCrawler, domain.MethodGET) {
 			continue
 		}
 		// SourceScriptLiteral already means "a literal in the site's own
@@ -415,7 +414,7 @@ func (s *sitemapSource) process(ctx context.Context, in Input, sink Sink, sitema
 		// before it is requested. The top-level /sitemap.xml is built from the
 		// operator's seed origin.
 		info, err := Normalize(sitemapURL)
-		if err != nil || !in.Scope.Permits(info.Canonical).Allowed || !allowFetch(sink, info.Canonical, domain.SourceSitemap) {
+		if err != nil || !in.Scope.Permits(info.Canonical).Allowed || !allowFetch(sink, info.Canonical, domain.SourceSitemap, domain.MethodGET) {
 			return nil
 		}
 		sitemapURL = info.Canonical
@@ -614,8 +613,12 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			}
 			return err
 		}
-		routes := extractSPARoutes(res.HTML)
-		routes = append(routes, n.harvestRouteAPIs(ctx, in, sink, info.Canonical, res.Network)...)
+		// extractSPARoutes and harvestRouteAPIs return bare route fragments
+		// ("/search?q=test"); marking them keeps renderSPARoutes from reading a
+		// leading slash as a path-based route.
+		hashRoutes := append(extractSPARoutes(res.HTML), n.harvestRouteAPIs(ctx, in, sink, info.Canonical, res.Network)...)
+		routes := hashRouteEntries(hashRoutes)
+		routes = append(routes, n.harvestScriptRoutes(ctx, in, sink, info.Canonical, res.HTML, res.Network)...)
 		if err := n.renderSPARoutes(ctx, in, sink, info.Canonical, routes); err != nil {
 			if errors.Is(err, ErrLimitReached) {
 				return nil
@@ -680,6 +683,85 @@ func (n *networkSource) emitNetwork(ctx context.Context, in Input, sink Sink, ne
 // lessons; 64 leaves room for one menu plus nearby routes without unbounded
 // navigation.
 const maxSPARouteRenders = 64
+
+// hashRouteEntries marks bare hash-route fragments ("/search?q=test",
+// "lesson/x") so renderSPARoutes can tell them apart from a path-based route
+// ("/dashboard"), which is navigated to without a '#'.
+func hashRouteEntries(routes []string) []string {
+	out := make([]string, 0, len(routes))
+	for _, route := range routes {
+		route = strings.TrimSpace(route)
+		if route == "" {
+			continue
+		}
+		if strings.HasPrefix(route, "#") {
+			out = append(out, route)
+			continue
+		}
+		out = append(out, "#"+route)
+	}
+	return out
+}
+
+// spaRouteURL resolves one renderSPARoutes entry into the URL to render.
+//
+//   - "#/basket" or "lesson/x": a hash route, rendered as base + "#" + route in
+//     the seed document. Fragments are client-side state, never their own URL.
+//   - "/dashboard": a path-based same-origin route (BrowserRouter style),
+//     resolved against the base origin with NO fragment — the view exists only
+//     at its own URL, so the browser has to navigate there for the router to
+//     mount it and issue the view's own API calls.
+//   - "https://host/profile" on the base origin: the same, spelled absolutely.
+//
+// Anything else (off-origin absolute URLs, protocol-relative "//host/x",
+// malformed paths) is refused. The caller's scope check would reject it too,
+// but refusing here keeps the renderer honest about what it sends.
+func spaRouteURL(base, route string) (string, bool) {
+	base = strings.SplitN(base, "#", 2)[0]
+	route = strings.TrimSpace(route)
+	if route == "" || len(route) > 512 {
+		return "", false
+	}
+	if strings.HasPrefix(route, "#") {
+		frag := strings.TrimPrefix(route, "#")
+		if frag == "" || strings.HasPrefix(frag, "//") {
+			return "", false
+		}
+		return base + "#" + frag, true
+	}
+	if strings.HasPrefix(route, "http://") || strings.HasPrefix(route, "https://") {
+		info, err := Normalize(route)
+		if err != nil || !sameOrigin(info.Canonical, base) {
+			return "", false
+		}
+		return info.Canonical, true
+	}
+	if strings.HasPrefix(route, "/") {
+		if strings.HasPrefix(route, "//") {
+			return "", false // protocol-relative: leaves the origin
+		}
+		info, err := NormalizeRef(base, route)
+		if err != nil || !sameOrigin(info.Canonical, base) {
+			return "", false
+		}
+		return info.Canonical, true
+	}
+	// Application-style hash route without a leading '#': "lesson/name".
+	return base + "#" + route, true
+}
+
+// sameOrigin reports whether rawURL and base share scheme and host[:port].
+func sameOrigin(rawURL, base string) bool {
+	a, err := Normalize(rawURL)
+	if err != nil {
+		return false
+	}
+	b, err := Normalize(base)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.HostPort, b.HostPort)
+}
 
 // spaHashRoute returns a route-like hash fragment from a raw href/script
 // reference. Plain anchors (#section), CSS colors (#fff) and fragments without
@@ -765,7 +847,7 @@ func (n *networkSource) harvestRouteAPIs(ctx context.Context, in Input, sink Sin
 	candidates := make([]browser.NetworkEvent, 0, len(network))
 	for _, ev := range network {
 		if !strings.EqualFold(strings.TrimSpace(ev.Method), "GET") || !in.Scope.Permits(ev.URL).Allowed ||
-			!allowFetch(sink, ev.URL, domain.SourceBrowserNetwork) {
+			!allowFetch(sink, ev.URL, domain.SourceBrowserNetwork, domain.MethodGET) {
 			continue
 		}
 		info, err := Normalize(ev.URL)
@@ -787,17 +869,6 @@ func (n *networkSource) harvestRouteAPIs(ctx context.Context, in Input, sink Sin
 		}
 		if n.engine != nil {
 			resp, err := n.engine.Do(ctx, httpengine.GET(ev.URL))
-			fmt.Printf("SPA-DEBUG candidate=%s status=%v body=%d err=%v\n", ev.URL, func() int {
-				if resp == nil {
-					return 0
-				}
-				return resp.Status
-			}(), func() int {
-				if resp == nil {
-					return 0
-				}
-				return len(resp.Body)
-			}(), err)
 			if err == nil && resp != nil && len(resp.Body) > 0 {
 				probes++
 				for _, route := range extractSPARoutes(string(resp.Body)) {
@@ -833,10 +904,295 @@ func (n *networkSource) harvestRouteAPIs(ctx context.Context, in Input, sink Sin
 	return out
 }
 
-// renderSPARoutes loads hash routes found on a rendered page in the same
-// browser context and emits the network requests they cause. It never changes
-// the HTTP crawler's URL set: fragments are client-side state, so ordinary
-// HTTP discovery would only request the same document again.
+// maxSPAScriptBundles bounds how many script assets the browser-network source
+// reads for router definitions. A page typically ships one application bundle
+// plus vendor chunks (skipped below); three covers the application's own code
+// without turning discovery into an asset downloader.
+const maxSPAScriptBundles = 3
+
+// maxSPAScriptBodyBytes caps how much of one bundle is inspected. A router
+// table sits near the top of an application bundle; the 2 MiB window keeps an
+// unusually large file from dominating the scan's memory budget.
+const maxSPAScriptBodyBytes = 2 << 20
+
+// spaRouterPathRE matches a client-router route definition as React Router,
+// Vue Router and Angular all write it: path: 'dashboard'. The captured literal
+// is one route segment, never an API path.
+var spaRouterPathRE = regexp.MustCompile(`path:\s*["']([a-zA-Z0-9][a-zA-Z0-9_-]{1,40})["']`)
+
+// spaRouteSlugRE is the shape of a router-declared route segment.
+var spaRouteSlugRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,40}$`)
+
+// spaRouteHints are the route segments that make a script-derived path worth
+// rendering first: the authenticated views whose screens issue their own API
+// calls. Rendering them is what lets browser_network observe those calls.
+var spaRouteHints = []string{"dashboard", "forum", "orders", "profile", "basket", "search", "contact", "admin"}
+
+// spaAssetPathPrefixes name infrastructure rather than an application view.
+// A bundle names both ("/api/invoices", "/static/app.js"); neither is a router
+// page, and rendering one only spends a navigation.
+var spaAssetPathPrefixes = map[string]struct{}{
+	"api": {}, "graphql": {}, "static": {}, "assets": {}, "js": {}, "css": {},
+	"img": {}, "images": {}, "fonts": {}, "media": {}, "uploads": {}, "public": {},
+}
+
+// spaPathRoute turns a router path literal ("dashboard") or a script-named path
+// ("/orders") into a same-origin path route renderSPARoutes can navigate to.
+// Empty when the input is not a plausible application view: a static asset, an
+// API path, a session-terminating route, or something too deep to be a page.
+func spaPathRoute(raw string) string {
+	p := strings.TrimSpace(raw)
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	if p == "" || len(p) > 128 || strings.HasPrefix(p, "//") {
+		return ""
+	}
+	if !strings.HasPrefix(p, "/") {
+		// A client router declares a segment, not a document-relative
+		// reference; anything with a dot or slash is not one.
+		if !spaRouteSlugRE.MatchString(p) {
+			return ""
+		}
+		p = "/" + p
+	}
+	if _, at := pathViolation(p); at >= 0 {
+		return ""
+	}
+	p = path.Clean(p)
+	if p == "/" || p == "." || strings.HasPrefix(p, "//") {
+		return ""
+	}
+	if IsStaticAssetPath(p) || looksSessionTerminating(p) {
+		return ""
+	}
+	segments := strings.Split(strings.Trim(p, "/"), "/")
+	if len(segments) > 2 {
+		return "" // deep paths are API/resource URLs, not router views
+	}
+	if _, asset := spaAssetPathPrefixes[strings.ToLower(segments[0])]; asset {
+		return ""
+	}
+	return p
+}
+
+// spaPathRouteScore ranks a script-derived path route: hinted views first, a
+// root-level view above a nested resource, discovery order otherwise. It orders
+// candidates only; the render cap still bounds how many are visited.
+func spaPathRouteScore(route string) int {
+	p := strings.ToLower(strings.Trim(route, "/"))
+	score := 0
+	for _, hint := range spaRouteHints {
+		if strings.Contains(p, hint) {
+			score += 10
+			break
+		}
+	}
+	if !strings.Contains(p, "/") {
+		score++
+	}
+	return score
+}
+
+// extractScriptEndpoints returns the application views a document or bundle
+// names as path literals ("/dashboard", "/orders"), best candidates first. It
+// is the script-literal scan (ExtractScriptEndpointLiterals) narrowed to paths
+// a client router can serve, so a bundle's "/api/v1/users" is not rendered as
+// a page.
+func extractScriptEndpoints(body string) []string {
+	out := make([]string, 0, 8)
+	seen := make(map[string]struct{})
+	for _, literal := range ExtractScriptEndpointLiterals(body) {
+		route := spaPathRoute(literal)
+		if route == "" {
+			continue
+		}
+		if _, dup := seen[route]; dup {
+			continue
+		}
+		seen[route] = struct{}{}
+		out = append(out, route)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return spaPathRouteScore(out[i]) > spaPathRouteScore(out[j]) })
+	return out
+}
+
+// isVendorScriptPath reports whether a script asset is third-party framework
+// code rather than the application's own bundle. Router definitions live in the
+// latter; a vendor chunk is only worth reading when nothing else was observed.
+func isVendorScriptPath(p string) bool {
+	lower := strings.ToLower(p)
+	for _, marker := range []string{"vendor", "node_modules", "polyfill", "framework"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// spaScriptBundles returns up to maxSPAScriptBundles same-origin, non-vendor
+// JavaScript assets the browser observed, in observation order.
+func spaScriptBundles(base string, network []browser.NetworkEvent) []string {
+	seen := make(map[string]struct{}, len(network))
+	out := make([]string, 0, maxSPAScriptBundles)
+	for _, ev := range network {
+		info, err := Normalize(ev.URL)
+		if err != nil || !IsScriptAssetPath(info.Path) || !sameOrigin(info.Canonical, base) {
+			continue
+		}
+		if isVendorScriptPath(info.Path) {
+			continue
+		}
+		if _, dup := seen[info.Canonical]; dup {
+			continue
+		}
+		seen[info.Canonical] = struct{}{}
+		out = append(out, info.Canonical)
+		if len(out) >= maxSPAScriptBundles {
+			break
+		}
+	}
+	return out
+}
+
+// looksLikeSPAShell reports whether a document is an SPA mount point rather
+// than a complete server-rendered page: the bundle/router fills it after load.
+func looksLikeSPAShell(html string) bool {
+	lower := strings.ToLower(html)
+	for _, marker := range []string{
+		`<div id="root"`, `<div id="app"`, `<div id="__next"`, `<div id="__nuxt"`, `<app-root`,
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// spaWantsScriptPathRoutes reports whether script-named paths should become
+// rendered views: the seed is an SPA shell, or the route harvest is still well
+// below the render budget. A classic server-rendered page yields few routes, so
+// the second condition keeps the harvest available there too; the render cap
+// still bounds it.
+func spaWantsScriptPathRoutes(html string, routes int) bool {
+	return routes < maxSPARouteRenders || looksLikeSPAShell(html)
+}
+
+// harvestScriptRoutes reads the application's own JavaScript for routes the
+// seed HTML does not link. A React/Vue/Angular bundle declares its router as
+// path literals ("path: 'dashboard'") and often embeds hash routes; the browser
+// network log names the bundles but never their contents.
+//
+// Up to maxSPAScriptBundles same-origin, non-vendor bundles are fetched through
+// the scan's scoped, authenticated engine (never a second identity) and
+// inspected, bounded to maxSPAScriptBodyBytes each. The seed document's inline
+// script and links are inspected too.
+//
+// The result is ready for renderSPARoutes: hash entries keep their '#' marker,
+// path routes stay "/slug". When the page or its bundle uses hash routing the
+// fragments are offered first; a BrowserRouter-style page offers its path
+// routes first. Nothing here registers an endpoint or makes a verdict.
+func (n *networkSource) harvestScriptRoutes(ctx context.Context, in Input, sink Sink, base, html string, network []browser.NetworkEvent) []string {
+	bodies := make([]string, 0, maxSPAScriptBundles+1)
+	if n.engine != nil {
+		for _, script := range spaScriptBundles(base, network) {
+			if !in.Scope.Permits(script).Allowed || !allowFetch(sink, script, domain.SourceBrowserNetwork, domain.MethodGET) {
+				continue
+			}
+			if err := in.wait(ctx); err != nil {
+				return nil
+			}
+			resp, err := n.engine.Do(ctx, httpengine.GET(script))
+			if err != nil || resp == nil || resp.Status >= 400 || len(resp.Body) == 0 {
+				continue
+			}
+			body := resp.Body
+			if len(body) > maxSPAScriptBodyBytes {
+				body = body[:maxSPAScriptBodyBytes]
+			}
+			bodies = append(bodies, string(body))
+		}
+	}
+	// The shell's own inline script is a router declaration too: many SPA
+	// templates inline the route table before any bundle loads.
+	bodies = append(bodies, html)
+
+	hashRoutes := make([]string, 0, 8)
+	pathRoutes := make([]string, 0, 8)
+	seenHash := make(map[string]struct{}, 8)
+	seenPath := make(map[string]struct{}, 8)
+	addHash := func(route string) {
+		route = strings.TrimSpace(route)
+		if route == "" {
+			return
+		}
+		if _, dup := seenHash[route]; dup {
+			return
+		}
+		seenHash[route] = struct{}{}
+		hashRoutes = append(hashRoutes, route)
+	}
+	addPath := func(raw string) {
+		route := spaPathRoute(raw)
+		if route == "" {
+			return
+		}
+		if _, dup := seenPath[route]; dup {
+			return
+		}
+		seenPath[route] = struct{}{}
+		pathRoutes = append(pathRoutes, route)
+	}
+	for _, body := range bodies {
+		for _, route := range extractSPARoutes(body) {
+			addHash(route)
+		}
+		for _, m := range spaRouterPathRE.FindAllStringSubmatch(body, -1) {
+			addPath(m[1])
+		}
+	}
+	// Links on the shell are views the router owns even when no bundle literal
+	// names them ("/dashboard" in the nav).
+	for _, ref := range ExtractLinks(html) {
+		if strings.HasPrefix(strings.TrimSpace(ref), "/") {
+			addPath(ref)
+		}
+	}
+	if spaWantsScriptPathRoutes(html, len(hashRoutes)+len(pathRoutes)) {
+		for _, body := range bodies {
+			for _, route := range extractScriptEndpoints(body) {
+				addPath(route)
+			}
+		}
+	}
+	sort.SliceStable(pathRoutes, func(i, j int) bool {
+		return spaPathRouteScore(pathRoutes[i]) > spaPathRouteScore(pathRoutes[j])
+	})
+	out := make([]string, 0, len(hashRoutes)+len(pathRoutes))
+	// A page that links "#/" or whose bundle carries hash routes is a
+	// hash-routed SPA: its fragments are the reachable screens, so they render
+	// first. A BrowserRouter-style app offers its path views first instead.
+	if strings.Contains(html, "#/") || len(hashRoutes) > 0 {
+		for _, route := range hashRoutes {
+			out = append(out, "#"+route)
+		}
+		return append(out, pathRoutes...)
+	}
+	out = append(out, pathRoutes...)
+	for _, route := range hashRoutes {
+		out = append(out, "#"+route)
+	}
+	return out
+}
+
+// renderSPARoutes loads routes found on a rendered page in the same browser
+// context and emits the network requests they cause. A route entry is either a
+// hash route ("#/basket", "lesson/x"), rendered as a fragment of the seed
+// document, or a path-based same-origin route ("/dashboard"), navigated to as
+// its own URL so a client router mounts the view. It never changes the HTTP
+// crawler's URL set: fragments are client-side state, so ordinary HTTP
+// discovery would only request the same document again; a path route is a real
+// view the browser has to load to reveal the API calls behind it.
 func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink, base string, routes []string) error {
 	if len(routes) == 0 {
 		return nil
@@ -852,8 +1208,11 @@ func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink
 		if rendered >= maxSPARouteRenders {
 			break
 		}
-		routeURL := base + "#" + route
-		if !in.Scope.Permits(routeURL).Allowed || !allowFetch(sink, routeURL, domain.SourceBrowserNetwork) {
+		routeURL, ok := spaRouteURL(base, route)
+		if !ok {
+			continue
+		}
+		if !in.Scope.Permits(routeURL).Allowed || !allowFetch(sink, routeURL, domain.SourceBrowserNetwork, domain.MethodGET) {
 			continue
 		}
 		if err := in.wait(ctx); err != nil {
@@ -862,7 +1221,7 @@ func (n *networkSource) renderSPARoutes(ctx context.Context, in Input, sink Sink
 		res, err := n.browser.Render(ctx, routeURL, browser.RenderOptions{
 			Limiter:           n.cfg.Limiter,
 			WaitUntil:         browser.WaitLoad,
-			ObservationWindow: 350 * time.Millisecond,
+			ObservationWindow: 750 * time.Millisecond,
 			AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
 			SessionStatePath:  in.SessionStatePath,
 			UserAgent:         n.cfg.HuntingUserAgent,
@@ -898,13 +1257,16 @@ func (n *networkSource) emitForms(ctx context.Context, in Input, sink Sink, base
 			action = base
 		}
 		info, err := NormalizeRef(base, action)
-		if err != nil || !in.Scope.Permits(info.Canonical).Allowed ||
-			!allowFetch(sink, info.Canonical, domain.SourceBrowserNetwork) {
-			continue
-		}
 		method := form.Method
 		if method == "" {
 			method = domain.MethodGET
+		}
+		// Registration is passive, but the method still decides which guards
+		// apply: a destructive-looking GET form action is refused, while a
+		// POST target is kept for the executor's state-changing opt-in.
+		if err != nil || !in.Scope.Permits(info.Canonical).Allowed ||
+			!allowFetch(sink, info.Canonical, domain.SourceBrowserNetwork, method) {
+			continue
 		}
 		if _, err := sink.AddEndpoint(ctx, EndpointCandidate{
 			URL: info.Canonical, Method: method, Source: domain.SourceBrowserNetwork,
