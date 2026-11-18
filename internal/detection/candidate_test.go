@@ -238,18 +238,36 @@ func TestPlanDeduplication(t *testing.T) {
 // --- unknown / mixed handling ---
 
 func TestPlanUnknownAndMixed(t *testing.T) {
-	m := tok()
-
-	t.Run("non-markup response", func(t *testing.T) {
+	t.Run("non-markup response plans nothing", func(t *testing.T) {
+		// A browser never parses a JSON document as markup, so a marker
+		// reflected there cannot reach an executable position: the site is
+		// recorded (context + NonMarkupSites) but no breakout is planned. This
+		// is what keeps a reflected value in an API response from becoming a
+		// finding that verification can only call "inert" or "inconclusive".
 		rep := planDoc(t, `{"q":"{{M}}"}`, "application/json", raw)
-		c := mustFind(t, rep.Plan, "<svg onload="+m+">")
-		if c.Category != detection.CatUnknown {
-			t.Fatalf("category = %q, want unknown_mixed", c.Category)
+		if got := len(rep.Plan.Candidates); got != 0 {
+			t.Fatalf("a non-markup response must not yield candidates; got %v", valuesOf(rep.Plan))
 		}
-		for _, c := range rep.Plan.Candidates {
-			if c.Priority > 30 {
-				t.Fatalf("unknown-context candidate %q has priority %d (should be low)", c.Value, c.Priority)
-			}
+		if rep.Plan.NonMarkupSites != 1 {
+			t.Fatalf("NonMarkupSites = %d, want the one reflected site", rep.Plan.NonMarkupSites)
+		}
+		if a := rep.Locations[0].Context; !a.NonMarkupResponse() || a.Sub != detection.SubNonHTMLResponse {
+			t.Fatalf("context = %s/%s, want the non-markup marker", a.Context, a.Sub)
+		}
+	})
+
+	t.Run("JSON-looking body served as HTML still plans", func(t *testing.T) {
+		// The rule follows what the browser actually does, not how the body
+		// looks: a JSON-shaped body served as text/html IS parsed as HTML, so a
+		// breakout there can execute and must still be planned. (This is what a
+		// client-side consumer shape relies on — the HTML document is the thing
+		// the browser parses.)
+		rep := planDoc(t, `{"q":"{{M}}"}`, "text/html", raw)
+		if len(rep.Plan.Candidates) == 0 {
+			t.Fatal("a text/html response must still plan candidates")
+		}
+		if rep.Plan.NonMarkupSites != 0 {
+			t.Fatalf("NonMarkupSites = %d, want 0 for an HTML response", rep.Plan.NonMarkupSites)
 		}
 	})
 
@@ -265,7 +283,51 @@ func TestPlanUnknownAndMixed(t *testing.T) {
 				t.Fatalf("mixed site candidate category = %q, want unknown_mixed", c.Category)
 			}
 		}
+		if rep.Plan.NonMarkupSites != 0 {
+			t.Fatalf("NonMarkupSites = %d, want 0 for an HTML document", rep.Plan.NonMarkupSites)
+		}
 	})
+}
+
+// A reflection in any response a browser does not parse as markup is evidence,
+// not a candidate — whatever the body looks like. This is the whole set of
+// media types mediaOf calls mediaOther, not just JSON.
+func TestPlanSkipsEveryNonMarkupResponse(t *testing.T) {
+	for _, ct := range []string{
+		"application/json",
+		"application/json; charset=utf-8",
+		"application/ld+json",
+		"text/plain",
+		"text/csv",
+		"image/png",
+		"application/octet-stream",
+	} {
+		t.Run(ct, func(t *testing.T) {
+			rep := planDoc(t, `{"q":"{{M}}"}`, ct, raw)
+			if !rep.Reflected {
+				t.Fatal("the probe must still be recorded as reflected")
+			}
+			if got := len(rep.Plan.Candidates); got != 0 {
+				t.Fatalf("non-markup %s must not yield candidates; got %v", ct, valuesOf(rep.Plan))
+			}
+			if rep.Plan.NonMarkupSites != 1 {
+				t.Fatalf("NonMarkupSites = %d, want 1", rep.Plan.NonMarkupSites)
+			}
+		})
+	}
+}
+
+// The automatic filter-bypass fallback must not resurrect what the canonical
+// plan deliberately refused: a non-markup point yields no evasion candidates
+// either, so the escalation cannot spend bypass requests on a JSON endpoint.
+func TestPlanNonMarkupResponseYieldsNoEvasionEscalation(t *testing.T) {
+	rep := planDoc(t, `{"q":"{{M}}"}`, "application/json", raw)
+	got := detection.EvasionEscalationCandidates(rep, detection.PlanOptions{
+		ScanID: candScan, InjectionPointID: candIP, EnableEvasion: true,
+	})
+	if len(got) != 0 {
+		t.Fatalf("non-markup point produced %d escalation candidate(s): %+v", len(got), got)
+	}
 }
 
 // --- deterministic output ---

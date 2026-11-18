@@ -193,6 +193,12 @@ type CandidatePlan struct {
 	// per-injection-point cap (MaxLibraryCandidatesPerInjectionPoint) left
 	// unsent. Zero when the library did not run or nothing was capped.
 	LibraryCapped int `json:"library_capped,omitempty"`
+	// NonMarkupSites counts reflection sites that were recorded but never
+	// planned because their response is not a markup document (JSON, plain
+	// text, binary — see ContextAnalysis.NonMarkupResponse). No breakout can
+	// execute there, so planning one would only manufacture a reflection that
+	// is inert by construction.
+	NonMarkupSites int `json:"non_markup_sites,omitempty"`
 }
 
 // PlanOptions configures planning.
@@ -272,6 +278,19 @@ func PlanCandidates(rep *ReflectionReport, opts PlanOptions) *CandidatePlan {
 	for i := range rep.Locations {
 		loc := rep.Locations[i]
 		if loc.Context == nil {
+			continue
+		}
+		// A response a browser does not parse as markup (JSON, plain text,
+		// binary) has no context a breakout could escape from: whatever the body
+		// looks like, the value never reaches an HTML/JS/CSS parser. Plan
+		// nothing for such a site and record that it was seen, so a reflection
+		// in an API response is evidence — never a reflected-XSS candidate that
+		// can only end as "reflected but inert" or, when the replay does not
+		// reproduce the echo, as a misleading Inconclusive finding. A client
+		// that consumes that JSON into an HTML sink is DOM XSS, handled by the
+		// DOM-XSS engine against the HTML page that performs the fetch.
+		if loc.Context.NonMarkupResponse() {
+			plan.NonMarkupSites++
 			continue
 		}
 		tpls := templatesFor(*loc.Context, marker)

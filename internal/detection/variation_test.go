@@ -445,15 +445,26 @@ func TestVariationPacksDoNotApplyEverywhere(t *testing.T) {
 		ct  string
 	}{
 		{`<style>.a { color: {{M}} }</style>`, "text/html"},
-		{`{"q":"{{M}}"}`, "application/json"},
+		// A genuine unknown context inside an HTML document (a doctype), not the
+		// non-markup case: that one is not plannable at all, checked below.
+		{`<!DOCTYPE {{M}}>`, "text/html"},
 	}
 	for _, tc := range cases {
 		body := docBody(t, tc.doc)
 		rep := planVariation(t, body, tc.ct, PlanOptions{EnableVariationPacks: true})
+		if len(rep.Plan.Candidates) == 0 {
+			t.Fatalf("%s: expected canonical candidates to remain", tc.doc)
+		}
 		for _, c := range rep.Plan.Candidates {
 			if c.Variation != "" {
 				t.Fatalf("%s: unexpected variation candidate %q for context %s:%s", tc.doc, c.Value, c.Context, c.ContextSub)
 			}
 		}
+	}
+
+	// A non-markup response has no pack to apply and no candidate at all.
+	rep := planVariation(t, docBody(t, `{"q":"{{M}}"}`), "application/json", PlanOptions{EnableVariationPacks: true})
+	if len(rep.Plan.Candidates) != 0 {
+		t.Fatalf("non-markup response produced candidates: %+v", rep.Plan.Candidates)
 	}
 }

@@ -51,6 +51,13 @@ const (
 	CtxMixed         Context = "mixed"           // ambiguous between two or more contexts
 )
 
+// SubNonHTMLResponse marks a site whose response a browser does not parse as
+// markup at all (JSON, plain text, images, ... — see mediaOf). The context is
+// unknown not because the analysis failed but because there is nothing to
+// classify: no HTML/JS/CSS parser ever sees those bytes, so a value reflected
+// there cannot reach an executable position.
+const SubNonHTMLResponse = "non_html_response"
+
 // ContextAlternative is another plausible reading of an ambiguous site.
 type ContextAlternative struct {
 	Context Context `json:"context"`
@@ -160,6 +167,28 @@ func ClassifyAt(body []byte, offset int, opts ContextOptions) ContextAnalysis {
 	a.Offset, a.TokenEnd = offset, offset
 	a.Form = FormUnknown
 	return a
+}
+
+// NonMarkupResponse reports whether this site lives in a response a browser does
+// not parse as markup at all: JSON, plain text, images, binary — anything whose
+// media type mediaOf maps to mediaOther. It is a definite, high-confidence
+// property of the response (not "the analysis gave up"): those bytes never reach
+// an HTML, JS or CSS parser, so no breakout value placed there can execute.
+//
+// It is deliberately narrow. Genuine unknown/mixed sites inside an HTML document
+// (an unmodelled tokenizer state, a doctype, a script data block, a regex-or-
+// division ambiguity) are NOT covered: those are still parsed by a browser and
+// keep their generic candidates.
+func (a ContextAnalysis) NonMarkupResponse() bool {
+	return a.Context == CtxUnknown && a.Sub == SubNonHTMLResponse
+}
+
+// NonMarkupResponse is ContextAnalysis.NonMarkupResponse for a planned
+// candidate, which carries the same context/sub pair it was planned from. Used
+// by the scan layer to keep a candidate queued before this rule existed from
+// creating a finding after a restart.
+func (c Candidate) NonMarkupResponse() bool {
+	return c.Context == CtxUnknown && c.ContextSub == SubNonHTMLResponse
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +328,7 @@ func (c *classifier) at(offset int) ContextAnalysis {
 	switch c.media {
 	case mediaOther:
 		return ContextAnalysis{
-			Context: CtxUnknown, Sub: "non_html_response", Chain: []Context{CtxUnknown},
+			Context: CtxUnknown, Sub: SubNonHTMLResponse, Chain: []Context{CtxUnknown},
 			Confidence:     domain.ConfidenceHigh,
 			Reason:         fmt.Sprintf("the response Content-Type is %q, which a browser does not parse as markup, so there is no HTML/JS/CSS context to classify", c.mt),
 			Signals:        []string{"content_type:" + c.mt},
