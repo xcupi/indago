@@ -9,8 +9,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -387,5 +389,37 @@ func TestEnqueueSQLiProbesRespectsEnableSQLi(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSQLiExecutorConfirmsHSQLDBErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		vals, _ := url.ParseQuery(string(raw))
+		acc := vals.Get("account")
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(acc, "'))"):
+			_, _ = w.Write([]byte(`{"output":"unexpected token: )"}`))
+		case strings.Contains(acc, "'"):
+			_, _ = w.Write([]byte(`{"output":"malformed string: '"}`))
+		default:
+			_, _ = w.Write([]byte(`{"output":"No results matched."}`))
+		}
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/WebGoat/SqlInjection/assignment5a", domain.MethodPOST)
+	focus := env.param(ep, "account", domain.LocationForm, "Smith")
+	ip := env.injection(ep, focus)
+
+	ex := sqliExecutorFor(t, env, ExecutorConfig{AllowStateChanging: true})
+	runSQLiJob(t, ex, env, ep, focus, ip)
+
+	findings := sqliFindings(t, env)
+	if len(findings) != 1 || findings[0].Verdict != domain.VerdictConfirmed {
+		tc := sqliCase(t, env)
+		t.Fatalf("status=%s outcome=%s note=%q detail=%q findings=%+v", tc.Status, tc.Outcome, tc.Note, string(tc.Detail), findings)
 	}
 }

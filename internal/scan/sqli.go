@@ -163,6 +163,13 @@ var sqlErrorSignatures = []sqlErrorSignature{
 	sqlSignature("Oracle", "ORA-01756", `ORA-01756`),
 	sqlSignature("Oracle", "quoted string not properly terminated", `quoted string not properly terminated`),
 
+	// HSQLDB / JDBC.
+	sqlSignature("HSQLDB", "SQLSyntaxErrorException", `SQLSyntaxErrorException`),
+	sqlSignature("HSQLDB", "HsqlException", `HsqlException`),
+	sqlSignature("HSQLDB", "malformed string", `malformed string:`),
+	sqlSignature("HSQLDB", "unexpected token", `unexpected token:`),
+	sqlSignature("HSQLDB", "unexpected end of statement", `unexpected end of statement`),
+
 	// Generic PDO/DBAL wrapper.
 	sqlSignature("generic", "SQLSTATE", `SQLSTATE\[`),
 }
