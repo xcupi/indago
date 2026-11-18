@@ -34,6 +34,7 @@ func TestClassifyCoversEveryIndagoClass(t *testing.T) {
 		domain.VulnOpenRedirect:     {601, 4.3},
 		report.ClassGraphQL:         {200, 5.3},
 		domain.VulnInfoDisclosure:   {200, 7.5},
+		domain.VulnPathTraversal:    {22, 7.5},
 	}
 	classes := report.Classes()
 	if len(classes) != len(want) {
@@ -81,6 +82,32 @@ func TestClassifyUnknownClassIsNotInvented(t *testing.T) {
 		if c, ok := report.Classify(class); ok {
 			t.Fatalf("Classify(%q) invented a classification: %+v", class, c)
 		}
+	}
+}
+
+// TestClassifyPathTraversal pins the exact vector and result an operator will
+// paste into a submission: CWE-22 and the read-only 7.5 baseline. The table
+// test above only checks the score, so a silent vector edit would slip past it.
+func TestClassifyPathTraversal(t *testing.T) {
+	c, ok := report.Classify(domain.VulnPathTraversal)
+	if !ok {
+		t.Fatal("path traversal is not classified")
+	}
+	if c.CWE.ID != 22 || !strings.Contains(c.CWE.Name, "Path Traversal") {
+		t.Fatalf("CWE = %s, want CWE-22 Path Traversal", c.CWE)
+	}
+	const wantVector = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"
+	if c.CVSS.Vector != wantVector {
+		t.Fatalf("vector = %q, want %q", c.CVSS.Vector, wantVector)
+	}
+	if c.CVSS.Score() != "7.5" || c.CVSS.Severity != report.CVSSSeverityHigh {
+		t.Fatalf("score = %s (%s), want 7.5 high", c.CVSS.Score(), c.CVSS.Severity)
+	}
+	if !strings.HasPrefix(c.CWE.URL(), "https://cwe.mitre.org/data/definitions/22") {
+		t.Fatalf("CWE.URL() = %q", c.CWE.URL())
+	}
+	if got := c.String(); !strings.Contains(got, "CWE-22") || !strings.Contains(got, "7.5 high") {
+		t.Fatalf("Classification.String() = %q", got)
 	}
 }
 

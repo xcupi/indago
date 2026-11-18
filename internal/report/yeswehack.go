@@ -37,6 +37,8 @@ func ywhBugType(c domain.VulnClass) string {
 		return "Information Disclosure"
 	case domain.VulnOpenRedirect:
 		return "Open Redirect"
+	case domain.VulnPathTraversal:
+		return "Path Traversal"
 	default:
 		return string(c)
 	}
@@ -56,6 +58,8 @@ func ywhRemediation(c domain.VulnClass) string {
 		return "Redirect only to an allow-listed destination or a relative path, and validate the target's origin on the server. Do not accept a full URL from a request parameter as the redirect destination."
 	case domain.VulnInfoDisclosure:
 		return "Remove the exposed artefact from the web root, deny access to version-control and backup paths at the server, and rotate any credential the artefact contained."
+	case domain.VulnPathTraversal:
+		return "Resolve the requested name against a fixed base directory and reject the request when the resolved path leaves it. Serve only an allow-list of known files, and never pass a user-supplied name straight to a file API."
 	default:
 		return "Apply the remediation appropriate to the vulnerability class and verify it with the same reproduction steps."
 	}
@@ -183,6 +187,8 @@ func riskSentence(c domain.VulnClass) string {
 		return "A function that should require authorization is reachable without it, exposing administrative actions to an unprivileged caller."
 	case domain.VulnInfoDisclosure:
 		return "The exposed material can give an attacker configuration details or credentials that shorten the path to a deeper compromise."
+	case domain.VulnPathTraversal:
+		return "An attacker can read files outside the directory the endpoint intended, including configuration, credentials or key material the web process is allowed to open."
 	default:
 		return "The impact follows from the vulnerability class and the data the affected surface can reach."
 	}

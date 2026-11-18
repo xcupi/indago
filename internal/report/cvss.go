@@ -336,6 +336,7 @@ var (
 	cweIDOR             = CWE{639, "Authorization Bypass Through User-Controlled Key"}
 	cweAccessControl    = CWE{862, "Missing Authorization"}
 	cweOpenRedirect     = CWE{601, "URL Redirection to Untrusted Site ('Open Redirect')"}
+	cwePathTraversal    = CWE{22, "Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"}
 	cweDisclosure       = CWE{200, "Exposure of Sensitive Information to an Unauthorized Actor"}
 	cweCORS             = CWE{942, "Permissive Cross-domain Policy with Untrusted Domains"}
 	cweSSTI             = CWE{1336, "Improper Neutralization of Special Elements Used in a Template Engine"}
@@ -366,6 +367,12 @@ var classTable = []Classification{
 	// XXE as a file-read/SSRF primitive: high confidentiality, no integrity or
 	// availability impact.
 	{Class: domain.VulnXXE, CWE: cweXXE, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"), Note: ClassificationNote},
+
+	// Path traversal / LFI is also a file-read primitive: the attacker reads
+	// files outside the intended directory, so confidentiality is high while
+	// the engine's read-only probes leave integrity and availability untouched.
+	// Raise I/A only if the same parameter is shown to write or delete.
+	{Class: domain.VulnPathTraversal, CWE: cwePathTraversal, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"), Note: ClassificationNote},
 
 	// SSRF reaches internal services the attacker cannot address directly, so
 	// the security scope changes (S:C).
