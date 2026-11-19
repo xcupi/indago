@@ -252,6 +252,8 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 			"Also reports Set-Cookie flag findings as cookie_policy. One read-only request per origin.", domain.VulnSecurityHeaders},
 		{"method_tls_hygiene", "HTTP method & TLS hygiene", !cfg.SkipMethodTLS,
 			"Read-only OPTIONS/TRACE probes per origin plus the TLS state of the scan's own handshake. No write method is ever sent; a self-signed lab certificate is recorded, not reported.", domain.VulnHTTPMethods},
+		{"websocket_security", "WebSocket handshake & origin", !cfg.SkipWebSocket,
+			"Two bounded read-only HTTP Upgrade handshakes per discovered WebSocket endpoint: an untrusted Origin (reported only on 101 Switching Protocols) and an anonymous handshake. No WebSocket frame is ever sent.", domain.VulnWebSocket},
 		{"host_header", "Host header injection", !cfg.SkipHostHeader,
 			"One read-only baseline plus control requests per origin, carrying a canary Host/X-Forwarded-Host value.", domain.VulnHostHeader},
 		{"jwt_validation", "JWT token validation", !cfg.SkipJWT,

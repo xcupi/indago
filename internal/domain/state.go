@@ -322,12 +322,20 @@ const (
 	// state of the scan's own handshake. Findings are deduplicated per
 	// origin. See internal/scan/methodtls.go.
 	JobMethodTLS JobType = "method_tls_hygiene"
+	// JobWebSocket inspects ONE discovered, WebSocket-shaped endpoint for
+	// handshake and Origin-validation weaknesses: a bounded, strictly
+	// read-only HTTP Upgrade handshake carrying an untrusted Origin (reported
+	// only when the server answers 101 Switching Protocols) plus an anonymous
+	// handshake that exposes an unauthenticated or plaintext upgrade during an
+	// authenticated scan. No WebSocket frame is ever sent. Findings are
+	// deduplicated per origin and path. See internal/scan/websocket.go.
+	JobWebSocket JobType = "websocket_security"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders, JobHostHeader, JobJWT, JobNoSQLi, JobMethodTLS:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders, JobHostHeader, JobJWT, JobNoSQLi, JobMethodTLS, JobWebSocket:
 		return true
 	default:
 		return false

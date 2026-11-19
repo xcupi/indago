@@ -229,6 +229,22 @@ var classIntelByClass = map[domain.VulnClass]classIntel{
 			"certificate cannot expire unnoticed.",
 		References: []string{"https://cwe.mitre.org/data/definitions/326.html", "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html"},
 	},
+	domain.VulnWebSocket: {
+		CWE:  "CWE-1385",
+		Name: "Missing Origin validation in WebSockets",
+		Impact: "A browser sends cookies with a WebSocket handshake to any origin that opens the socket, and the " +
+			"server's only defence is validating the handshake's Origin header (CWE-1385, an instance of " +
+			"CWE-346 origin validation error). A server that answers 101 Switching Protocols for an arbitrary Origin " +
+			"lets a page on an attacker-controlled site open an authenticated socket as the victim: the attacker can " +
+			"read whatever the socket pushes and send whatever the application accepts. An upgrade that needs no " +
+			"session at all exposes the same socket to anyone who can reach it, and a plaintext ws:// endpoint " +
+			"carries all of it in the clear.",
+		Remediation: "Validate the Origin header of every Upgrade request against an explicit allow-list of the " +
+			"application's own origins before answering 101, require the same authentication on the socket that the " +
+			"HTTP application requires, keep an authorization check on every message, and serve the endpoint over " +
+			"wss:// only.",
+		References: []string{"https://cwe.mitre.org/data/definitions/1385.html", "https://cwe.mitre.org/data/definitions/346.html", "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/11-Client-side_Testing/10-Testing_WebSockets"},
+	},
 }
 
 func intelFor(class domain.VulnClass) classIntel {

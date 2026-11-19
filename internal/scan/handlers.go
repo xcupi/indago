@@ -142,6 +142,10 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	// safe methods, and a state-changing endpoint is skipped before any
 	// request is sent.
 	h[domain.JobMethodTLS] = newMethodTLSExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	// The WebSocket handshake check is strictly read-only too: an Upgrade
+	// handshake is a GET, no frame is ever sent, and a state-changing endpoint
+	// is skipped before any request is made.
+	h[domain.JobWebSocket] = newWebSocketExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobHostHeader] = newHostHeaderExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobJWT] = newJWTExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobOpenRedirect] = newOpenRedirectExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
@@ -224,6 +228,7 @@ func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 		domain.JobCORS:             noop(domain.JobCORS),
 		domain.JobSecurityHeaders:  noop(domain.JobSecurityHeaders),
 		domain.JobMethodTLS:        noop(domain.JobMethodTLS),
+		domain.JobWebSocket:        noop(domain.JobWebSocket),
 		domain.JobHostHeader:       noop(domain.JobHostHeader),
 		domain.JobJWT:              noop(domain.JobJWT),
 		domain.JobOpenRedirect:     noop(domain.JobOpenRedirect),

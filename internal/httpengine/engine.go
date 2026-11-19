@@ -90,6 +90,13 @@ type Request struct {
 	// caller spends waiting before calling Do (e.g. for a rate-limit permit)
 	// does not count against it. 0 leaves only the client's configured timeout.
 	Timeout time.Duration
+	// HTTP1Only forces this single exchange over HTTP/1.1 (no HTTP/2
+	// negotiation). Required by protocol-upgrade probes: an HTTP/2 connection
+	// forbids the Upgrade/Connection headers the handshake needs, so a server
+	// whose ALPN prefers h2 would otherwise fail the probe instead of
+	// answering it. Everything else about the configured transport (proxy,
+	// dialer, TLS verification, fingerprint override) is preserved.
+	HTTP1Only bool
 }
 
 // NewRequest returns a request with the given method and URL.

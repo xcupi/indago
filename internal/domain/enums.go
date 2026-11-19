@@ -101,12 +101,21 @@ const (
 	// serves an expired certificate. Decided from the handshake the scan's
 	// own client performed, never by an LLM. See internal/scan/methodtls.go.
 	VulnTLSConfig VulnClass = "tls_config"
+	// VulnWebSocket is a WebSocket handshake weakness: the server completes
+	// an Upgrade for an attacker-chosen Origin it never validated (CWE-1385
+	// missing origin validation in WebSockets / CWE-346 origin validation
+	// error — the cross-site WebSocket hijacking primitive), or it accepts an
+	// unauthenticated/plaintext upgrade during an authenticated scan. Decided
+	// from the server's own answer to a bounded, strictly read-only Upgrade
+	// handshake; no WebSocket frame is ever sent. See
+	// internal/scan/websocket.go.
+	VulnWebSocket VulnClass = "websocket_security"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader, VulnJWT, VulnNoSQLi, VulnHTTPMethods, VulnTLSConfig:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader, VulnJWT, VulnNoSQLi, VulnHTTPMethods, VulnTLSConfig, VulnWebSocket:
 		return true
 	default:
 		return false

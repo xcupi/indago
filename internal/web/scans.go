@@ -460,6 +460,9 @@ type createScanReq struct {
 	// SkipMethodTLS omits the READ-ONLY HTTP method & TLS transport-hygiene
 	// check (one bounded OPTIONS/TRACE inspection per origin).
 	SkipMethodTLS bool `json:"skip_method_tls"`
+	// SkipWebSocket omits the READ-ONLY WebSocket handshake & Origin
+	// inspection (two bounded Upgrade handshakes per discovered endpoint).
+	SkipWebSocket bool `json:"skip_websocket"`
 	// SkipHostHeader omits the READ-ONLY host-header inspection (one bounded
 	// baseline plus control requests per origin).
 	SkipHostHeader bool `json:"skip_host_header"`
@@ -581,6 +584,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		SkipPathTraversal:               req.SkipPathTraversal,
 		SkipSecurityHeaders:             req.SkipSecurityHeaders,
 		SkipMethodTLS:                   req.SkipMethodTLS,
+		SkipWebSocket:                   req.SkipWebSocket,
 		SkipHostHeader:                  req.SkipHostHeader,
 		SkipJWT:                         req.SkipJWT,
 		SkipCORS:                        req.SkipCORS,
@@ -693,6 +697,9 @@ type capabilitiesReq struct {
 	// SkipMethodTLS omits the READ-ONLY HTTP method & TLS transport-hygiene
 	// check.
 	SkipMethodTLS bool `json:"skip_method_tls"`
+	// SkipWebSocket omits the READ-ONLY WebSocket handshake & Origin
+	// inspection.
+	SkipWebSocket bool `json:"skip_websocket"`
 	// SkipHostHeader omits the READ-ONLY host-header inspection.
 	SkipHostHeader bool `json:"skip_host_header"`
 
@@ -737,6 +744,7 @@ func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Req
 	sc.Config.SkipPathTraversal = req.SkipPathTraversal
 	sc.Config.SkipSecurityHeaders = req.SkipSecurityHeaders
 	sc.Config.SkipMethodTLS = req.SkipMethodTLS
+	sc.Config.SkipWebSocket = req.SkipWebSocket
 	sc.Config.SkipHostHeader = req.SkipHostHeader
 	sc.Config.SkipJWT = req.SkipJWT
 	sc.Config.SkipCORS = req.SkipCORS
