@@ -27,8 +27,10 @@ type browserHandle interface {
 	// are sent. allowStateChanging, when false, must abort every request whose
 	// method is not read-only (GET/HEAD/OPTIONS) before it is sent — including
 	// a redirect hop that would preserve such a method (see
-	// ContextOptions.AllowStateChanging).
-	NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(url string) bool, allowStateChanging bool) (contextHandle, error)
+	// ContextOptions.AllowStateChanging). ignoreHTTPSErrors, when true, must
+	// accept a self-signed or hostname-mismatched HTTPS certificate (see
+	// ContextOptions.IgnoreHTTPSErrors); false is the strict default.
+	NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(url string) bool, allowStateChanging, ignoreHTTPSErrors bool) (contextHandle, error)
 	// Close closes the browser and all its contexts.
 	Close() error
 }

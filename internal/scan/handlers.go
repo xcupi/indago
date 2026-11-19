@@ -31,8 +31,10 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	findingsMu := &sync.Mutex{}
 	tokenMu := &sync.Mutex{}
 	ua := ""
+	insecureTLS := false
 	if sc != nil {
 		ua = c.huntingUserAgent(sc)
+		insecureTLS = sc.Config.AllowInsecureTLS
 	}
 	hasSession := false
 	if se, ok := eng.(*scopedEngine); ok && se != nil && len(se.cookies) > 0 {
@@ -57,6 +59,9 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	h[domain.JobTest] = newExecutor(c.store, eng, c.opts.Evidence, c.queue, execCfg, c.log, findingsMu, tokenMu)
 	verify := newVerifyExecutor(c.store, eng, c.verifier(), c.opts.Evidence, c.queue, scope, execCfg, c.log, findingsMu, tokenMu, proxyPool, limiter)
 	verify.userAgent = ua
+	// Lab/staging TLS opt-in: the verifying browser context accepts the same
+	// self-signed/hostname-mismatched certificate the scan's raw engine does.
+	verify.ignoreHTTPSErrors = insecureTLS
 	h[domain.JobVerify] = verify
 	// DOM XSS shares findingsMu too: its Finding correlation is a
 	// read-then-write against the SAME store.Findings() rows Reflected
@@ -66,6 +71,9 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	dom.userAgent = ua
 	dom.limiter = limiter
 	dom.proxyPool = append([]string(nil), proxyPool...)
+	// Same TLS opt-in as raw HTTP and verification: DOM-XSS navigation to a
+	// self-signed lab origin would otherwise fail before any probe ran.
+	dom.ignoreHTTPSErrors = insecureTLS
 	// The DOM engine's browser contexts obey the same method policy as every
 	// other scan context: non-mutating unless the operator explicitly allowed
 	// state-changing requests.

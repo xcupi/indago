@@ -15,7 +15,7 @@ type hashTestDriver struct {
 
 func (d *hashTestDriver) Launch(bool) (browserHandle, error) { return d, nil }
 func (d *hashTestDriver) Stop() error                        { return nil }
-func (d *hashTestDriver) NewContext(string, string, map[string]string, func(string) bool, bool) (contextHandle, error) {
+func (d *hashTestDriver) NewContext(string, string, map[string]string, func(string) bool, bool, bool) (contextHandle, error) {
 	d.contexts++
 	return d, nil
 }

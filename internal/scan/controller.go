@@ -361,6 +361,11 @@ type CreateScanParams struct {
 	// RandomizeTLSFingerprint — see domain.ScanConfig.RandomizeTLSFingerprint.
 	// Off by default; mutually exclusive with ProxyPool (validated below).
 	RandomizeTLSFingerprint bool
+	// AllowInsecureTLS — see domain.ScanConfig.AllowInsecureTLS. Off by
+	// default; opts an authorized lab/staging scan into accepting a
+	// self-signed or hostname-mismatched HTTPS certificate on both its raw
+	// HTTP engine and its browser contexts. Never widens scope.
+	AllowInsecureTLS bool
 	// IDORCandidates are operator-supplied foreign object identifiers — see
 	// domain.ScanConfig.IDORCandidates. Bounded and validated at creation.
 	//
@@ -608,6 +613,10 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 			"Go's HTTP transport performs TLS internally after any proxy tunnel, never through a "+
 			"custom TLS dialer, so the fingerprint override would silently have no effect through a proxy", ErrBadConfig)
 	}
+	// Opt-in TLS relaxation for authorized lab/staging targets. It is carried
+	// verbatim — never inferred from the target URL or scheme — and it does
+	// not interact with scope: every request is still scope-checked.
+	cfg.AllowInsecureTLS = p.AllowInsecureTLS
 	// The session mode decides several validations below (IDOR enumeration,
 	// the role-field slice), so resolve it once, up front.
 	mode := p.AuthMode
@@ -1201,7 +1210,7 @@ func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p Cr
 		if err != nil {
 			return "", fmt.Errorf("%w: build session state path: %w", ErrAuth, err)
 		}
-		res, err := mgr.InteractiveLogin(ctx, browser.LoginOptions{AllowRequest: allow, LoginURL: loginURL, SuccessURLGlob: successURL, StorageStatePath: path, UserAgent: userAgent})
+		res, err := mgr.InteractiveLogin(ctx, browser.LoginOptions{AllowRequest: allow, LoginURL: loginURL, SuccessURLGlob: successURL, StorageStatePath: path, UserAgent: userAgent, IgnoreHTTPSErrors: p.AllowInsecureTLS})
 		if err != nil {
 			return "", fmt.Errorf("%w: interactive login: %w", ErrAuth, err)
 		}
@@ -1239,6 +1248,10 @@ func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p Cr
 			AllowRequest: allow,
 			LoginURL:     loginURL, Username: user, Password: pass, SuccessURLGlob: successURL, StorageStatePath: path,
 			UsernameSelector: p.LoginUsernameSelector, PasswordSelector: p.LoginPasswordSelector, SubmitSelector: p.LoginSubmitSelector,
+			// The same explicit lab/staging TLS opt-in the scan itself carries:
+			// a self-signed login page must be reachable before any session can
+			// be captured.
+			IgnoreHTTPSErrors: p.AllowInsecureTLS,
 		})
 		if err != nil {
 			return "", fmt.Errorf("%w: password login: %w", ErrAuth, err)

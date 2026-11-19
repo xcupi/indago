@@ -161,6 +161,9 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 		// policy: a default scan verifies in a non-mutating browser, so a
 		// target page cannot turn verification into a write.
 		AllowStateChanging: in.AllowStateChanging,
+		// Only the scan's explicit AllowInsecureTLS opt-in relaxes certificate
+		// verification; the zero value keeps the browser's strict default.
+		IgnoreHTTPSErrors: in.IgnoreHTTPSErrors,
 	})
 	if err != nil {
 		return nil, classifyBrowserErr(ctx, err)

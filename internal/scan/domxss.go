@@ -1616,6 +1616,11 @@ type domXSSExecutor struct {
 	// target, so a scan configured to keep payloads away from write behavior
 	// must not perform it.
 	skipWriteEndpoints bool
+	// ignoreHTTPSErrors mirrors the scan's explicit AllowInsecureTLS opt-in
+	// (domain.ScanConfig.AllowInsecureTLS): DOM-XSS browser contexts then
+	// accept a self-signed or hostname-mismatched certificate, so a lab/staging
+	// HTTPS target can be probed at all. false is the strict default.
+	ignoreHTTPSErrors bool
 }
 
 func newDOMXSSExecutor(st store.Store, mgr *browser.Manager, ev evidence.Store, scope domain.Scope, log *slog.Logger, findingsMu *sync.Mutex) *domXSSExecutor {
@@ -1822,7 +1827,7 @@ func (e *domXSSExecutor) handleDOMXSSSource(ctx context.Context, job *domain.Tes
 	sessionStatePath := e.sessionStatePathFor(ctx, job.ScanID)
 	proxy := e.nextProxy() // one proxy per job, shared by every per-selector context below
 	newContext := func() (*browser.Context, error) {
-		opts := browser.ContextOptions{AllowRequest: allow, StorageStatePath: sessionStatePath, ProxyServer: proxy, AllowStateChanging: e.allowStateChanging}
+		opts := browser.ContextOptions{AllowRequest: allow, StorageStatePath: sessionStatePath, ProxyServer: proxy, AllowStateChanging: e.allowStateChanging, IgnoreHTTPSErrors: e.ignoreHTTPSErrors}
 		if e.userAgent != "" {
 			opts.ExtraHeaders = map[string]string{"User-Agent": e.userAgent}
 		}

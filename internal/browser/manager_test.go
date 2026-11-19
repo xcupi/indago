@@ -88,7 +88,7 @@ type fakeBrowser struct {
 	contexts []*fakeContext
 }
 
-func (b *fakeBrowser) NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(string) bool, allowStateChanging bool) (contextHandle, error) {
+func (b *fakeBrowser) NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(string) bool, allowStateChanging, ignoreHTTPSErrors bool) (contextHandle, error) {
 	if b.drv.createDelay > 0 {
 		time.Sleep(b.drv.createDelay)
 	}
@@ -97,7 +97,7 @@ func (b *fakeBrowser) NewContext(storageStatePath, proxyServer string, extraHead
 	if b.closed {
 		return nil, errors.New("browser closed")
 	}
-	c := &fakeContext{br: b, gated: allow != nil, storagePath: storageStatePath, proxyServer: proxyServer, extraHeaders: extraHeaders, cookies: map[string]Cookie{}, gotoDelay: b.drv.gotoDelay, allowStateChanging: allowStateChanging}
+	c := &fakeContext{br: b, gated: allow != nil, storagePath: storageStatePath, proxyServer: proxyServer, extraHeaders: extraHeaders, cookies: map[string]Cookie{}, gotoDelay: b.drv.gotoDelay, allowStateChanging: allowStateChanging, ignoreHTTPSErrors: ignoreHTTPSErrors}
 	b.contexts = append(b.contexts, c)
 	return c, nil
 }
@@ -145,10 +145,13 @@ type fakeContext struct {
 	// allowStateChanging records the method policy the Manager passed down, so
 	// tests can assert the wiring without a real browser.
 	allowStateChanging bool
-	mu                 sync.Mutex
-	closed             bool
-	cookies            map[string]Cookie
-	pages              []*fakePage
+	// ignoreHTTPSErrors records the certificate-verification policy the Manager
+	// passed down (ContextOptions.IgnoreHTTPSErrors), same reason.
+	ignoreHTTPSErrors bool
+	mu                sync.Mutex
+	closed            bool
+	cookies           map[string]Cookie
+	pages             []*fakePage
 }
 
 func (c *fakeContext) NewPage() (pageHandle, error) {
@@ -1057,6 +1060,55 @@ func TestRenderUsesNonMutatingContext(t *testing.T) {
 	}
 	if contexts[0].allowStateChanging {
 		t.Fatal("Render created a state-changing context; discovery rendering must stay non-mutating")
+	}
+}
+
+// ContextOptions.IgnoreHTTPSErrors must reach the driver unchanged: it is the
+// one switch that lets an authorized lab/staging HTTPS origin (self-signed or
+// hostname-mismatched) be loaded by the browser, and a wiring mistake would
+// either silently keep strict verification or silently relax every context.
+func TestNewContextPropagatesIgnoreHTTPSErrors(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+	ctx := context.Background()
+
+	if _, err := m.NewContext(ctx, ContextOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.NewContext(ctx, ContextOptions{IgnoreHTTPSErrors: true}); err != nil {
+		t.Fatal(err)
+	}
+	contexts := d.browsers[0].contexts
+	if len(contexts) != 2 {
+		t.Fatalf("created %d contexts, want 2", len(contexts))
+	}
+	if contexts[0].ignoreHTTPSErrors {
+		t.Fatal("the zero-value ContextOptions must reach the driver with strict certificate verification")
+	}
+	if !contexts[1].ignoreHTTPSErrors {
+		t.Fatal("ContextOptions.IgnoreHTTPSErrors=true did not reach the driver")
+	}
+}
+
+// Render carries the scan's lab/staging TLS opt-in (and nothing else): the same
+// RenderOptions.IgnoreHTTPSErrors must reach the context discovery creates.
+func TestRenderPropagatesIgnoreHTTPSErrors(t *testing.T) {
+	d := &fakeDriver{}
+	m := newFakeManager(t, Config{PoolSize: 1}, d)
+	defer m.Close()
+	if _, err := m.Render(context.Background(), "https://lab.example/page", RenderOptions{IgnoreHTTPSErrors: true}); err != nil {
+		t.Fatal(err)
+	}
+	contexts := d.browsers[0].contexts
+	if len(contexts) != 1 {
+		t.Fatalf("created %d contexts, want 1", len(contexts))
+	}
+	if !contexts[0].ignoreHTTPSErrors {
+		t.Fatal("RenderOptions.IgnoreHTTPSErrors did not reach the render context")
+	}
+	if contexts[0].allowStateChanging {
+		t.Fatal("the TLS opt-in must not relax the non-mutating render policy")
 	}
 }
 

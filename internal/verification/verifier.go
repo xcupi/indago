@@ -102,6 +102,14 @@ type Input struct {
 	// on a default scan therefore verifies with a non-mutating browser, even
 	// if the page's own JavaScript tries to submit a form.
 	AllowStateChanging bool
+	// IgnoreHTTPSErrors mirrors the scan's explicit AllowInsecureTLS opt-in
+	// (domain.ScanConfig.AllowInsecureTLS): with it set, the verifying browser
+	// context accepts a self-signed or hostname-mismatched certificate so an
+	// authorized lab/staging HTTPS target can be verified. With the zero value
+	// the browser keeps strict verification, and a certificate it does not
+	// trust fails the navigation (the attempt is then inconclusive, never a
+	// fabricated confirmation).
+	IgnoreHTTPSErrors bool
 }
 
 // ResultEvidence carries the raw artifacts a verification attempt produced. The
