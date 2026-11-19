@@ -156,6 +156,9 @@ func runRawQueryScan(t *testing.T, site *rawQuerySite, mode discovery.RawQueryMo
 		// counted as raw-query traffic. It has its own tests
 		// (methodtls_test.go); keep this fixture about one engine's volume.
 		SkipMethodTLS: true,
+		// The WebSocket pass probes discovered socket-shaped endpoints; this
+		// fixture has none and its request arithmetic is one engine's.
+		SkipWebSocket: true,
 	}
 	opts := scan.Options{}
 	if withBrowser {

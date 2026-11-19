@@ -344,7 +344,13 @@ type ScanConfig struct {
 	// check. It sends one GET baseline plus one OPTIONS and one TRACE probe
 	// per origin (all safe methods) and reads the TLS state of that
 	// handshake; true omits only its jobs.
-	SkipMethodTLS       bool   `json:"skip_method_tls,omitempty"`
+	SkipMethodTLS bool `json:"skip_method_tls,omitempty"`
+	// SkipWebSocket omits the READ-ONLY WebSocket handshake & Origin
+	// inspection. It only acts on endpoints whose URL looks like a WebSocket
+	// endpoint (ws://, wss://, or a WS-shaped path such as /ws or /socket.io),
+	// sends a bounded HTTP Upgrade handshake and never a WebSocket frame;
+	// true omits only its jobs.
+	SkipWebSocket       bool   `json:"skip_websocket,omitempty"`
 	SSRFCallbackURL     string `json:"ssrf_callback_url,omitempty"`
 	SSRFCallbackPollURL string `json:"ssrf_callback_poll_url,omitempty"`
 	// AllowPrivateOAST lets THIS scan's SSRF engine use an OAST collaborator

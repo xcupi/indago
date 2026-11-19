@@ -347,6 +347,7 @@ var (
 	cweJWT              = CWE{347, "Improper Verification of Cryptographic Signature"}
 	cweHTTPMethods      = CWE{749, "Exposed Dangerous Method or Function"}
 	cweTLSConfig        = CWE{326, "Inadequate Encryption Strength"}
+	cweWebSocket        = CWE{1385, "Missing Origin Validation in WebSockets"}
 )
 
 // classTable is the deterministic mapping. Order is documentation order and is
@@ -426,6 +427,15 @@ var classTable = []Classification{
 	// are needed by the attacker, and integrity is affected because a
 	// downgraded channel can be modified in flight.
 	{Class: domain.VulnTLSConfig, CWE: cweTLSConfig, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N"), Note: ClassificationNote},
+
+	// A WebSocket upgrade that accepts an attacker-chosen Origin is the
+	// cross-site WebSocket hijacking primitive (CWE-1385, with CWE-346 as the
+	// underlying origin-validation error): a page on any origin can open an
+	// authenticated socket as the victim. Reading the socket's messages is a
+	// high confidentiality impact; sending on it is a lower integrity impact
+	// because what the socket accepts depends on the application. The victim
+	// must visit the attacker's page, so interaction is required.
+	{Class: domain.VulnWebSocket, CWE: cweWebSocket, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:L/A:N"), Note: ClassificationNote},
 
 	// SSRF reaches internal services the attacker cannot address directly, so
 	// the security scope changes (S:C).

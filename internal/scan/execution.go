@@ -121,6 +121,10 @@ type execution struct {
 	// methodTLSPassDone marks the one-time read-only HTTP method & TLS
 	// transport-hygiene pass (one bounded OPTIONS/TRACE inspection per origin).
 	methodTLSPassDone atomic.Bool
+	// webSocketPassDone marks the one-time read-only WebSocket handshake &
+	// Origin inspection pass (one bounded Upgrade probe pair per discovered
+	// WebSocket-shaped endpoint).
+	webSocketPassDone atomic.Bool
 	// hostHeaderPassDone marks the one-time read-only host-header inspection
 	// pass (one bounded GET baseline plus control requests per origin).
 	hostHeaderPassDone atomic.Bool
@@ -791,6 +795,17 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		ex.methodTLSPassDone.Store(true)
 		if !sc.Config.SkipMethodTLS {
 			c.enqueueMethodTLSProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	// Read-only WebSocket handshake & Origin inspection: two bounded HTTP
+	// Upgrade handshakes per discovered WebSocket-shaped endpoint, no frame
+	// ever sent, no mutation, no opt-in (see websocket.go). It enqueues
+	// nothing at all when the crawl found no WebSocket endpoint.
+	if !ex.webSocketPassDone.Load() {
+		ex.webSocketPassDone.Store(true)
+		if !sc.Config.SkipWebSocket {
+			c.enqueueWebSocketProbes(ctx, ex.scanID)
 			passes = true
 		}
 	}

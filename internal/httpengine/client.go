@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -94,6 +95,13 @@ type Client struct {
 	maxBodyBytes    int64
 	userAgent       string
 	defaultHeaders  map[string]string
+	// http1Once/http1 lazily build a transport that cannot negotiate HTTP/2.
+	// A protocol-upgrade request carries Upgrade/Connection headers, which an
+	// HTTP/2 connection forbids outright; without this the probe would fail
+	// on any origin whose ALPN picks h2 rather than observing the handshake.
+	// The pointer is atomic so Close can read it while a request is starting.
+	http1Once sync.Once
+	http1     atomic.Pointer[http.Transport]
 }
 
 var _ Engine = (*Client)(nil)
@@ -259,7 +267,33 @@ func NewDefault() *Client {
 func (c *Client) CookieJar() http.CookieJar { return c.jar }
 
 // Close releases idle connections held by the transport.
-func (c *Client) Close() { c.transport.CloseIdleConnections() }
+func (c *Client) Close() {
+	c.transport.CloseIdleConnections()
+	if tr := c.http1.Load(); tr != nil {
+		tr.CloseIdleConnections()
+	}
+}
+
+// http1Transport returns a transport that always speaks HTTP/1.1, cloned from
+// the configured one so proxy, dialer, TLS verification and raw-TLS dialer
+// overrides all still apply. It is built once and shared by every HTTP1Only
+// request, so ordinary idle connections are reused as usual; an upgraded (101)
+// connection is closed after its headers are read and is never reused.
+func (c *Client) http1Transport() *http.Transport {
+	c.http1Once.Do(func() {
+		tr := c.transport.Clone()
+		tr.ForceAttemptHTTP2 = false
+		if tr.TLSClientConfig != nil {
+			tlsCfg := tr.TLSClientConfig.Clone()
+			tlsCfg.NextProtos = []string{"http/1.1"}
+			tr.TLSClientConfig = tlsCfg
+		} else {
+			tr.TLSClientConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
+		}
+		c.http1.Store(tr)
+	})
+	return c.http1.Load()
+}
 
 // Do executes an HTTP request and captures the response. Scope must be checked
 // by the caller before calling Do.
@@ -306,6 +340,10 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 		jar = nil
 	}
 	start := time.Now()
+	transport := c.transport
+	if req.HTTP1Only {
+		transport = c.http1Transport()
+	}
 	var resp *http.Response
 	if !c.followRedirects || req.NoRedirects {
 		// Execute a single hop directly on the transport when redirects are
@@ -317,7 +355,7 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 				hr.AddCookie(ck)
 			}
 		}
-		resp, err = c.transport.RoundTrip(hr)
+		resp, err = transport.RoundTrip(hr)
 		if err == nil && jar != nil {
 			if rc := resp.Cookies(); len(rc) > 0 {
 				jar.SetCookies(hr.URL, rc)
@@ -325,7 +363,7 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 		}
 	} else {
 		client := &http.Client{
-			Transport: c.transport,
+			Transport: transport,
 			Jar:       jar,
 			CheckRedirect: func(r *http.Request, via []*http.Request) error {
 				chain = append(chain, r.URL.String())
@@ -354,9 +392,19 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 	}
 	defer resp.Body.Close()
 
-	body, truncated, err := readLimited(resp.Body, c.maxBodyBytes)
-	if err != nil {
-		return nil, fmt.Errorf("httpengine: read body: %w", err)
+	// A 101 response has NO message body: the connection becomes a raw tunnel
+	// for the upgraded protocol. Reading until EOF would block until the peer
+	// closes (or the request deadline expires) and then discard the response,
+	// destroying the very observation a read-only Upgrade probe needs. Record
+	// an empty body and close the tunnel immediately — nothing is ever sent
+	// through it.
+	var body []byte
+	var truncated bool
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		body, truncated, err = readLimited(resp.Body, c.maxBodyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("httpengine: read body: %w", err)
+		}
 	}
 	received := time.Now()
 

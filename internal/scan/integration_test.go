@@ -195,6 +195,11 @@ func legacyPipelineCfg(httpWorkers int) *domain.ScanConfig {
 	// The JWT validation & hygiene pass also adds one job per origin carrying a
 	// Bearer JWT; it has its own tests in jwtcheck_test.go.
 	cfg.SkipJWT = true
+	// The WebSocket handshake pass adds one job per discovered WebSocket-shaped
+	// endpoint (none in this fixture's plain HTML site) and has its own tests in
+	// websocket_test.go; it is switched off so the fixed job graph below can
+	// never gain a job from a page whose path merely looks like a socket.
+	cfg.SkipWebSocket = true
 	return cfg
 }
 
@@ -219,6 +224,7 @@ func createScan(t *testing.T, c *scan.Controller, proj, tgt domain.ID, cfg *doma
 		p.SkipCORS = cfg.SkipCORS
 		p.SkipSecurityHeaders = cfg.SkipSecurityHeaders
 		p.SkipMethodTLS = cfg.SkipMethodTLS
+		p.SkipWebSocket = cfg.SkipWebSocket
 		p.SkipHostHeader = cfg.SkipHostHeader
 		p.SkipJWT = cfg.SkipJWT
 		p.SkipOpenRedirect = cfg.SkipOpenRedirect
@@ -300,6 +306,14 @@ func recordingHandlers() (map[domain.JobType]worker.Handler, func() []string) {
 		// The read-only method/TLS pass queues one origin-level job; a real
 		// worker handles it, so this double must too.
 		domain.JobMethodTLS: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
+			mu.Lock()
+			urls = append(urls, j.Target.URL)
+			mu.Unlock()
+			return nil
+		}),
+		// The read-only WebSocket handshake pass queues one job per discovered
+		// socket endpoint; a real worker handles it, so this double must too.
+		domain.JobWebSocket: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
 			mu.Lock()
 			urls = append(urls, j.Target.URL)
 			mu.Unlock()

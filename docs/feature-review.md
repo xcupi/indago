@@ -72,6 +72,7 @@ enqueues each pass once per scan and gates it on the scan config.
 | CORS misconfiguration | `internal/scan/cors.go` | ON — `SkipCORS` / `-skip-cors` omits it |
 | Security headers / cookie policy | `internal/scan/securityheaders.go` | ON — `SkipSecurityHeaders` / `-skip-security-headers` omits it |
 | HTTP method & TLS hygiene | `internal/scan/methodtls.go` | ON — `SkipMethodTLS` / `-skip-method-tls` omits it; read-only OPTIONS/TRACE probes plus the scan's own TLS handshake state |
+| WebSocket handshake & origin | `internal/scan/websocket.go` | ON — `SkipWebSocket` / `-skip-websocket` omits it; two read-only HTTP Upgrade handshakes per discovered WebSocket endpoint (untrusted Origin + anonymous), never a WebSocket frame |
 | Host header injection | `internal/scan/hostheader.go` | ON — `SkipHostHeader` / `-skip-host-header` omits it |
 | JWT validation & hygiene | `internal/scan/jwtcheck.go` | ON — `SkipJWT` / `-skip-jwt` omits it; only acts when the scan's session carries a Bearer JWT |
 | GraphQL exposure | `internal/scan/graphql.go` | ON — `SkipGraphQL` / `-skip-graphql` omits it |
@@ -108,6 +109,24 @@ handshake; a valid self-signed certificate is recorded in the detail but is
 deliberately NOT reported. No live run against the VM lab has been recorded for
 this engine yet, so treat "confirmed" here as "the code path produced the
 finding its fixture asserts".
+
+**WebSocket handshake & origin (`feat/websocket-inspection`): unit verified
+only.** `internal/scan/websocket_test.go` exercises the engine against real
+`httptest` servers: a server that rejects the untrusted Origin with 403 records
+zero findings even though it answers a valid 101 to a same-origin handshake, a
+server that answers 101 for the untrusted Origin produces the
+`websocket_security` finding with the handshake stored as evidence, two
+endpoints that collapse to one origin+path share a single finding, and a crawl
+with no WebSocket endpoint enqueues nothing. The authenticated-scan path is
+covered too: an anonymous 101 yields the missing-authentication finding and,
+on a plain `http` endpoint, the plaintext-transport finding; 429/503
+disqualifies the endpoint without a judgement; state-changing endpoints are
+skipped before any request; and cookie values are redacted from evidence. The
+transport change it depends on (a 101 response is returned without reading the
+upgraded tunnel, and the handshake is forced over HTTP/1.1) is pinned in
+`internal/httpengine/upgrade_test.go`. No live run against the VM lab has been
+recorded for this engine yet, and no target's WebSocket support is claimed on
+the strength of these fixtures alone.
 
 ### Discovery and recon
 
