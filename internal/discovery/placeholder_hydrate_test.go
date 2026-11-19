@@ -60,13 +60,13 @@ func TestHydratePlaceholderEndpoints(t *testing.T) {
 	sink := &formTestSink{}
 	in := Input{Scope: sc}
 	observed := map[string]struct{}{
-		"http://app.test/workshop/api/shop/orders/null":                   {},
-		"http://app.test/workshop/api/shop/orders/all?limit=30&offset=0":  {},
-		"http://app.test/community/api/v2/community/posts/null":           {},
-		"http://app.test/community/api/v2/community/posts/recent":         {},
+		"http://app.test/workshop/api/shop/orders/null":                        {},
+		"http://app.test/workshop/api/shop/orders/all?limit=30&offset=0":       {},
+		"http://app.test/community/api/v2/community/posts/null":                {},
+		"http://app.test/community/api/v2/community/posts/recent":              {},
 		"http://app.test/workshop/api/mechanic/mechanic_report?report_id=null": {},
-		"http://app.test/workshop/api/mechanic/list":                      {},
-		"http://app.test/identity/api/v2/user/videos/undefined":           {},
+		"http://app.test/workshop/api/mechanic/list":                           {},
+		"http://app.test/identity/api/v2/user/videos/undefined":                {},
 	}
 
 	if err := n.hydratePlaceholderEndpoints(context.Background(), in, sink, observed); err != nil {
