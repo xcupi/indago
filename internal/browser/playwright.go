@@ -78,8 +78,14 @@ func (d *pwDriver) Stop() error { return d.pw.Stop() }
 
 type pwBrowser struct{ b pw.Browser }
 
-func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(string) bool, allowStateChanging bool) (contextHandle, error) {
+func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(string) bool, allowStateChanging, ignoreHTTPSErrors bool) (contextHandle, error) {
 	opts := pw.BrowserNewContextOptions{}
+	if ignoreHTTPSErrors {
+		// Operator opt-in only (domain.ScanConfig.AllowInsecureTLS): accept a
+		// self-signed or hostname-mismatched certificate. Playwright's zero
+		// value is strict verification, which is what every other context gets.
+		opts.IgnoreHttpsErrors = pw.Bool(true)
+	}
 	if allow != nil {
 		// Service workers can initiate requests outside Playwright's page route
 		// plumbing, so scoped scan contexts block them rather than risk leaking

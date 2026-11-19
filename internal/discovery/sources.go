@@ -605,6 +605,9 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
 			SessionStatePath:  in.SessionStatePath,
 			UserAgent:         n.cfg.HuntingUserAgent,
+			// Operator opt-in for a lab/staging self-signed HTTPS target; false
+			// (the default) keeps the browser's strict verification.
+			IgnoreHTTPSErrors: n.cfg.AllowInsecureTLS,
 		})
 		if err != nil {
 			if errors.Is(err, browser.ErrNotImplemented) {
@@ -1316,6 +1319,8 @@ func (n *networkSource) renderSPARoutesWithBudget(ctx context.Context, in Input,
 		AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
 		SessionStatePath:  in.SessionStatePath,
 		UserAgent:         n.cfg.HuntingUserAgent,
+		// Operator opt-in for a lab/staging self-signed HTTPS target.
+		IgnoreHTTPSErrors: n.cfg.AllowInsecureTLS,
 	}
 
 	var hashFrags []string

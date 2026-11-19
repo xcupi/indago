@@ -524,6 +524,31 @@ type ScanConfig struct {
 	// has no way to reach into.
 	RandomizeTLSFingerprint bool `json:"randomize_tls_fingerprint,omitempty"`
 
+	// AllowInsecureTLS disables TLS certificate verification for THIS scan's
+	// target-facing traffic: the raw HTTP engine (internal/httpengine) and
+	// every browser context the scan opens (discovery rendering, browser
+	// verification, DOM-XSS, and a login this scan drives at creation). It
+	// exists so an authorized lab/staging HTTPS target with a self-signed or
+	// hostname-mismatched certificate can be tested at all. Off by default: a
+	// production scan keeps Go's and Chromium's strict verification, so a
+	// certificate the toolchain does not trust fails the handshake instead of
+	// being silently accepted.
+	//
+	// It does NOT widen what may be targeted: scan scope is still enforced
+	// before every request and redirect hop, and every request still goes
+	// through the SAME scope-enforcing engine. It only changes how the
+	// transport authenticates a server the scan was already authorized to
+	// talk to. It also does not change any verdict: methodtls.go still records
+	// the presented certificate and reports only real transport weaknesses
+	// (expired, weak cipher, legacy protocol); a self-signed certificate by
+	// itself is recorded, never reported as a finding.
+	//
+	// Because disabling verification removes the identity guarantee TLS
+	// provides, every scan that starts with this enabled logs a WARN. Lab and
+	// staging targets only — never the open internet. See
+	// docs/insecure-tls.md.
+	AllowInsecureTLS bool `json:"allow_insecure_tls,omitempty"`
+
 	// The IDOR engine (object-identifier differential, see internal/idor and
 	// docs/idor.md) has no enable switch: it runs automatically for any scan
 	// that carries a real caller identity, because the differential needs

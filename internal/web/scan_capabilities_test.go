@@ -58,6 +58,7 @@ func TestUpdateScanCapabilitiesPersistsEveryEngineSwitch(t *testing.T) {
 		"enable_sqli":              true,
 		"enable_nosqli":            true,
 		"enable_xxe":               true,
+		"allow_insecure_tls":       true,
 	}
 	a.mustJSON(a.do("PUT", "/api/scans/"+string(id)+"/capabilities", body), 200, nil)
 
@@ -90,6 +91,7 @@ func TestUpdateScanCapabilitiesPersistsEveryEngineSwitch(t *testing.T) {
 		{"enable_sqli", cfg.EnableSQLi},
 		{"enable_nosqli", cfg.EnableNoSQLi},
 		{"enable_xxe", cfg.EnableXXE},
+		{"allow_insecure_tls", cfg.AllowInsecureTLS},
 	} {
 		if !c.value {
 			t.Errorf("PUT /capabilities dropped %s", c.name)

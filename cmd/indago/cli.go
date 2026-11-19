@@ -623,6 +623,7 @@ func (c *cli) scanCreate(args []string) error {
 	var proxyPool stringList
 	fs.Var(&proxyPool, "proxy", "proxy to route this scan's traffic through — raw HTTP and browser verification alike (repeatable, round-robin; http://host:port, https://host:port, or socks5://host:port, optionally with embedded user:pass@ creds); operator-supplied infrastructure only, off by default (see AGENTS.md §2.3)")
 	randomizeTLS := fs.Bool("randomize-tls-fingerprint", false, "randomize the raw HTTP engine's TLS ClientHello (JA3) via uTLS instead of Go's own default — OFF by default (see AGENTS.md §2.3); MUTUALLY EXCLUSIVE with -proxy (Go's transport never consults a custom TLS dialer for a proxied connection); has no effect on browser verification, which already uses a real browser's own TLS stack")
+	allowInsecureTLS := fs.Bool("allow-insecure-tls", false, "accept a self-signed or hostname-mismatched HTTPS certificate for THIS scan (raw HTTP engine AND browser contexts), so an authorized lab/staging target can be tested — OFF by default, which keeps strict certificate verification; it never widens scope, and the server logs a WARN when such a scan starts; never use it against a production system (see docs/insecure-tls.md)")
 	quick := fs.Bool("quick", false, "quick scan: test the seeds only, do not follow links (crawl depth 0)")
 	depth := fs.Int("depth", 0, "crawl depth for a full scan (0 = server default; ignored with -quick)")
 	maxPages := fs.Int("max-pages", 0, "cap on pages fetched by the crawler (0 = server default)")
@@ -636,7 +637,7 @@ func (c *cli) scanCreate(args []string) error {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-openapi-spec-file FILE | -openapi-spec-url URL] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-sqli] [-enable-nosqli] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-path-traversal] [-skip-cors] [-skip-security-headers] [-skip-method-tls] [-skip-websocket] [-skip-host-header] [-skip-jwt] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-openapi-spec-file FILE | -openapi-spec-url URL] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-sqli] [-enable-nosqli] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-path-traversal] [-skip-cors] [-skip-security-headers] [-skip-method-tls] [-skip-websocket] [-skip-host-header] [-skip-jwt] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE] [-allow-insecure-tls]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
@@ -797,6 +798,9 @@ func (c *cli) scanCreate(args []string) error {
 	}
 	if *randomizeTLS {
 		req["randomize_tls_fingerprint"] = true
+	}
+	if *allowInsecureTLS {
+		req["allow_insecure_tls"] = true
 	}
 	if *candProfile != "" {
 		req["candidate_profile"] = *candProfile

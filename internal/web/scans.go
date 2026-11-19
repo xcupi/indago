@@ -401,6 +401,14 @@ type createScanReq struct {
 	// Controller.CreateScan) rather than silently no-op the override.
 	RandomizeTLSFingerprint bool `json:"randomize_tls_fingerprint"`
 
+	// AllowInsecureTLS disables TLS certificate verification for this scan's
+	// target traffic (raw HTTP and browser contexts) so an authorized
+	// lab/staging HTTPS target with a self-signed or hostname-mismatched
+	// certificate can be tested. Off by default — a production scan keeps
+	// strict verification. It never widens scope, and a scan that enables it
+	// logs a WARN at start. See domain.ScanConfig.AllowInsecureTLS.
+	AllowInsecureTLS bool `json:"allow_insecure_tls"`
+
 	// The IDOR engine (object-identifier differential) has no enable switch:
 	// it runs automatically for a scan that carries a real caller identity.
 	// IDORCandidates are operator-supplied foreign object identifiers, e.g.
@@ -564,6 +572,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		RawQueryInjection:               req.RawQueryInjection,
 		ProxyPool:                       cleanList(req.ProxyPool),
 		RandomizeTLSFingerprint:         req.RandomizeTLSFingerprint,
+		AllowInsecureTLS:                req.AllowInsecureTLS,
 		IDORCandidates:                  req.IDORCandidates,
 		EnableIDOREnumeration:           req.EnableIDOREnumeration,
 		IDOREnumerationNeighbours:       req.IDOREnumerationNeighbours,
@@ -712,6 +721,14 @@ type capabilitiesReq struct {
 	EnableXXE              bool   `json:"enable_xxe"`
 	XXECallbackURL         string `json:"xxe_callback_url"`
 	XXECallbackPollURL     string `json:"xxe_callback_poll_url"`
+
+	// AllowInsecureTLS opts a draft scan into accepting a self-signed or
+	// hostname-mismatched HTTPS certificate (see
+	// domain.ScanConfig.AllowInsecureTLS). It is settable here for the same
+	// reason as the other pre-start capabilities: it changes how the scan's
+	// transport authenticates its target, and the decision is fixed once
+	// execution starts. Off by default.
+	AllowInsecureTLS bool `json:"allow_insecure_tls"`
 }
 
 // handleUpdateScanCapabilities edits the attack selection of a draft scan.
@@ -757,6 +774,10 @@ func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Req
 	sc.Config.EnableXXE = req.EnableXXE
 	sc.Config.XXECallbackURL = req.XXECallbackURL
 	sc.Config.XXECallbackPollURL = req.XXECallbackPollURL
+	// Transport-level opt-in: the flag is immutable once execution starts, so
+	// a draft is the last point where it can be changed. The controller has
+	// already persisted it at creation; this only mirrors the edit.
+	sc.Config.AllowInsecureTLS = req.AllowInsecureTLS
 	sc.UpdatedAt = time.Now()
 	if err := s.store.Scans().Update(r.Context(), sc); err != nil {
 		s.writeInternalError(w, "update scan capabilities", err)

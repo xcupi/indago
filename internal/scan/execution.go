@@ -180,6 +180,20 @@ func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.S
 		closeHTTP()
 		return nil, err
 	}
+	// Disabling certificate verification removes the identity guarantee TLS
+	// exists to provide, so it must never be a silent scan property. The flag
+	// is operator opt-in (CLI -allow-insecure-tls / API allow_insecure_tls)
+	// and is only ever appropriate for an authorized lab/staging target.
+	if sc.Config.AllowInsecureTLS {
+		targetURL := ""
+		if target != nil {
+			targetURL = target.BaseURL
+		}
+		c.log.Warn("scan started with TLS certificate verification DISABLED (allow_insecure_tls): "+
+			"self-signed and hostname-mismatched HTTPS certificates will be accepted by every raw request "+
+			"and browser context of this scan — authorized lab/staging targets only, never a production system",
+			"scan", sc.ID, "target", targetURL)
+	}
 	limiter := newScanLimiter(sc.Config.RequestsPerSecond)
 	eng := newScopedEngine(httpEng, scope).WithRateLimiter(limiter)
 	cookies := c.sessionCookiesFor(ctx, sc)
@@ -288,12 +302,17 @@ func (c *Controller) scanHTTPEngine(sc *domain.Scan) (httpengine.Engine, func(),
 	wantsProxy := len(sc.Config.ProxyPool) > 0
 	wantsTLS := sc.Config.RandomizeTLSFingerprint
 	wantsUA := sc.Config.HuntingUserAgent != ""
-	if !wantsProxy && !wantsTLS && !wantsUA {
+	wantsInsecureTLS := sc.Config.AllowInsecureTLS
+	if !wantsProxy && !wantsTLS && !wantsUA && !wantsInsecureTLS {
 		return c.opts.HTTP, func() {}, nil
 	}
 	cfg := c.opts.HTTPConfig
 	cfg.ProxyPool = sc.Config.ProxyPool
 	cfg.RandomizeTLSFingerprint = sc.Config.RandomizeTLSFingerprint
+	// The scan's own config decides certificate verification. Setting it
+	// explicitly (rather than only when true) keeps a dedicated client from
+	// inheriting an insecure base config the operator never asked for.
+	cfg.InsecureSkipVerify = sc.Config.AllowInsecureTLS
 	if wantsUA {
 		if sc.Config.HuntingUserAgentReplace {
 			cfg.UserAgent = sc.Config.HuntingUserAgent
@@ -304,7 +323,7 @@ func (c *Controller) scanHTTPEngine(sc *domain.Scan) (httpengine.Engine, func(),
 	eng, err := newHTTPEngine(cfg)
 	if err != nil {
 		reason := "its hunting User-Agent could not be applied"
-		if wantsProxy || wantsTLS {
+		if wantsProxy || wantsTLS || wantsInsecureTLS {
 			reason = "its proxy/TLS-override HTTP client could not be built"
 		}
 		// httpengine.New quotes the offending entry verbatim; this error is
@@ -411,6 +430,11 @@ func (c *Controller) discoveryConfig(sc *domain.Scan) discovery.Config {
 	// discovery.NewWellKnownSource.
 	cfg.SkipGraphQLProbe = sc.Config.SkipGraphQL
 	cfg.HuntingUserAgent = c.huntingUserAgent(sc)
+	// Same opt-in the scan's raw HTTP engine and browser verification already
+	// carry: a lab/staging HTTPS target with a self-signed certificate must be
+	// renderable by discovery too, or its JS-rendered endpoints would never be
+	// discovered at all.
+	cfg.AllowInsecureTLS = sc.Config.AllowInsecureTLS
 	return cfg
 }
 

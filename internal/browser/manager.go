@@ -129,7 +129,7 @@ func (m *Manager) NewContext(ctx context.Context, opts ContextOptions) (*Context
 	ch, err := callCtxCreate(ctx, func() (contextHandle, error) {
 		m.createMu.Lock()
 		defer m.createMu.Unlock()
-		return b.NewContext(opts.StorageStatePath, opts.ProxyServer, opts.ExtraHeaders, opts.AllowRequest, opts.AllowStateChanging)
+		return b.NewContext(opts.StorageStatePath, opts.ProxyServer, opts.ExtraHeaders, opts.AllowRequest, opts.AllowStateChanging, opts.IgnoreHTTPSErrors)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("browser: new context: %w", err)
@@ -230,6 +230,9 @@ func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*
 		// Discovery/UI rendering never opts into state-changing requests: the
 		// browser is loading a page to observe it, not to write to the target.
 		AllowStateChanging: false,
+		// Only the scan's explicit AllowInsecureTLS opt-in relaxes certificate
+		// verification for a render; false keeps the browser's strict default.
+		IgnoreHTTPSErrors: opts.IgnoreHTTPSErrors,
 	})
 	if err != nil {
 		return nil, err
@@ -304,6 +307,7 @@ func (m *Manager) RenderHashRoutes(ctx context.Context, baseURL string, fragment
 		AllowRequest:       opts.AllowRequest,
 		ExtraHeaders:       extra,
 		AllowStateChanging: false,
+		IgnoreHTTPSErrors:  opts.IgnoreHTTPSErrors,
 	})
 	if err != nil {
 		return nil, err
@@ -429,7 +433,7 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", loginHeaders(opts.UserAgent), opts.AllowRequest, true) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed. AllowStateChanging is TRUE here because a login flow is an explicit operator action that must POST its credentials: it is the one deliberate exception to the scan's non-mutating default, and it is decided at this call site, not silently inside the gate.
+	ch, err := b.NewContext("", "", loginHeaders(opts.UserAgent), opts.AllowRequest, true, opts.IgnoreHTTPSErrors) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed. AllowStateChanging is TRUE here because a login flow is an explicit operator action that must POST its credentials: it is the one deliberate exception to the scan's non-mutating default, and it is decided at this call site, not silently inside the gate.
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}
@@ -570,7 +574,7 @@ func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginR
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", loginHeaders(opts.UserAgent), opts.AllowRequest, true) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed. AllowStateChanging is TRUE for the same reason as InteractiveLogin: an explicit, operator-requested login must POST its form.
+	ch, err := b.NewContext("", "", loginHeaders(opts.UserAgent), opts.AllowRequest, true, opts.IgnoreHTTPSErrors) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed. AllowStateChanging is TRUE for the same reason as InteractiveLogin: an explicit, operator-requested login must POST its form.
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}

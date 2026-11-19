@@ -218,6 +218,11 @@ type verifyExecutor struct {
 	limiter   *ratelimit.Limiter
 	userAgent string
 	proxyNext atomic.Uint64
+	// ignoreHTTPSErrors mirrors the scan's explicit AllowInsecureTLS opt-in
+	// (domain.ScanConfig.AllowInsecureTLS): the verifying browser context then
+	// accepts a self-signed or hostname-mismatched certificate. false is the
+	// strict default for every production scan.
+	ignoreHTTPSErrors bool
 }
 
 func newVerifyExecutor(st store.Store, eng httpengine.Engine, v verification.Verifier, ev evidence.Store, q queue.Queue, scope domain.Scope, cfg ExecutorConfig, log *slog.Logger, findingsMu *sync.Mutex, tokenMu *sync.Mutex, proxyPool []string, limiter *ratelimit.Limiter) *verifyExecutor {
@@ -387,6 +392,9 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 			// non-mutating browser; on only when the operator allowed
 			// state-changing requests (POST candidates need it to replay).
 			AllowStateChanging: e.cfg.AllowStateChanging,
+			// Lab/staging TLS opt-in: the same explicit flag the scan's raw
+			// HTTP engine uses, threaded into the verifying browser context.
+			IgnoreHTTPSErrors: e.ignoreHTTPSErrors,
 		}
 		if req.Method == "POST" && focus.Location == domain.LocationForm {
 			if vals, perr := url.ParseQuery(string(req.Body)); perr == nil {

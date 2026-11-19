@@ -48,6 +48,12 @@ type Config struct {
 	// unlimited (use with care).
 	MaxBodyBytes int64
 	// InsecureSkipVerify disables TLS certificate verification (default false).
+	// It is wired ONLY from domain.ScanConfig.AllowInsecureTLS, an explicit
+	// per-scan operator opt-in for authorized lab/staging HTTPS targets whose
+	// certificate is self-signed or hostname-mismatched. Leave it false for any
+	// production target: strict verification is what makes the handshake an
+	// identity guarantee. When RandomizeTLSFingerprint is also set, the same
+	// value is applied to the uTLS handshake config (see randomizedTLSDialer).
 	InsecureSkipVerify bool
 	// DefaultHeaders are applied to every request (overridable per request).
 	DefaultHeaders map[string]string

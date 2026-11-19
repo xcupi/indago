@@ -274,6 +274,15 @@ type Config struct {
 	// is invisible to a link crawler, so without this probe a GraphQL target
 	// is never seen at all on a scan that does no wordlist recon.
 	SkipGraphQLProbe bool
+
+	// AllowInsecureTLS makes discovery's browser renders accept a self-signed
+	// or hostname-mismatched HTTPS certificate (Playwright's
+	// ignoreHTTPSErrors). Wired verbatim from the scan's own
+	// domain.ScanConfig.AllowInsecureTLS, an explicit operator opt-in for
+	// authorized lab/staging targets. Off by default, so every production
+	// target keeps strict verification. It never widens scope: the same
+	// AllowRequest gate still aborts every out-of-scope request first.
+	AllowInsecureTLS bool
 }
 
 // DefaultConfig returns conservative discovery defaults.

@@ -105,6 +105,7 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER_URL, default htt
   scope show -project ID
   scan create -project ID -target ID [-name N] [-profile P] [-candidate-profile minimal|standard|thorough] [-max-candidates N] [-seed URL]... [-stop MODE [-stop-n N]]
               [-quick | -depth N] [-max-pages N] [-max-endpoints N] [-proxy URL]... [-randomize-tls-fingerprint]
+              [-allow-insecure-tls]   (lab/staging only: accept a self-signed/hostname-mismatched HTTPS certificate; default strict)
               [-auth anonymous|existing|interactive|mfa|password] [-auth-state FILE] [-login-url URL] [-success-url GLOB]
               [-login-username-selector SEL] [-login-password-selector SEL] [-login-submit-selector SEL]
   scan list [-json]

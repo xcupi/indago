@@ -182,6 +182,14 @@ type ContextOptions struct {
 	// operator-requested login (which must POST its login form). Discovery
 	// rendering never sets it — crawling a page needs no state change.
 	AllowStateChanging bool
+	// IgnoreHTTPSErrors, when true, makes this context accept a self-signed or
+	// hostname-mismatched HTTPS certificate (Playwright's ignoreHTTPSErrors).
+	// Wired ONLY from the scan's explicit domain.ScanConfig.AllowInsecureTLS
+	// opt-in for authorized lab/staging targets; false (the zero value) keeps
+	// the browser's strict verification on every production target. It never
+	// weakens the scope gate: AllowRequest still aborts out-of-scope requests
+	// before they are sent.
+	IgnoreHTTPSErrors bool
 }
 
 // NavOptions control a single navigation.
@@ -221,6 +229,12 @@ type LoginOptions struct {
 	// UserAgent, when set, is sent by every request in the login context.
 	UserAgent string
 	Timeout   time.Duration // overall wait for the operator (0 → 5m)
+	// IgnoreHTTPSErrors accepts a self-signed or hostname-mismatched HTTPS
+	// certificate for the login context, so an authorized lab/staging target
+	// whose own login page is only reachable over such a certificate can be
+	// logged into at all. Wired from the scan's explicit AllowInsecureTLS
+	// opt-in; false keeps the browser's strict verification.
+	IgnoreHTTPSErrors bool
 }
 
 // LoginResult is returned after a successful interactive login.
@@ -259,6 +273,10 @@ type AutoLoginOptions struct {
 	// UserAgent, when set, is sent by every request in the login context.
 	UserAgent string
 	Timeout   time.Duration // overall wait (0 → 2m; shorter than interactive's 5m since no human step is involved)
+	// IgnoreHTTPSErrors accepts a self-signed or hostname-mismatched HTTPS
+	// certificate for the login context (see LoginOptions.IgnoreHTTPSErrors).
+	// Wired from the scan's explicit AllowInsecureTLS opt-in.
+	IgnoreHTTPSErrors bool
 }
 
 // PoolStats is a snapshot of Manager resources.
@@ -288,6 +306,11 @@ type RenderOptions struct {
 	// UserAgent, when set, is sent by every request in the render context.
 	// Scans use it for a program's required hunting identifier.
 	UserAgent string
+	// IgnoreHTTPSErrors accepts a self-signed or hostname-mismatched HTTPS
+	// certificate for this render (see ContextOptions.IgnoreHTTPSErrors).
+	// Wired from the scan's explicit AllowInsecureTLS opt-in; false keeps
+	// strict verification.
+	IgnoreHTTPSErrors bool
 }
 
 // RenderResult captures observations from loading a page. Fields are generic so
