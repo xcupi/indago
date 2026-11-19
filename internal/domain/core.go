@@ -328,7 +328,13 @@ type ScanConfig struct {
 	// and cookie-policy inspection. It is one GET per origin and is on by
 	// default, like the other passive header-reading engines; true omits only
 	// its jobs.
-	SkipSecurityHeaders bool   `json:"skip_security_headers,omitempty"`
+	SkipSecurityHeaders bool `json:"skip_security_headers,omitempty"`
+	// SkipHostHeader omits the READ-ONLY host-header inspection. It is one
+	// bounded GET baseline plus control requests per origin and is on by
+	// default, like the other passive origin-level engines; true omits only
+	// its jobs.
+	SkipHostHeader bool `json:"skip_host_header,omitempty"`
+
 	SSRFCallbackURL     string `json:"ssrf_callback_url,omitempty"`
 	SSRFCallbackPollURL string `json:"ssrf_callback_poll_url,omitempty"`
 	// AllowPrivateOAST lets THIS scan's SSRF engine use an OAST collaborator

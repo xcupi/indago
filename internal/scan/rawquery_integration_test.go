@@ -80,7 +80,7 @@ func newRawQuerySite(t *testing.T, reflect bool, links int) *rawQuerySite {
 		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) { writeHTML(w, "ok") })
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.RawQuery != "" && !strings.HasPrefix(r.URL.Path, "/favicon") && !isDiscoveryProbe(r) {
+		if r.URL.RawQuery != "" && !strings.HasPrefix(r.URL.Path, "/favicon") && !isDiscoveryProbe(r) && !isHostHeaderProbe(r) {
 			s.mu.Lock()
 			s.hits = append(s.hits, r.URL.Path+"?"+r.URL.RawQuery)
 			s.per[r.URL.Path]++
@@ -99,6 +99,20 @@ func newRawQuerySite(t *testing.T, reflect bool, links int) *rawQuerySite {
 // raw-query budget tests measure something they do not own.
 func isDiscoveryProbe(r *http.Request) bool {
 	return r.URL.Path == "/graphql" && r.URL.Query().Get("query") == "{__typename}"
+}
+
+// isHostHeaderProbe reports whether a request is one of the passive host-header
+// inspection's own cache-busted probes (one baseline plus control requests per
+// origin). The unique query parameter exists precisely so a shared cache is
+// never read or written; it is not a raw-query blob and must not count against
+// the raw-query budget.
+func isHostHeaderProbe(r *http.Request) bool {
+	q := r.URL.Query()
+	if len(q) != 1 {
+		return false
+	}
+	_, ok := q["indago_host_check"]
+	return ok
 }
 
 func (s *rawQuerySite) queryHits() []string {

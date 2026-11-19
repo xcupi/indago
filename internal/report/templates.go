@@ -167,6 +167,19 @@ var classIntelByClass = map[domain.VulnClass]classIntel{
 			"genuine cross-site flow needs it, and then together with Secure).",
 		References: []string{"https://cwe.mitre.org/data/definitions/614.html", "https://owasp.org/www-community/controls/SecureCookieAttribute"},
 	},
+	domain.VulnHostHeader: {
+		CWE:  "CWE-644",
+		Name: "Host header injection",
+		Impact: "The server uses the client-supplied Host / X-Forwarded-Host value when it builds a redirect " +
+			"target or an absolute URL, so a crafted request makes the site point at an attacker-controlled " +
+			"host. That enables phishing under the real brand, password-reset links that lead to the attacker, " +
+			"and poisoning of a shared cache that then serves the malicious host to other users.",
+		Remediation: "Never derive a redirect target, an absolute link or a cache key from the request's Host or " +
+			"X-Forwarded-Host header. Configure the canonical hostname server-side, validate any incoming Host " +
+			"against that allow-list and reject (or ignore) anything else, and make sure a front proxy does not " +
+			"pass an unvalidated X-Forwarded-Host through.",
+		References: []string{"https://cwe.mitre.org/data/definitions/644.html", "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/17-Testing_for_Host_Header_Injection"},
+	},
 }
 
 func intelFor(class domain.VulnClass) classIntel {

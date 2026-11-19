@@ -288,6 +288,11 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 		Headers: hr.Header.Clone(),
 		Body:    req.Body,
 	}
+	// The Host override is not in hr.Header (net/http keeps it on the request
+	// value), but it IS what went on the wire, so the capture must show it.
+	if req.Host != "" {
+		captured.Headers.Set("Host", req.Host)
+	}
 
 	// Per-call redirect capture keeps the Client concurrency-safe.
 	var chain []string
@@ -406,6 +411,11 @@ func (c *Client) buildRequest(ctx context.Context, req *Request) (*http.Request,
 	}
 	for k, v := range req.Headers {
 		hr.Header.Set(k, v)
+	}
+	// A Host override is not a Headers entry: net/http writes the request's
+	// Host line from Request.Host and ignores Header["Host"].
+	if req.Host != "" {
+		hr.Host = req.Host
 	}
 	if hr.Header.Get("Content-Type") == "" && req.ContentType != "" {
 		hr.Header.Set("Content-Type", req.ContentType)

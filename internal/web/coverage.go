@@ -234,6 +234,8 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		{"path_traversal", "Path traversal / file inclusion", !cfg.SkipPathTraversal, "", domain.VulnPathTraversal},
 		{"security_headers", "Security headers & cookie policy", !cfg.SkipSecurityHeaders,
 			"Also reports Set-Cookie flag findings as cookie_policy. One read-only request per origin.", domain.VulnSecurityHeaders},
+		{"host_header", "Host header injection", !cfg.SkipHostHeader,
+			"One read-only baseline plus control requests per origin, carrying a canary Host/X-Forwarded-Host value.", domain.VulnHostHeader},
 		{"cors", "CORS misconfiguration", !cfg.SkipCORS, "", domain.VulnCORS},
 		{"graphql", "GraphQL", !cfg.SkipGraphQL, "", domain.VulnGraphQL},
 		{"command_injection", "OS command injection", cfg.EnableCommandInjection, "", domain.VulnCommandInjection},

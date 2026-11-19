@@ -298,12 +298,17 @@ const (
 	// deduplicated per origin and header/cookie name, never per URL. See
 	// internal/scan/securityheaders.go.
 	JobSecurityHeaders JobType = "security_headers"
+	// JobHostHeader inspects ONE origin for host header injection with a
+	// bounded read-only GET baseline plus control requests carrying a canary
+	// Host / X-Forwarded-Host value. Findings are deduplicated per origin,
+	// never per URL. See internal/scan/hostheader.go.
+	JobHostHeader JobType = "host_header"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders, JobHostHeader:
 		return true
 	default:
 		return false
