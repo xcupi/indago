@@ -25,6 +25,8 @@ func TestClassifySkipKnowsTheNotesTheExecutorsWrite(t *testing.T) {
 		{"command-injection skipped: baseline was denied (HTTP 403): an authorization or prerequisite gate refused the unmutated request; no command payload was sent", "endpoint_gated"},
 		{"command-injection skipped: baseline was unavailable (HTTP 405): the endpoint does not serve this method and path; no command payload was sent", "endpoint_unavailable"},
 		{"security headers skipped: POST is state-changing; a security-header check only sends GET", "method_not_applicable"},
+		{"nosqli skipped: state-changing endpoint skipped by policy", "nosqli_not_applicable"},
+		{"nosqli skipped: parameter location is not a GET query parameter", "nosqli_not_applicable"},
 	}
 	for _, tc := range cases {
 		if got := classifySkip(tc.note).Code; got != tc.want {

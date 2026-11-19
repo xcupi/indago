@@ -340,6 +340,7 @@ var (
 	cweCORS             = CWE{942, "Permissive Cross-domain Policy with Untrusted Domains"}
 	cweSSTI             = CWE{1336, "Improper Neutralization of Special Elements Used in a Template Engine"}
 	cweSQLi             = CWE{89, "Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"}
+	cweNoSQLi           = CWE{943, "Improper Neutralization of Special Elements in Data Query Logic"}
 	cweSecurityHeaders  = CWE{693, "Protection Mechanism Failure"}
 	cweCookiePolicy     = CWE{614, "Sensitive Cookie in HTTPS Session Without 'Secure' Attribute"}
 )
@@ -364,6 +365,13 @@ var classTable = []Classification{
 	// writes stored data, so all three impact metrics are high and no victim
 	// interaction is needed.
 	{Class: domain.VulnSQLi, CWE: cweSQLi, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), Note: ClassificationNote},
+
+	// NoSQL query-operator injection changes the document database's query
+	// predicate, which is enough to bypass a login filter or read the whole
+	// collection. This engine's own probes are read-only, but the class
+	// baseline is the same as SQL injection: the underlying weakness decides
+	// the score, not how gently Indago proved it.
+	{Class: domain.VulnNoSQLi, CWE: cweNoSQLi, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), Note: ClassificationNote},
 
 	// XXE as a file-read/SSRF primitive: high confidentiality, no integrity or
 	// availability impact.

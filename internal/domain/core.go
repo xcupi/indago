@@ -347,6 +347,13 @@ type ScanConfig struct {
 	// separate from every other engine because its evidence is the database's
 	// own reply, never a computed marker.
 	EnableSQLi bool `json:"enable_sqli,omitempty"`
+	// EnableNoSQLi opts into the NoSQL query-operator engine: array-shaped and
+	// selection-operator ($ne/$gt) probes on GET query parameters, confirmed
+	// by a new document-database error signature or a stable
+	// operator-versus-control differential. Strictly READ-ONLY: the engine
+	// never sends an update/delete operator and never runs on a state-changing
+	// endpoint, even when AllowStateChanging is set.
+	EnableNoSQLi bool `json:"enable_nosqli,omitempty"`
 	// EnableXXE opts into XML external-entity probing. It only runs against
 	// observed (or operator-supplied) XML request bodies. In-band
 	// document-internal entity expansion is confirmed without a collaborator;

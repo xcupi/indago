@@ -298,12 +298,18 @@ const (
 	// deduplicated per origin and header/cookie name, never per URL. See
 	// internal/scan/securityheaders.go.
 	JobSecurityHeaders JobType = "security_headers"
+	// JobNoSQLi probes one GET/query injection point for NoSQL query-operator
+	// injection. It sends only read-only selection operators ($ne, $gt) and
+	// array-shaped values, and confirms only when a new database error
+	// signature or an operator-versus-control differential independently
+	// agrees. See internal/scan/nosqli.go.
+	JobNoSQLi JobType = "nosqli"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders, JobNoSQLi:
 		return true
 	default:
 		return false

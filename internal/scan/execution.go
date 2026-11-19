@@ -104,6 +104,8 @@ type execution struct {
 	sstiPassDone atomic.Bool
 	// sqliPassDone marks the one-time SQL injection pass.
 	sqliPassDone atomic.Bool
+	// nosqliPassDone marks the one-time NoSQL query-operator pass.
+	nosqliPassDone atomic.Bool
 	// xxePassDone marks the one-time XML external entity pass.
 	xxePassDone atomic.Bool
 	// ssrfPassDone marks the one-time non-destructive SSRF pass.
@@ -719,6 +721,13 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		ex.sqliPassDone.Store(true)
 		if sc.Config.EnableSQLi {
 			c.enqueueSQLiProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.nosqliPassDone.Load() {
+		ex.nosqliPassDone.Store(true)
+		if sc.Config.EnableNoSQLi {
+			c.enqueueNoSQLiProbes(ctx, ex.scanID)
 			passes = true
 		}
 	}

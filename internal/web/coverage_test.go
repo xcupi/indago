@@ -225,8 +225,8 @@ func TestCoverageReportsCapabilityMatrix(t *testing.T) {
 	}
 	var c coverageResp
 	a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
-	if len(c.Capabilities) != 15 {
-		t.Fatalf("capabilities = %d, want 15", len(c.Capabilities))
+	if len(c.Capabilities) != 16 {
+		t.Fatalf("capabilities = %d, want 16", len(c.Capabilities))
 	}
 	byKey := map[string]bool{}
 	labels := map[string]string{}
@@ -246,7 +246,7 @@ func TestCoverageReportsCapabilityMatrix(t *testing.T) {
 			t.Fatalf("%s is enabled for this scan but reported disabled: %+v", k, byKey)
 		}
 	}
-	if byKey["ssti"] || byKey["sqli"] || byKey["xxe"] || byKey["command_injection"] {
+	if byKey["ssti"] || byKey["sqli"] || byKey["nosqli"] || byKey["xxe"] || byKey["command_injection"] {
 		t.Fatalf("opt-in engines reported enabled: %+v", byKey)
 	}
 	if labels["open_redirect"] != "Open redirect" {

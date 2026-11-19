@@ -27,10 +27,10 @@ treats an unreadable response as "capabilities unknown", never as "on".
 Groups the scan's skipped tests by reason and reports warnings. It also carries
 a `capabilities` array — one row per engine (`reflected_xss`, `dom_xss`,
 `access_control`, `idor`, `information_disclosure`, `open_redirect`, `ssrf`,
-`cors`, `graphql`, `command_injection`, `ssti`, `sqli`, `xxe`) with `enabled`,
-its test counts and an optional `note`. `open_redirect` covers both the
-server-side redirect probe and the client-side DOM engine, so it reads enabled
-while either one is on.
+`cors`, `graphql`, `command_injection`, `ssti`, `sqli`, `nosqli`, `xxe`) with
+`enabled`, its test counts and an optional `note`. `open_redirect` covers both
+the server-side redirect probe and the client-side DOM engine, so it reads
+enabled while either one is on.
 
 - `browser_disabled` (high): DOM probes did not run and nothing could be
   confirmed in a browser. Zero findings is not a clean result.

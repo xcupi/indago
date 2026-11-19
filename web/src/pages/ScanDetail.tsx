@@ -68,6 +68,7 @@ export default function ScanDetail({ id }: { id: string }) {
     command: false,
     ssti: false,
     sqli: false,
+    nosqli: false,
     xxe: false,
   });
 
@@ -98,6 +99,7 @@ export default function ScanDetail({ id }: { id: string }) {
       command: Boolean(c.enable_command_injection),
       ssti: Boolean(c.enable_ssti),
       sqli: Boolean(c.enable_sqli),
+      nosqli: Boolean(c.enable_nosqli),
       xxe: Boolean(c.enable_xxe),
     });
   }, [scan.data?.id, scan.data?.updated_at]);
@@ -156,6 +158,7 @@ export default function ScanDetail({ id }: { id: string }) {
           enable_command_injection: caps.command,
           enable_ssti: caps.ssti,
           enable_sqli: caps.sqli,
+          enable_nosqli: caps.nosqli,
           enable_xxe: caps.xxe,
         },
       });
@@ -394,6 +397,7 @@ export default function ScanDetail({ id }: { id: string }) {
               ["command", "OS command injection", "Opt-in marker probes; confirms two independent executions."],
               ["ssti", "Server-side template injection", "Opt-in arithmetic template probes; confirms two independent evaluations."],
               ["sqli", "SQL injection", "Opt-in quote-breaking and boolean pairs; confirmed by the database's own error signature."],
+              ["nosqli", "NoSQL injection", "Opt-in read-only array/operator probes on GET query parameters; confirmed by a new database error or a control-checked differential."],
               ["xxe", "XML external entity", "Opt-in XML-body probes; confirms in-band entity expansion, and uses your callback when one is set."],
             ].map(([key, label, hint]) => (
               <label key={key} className="flex items-start justify-between gap-4 rounded-md border border-border p-3">

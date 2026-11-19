@@ -106,6 +106,10 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	// quote-breaking and boolean-differential probes and confirms only two
 	// independent signals, one of which must be new relative to the baseline.
 	h[domain.JobSQLi] = newSQLiExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	// NoSQL query-operator injection is a bounded raw-HTTP pass too. It is
+	// strictly read-only: GET query parameters only, selection operators only,
+	// and no state-changing opt-in can widen it.
+	h[domain.JobNoSQLi] = newNoSQLiExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	xxe := newXXEExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	var xxeCallbackURL, xxePollURL string
 	if sc != nil {
@@ -207,6 +211,7 @@ func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 		domain.JobCommandInjection: noop(domain.JobCommandInjection),
 		domain.JobSSTI:             noop(domain.JobSSTI),
 		domain.JobSQLi:             noop(domain.JobSQLi),
+		domain.JobNoSQLi:           noop(domain.JobNoSQLi),
 		domain.JobXXE:              noop(domain.JobXXE),
 		domain.JobSSRF:             noop(domain.JobSSRF),
 		domain.JobPathTraversal:    noop(domain.JobPathTraversal),
