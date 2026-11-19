@@ -146,6 +146,27 @@ var classIntelByClass = map[domain.VulnClass]classIntel{
 			"only an allow-list of known files). Never pass a user-supplied name straight to a file API.",
 		References: []string{"https://cwe.mitre.org/data/definitions/22.html", "https://owasp.org/www-community/attacks/Path_Traversal"},
 	},
+	domain.VulnSecurityHeaders: {
+		CWE:  "CWE-693",
+		Name: "Missing or weak response security headers",
+		Impact: "The browser is given no instruction to refuse a TLS downgrade (HSTS), no instruction to stop " +
+			"MIME sniffing (X-Content-Type-Options), and no framing policy (CSP/X-Frame-Options). Each removal " +
+			"turns a separate browser defence off, which makes an injection or a clickjacking lure easier to land.",
+		Remediation: "Send Strict-Transport-Security on every HTTPS response, X-Content-Type-Options: nosniff, a " +
+			"Content-Security-Policy that includes frame-ancestors, and remove Server/X-Powered-By version strings " +
+			"at the application or the edge.",
+		References: []string{"https://cwe.mitre.org/data/definitions/693.html", "https://owasp.org/www-project-secure-headers/"},
+	},
+	domain.VulnCookiePolicy: {
+		CWE:  "CWE-614",
+		Name: "Cookie missing security attributes",
+		Impact: "A session-like cookie without HttpOnly can be read by any script running on the origin; a cookie " +
+			"without Secure is also sent over plain HTTP; a cookie without SameSite is attached to cross-site " +
+			"requests. Together these expose the session to script access, network interception and CSRF.",
+		Remediation: "Set every session cookie with HttpOnly, Secure and SameSite=Lax or Strict (None only when a " +
+			"genuine cross-site flow needs it, and then together with Secure).",
+		References: []string{"https://cwe.mitre.org/data/definitions/614.html", "https://owasp.org/www-community/controls/SecureCookieAttribute"},
+	},
 }
 
 func intelFor(class domain.VulnClass) classIntel {

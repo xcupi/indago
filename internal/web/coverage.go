@@ -110,6 +110,9 @@ func classifySkip(note string) skipReason {
 	case strings.Contains(n, "baseline was unavailable"):
 		return skipReason{"endpoint_unavailable", sevInfo, "Endpoint does not serve this method/path",
 			"The endpoint answered 404/405/410 to the unmutated request, so the command-injection payload set was not sent. Usually a discovery artifact (a form action or method the site does not serve); not a negative result."}
+	case strings.Contains(n, "security-header check only sends get"):
+		return skipReason{"method_not_applicable", sevInfo, "Security-header check skipped a state-changing endpoint",
+			"The header/cookie check only sends GET. Another GET endpoint on the same origin carries the same header policy, so the origin is still inspected; this is not a failed test."}
 	case strings.Contains(n, "path-segment injection point"):
 		return skipReason{"path_segment_not_testable", sevInfo, "Path traversal cannot be delivered through a URL path segment",
 			"The scope validator refuses dot segments, encoded slashes, NUL bytes and duplicate slashes in a request path (it fails closed), so no traversal payload can reach a path-segment injection point. Query and form parameters on the same endpoint are still tested."}
@@ -229,6 +232,8 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 			"Covers the server-side redirect probe and the client-side DOM engine.", domain.VulnOpenRedirect},
 		{"ssrf", "Server-side request forgery", !cfg.SkipSSRF, "", domain.VulnSSRF},
 		{"path_traversal", "Path traversal / file inclusion", !cfg.SkipPathTraversal, "", domain.VulnPathTraversal},
+		{"security_headers", "Security headers & cookie policy", !cfg.SkipSecurityHeaders,
+			"Also reports Set-Cookie flag findings as cookie_policy. One read-only request per origin.", domain.VulnSecurityHeaders},
 		{"cors", "CORS misconfiguration", !cfg.SkipCORS, "", domain.VulnCORS},
 		{"graphql", "GraphQL", !cfg.SkipGraphQL, "", domain.VulnGraphQL},
 		{"command_injection", "OS command injection", cfg.EnableCommandInjection, "", domain.VulnCommandInjection},

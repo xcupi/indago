@@ -179,6 +179,10 @@ func legacyPipelineCfg(httpWorkers int) *domain.ScanConfig {
 	cfg.SkipCORS = true
 	cfg.SkipOpenRedirect = true
 	cfg.SkipGraphQL = true
+	// The read-only response security-headers / cookie-policy pass adds ONE
+	// job per origin, which this fixture's one-job-per-endpoint/injection-point
+	// arithmetic does not model. It has its own tests in securityheaders_test.go.
+	cfg.SkipSecurityHeaders = true
 	return cfg
 }
 
@@ -201,6 +205,7 @@ func createScan(t *testing.T, c *scan.Controller, proj, tgt domain.ID, cfg *doma
 		p.SkipSSRF = cfg.SkipSSRF
 		p.SkipPathTraversal = cfg.SkipPathTraversal
 		p.SkipCORS = cfg.SkipCORS
+		p.SkipSecurityHeaders = cfg.SkipSecurityHeaders
 		p.SkipOpenRedirect = cfg.SkipOpenRedirect
 		p.SkipGraphQL = cfg.SkipGraphQL
 		p.SkipWriteEndpoints = cfg.SkipWriteEndpoints

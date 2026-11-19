@@ -69,6 +69,7 @@ enqueues each pass once per scan and gates it on the scan config.
 | OS command injection | `internal/scan/commandinjection.go` | opt-in — `EnableCommandInjection` / `-enable-command-injection` |
 | XXE | `internal/scan/xxe.go` | opt-in — `EnableXXE` / `-enable-xxe` |
 | CORS misconfiguration | `internal/scan/cors.go` | ON — `SkipCORS` / `-skip-cors` omits it |
+| Security headers / cookie policy | `internal/scan/securityheaders.go` | ON — `SkipSecurityHeaders` / `-skip-security-headers` omits it |
 | GraphQL exposure | `internal/scan/graphql.go` | ON — `SkipGraphQL` / `-skip-graphql` omits it |
 
 A server-side open-redirect probe (`SkipOpenRedirect` / `-skip-open-redirect`)

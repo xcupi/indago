@@ -215,6 +215,12 @@ func TestRawQueryInjection_ConfirmsCanonicalLinkAndRejectsEscaped(t *testing.T) 
 
 	confirmedRaw, rejectedEscaped := 0, 0
 	for _, f := range findings {
+		if f.VulnClass != domain.VulnReflectedXSS {
+			// Other engines' findings on the same endpoints are not raw-query
+			// evidence; counting them here would both misattribute a verdict
+			// and mask a missing raw-query confirmation.
+			continue
+		}
 		path := endpointPath(t, st, scanID, f.EndpointID)
 		switch path {
 		case "/", "/reflect-raw":
@@ -287,9 +293,16 @@ func TestRawQueryInjection_OffSendsNoBlobRequests(t *testing.T) {
 func TestRawQueryInjection_CapsHoldOnCountingFixture(t *testing.T) {
 	const links = 25
 	site := newRawQuerySite(t, false, links)
-	_, _, _, findings := runRawQueryScan(t, site, discovery.RawQueryAlways, false, links)
-	if len(findings) != 0 {
-		t.Fatalf("non-reflecting fixture produced %d finding(s); want 0", len(findings))
+	_, _, _, allFindings := runRawQueryScan(t, site, discovery.RawQueryAlways, false, links)
+	// This fixture reflects nothing, so the raw-query probes must produce no
+	// REFLECTED finding. Other engines legitimately report their own classes on
+	// the same scan (the passive security-headers pass reports this bare
+	// fixture's missing headers), so the assertion is scoped to the class this
+	// test is about.
+	for _, f := range allFindings {
+		if f.VulnClass == domain.VulnReflectedXSS {
+			t.Fatalf("non-reflecting fixture produced a reflected finding: %s (%s)", f.Title, f.Verdict)
+		}
 	}
 
 	hits := site.queryHits()

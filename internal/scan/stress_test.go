@@ -132,7 +132,18 @@ func assertScanIntegrity(t *testing.T, st store.Store, ev evidence.Store, q queu
 			t.Fatalf("duplicate finding for correlation key %q", d.DedupKey)
 		}
 		keys[d.DedupKey] = true
-		byIP[f.InjectionPointID] = true
+		// Only findings that NAME an injection point count towards per-point
+		// coverage. Origin-level engines (CORS policy, security headers /
+		// cookie policy) legitimately report one finding per origin/endpoint
+		// with no injection point; counting their empty ID as a "point" would
+		// invent a thirteenth bucket. A reflected-XSS finding must still carry
+		// one, so the invariant this assertion exists for stays strict.
+		if f.VulnClass == domain.VulnReflectedXSS && f.InjectionPointID.Empty() {
+			t.Fatalf("reflected-XSS finding %s carries no injection point", f.ID)
+		}
+		if !f.InjectionPointID.Empty() {
+			byIP[f.InjectionPointID] = true
+		}
 		if ev != nil {
 			for _, id := range f.EvidenceIDs {
 				row, err := st.Evidence().Get(ctx, id)

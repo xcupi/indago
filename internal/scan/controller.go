@@ -425,7 +425,10 @@ type CreateScanParams struct {
 	SkipGraphQL      bool
 	// SkipPathTraversal omits the read-only path-traversal / local file
 	// inclusion pass. See domain.ScanConfig.SkipPathTraversal.
-	SkipPathTraversal   bool
+	SkipPathTraversal bool
+	// SkipSecurityHeaders omits the read-only response security-headers and
+	// cookie-policy inspection. See domain.ScanConfig.SkipSecurityHeaders.
+	SkipSecurityHeaders bool
 	SSRFCallbackURL     string
 	SSRFCallbackPollURL string
 	// AllowPrivateOAST opts this scan into using an OAST collaborator on a
@@ -630,6 +633,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.SkipInfoDisclosure = p.SkipInfoDisclosure
 	cfg.SkipSSRF = p.SkipSSRF
 	cfg.SkipPathTraversal = p.SkipPathTraversal
+	cfg.SkipSecurityHeaders = p.SkipSecurityHeaders
 	cfg.SkipCORS = p.SkipCORS
 	cfg.SkipOpenRedirect = p.SkipOpenRedirect
 	cfg.SkipGraphQL = p.SkipGraphQL
@@ -1568,7 +1572,7 @@ func (c *Controller) poolConfig(sc *domain.Scan) worker.Config {
 		ScanID: sc.ID,
 		Groups: []worker.GroupSpec{
 			{Name: GroupDiscovery, Types: []domain.JobType{domain.JobDiscovery}, Size: sc.Config.DiscoveryConcurrency},
-			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR, domain.JobAccessControl, domain.JobDisclosure, domain.JobCommandInjection, domain.JobSSTI, domain.JobSQLi, domain.JobXXE, domain.JobSSRF, domain.JobPathTraversal, domain.JobCORS, domain.JobOpenRedirect, domain.JobGraphQL}, Size: sc.Config.HTTPConcurrency},
+			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR, domain.JobAccessControl, domain.JobDisclosure, domain.JobCommandInjection, domain.JobSSTI, domain.JobSQLi, domain.JobXXE, domain.JobSSRF, domain.JobPathTraversal, domain.JobCORS, domain.JobSecurityHeaders, domain.JobOpenRedirect, domain.JobGraphQL}, Size: sc.Config.HTTPConcurrency},
 			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify, domain.JobDOMXSS}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
 		},
 		LeaseDuration: c.opts.LeaseDuration,

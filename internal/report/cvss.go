@@ -316,11 +316,10 @@ func (c Classification) String() string {
 
 // Classification-only classes.
 //
-// The domain model declares ten vulnerability classes today. SSRF, CORS and
-// GraphQL are recognized HERE so a future engine's finding can be classified
-// without this table changing; they are deliberately not added to
-// internal/domain (that model is owned by the engine slices, and this package
-// must not extend it).
+// SSRF, CORS and GraphQL were first recognized HERE so a future engine's
+// finding could be classified without this table changing; they are
+// deliberately not added to internal/domain by this package (that model is
+// owned by the engine slices, and this package must not extend it).
 const (
 	ClassSSRF    domain.VulnClass = "ssrf"
 	ClassCORS    domain.VulnClass = "cors"
@@ -341,6 +340,8 @@ var (
 	cweCORS             = CWE{942, "Permissive Cross-domain Policy with Untrusted Domains"}
 	cweSSTI             = CWE{1336, "Improper Neutralization of Special Elements Used in a Template Engine"}
 	cweSQLi             = CWE{89, "Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"}
+	cweSecurityHeaders  = CWE{693, "Protection Mechanism Failure"}
+	cweCookiePolicy     = CWE{614, "Sensitive Cookie in HTTPS Session Without 'Secure' Attribute"}
 )
 
 // classTable is the deterministic mapping. Order is documentation order and is
@@ -373,6 +374,18 @@ var classTable = []Classification{
 	// the engine's read-only probes leave integrity and availability untouched.
 	// Raise I/A only if the same parameter is shown to write or delete.
 	{Class: domain.VulnPathTraversal, CWE: cwePathTraversal, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"), Note: ClassificationNote},
+
+	// Missing/weak response security headers remove a browser-side defence
+	// (downgrade protection, MIME-sniffing, framing). They are enablers, not a
+	// vulnerability on their own, so the baseline is deliberately modest and
+	// needs a victim interaction; raise it when the finding is chained with a
+	// concrete injection or clickjacking payload.
+	{Class: domain.VulnSecurityHeaders, CWE: cweSecurityHeaders, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:N"), Note: ClassificationNote},
+
+	// A cookie set without Secure/HttpOnly/SameSite exposes a session to
+	// network interception or script access; the attacker still has to reach
+	// the cookie, so the baseline is low with a high attack complexity.
+	{Class: domain.VulnCookiePolicy, CWE: cweCookiePolicy, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"), Note: ClassificationNote},
 
 	// SSRF reaches internal services the attacker cannot address directly, so
 	// the security scope changes (S:C).

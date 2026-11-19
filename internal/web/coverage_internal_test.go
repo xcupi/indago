@@ -24,6 +24,7 @@ func TestClassifySkipKnowsTheNotesTheExecutorsWrite(t *testing.T) {
 		{"", "other"},
 		{"command-injection skipped: baseline was denied (HTTP 403): an authorization or prerequisite gate refused the unmutated request; no command payload was sent", "endpoint_gated"},
 		{"command-injection skipped: baseline was unavailable (HTTP 405): the endpoint does not serve this method and path; no command payload was sent", "endpoint_unavailable"},
+		{"security headers skipped: POST is state-changing; a security-header check only sends GET", "method_not_applicable"},
 	}
 	for _, tc := range cases {
 		if got := classifySkip(tc.note).Code; got != tc.want {
@@ -59,6 +60,7 @@ func TestClassifySkipPatternsStillExistInTheExecutors(t *testing.T) {
 		"source not tested:",
 		"baseline was denied",
 		"baseline was unavailable",
+		"security-header check only sends get",
 	} {
 		if !strings.Contains(all, pat) {
 			t.Errorf("pattern %q is no longer written by any executor in internal/scan; update classifySkip", pat)
