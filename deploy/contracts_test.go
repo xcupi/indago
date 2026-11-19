@@ -42,7 +42,7 @@ func TestDockerContract(t *testing.T) {
 		t.Error("image must not downgrade remote TLS")
 	}
 	requireText(t, ".dockerignore", "!third_party/", "!third_party/playwright-go/", "!third_party/playwright-go/**", "data/", ".git", ".env", "sessions/", "*.key", "bin/", "*.log")
-	requireText(t, "deploy/docker/healthcheck.sh", "--cacert", "INDAGO_HEALTH_CA", "https://127.0.0.1:8750/healthz")
+	requireText(t, "deploy/docker/healthcheck.sh", "--cacert", "INDAGO_HEALTH_CA", "https://127.0.0.1:8750/readyz")
 	runtime := strings.SplitN(s, "FROM runtime-base AS runtime", 2)
 	if len(runtime) != 2 || !strings.Contains(runtime[1], "COPY --from=build /src/third_party/playwright-go/LICENSE /usr/share/licenses/indago/playwright-go.LICENSE") {
 		t.Error("final runtime image must retain the patched Playwright runtime's MIT license")

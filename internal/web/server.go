@@ -188,6 +188,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("GET /api/version", s.handleVersion)
 	mux.HandleFunc("GET /api/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
@@ -328,12 +329,57 @@ func serveEmbeddedHTML(w http.ResponseWriter, fsys fs.FS, name string) {
 
 // --- handlers ---
 
+// healthResponse is a struct, not a map: the field order in the JSON body is
+// then stable for probe logs and documentation.
+type healthResponse struct {
+	Status  string `json:"status"`
+	Version string `json:"version"`
+}
+
+// readyResponse keeps /readyz's two fields in a stable order for the same
+// reason.
+type readyResponse struct {
+	Status string `json:"status"`
+	DB     string `json:"db"`
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.Ping(r.Context()); err != nil {
-		writeError(w, http.StatusServiceUnavailable, "store unavailable")
+	// Liveness only: the process is up and serving HTTP. It deliberately does
+	// NOT touch the store — a transient database problem must never make an
+	// orchestrator restart an otherwise healthy process (and killing the
+	// process mid-write is exactly what WAL recovery then has to undo).
+	// Dependency health is /readyz's job.
+	writeJSON(w, http.StatusOK, healthResponse{Status: "ok", Version: s.version})
+}
+
+// readyCheckTimeout bounds the readiness probe's store check. A probe that
+// hangs is worse than one that reports not-ready: the orchestrator's own
+// timeout would otherwise be the only backstop.
+const readyCheckTimeout = 2 * time.Second
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
+	defer cancel()
+	if err := s.store.Ping(ctx); err != nil {
+		// The reason is logged server-side and never returned: this endpoint is
+		// unauthenticated by design, and a driver error can name the database
+		// path or DSN.
+		s.log.Warn("readiness check failed", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, readyResponse{Status: "not_ready", DB: "error"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, readyResponse{Status: "ready", DB: "ok"})
+}
+
+// isProbePath reports whether p is an orchestrator/reverse-proxy probe
+// (liveness or readiness). Probes are answered before the control plane's
+// protections: they carry no token and no X-Indago-Client header, come from a
+// proxy or kubelet whose Host is not one of this server's names, and must keep
+// working exactly when the rest of the server looks unhealthy — that is the
+// point of a probe. Their responses contain only status/version, so nothing
+// sensitive is exposed. See docs/production-deployment.md.
+func isProbePath(p string) bool {
+	return p == "/healthz" || p == "/readyz"
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {

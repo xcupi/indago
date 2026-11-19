@@ -19,9 +19,9 @@ import (
 // every client therefore shares the proxy's address and bucket. Per-client
 // limiting in that setup belongs in the proxy (see docs/deployment.md §1).
 //
-// /healthz and the static UI are not limited. The Host/CSRF guard runs before
-// this limiter; the bearer-token check runs after it, so unauthenticated floods
-// are limited too.
+// /healthz, /readyz and the static UI are not limited. The Host/CSRF guard runs
+// before this limiter; the bearer-token check runs after it, so unauthenticated
+// floods are limited too.
 
 const (
 	// rateIdleFloor is the minimum idle time before a bucket may be evicted.

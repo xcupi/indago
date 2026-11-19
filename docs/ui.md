@@ -118,8 +118,8 @@ design, not gaps): `idor_candidates`, `idor_enumerate(_n)`,
 `enable_admin_step_probe`, `enable_object_family_probe`, `enable_xss_library`,
 `randomize_tls_fingerprint`.
 
-Operational endpoints with no screen by design: `GET /healthz`, `GET /metrics`
-(Prometheus scrape, not an operator screen).
+Operational endpoints with no screen by design: `GET /healthz`, `GET /readyz`,
+`GET /metrics` (Prometheus scrape, not an operator screen).
 
 ## UX pass (2026-11)
 
