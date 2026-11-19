@@ -84,14 +84,15 @@ needs `-xxe-callback` + `-xxe-poll` to do anything, recording a clean skip
 otherwise; SSRF's OAST path needs an operator-supplied canary.
 
 **Verification status: the implementations exist; current-build live
-verification is not established.** Nothing in this repository shows these
-engines working against a real target. The PortSwigger mapping below predates
-them, and there is no dated validation record for them of the kind
-`docs/p0-live-validation.md` establishes for the control plane. Their only
-in-repo evidence is unit and integration coverage under `internal/scan/`, which
-is sufficient to show the engines do what their fixtures assert and is **not**
-sufficient to call any of these capabilities confirmed. Treat all eight as
-unproven capability until a dated live run is written down.
+verification is not established for all new engines.** Nothing in the older
+PortSwigger mapping below covers them, and `docs/p0-live-validation.md` only
+covers the control plane. For the newest read-only capabilities on `8a26e33`
+(and OpenAPI import on `855d589`), dated live runs against the local VM lab
+(`192.168.103.20`) recorded:
+
+- **OpenAPI v3 JSON import (`855d589`, `crAPI` scan `24132197-b33f-41ec-b9c5-7cc2e75c0fa2`)**: `43` endpoints discovered (`7` registered with `source=openapi`), `136` parameters, `332/332` jobs completed (`0` failed).
+- **Security headers & JWT validation (`8a26e33`, `crAPI` scan `846a32f0-ca89-4a87-b2c7-c80a6f67ad7f`, `crapi-auth.json`)**: `7/7` jobs completed (`0` failed), **`3` confirmed findings** (`security_headers` low: `Server header discloses the software version`; `jwt_validation` critical: `Unsigned alg=none JWT is accepted` and `JWT signature is not validated`).
+- **Host header & NoSQLi clean execution (`8a26e33`, `Juice Shop` scan `04044672-af41-4824-8dd1-7e940f64b317`)**: `70/70` jobs completed (`0` failed), `security_headers` (`1/1`), `host_header` (`1/1`), and `nosqli` (`35/35`) completed with `0` errors and `0` false positives. Positive live confirmation of `host_header` and `nosqli` against intentionally vulnerable targets remains to be recorded.
 
 ### Discovery and recon
 
