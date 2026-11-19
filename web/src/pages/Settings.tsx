@@ -131,15 +131,20 @@ export default function Settings() {
     }
   }
 
-  // ChatGPT and Claude expose a versioned model list over their OAuth
-  // sessions. Fetch it as soon as one is selected, so the picker is useful
-  // without making the operator hunt for a Discover button.
+  // Auto-discover models whenever the selected provider already has a usable
+  // credential (OAuth session, saved Settings key, or env var).
+  const selectedProviderReady =
+    form.provider === "chatgpt" ||
+    form.provider === "claude" ||
+    form.provider === "anthropic" ||
+    Boolean((availability.data?.providers ?? []).find((p) => p.provider === form.provider)?.configured);
+
   useEffect(() => {
-    if (form.provider === "chatgpt" || form.provider === "claude" || form.provider === "anthropic") {
+    if (form.provider && selectedProviderReady) {
       void discoverModels(form.provider);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.provider]);
+  }, [form.provider, selectedProviderReady]);
 
   useEffect(() => {
     if (!status.data) return;
@@ -242,194 +247,13 @@ export default function Settings() {
 
       <div className="space-y-6">
         <CollapsibleSection
-          title="Providers"
-          description="Default gateway, credentials, and every LLM Indago can reach."
-          icon={<Layers className="size-4" />}
+          title="1. Authentication (Sessions & Credentials)"
+          description="Connect a subscription session (Claude / ChatGPT) or check which providers already have credentials."
+          icon={<KeyRound className="size-4" />}
           badge={`${readyProviders} of ${providerList.length || 0} ready`}
           defaultOpen
         >
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Zap className="size-4 text-amber-700 dark:text-amber-400" /> AI Gateway
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {status.loading && !status.data ? (
-              <Loading />
-            ) : (
-              <>
-                <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                  <span>status:</span>
-                  <span className={status.data?.configured ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>
-                    {status.data?.configured ? "configured" : "not configured"}
-                  </span>
-                  {status.data?.key_set ? (
-                    <span className="mono">key {status.data?.key_hint}</span>
-                  ) : null}
-                </div>
-                <div className="max-h-72 space-y-1 overflow-auto rounded-md border border-border bg-muted/30 p-2">
-                  <div className="sticky top-0 bg-muted/30 pb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
-                    Usable providers · {readyProviders}/{providerList.length}
-                  </div>
-                  {(availability.data?.providers ?? []).map((p) => (
-                    <div key={p.provider} className="flex items-center justify-between gap-2 text-[11px]">
-                      <span className="text-foreground">{p.label}</span>
-                      <span className="flex items-center gap-2">
-                        <span className={p.configured ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>
-                          {p.configured ? `${p.model || "model: auto"} · ${sourceLabel(p.source)}` : "no credential"}
-                        </span>
-                        {p.configured ? (
-                          <button
-                            className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
-                            onClick={async () => {
-                              try {
-                                const res = await api<{ ok: boolean; latency_ms?: number; error?: string }>(
-                                  `/api/llm/test?provider=${p.provider}`,
-                                  { method: "POST", body: {} },
-                                );
-                                setProbe((prev) => ({
-                                  ...prev,
-                                  [p.provider]: res.ok ? `ok ${res.latency_ms ?? 0}ms` : res.error || "failed",
-                                }));
-                              } catch (e) {
-                                setProbe((prev) => ({ ...prev, [p.provider]: (e as Error).message }));
-                              }
-                            }}
-                          >
-                            test
-                          </button>
-                        ) : null}
-                        {probe[p.provider] ? (
-                          <span className="text-[10px] text-muted-foreground">{probe[p.provider]}</span>
-                        ) : null}
-                      </span>
-                    </div>
-                  ))}
-                  <p className="text-[10px] text-muted-foreground">
-                    Add a second provider without moving the stored key: start the server with
-                    INDAGO_LLM_KEY_&lt;PROVIDER&gt; (e.g. INDAGO_LLM_KEY_OPENAI). Scans and reports can then pick either.
-                  </p>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <Field label="Provider">
-                    <select
-                      className="h-9 rounded-md border border-border bg-card px-2 text-sm"
-                      value={form.provider}
-                      onChange={(e) => {
-                        const provider = e.target.value;
-                        const def = (status.data?.providers ?? []).find((p) => String(p.id) === provider) as
-                          | { default_base_url?: string }
-                          | undefined;
-                        setModels([]);
-                        setModelNote("");
-                        setForm({
-                          ...form,
-                          provider,
-                          model: provider === form.provider ? form.model : "",
-                          base_url: def?.default_base_url ?? "",
-                        });
-                      }}
-                    >
-                      <option value="">Select…</option>
-                      {providers.map((p) => (
-                        <option key={p}>{p}</option>
-                      ))}
-                    </select>
-                  </Field>
-                  <Field label="Model" hint="ChatGPT/Claude versions are discovered from the selected provider; empty lets it choose.">
-                    <div className="flex gap-2">
-                      <Input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => discoverModels()}
-                        disabled={modelBusy}
-                        title="Ask the saved provider for its model list"
-                      >
-                        <RefreshCw className="size-3.5" /> {modelBusy ? "…" : "Discover"}
-                      </Button>
-                    </div>
-                    {models.length ? (
-                      <select
-                        className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
-                        value={models.includes(form.model) ? form.model : ""}
-                        onChange={(e) => e.target.value && setForm({ ...form, model: e.target.value })}
-                      >
-                        <option value="">Pick a discovered model…</option>
-                        {models.map((m) => (
-                          <option key={m}>{m}</option>
-                        ))}
-                      </select>
-                    ) : null}
-                    {modelNote ? <p className="text-[11px] text-muted-foreground">{modelNote}</p> : null}
-                  </Field>
-                  <Field label="Base URL" hint="Optional for providers with a default endpoint." className="sm:col-span-2">
-                    <Input
-                      value={form.base_url}
-                      onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-                      placeholder="https://api.example.com/v1"
-                    />
-                  </Field>
-                  <Field
-                    label="AI advisory"
-                    hint="Master switch. Off means no advisory call at all — scanning and reports keep working without a model."
-                    className="sm:col-span-2"
-                  >
-                    <div className="flex items-center gap-3">
-                      <Switch checked={form.enabled} onCheckedChange={(v) => setForm({ ...form, enabled: v })} />
-                      <span className="text-xs text-muted-foreground">
-                        {form.enabled ? "Enabled — payload diagnosis and report narration may run" : "Disabled — no LLM call is made"}
-                      </span>
-                    </div>
-                  </Field>
-                  <Field
-                    label="Attempts per parameter"
-                    hint="Advisory budget. After this many failed model calls for one parameter, Indago stops asking and continues with its own testing. Applies to every provider."
-                  >
-                    <Input
-                      type="number"
-                      min={1}
-                      max={50}
-                      value={form.max_attempts}
-                      onChange={(e) => setForm({ ...form, max_attempts: Number(e.target.value) })}
-                    />
-                  </Field>
-                  <Field label="API key" hint="Empty keeps the stored key. Never echoed back." className="sm:col-span-2">
-                    <Input
-                      type="password"
-                      value={form.api_key}
-                      onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-                      placeholder={status.data?.key_set ? "•••• stored" : "paste a key"}
-                    />
-                  </Field>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button size="sm" onClick={save} disabled={busy === "save"}>
-                    <Save className="size-4" /> Save
-                  </Button>
-                  <Button size="sm" variant="secondary" onClick={test} disabled={busy === "test"}>
-                    <Zap className="size-4" /> Test
-                  </Button>
-                  <Button size="sm" variant="destructive" onClick={remove} disabled={busy === "delete"}>
-                    <Trash2 className="size-4" /> Clear
-                  </Button>
-                </div>
-              </>
-            )}
-            {err ? <Alert>{err}</Alert> : null}
-            {msg ? <p className="text-[11px] text-emerald-700 dark:text-emerald-400">{msg}</p> : null}
-          </CardContent>
-        </Card>
-        </CollapsibleSection>
-
-        <CollapsibleSection
-          title="Sessions"
-          description="Connect a subscription account directly instead of pasting an API key."
-          icon={<KeyRound className="size-4" />}
-          badge={[claude.data?.connected ? "Claude ready" : null, cg.data?.logged_in ? "ChatGPT ready" : null].filter(Boolean).join(" · ") || "none connected"}
-          defaultOpen
-        >
+        <div className="space-y-4">
         <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
@@ -590,6 +414,217 @@ export default function Settings() {
           </CardContent>
         </Card>
         </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Layers className="size-4 text-sky-700 dark:text-sky-400" /> Usable providers ({readyProviders}/{providerList.length})
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-1 rounded-md border border-border bg-muted/30 p-2">
+              {(availability.data?.providers ?? []).map((p) => (
+                <div key={p.provider} className="flex items-center justify-between gap-2 text-[11px]">
+                  <span className="text-foreground">{p.label}</span>
+                  <span className="flex items-center gap-2">
+                    <span className={p.configured ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>
+                      {p.configured ? `${p.model || "model: auto"} · ${sourceLabel(p.source)}` : "no credential"}
+                    </span>
+                    {p.configured ? (
+                      <button
+                        className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+                        onClick={async () => {
+                          try {
+                            const res = await api<{ ok: boolean; latency_ms?: number; error?: string }>(
+                              `/api/llm/test?provider=${p.provider}`,
+                              { method: "POST", body: {} },
+                            );
+                            setProbe((prev) => ({
+                              ...prev,
+                              [p.provider]: res.ok ? `ok ${res.latency_ms ?? 0}ms` : res.error || "failed",
+                            }));
+                          } catch (e) {
+                            setProbe((prev) => ({ ...prev, [p.provider]: (e as Error).message }));
+                          }
+                        }}
+                      >
+                        test
+                      </button>
+                    ) : null}
+                    {probe[p.provider] ? (
+                      <span className="text-[10px] text-muted-foreground">{probe[p.provider]}</span>
+                    ) : null}
+                  </span>
+                </div>
+              ))}
+              <p className="pt-1 text-[10px] text-muted-foreground">
+                Add a second API provider without moving the stored key: start the server with
+                INDAGO_LLM_KEY_&lt;PROVIDER&gt; (e.g. INDAGO_LLM_KEY_OPENAI). Scans and reports can then pick either.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+        </div>
+        </CollapsibleSection>
+
+        <CollapsibleSection
+          title="2. Default Gateway & Model Selection"
+          description="Pick your active provider, configure API credentials if needed, then choose the default model."
+          icon={<Zap className="size-4" />}
+          badge={status.data?.provider ? `${status.data.provider}${status.data.model ? ` · ${status.data.model}` : ""}` : "not set"}
+          defaultOpen
+        >
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Zap className="size-4 text-amber-700 dark:text-amber-400" /> AI Gateway
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {status.loading && !status.data ? (
+              <Loading />
+            ) : (
+              <>
+                <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                  <span>status:</span>
+                  <span className={status.data?.configured ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>
+                    {status.data?.configured ? "configured" : "not configured"}
+                  </span>
+                  {status.data?.key_set ? (
+                    <span className="mono">key {status.data?.key_hint}</span>
+                  ) : null}
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <Field label="Provider" className="sm:col-span-2">
+                    <select
+                      className="h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
+                      value={form.provider}
+                      onChange={(e) => {
+                        const provider = e.target.value;
+                        const def = (status.data?.providers ?? []).find((p) => String(p.id) === provider) as
+                          | { default_base_url?: string }
+                          | undefined;
+                        setModels([]);
+                        setModelNote("");
+                        setForm({
+                          ...form,
+                          provider,
+                          model: provider === form.provider ? form.model : "",
+                          base_url: def?.default_base_url ?? "",
+                        });
+                      }}
+                    >
+                      <option value="">Select…</option>
+                      {providers.map((p) => (
+                        <option key={p}>{p}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  {form.provider !== "chatgpt" ? (
+                    <>
+                      <Field label="Base URL" hint="Optional for providers with a default endpoint." className="sm:col-span-2">
+                        <Input
+                          value={form.base_url}
+                          onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                          placeholder="https://api.example.com/v1"
+                        />
+                      </Field>
+                      <Field
+                        label="API key"
+                        hint={
+                          form.provider === "claude" && claude.data?.connected
+                            ? "Optional — Claude OAuth session is connected above. Only paste a key to override OAuth."
+                            : "Empty keeps the stored key. Never echoed back."
+                        }
+                        className="sm:col-span-2"
+                      >
+                        <Input
+                          type="password"
+                          value={form.api_key}
+                          onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+                          placeholder={status.data?.key_set ? "•••• stored" : "paste a key"}
+                        />
+                      </Field>
+                    </>
+                  ) : (
+                    <p className="text-[11px] text-emerald-700 dark:text-emerald-400 sm:col-span-2">
+                      Uses the ChatGPT OAuth session connected above — no API key needed.
+                    </p>
+                  )}
+                  <Field
+                    label="Default Model"
+                    hint="Discovered from your connected session or saved API credential; empty lets the provider choose."
+                    className="sm:col-span-2"
+                  >
+                    <div className="flex gap-2">
+                      <Input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => discoverModels()}
+                        disabled={modelBusy}
+                        title="Ask the selected provider for its model list"
+                      >
+                        <RefreshCw className="size-3.5" /> {modelBusy ? "…" : "Discover"}
+                      </Button>
+                    </div>
+                    {models.length ? (
+                      <select
+                        className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
+                        value={models.includes(form.model) ? form.model : ""}
+                        onChange={(e) => e.target.value && setForm({ ...form, model: e.target.value })}
+                      >
+                        <option value="">Pick a discovered model…</option>
+                        {models.map((m) => (
+                          <option key={m}>{m}</option>
+                        ))}
+                      </select>
+                    ) : null}
+                    {modelNote ? <p className="text-[11px] text-muted-foreground">{modelNote}</p> : null}
+                  </Field>
+                  <Field
+                    label="AI advisory"
+                    hint="Master switch. Off means no advisory call at all — scanning and reports keep working without a model."
+                    className="sm:col-span-2"
+                  >
+                    <div className="flex items-center gap-3">
+                      <Switch checked={form.enabled} onCheckedChange={(v) => setForm({ ...form, enabled: v })} />
+                      <span className="text-xs text-muted-foreground">
+                        {form.enabled ? "Enabled — payload diagnosis and report narration may run" : "Disabled — no LLM call is made"}
+                      </span>
+                    </div>
+                  </Field>
+                  <Field
+                    label="Attempts per parameter"
+                    hint="Advisory budget. After this many failed model calls for one parameter, Indago stops asking and continues with its own testing. Applies to every provider."
+                    className="sm:col-span-2"
+                  >
+                    <Input
+                      type="number"
+                      min={1}
+                      max={50}
+                      value={form.max_attempts}
+                      onChange={(e) => setForm({ ...form, max_attempts: Number(e.target.value) })}
+                    />
+                  </Field>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" onClick={save} disabled={busy === "save"}>
+                    <Save className="size-4" /> Save
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={test} disabled={busy === "test"}>
+                    <Zap className="size-4" /> Test
+                  </Button>
+                  <Button size="sm" variant="destructive" onClick={remove} disabled={busy === "delete"}>
+                    <Trash2 className="size-4" /> Clear
+                  </Button>
+                </div>
+              </>
+            )}
+            {err ? <Alert>{err}</Alert> : null}
+            {msg ? <p className="text-[11px] text-emerald-700 dark:text-emerald-400">{msg}</p> : null}
+          </CardContent>
+        </Card>
         </CollapsibleSection>
 
         <CollapsibleSection
