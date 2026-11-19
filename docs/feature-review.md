@@ -94,7 +94,12 @@ covers the control plane. For the newest read-only capabilities on `8a26e33`
 
 - **OpenAPI v3 JSON import (`855d589`, `crAPI` scan `24132197-b33f-41ec-b9c5-7cc2e75c0fa2`)**: `43` endpoints discovered (`7` registered with `source=openapi`), `136` parameters, `332/332` jobs completed (`0` failed).
 - **Security headers & JWT validation (`8a26e33`, `crAPI` scan `846a32f0-ca89-4a87-b2c7-c80a6f67ad7f`, `crapi-auth.json`)**: `7/7` jobs completed (`0` failed), **`3` confirmed findings** (`security_headers` low: `Server header discloses the software version`; `jwt_validation` critical: `Unsigned alg=none JWT is accepted` and `JWT signature is not validated`).
-- **Host header & NoSQLi clean execution (`8a26e33`, `Juice Shop` scan `04044672-af41-4824-8dd1-7e940f64b317`)**: `70/70` jobs completed (`0` failed), `security_headers` (`1/1`), `host_header` (`1/1`), and `nosqli` (`35/35`) completed with `0` errors and `0` false positives. Positive live confirmation of `host_header` and `nosqli` against intentionally vulnerable targets remains to be recorded.
+- **Live lab validation on `1b1d195` (`2026-11-19`, `192.168.103.20`)**:
+  - **DVGA (`e82c7da6-b43a-4020-b215-a04627984fa6`)**: `121/121` jobs succeeded (`0` failed), **`7` confirmed findings** (`graphql`: 4, `security_headers`: 2, `cookie_policy`: 1).
+  - **Juice Shop (`14659737-5964-4ea5-b9dc-867aec448bfb`)**: `458/458` jobs succeeded (`0` failed), **`2` confirmed findings** (`sqli` high: 1; **`websocket_security` medium: 1** on `192.168.103.20:3001/socket.io` untrusted cross-origin upgrade).
+  - **Mutillidae II (`4a015d54-ac27-4605-9c05-d708ae0157dc`)**: `759` jobs succeeded (`0` failed), **`47` confirmed findings** (`cors`: 3, `dom_xss`: 1, `path_traversal`: 10, `reflected_xss`: 39, `security_headers`: 4, `sqli`: 4).
+  - **bWAPP (`948d3c5c-9c83-446f-b4e6-1782030c4b29`)**: `134/134` jobs succeeded (`0` failed), **`4` confirmed findings** (`security_headers`: 4).
+  - **WebGoat (`99f62096-658d-4832-9cda-795b3c33e156`)**: `155/155` jobs succeeded (`0` failed), **`3` confirmed findings** (**`host_header` medium: 1** on `192.168.103.20:8081`, `security_headers`: 2).
 
 **HTTP method & TLS hygiene (`feat/method-tls-hygiene`): unit and integration
 verified only.** `internal/scan/methodtls_test.go` exercises the engine against
@@ -306,13 +311,13 @@ is detected, header/comment/backup exposure is reported.
 
 | Priority | Work | Why |
 | --- | --- | --- |
-| **P1 (post-review)** | **Live-validate the eight new engines** (SQLi, NoSQLi, SSRF, SSTI, command injection, XXE, CORS, GraphQL) | they are implemented and QA-controlled but have **no current-build live evidence** — see [Current build (post-review)](#current-build-post-review) |
-| P1 | Finish DOM open-redirect and clobbering models | the other sink models are in; these two need an engine that does not follow a redirect out of scope |
+| **P1 (post-review)** | **Live-validate remaining opt-in/conditional engines** (NoSQLi positive target, SSTI, Command Injection, XXE, SSRF, Open Redirect, DOM Open-Redirect/Clobbering) | `graphql`, `sqli`, `cors`, `websocket_security`, `host_header`, `security_headers`, and `jwt_validation` have live confirmations; remaining opt-in/conditional passes still need positive live evidence |
+| P1 | ~~Finish DOM open-redirect and clobbering models~~ | done (`5d18556` — `internal/detection/dom_openredirect.go`, `internal/detection/dom_clobbering.go`, `internal/scan/dom_openredirect.go`, `internal/scan/dom_clobbering.go`, short-circuiting `canary.invalid` in harness) |
 | P1 | ~~Expose all 9 providers in Settings~~ | done |
 | P2 | ~~Token accounting~~ | done (tokens, not cost) |
 | P1 | Live Claude OAuth test | proves the second OAuth path end to end |
-| P2 | TOC page numbers via a two-pass render, or drop the page column | polish |
-| P2 | YesWeHack draft auto-fill (no submit) | saves typing without spending credits |
+| P2 | ~~TOC page numbers via a two-pass render, or drop the page column~~ | done (`03baff9` — pure Go stdlib `ExtractPDFSectionPages` + two-pass render in `internal/web/reports.go`) |
+| P2 | ~~YesWeHack draft auto-fill (no submit)~~ | done (`fa98cfa` — `POST /api/scans/{id}/bounty/yeswehack/draft`, strictly no submit) |
 | P3 | Stored XSS and exploit chains | explicitly out of scope unless the product decision changes |
 
 ## Verification
