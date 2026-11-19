@@ -116,6 +116,9 @@ type execution struct {
 	// securityHeadersPassDone marks the one-time read-only HTTP response
 	// security-headers / cookie-policy pass (one GET per origin).
 	securityHeadersPassDone atomic.Bool
+	// hostHeaderPassDone marks the one-time read-only host-header inspection
+	// pass (one bounded GET baseline plus control requests per origin).
+	hostHeaderPassDone atomic.Bool
 	// openRedirectPassDone marks the one-time server-side open redirect pass.
 	openRedirectPassDone atomic.Bool
 	// graphQLPassDone marks the one-time safe GraphQL exposure pass.
@@ -763,6 +766,15 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		ex.securityHeadersPassDone.Store(true)
 		if !sc.Config.SkipSecurityHeaders {
 			c.enqueueSecurityHeadersProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	// Read-only host-header inspection: one bounded baseline plus control
+	// requests per origin, no mutation, no opt-in (see hostheader.go).
+	if !ex.hostHeaderPassDone.Load() {
+		ex.hostHeaderPassDone.Store(true)
+		if !sc.Config.SkipHostHeader {
+			c.enqueueHostHeaderProbes(ctx, ex.scanID)
 			passes = true
 		}
 	}

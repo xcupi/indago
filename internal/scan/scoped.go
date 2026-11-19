@@ -222,6 +222,12 @@ func (s *scopedEngine) Do(ctx context.Context, req *httpengine.Request) (*httpen
 		}
 		chain = append(chain, next)
 		cur.URL = next
+		// A Host override belongs to the URL it was requested for: a hop that
+		// changes host (or port) must not carry it, or this engine would send
+		// one site's Host header to a host the caller never named.
+		if cur.Host != "" && !sameRequestHost(cur.URL, req.URL) {
+			cur.Host = ""
+		}
 		// Per RFC 9110, 301/302/303 turn a non-GET/HEAD into GET and drop the body;
 		// 307/308 preserve method and body.
 		if resp.Status == 301 || resp.Status == 302 || resp.Status == 303 {
@@ -671,4 +677,18 @@ func resolveRedirect(base, loc string) (string, error) {
 		return "", err
 	}
 	return bu.ResolveReference(lu).String(), nil
+}
+
+// sameRequestHost reports whether two absolute URLs name the same host[:port],
+// which is what a Host-header override is scoped to.
+func sameRequestHost(a, b string) bool {
+	ua, err := url.Parse(a)
+	if err != nil || ua.Host == "" {
+		return false
+	}
+	ub, err := url.Parse(b)
+	if err != nil || ub.Host == "" {
+		return false
+	}
+	return strings.EqualFold(ua.Host, ub.Host)
 }

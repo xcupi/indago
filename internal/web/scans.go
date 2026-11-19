@@ -456,7 +456,11 @@ type createScanReq struct {
 	SkipPathTraversal bool `json:"skip_path_traversal"`
 	// SkipSecurityHeaders omits the READ-ONLY response security-headers and
 	// cookie-policy inspection (one GET per origin).
-	SkipSecurityHeaders             bool   `json:"skip_security_headers"`
+	SkipSecurityHeaders bool `json:"skip_security_headers"`
+	// SkipHostHeader omits the READ-ONLY host-header inspection (one bounded
+	// baseline plus control requests per origin).
+	SkipHostHeader bool `json:"skip_host_header"`
+
 	SSRFCallbackURL                 string `json:"ssrf_callback_url"`
 	SSRFCallbackPollURL             string `json:"ssrf_callback_poll_url"`
 	AllowPrivateOAST                bool   `json:"allow_private_oast"`
@@ -569,6 +573,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		SkipSSRF:                        req.SkipSSRF,
 		SkipPathTraversal:               req.SkipPathTraversal,
 		SkipSecurityHeaders:             req.SkipSecurityHeaders,
+		SkipHostHeader:                  req.SkipHostHeader,
 		SkipCORS:                        req.SkipCORS,
 		SkipOpenRedirect:                req.SkipOpenRedirect,
 		SkipGraphQL:                     req.SkipGraphQL,
@@ -674,7 +679,10 @@ type capabilitiesReq struct {
 	SkipPathTraversal bool `json:"skip_path_traversal"`
 	// SkipSecurityHeaders omits the READ-ONLY response security-headers and
 	// cookie-policy inspection.
-	SkipSecurityHeaders    bool   `json:"skip_security_headers"`
+	SkipSecurityHeaders bool `json:"skip_security_headers"`
+	// SkipHostHeader omits the READ-ONLY host-header inspection.
+	SkipHostHeader bool `json:"skip_host_header"`
+
 	EnableCommandInjection bool   `json:"enable_command_injection"`
 	EnableSSTI             bool   `json:"enable_ssti"`
 	EnableSQLi             bool   `json:"enable_sqli"`
@@ -712,6 +720,7 @@ func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Req
 	sc.Config.SkipSSRF = req.SkipSSRF
 	sc.Config.SkipPathTraversal = req.SkipPathTraversal
 	sc.Config.SkipSecurityHeaders = req.SkipSecurityHeaders
+	sc.Config.SkipHostHeader = req.SkipHostHeader
 	sc.Config.SkipCORS = req.SkipCORS
 	sc.Config.SkipOpenRedirect = req.SkipOpenRedirect
 	sc.Config.SkipGraphQL = req.SkipGraphQL

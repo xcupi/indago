@@ -342,6 +342,7 @@ var (
 	cweSQLi             = CWE{89, "Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"}
 	cweSecurityHeaders  = CWE{693, "Protection Mechanism Failure"}
 	cweCookiePolicy     = CWE{614, "Sensitive Cookie in HTTPS Session Without 'Secure' Attribute"}
+	cweHostHeader       = CWE{644, "Improper Neutralization of HTTP Headers for Scripting Syntax"}
 )
 
 // classTable is the deterministic mapping. Order is documentation order and is
@@ -386,6 +387,14 @@ var classTable = []Classification{
 	// network interception or script access; the attacker still has to reach
 	// the cookie, so the baseline is low with a high attack complexity.
 	{Class: domain.VulnCookiePolicy, CWE: cweCookiePolicy, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"), Note: ClassificationNote},
+
+	// Host header injection: the server builds a redirect target or absolute
+	// URL from a client-supplied host, so a crafted request can point a victim
+	// or a shared cache at an attacker-controlled host. The security scope
+	// changes because a poisoned shared cache affects other users, and the
+	// reflection on its own does not yet prove a password-reset/account-takeover
+	// chain, so only confidentiality and integrity are low.
+	{Class: domain.VulnHostHeader, CWE: cweHostHeader, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:L/A:N"), Note: ClassificationNote},
 
 	// SSRF reaches internal services the attacker cannot address directly, so
 	// the security scope changes (S:C).

@@ -65,12 +65,19 @@ const (
 	// cookie without SameSite. Values are never recorded. See
 	// internal/scan/securityheaders.go.
 	VulnCookiePolicy VulnClass = "cookie_policy"
+	// VulnHostHeader is host header injection (CWE-644): the server builds a
+	// redirect target or an absolute URL from the client-supplied Host /
+	// X-Forwarded-Host value, so a crafted request can point a victim or a
+	// shared cache at an attacker-controlled host. Decided from the response
+	// the server itself returns, never by an LLM; the check is read-only.
+	// See internal/scan/hostheader.go.
+	VulnHostHeader VulnClass = "host_header"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader:
 		return true
 	default:
 		return false

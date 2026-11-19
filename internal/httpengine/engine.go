@@ -34,7 +34,15 @@ type Request struct {
 	Method  string            // defaults to GET when empty
 	URL     string            // absolute http(s) URL
 	Headers map[string]string // request headers (single value each)
-	Cookies []*http.Cookie    // request-scoped cookies (in addition to any jar)
+	// Host, when set, overrides the Host header sent with this request; the
+	// connection still goes to URL's host. Go's transport ignores a "Host"
+	// entry in Headers for client requests (net/http writes the header from
+	// Request.Host), so this field is the only way to ask a target how it
+	// treats a client-supplied host. Used by the read-only host-header
+	// inspection, always with NoRedirects so a reflected host is never
+	// followed off-scope.
+	Host    string
+	Cookies []*http.Cookie // request-scoped cookies (in addition to any jar)
 	// NoCookies makes this request genuinely anonymous: the configured cookie
 	// jar is bypassed AND Cookies is ignored, so nothing a previous response
 	// stored can authenticate it. A raw "Cookie" header — from the client's
