@@ -2,14 +2,19 @@ package domain
 
 import "time"
 
-// ReportFormat is the rendered format of a report. Phase 0 implements JSON;
-// Markdown and HTML are designed-for.
+// ReportFormat is the rendered format of a report. Every format listed below
+// is implemented by internal/report.
 type ReportFormat string
 
 const (
 	ReportJSON     ReportFormat = "json"
 	ReportMarkdown ReportFormat = "markdown"
 	ReportHTML     ReportFormat = "html"
+	// ReportSARIF is the machine format security dashboards ingest: a
+	// SARIF 2.1.0 log whose rules are the class-level CWE/CVSS baselines
+	// and whose results are the not-rejected findings. It has no deliverable
+	// template (like JSON).
+	ReportSARIF ReportFormat = "sarif"
 	// ReportPDF is the print deliverable: the HTML template is rendered to a
 	// PDF by the server's Chromium renderer. It exists so a scan can hand a
 	// report straight to a client or a bug-bounty program without a manual
@@ -20,7 +25,7 @@ const (
 // IsValid reports whether the report format is a known value.
 func (f ReportFormat) IsValid() bool {
 	switch f {
-	case ReportJSON, ReportMarkdown, ReportHTML, ReportPDF:
+	case ReportJSON, ReportMarkdown, ReportHTML, ReportPDF, ReportSARIF:
 		return true
 	default:
 		return false

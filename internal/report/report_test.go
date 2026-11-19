@@ -110,7 +110,7 @@ func TestReportGeneratorsAreDeterministic(t *testing.T) {
 		GeneratedAt: now,
 		ToolVersion: "test",
 	}
-	for _, format := range []domain.ReportFormat{domain.ReportJSON, domain.ReportMarkdown, domain.ReportHTML} {
+	for _, format := range []domain.ReportFormat{domain.ReportJSON, domain.ReportMarkdown, domain.ReportHTML, domain.ReportSARIF} {
 		gen, err := report.For(format)
 		if err != nil {
 			t.Fatal(err)

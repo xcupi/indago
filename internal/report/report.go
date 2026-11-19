@@ -1,5 +1,5 @@
-// Package report renders scan results. JSON, Markdown, and HTML reporters are
-// all pure serialization — no security logic, no LLM.
+// Package report renders scan results. JSON, Markdown, HTML and SARIF
+// reporters are all pure serialization — no security logic, no LLM.
 package report
 
 import (
@@ -255,6 +255,8 @@ func For(format domain.ReportFormat) (Generator, error) {
 		return MarkdownGenerator{}, nil
 	case domain.ReportHTML:
 		return HTMLGenerator{}, nil
+	case domain.ReportSARIF:
+		return SARIFGenerator{}, nil
 	default:
 		return nil, fmt.Errorf("report: unknown format %q", format)
 	}

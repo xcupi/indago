@@ -40,6 +40,9 @@ func ywhBugType(c domain.VulnClass) string {
 	case domain.VulnPathTraversal:
 		return "Path Traversal"
 	default:
+		if in := intelFor(c); in.CWE != "n/a" {
+			return in.Name
+		}
 		return string(c)
 	}
 }
@@ -61,6 +64,9 @@ func ywhRemediation(c domain.VulnClass) string {
 	case domain.VulnPathTraversal:
 		return "Resolve the requested name against a fixed base directory and reject the request when the resolved path leaves it. Serve only an allow-list of known files, and never pass a user-supplied name straight to a file API."
 	default:
+		if in := intelFor(c); in.CWE != "n/a" {
+			return in.Remediation
+		}
 		return "Apply the remediation appropriate to the vulnerability class and verify it with the same reproduction steps."
 	}
 }
@@ -190,6 +196,9 @@ func riskSentence(c domain.VulnClass) string {
 	case domain.VulnPathTraversal:
 		return "An attacker can read files outside the directory the endpoint intended, including configuration, credentials or key material the web process is allowed to open."
 	default:
+		if in := intelFor(c); in.CWE != "n/a" {
+			return in.Impact
+		}
 		return "The impact follows from the vulnerability class and the data the affected surface can reach."
 	}
 }

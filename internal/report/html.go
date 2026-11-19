@@ -63,6 +63,14 @@ type htmlFinding struct {
 	CVSS      string
 	CVSSLabel string
 	CVSSNote  string
+	// IntelName/IntelImpact/IntelRemediation/IntelReferences are the
+	// class-level context from FindingView.Intel, so the technical HTML
+	// report carries the same impact/remediation a deliverable does. Empty
+	// only for a class with no table entry.
+	IntelName        string
+	IntelImpact      string
+	IntelRemediation string
+	IntelReferences  []string
 	// CurlPoC / CurlPoCNote reproduce the stored request evidence as one
 	// runnable command, credentials as shell variables.
 	CurlPoC      string
@@ -162,7 +170,7 @@ func (HTMLGenerator) Generate(w io.Writer, data Data) error {
 	for _, sec := range sectionOrder {
 		hs := htmlSection{Title: sec.Title()}
 		if sec == SectionDiagnostic {
-			hs.Note = "These candidates reflected but browser verification found no execution. They are kept for diagnosis; they are not vulnerabilities."
+			hs.Note = "These attempts produced no confirming signal from their engine. They are kept for diagnosis; they are not vulnerabilities."
 		}
 		for _, f := range findings {
 			if FindingSection(f) != sec {
@@ -215,6 +223,12 @@ func toHTMLFinding(n int, f *domain.Finding, v FindingView) htmlFinding {
 		hf.CVSS = c.CVSS.String()
 		hf.CVSSLabel = CVSSLabel(f.Verdict)
 		hf.CVSSNote = c.Note
+	}
+	if in := v.Intel; in != nil {
+		hf.IntelName = in.Name
+		hf.IntelImpact = in.Impact
+		hf.IntelRemediation = in.Remediation
+		hf.IntelReferences = in.References
 	}
 	if p := v.CurlPoC; p != nil {
 		hf.CurlPoC = p.Command
@@ -377,6 +391,10 @@ const htmlTemplateSrc = `<!doctype html>
     <li><strong>Vulnerability class:</strong> {{.VulnClass}}</li>
     {{if .CWE}}<li><strong>CWE:</strong> {{.CWE}}</li>{{end}}
     {{if .CVSS}}<li><strong>{{.CVSSLabel}}:</strong> {{.CVSS}}{{if .CVSSNote}}<br><span class="note">{{.CVSSNote}}</span>{{end}}</li>{{else}}<li><strong>CWE / CVSS:</strong> not classified — no baseline exists for this class, so no score is invented</li>{{end}}
+    {{if .IntelName}}<li><strong>Class:</strong> {{.IntelName}}</li>{{end}}
+    {{if .IntelImpact}}<li><strong>Typical impact:</strong> {{.IntelImpact}}</li>{{end}}
+    {{if .IntelRemediation}}<li><strong>Remediation:</strong> {{.IntelRemediation}}</li>{{end}}
+    {{if .IntelReferences}}<li><strong>References:</strong> {{range $i, $ref := .IntelReferences}}{{if $i}} · {{end}}<a href="{{$ref}}">{{$ref}}</a>{{end}}</li>{{end}}
     {{if .EndpointID}}<li><strong>Endpoint:</strong> <code>{{.EndpointID}}</code></li>{{end}}
     {{if .InjPointID}}<li><strong>Injection point:</strong> <code>{{.InjPointID}}</code></li>{{end}}
     {{if .Location}}<li><strong>Location:</strong> {{.Location}}</li>{{end}}

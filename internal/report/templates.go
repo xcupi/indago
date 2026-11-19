@@ -146,6 +146,79 @@ var classIntelByClass = map[domain.VulnClass]classIntel{
 			"only an allow-list of known files). Never pass a user-supplied name straight to a file API.",
 		References: []string{"https://cwe.mitre.org/data/definitions/22.html", "https://owasp.org/www-community/attacks/Path_Traversal"},
 	},
+	domain.VulnCommandInjection: {
+		CWE:  "CWE-78",
+		Name: "OS command injection",
+		Impact: "A parameter value reaches a shell command, so the caller can run commands as the web process: read " +
+			"files, reach internal services, or take the host. Indago's own probe executes only a benign marker " +
+			"command; the weakness is command execution regardless of how gently it was proved.",
+		Remediation: "Never build a shell command from user input. Use an API that takes an argument vector, " +
+			"allow-list any value that must reach a process, and run the service with least privilege.",
+		References: []string{"https://cwe.mitre.org/data/definitions/78.html", "https://owasp.org/www-community/attacks/Command_Injection"},
+	},
+	domain.VulnSSTI: {
+		CWE:  "CWE-1336",
+		Name: "Server-side template injection",
+		Impact: "A template expression supplied by the caller is evaluated by the server's template engine. Depending " +
+			"on the engine that is a read of server-side objects, a path to command execution, or both. Indago's " +
+			"probe only evaluates a benign arithmetic marker.",
+		Remediation: "Keep user data out of template source. Pass untrusted values as template context variables and " +
+			"render them with the engine's escaping; never compile a template from request input.",
+		References: []string{"https://cwe.mitre.org/data/definitions/1336.html", "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/18-Testing_for_Server-side_Template_Injection"},
+	},
+	domain.VulnSQLi: {
+		CWE:  "CWE-89",
+		Name: "SQL injection",
+		Impact: "A parameter changes the SQL statement the server executes. That can bypass authentication, read or " +
+			"modify other users' rows, and in some configurations reach the filesystem or the database host. The " +
+			"engine confirms the divergence with read-only marker payloads.",
+		Remediation: "Use parameterized queries or prepared statements for every value, never string concatenation; " +
+			"validate types and allow-list sort/column names; give the database user only the privileges it needs.",
+		References: []string{"https://cwe.mitre.org/data/definitions/89.html", "https://owasp.org/www-community/attacks/SQL_Injection"},
+	},
+	domain.VulnXXE: {
+		CWE:  "CWE-611",
+		Name: "XML external entity processing",
+		Impact: "An XML parser resolves an external entity supplied inside the request, so the caller can read local " +
+			"files or make the server issue outbound requests (SSRF). Indago's probe uses a self-contained marker " +
+			"entity and never reads a real file.",
+		Remediation: "Disable DTDs and external entity resolution in every XML parser (for example disallow-doctype-decl " +
+			"and external-general-entities off), and reject documents that declare a DOCTYPE unless the format " +
+			"requires it.",
+		References: []string{"https://cwe.mitre.org/data/definitions/611.html", "https://cheatsheetseries.owasp.org/cheatsheets/XML_External_Entity_Prevention_Cheat_Sheet.html"},
+	},
+	domain.VulnSSRF: {
+		CWE:  "CWE-918",
+		Name: "Server-side request forgery",
+		Impact: "A parameter makes the server issue an outbound request to a destination the attacker chooses, which " +
+			"can reach internal services, cloud metadata endpoints or localhost-only admin interfaces the attacker " +
+			"cannot address directly.",
+		Remediation: "Resolve and validate the destination against an allow-list (scheme, host, port and resolved IP; " +
+			"reject private, link-local and metadata ranges), disable redirects or re-validate every hop, and do " +
+			"not return the raw response body to the caller.",
+		References: []string{"https://cwe.mitre.org/data/definitions/918.html", "https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html"},
+	},
+	domain.VulnCORS: {
+		CWE:  "CWE-942",
+		Name: "Permissive cross-origin resource sharing",
+		Impact: "A permissive cross-origin policy lets an attacker's page read authenticated responses from this " +
+			"origin, so data the victim can see is exposed to the attacker's site. The engine observes the policy " +
+			"headers only; it never exfiltrates data.",
+		Remediation: "Allow only explicit trusted origins on credentialed endpoints. Never reflect an arbitrary Origin " +
+			"and never combine that with Access-Control-Allow-Credentials: true; keep the allowed methods and " +
+			"headers minimal.",
+		References: []string{"https://cwe.mitre.org/data/definitions/942.html", "https://owasp.org/www-community/attacks/CORS_OriginHeaderScrutiny"},
+	},
+	domain.VulnGraphQL: {
+		CWE:  "CWE-200",
+		Name: "GraphQL schema or error disclosure",
+		Impact: "GraphQL introspection, verbose errors or unbounded queries expose the schema and data the caller was " +
+			"not meant to see, which shortens the path to a targeted query or mutation. The engine observes the " +
+			"endpoint's own responses, read-only.",
+		Remediation: "Disable introspection in production where it is not needed, return generic errors, enforce query " +
+			"depth/complexity and cost limits, and authorize every field and mutation server-side.",
+		References: []string{"https://cwe.mitre.org/data/definitions/200.html", "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/12-API_Testing/01-Testing_GraphQL"},
+	},
 	domain.VulnNoSQLi: {
 		CWE:  "CWE-943",
 		Name: "NoSQL query-operator injection",

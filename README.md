@@ -31,7 +31,7 @@ AI gateway all live under one data directory.
 | **Information disclosure** | `.git` history, backup/config files, verbose errors, TRACE/IP headers, HTML comments |
 | **Discovery** | Crawl, forms, sitemap/robots, wordlists, JavaScript/network observation, parameter mining |
 | **Evidence** | Request/response blobs, browser signals, screenshots, per-finding provenance, standalone PoC |
-| **Reports** | JSON, Markdown, HTML, PDF; `technical`, `pentest`, `bug_bounty`, `yeswehack` templates |
+| **Reports** | JSON, Markdown, HTML, SARIF, PDF; `technical`, `pentest`, `bug_bounty`, `yeswehack` templates |
 | **Bug bounty** | YesWeHack program search, public scope/rules import, project creation, submission template |
 | **AI advisory** | Optional multi-provider assistant for payload diagnosis, triage and report narration; never changes a verdict |
 
@@ -156,7 +156,7 @@ re-running the scan.
 
 ## Reports
 
-Formats: **JSON**, **Markdown**, **HTML**, **PDF**.
+Formats: **JSON**, **Markdown**, **HTML**, **SARIF**, **PDF**.
 
 Templates: **technical**, **pentest**, **bug bounty**, **YesWeHack**. The
 YesWeHack template is intentionally markdown-only and includes the fields a

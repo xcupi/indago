@@ -2,6 +2,26 @@ package domain
 
 import "testing"
 
+func TestAllVulnClassesAreValidAndUnique(t *testing.T) {
+	classes := AllVulnClasses()
+	if len(classes) == 0 {
+		t.Fatal("AllVulnClasses returned no classes")
+	}
+	seen := make(map[VulnClass]bool, len(classes))
+	for _, class := range classes {
+		if class == "" {
+			t.Fatal("AllVulnClasses contains an empty class")
+		}
+		if !class.IsValid() {
+			t.Errorf("%q is listed but IsValid() is false", class)
+		}
+		if seen[class] {
+			t.Errorf("%q is listed more than once", class)
+		}
+		seen[class] = true
+	}
+}
+
 func TestNewIDUniqueAndFormatted(t *testing.T) {
 	seen := make(map[ID]bool)
 	for i := 0; i < 1000; i++ {

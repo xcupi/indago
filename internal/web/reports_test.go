@@ -33,6 +33,7 @@ func TestCreateReportAllFindingsEachFormat(t *testing.T) {
 		{"json", "application/json", `"id": "` + string(f.ID) + `"`},
 		{"markdown", "text/markdown", "# Indago Scan Report"},
 		{"html", "text/html", "<!doctype html>"},
+		{"sarif", "application/sarif+json", `"version": "2.1.0"`},
 	} {
 		var rpt domain.Report
 		rec := a.do("POST", "/api/scans/"+string(scanID)+"/reports", map[string]any{"format": tc.format})

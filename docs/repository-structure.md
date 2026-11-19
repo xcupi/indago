@@ -64,7 +64,7 @@ indago/
 │   │
 │   ├── config/               Local config (data dir, server, AI settings)
 │   ├── evidence/             Filesystem evidence store (✅)
-│   ├── report/               Report generator (JSON ✅)
+│   ├── report/               Report generators: JSON, Markdown, HTML, SARIF, PDF (✅)
 │   ├── ai/                   AI gateway + providers (disabled by default)
 │   │
 │   └── web/                  HTTP API + minimal UI
