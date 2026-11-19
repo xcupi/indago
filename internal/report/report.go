@@ -59,6 +59,10 @@ type Data struct {
 	// all — see AGENTS.md §2.5: the scanner must work identically with AI
 	// disabled, and AI output is never authoritative.
 	AISummary string
+	// TOCPageNumbers optionally maps section anchor IDs ("s1", "s2", ...) to
+	// 1-based page numbers for deliverable HTML/PDF tables of contents.
+	// Populated by the second pass of PDF rendering; nil in standalone HTML.
+	TOCPageNumbers map[string]int
 }
 
 // Completeness records the scan coverage a report was generated from: the

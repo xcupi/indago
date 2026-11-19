@@ -16,10 +16,14 @@ import (
 // (only reachable by bypassing Template.IsValid) falls back to pentest rather
 // than producing a technical dump under a deliverable label.
 func docFor(data Data) doc {
+	var d doc
 	if data.Template == TemplateBugBounty {
-		return buildBugBountyDoc(data)
+		d = buildBugBountyDoc(data)
+	} else {
+		d = buildPentestDoc(data)
 	}
-	return buildPentestDoc(data)
+	d.PageNumbers = data.TOCPageNumbers
+	return d
 }
 
 // writeDocHTML renders the selected template as a self-contained HTML page.

@@ -191,8 +191,10 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		Endpoints:       endpointURLs,
 	}
 	if format == domain.ReportPDF {
-		// Render the chosen template as HTML, then print it. The HTML is
-		// never persisted: only the PDF is the report artifact.
+		// Render the chosen template as HTML, then print it. When the pass-1
+		// PDF contains named destinations for the TOC sections, inject their
+		// actual rendered page numbers and re-render pass 2. The HTML is never
+		// persisted: only the final PDF is the report artifact.
 		var htmlBuf bytes.Buffer
 		if err := (report.HTMLGenerator{}).Generate(&htmlBuf, data); err != nil {
 			s.writeInternalError(w, "generate report", err)
@@ -203,6 +205,21 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 			s.log.Error("pdf export failed", "scan", scanID, "err", err)
 			writeError(w, http.StatusBadGateway, "pdf export failed: "+err.Error())
 			return
+		}
+		if pages := report.ExtractPDFSectionPages(pdfBytes); len(pages) > 0 {
+			data.TOCPageNumbers = pages
+			htmlBuf.Reset()
+			if err := (report.HTMLGenerator{}).Generate(&htmlBuf, data); err != nil {
+				s.writeInternalError(w, "generate report", err)
+				return
+			}
+			pdfBytes2, err := s.pdf.Render(r.Context(), htmlBuf.Bytes())
+			if err != nil {
+				s.log.Error("pdf export pass 2 failed", "scan", scanID, "err", err)
+				writeError(w, http.StatusBadGateway, "pdf export failed: "+err.Error())
+				return
+			}
+			pdfBytes = pdfBytes2
 		}
 		buf.Write(pdfBytes)
 	} else if err := gen.Generate(&buf, data); err != nil {
