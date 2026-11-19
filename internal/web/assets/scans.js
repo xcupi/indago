@@ -783,7 +783,9 @@ function reportsPanel(scanId) {
     radios[value] = r;
     modeRow.appendChild(labelInline(r, label));
   });
-  const fmt = select("r_fmt", [["json", "JSON"], ["markdown", "Markdown"], ["html", "HTML"]], state.format);
+  // SARIF is a machine export (SARIF 2.1.0 log) like JSON: the server names
+  // the saved file .sarif and ignores any deliverable template.
+  const fmt = select("r_fmt", [["json", "JSON"], ["markdown", "Markdown"], ["html", "HTML"], ["sarif", "SARIF 2.1.0 (.sarif)"]], state.format);
   fmt.style.width = "auto";
   fmt.addEventListener("change", () => { state.format = fmt.value; });
   const aiSummaryChk = el("input"); aiSummaryChk.type = "checkbox"; aiSummaryChk.id = "r_ai_summary";

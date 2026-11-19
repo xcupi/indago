@@ -257,6 +257,21 @@ export function EvidencePanel({ scanId }: { scanId: string }) {
 
 /* Reports ----------------------------------------------------------------- */
 
+// Formats the report API accepts, labelled with the file extension each is
+// saved as so the operator knows what "Generate report" produces. PDF/HTML
+// render inline; Markdown/JSON/SARIF preview as source.
+const REPORT_FORMATS = [
+  { value: "pdf", label: "PDF (.pdf)" },
+  { value: "html", label: "HTML (.html)" },
+  { value: "markdown", label: "Markdown (.md)" },
+  { value: "json", label: "JSON (.json)" },
+  { value: "sarif", label: "SARIF 2.1.0 (.sarif)" },
+];
+
+// Machine formats have no deliverable layout: they ignore the template and
+// are previewed as source text rather than rendered inline.
+const isMachineFormat = (format: string) => format === "json" || format === "sarif";
+
 export function ReportsPanel({ scanId }: { scanId: string }) {
   const reports = useApi<Report[]>(`/api/scans/${scanId}/reports`);
   const findings = useApi<Finding[]>(`/api/scans/${scanId}/findings?verdict=confirmed`);
@@ -314,7 +329,7 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
     setBusy(true);
     try {
       const body: Record<string, unknown> = { format, mode };
-      if (format !== "json") body.template = template;
+      if (!isMachineFormat(format)) body.template = template;
       if (mode === "selected") body.finding_ids = picked;
       if (ai) {
         body.ai_summary = true;
@@ -361,12 +376,14 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
               value={format}
               onChange={(e) => setFormat(e.target.value)}
             >
-              {["pdf", "html", "markdown", "json"].map((f) => (
-                <option key={f}>{f}</option>
+              {REPORT_FORMATS.map((f) => (
+                <option key={f.value} value={f.value}>
+                  {f.label}
+                </option>
               ))}
             </select>
           </div>
-          {format !== "json" ? (
+          {!isMachineFormat(format) ? (
             <div className="flex flex-col gap-1">
               <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Template</span>
               <select
@@ -555,7 +572,7 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
                             setPreviewReport(r);
                             setPreviewText("");
                             setPreviewError("");
-                            if (r.format === "markdown" || r.format === "json") {
+                            if (r.format === "markdown" || isMachineFormat(r.format)) {
                               try {
                                 const res = await fetch(`/api/reports/${r.id}/content`);
                                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -597,7 +614,9 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
                   ? "rendered inline"
                   : previewReport.format === "markdown"
                     ? "markdown source"
-                    : "JSON source"}
+                    : previewReport.format === "sarif"
+                      ? "SARIF 2.1.0 source"
+                      : "JSON source"}
               </span>
               <a
                 href={`/api/reports/${previewReport.id}/content?download`}
