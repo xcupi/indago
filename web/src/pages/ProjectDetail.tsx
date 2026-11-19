@@ -315,7 +315,7 @@ export default function ProjectDetail({ id }: { id: string }) {
         </Card>
 
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid items-start gap-4 lg:grid-cols-[1fr_1.3fr]">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">

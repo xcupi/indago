@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Play, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Play, Plus, SlidersHorizontal, Trash2 } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
+import { Pagination, usePagination } from "@/components/Pagination";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogTrigger, Tooltip } from "@/components/ui/controls";
@@ -113,6 +114,12 @@ export default function Scans() {
   const [projectScope, setProjectScope] = useState<Scope | null>(null);
   const [busy, setBusy] = useState<"create" | "start" | "">("");
   const [loginNote, setLoginNote] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [deleteTargets, setDeleteTargets] = useState<Scan[] | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkNote, setBulkNote] = useState("");
+  const [bulkErr, setBulkErr] = useState("");
   // Auto-scope is a convenience, never a silent widening: the switch is visible
   // and only merges THIS target host into the project's include list.
   const [autoScope, setAutoScope] = useState(true);
@@ -193,6 +200,69 @@ export default function Scans() {
 
   const running = filtered.filter((s) => s.state === "running").length;
   const confirmed = filtered.reduce((n, s) => n + (s.stats?.findings_confirmed ?? 0), 0);
+
+  const sortedScans = useMemo(
+    () => [...filtered].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")),
+    [filtered],
+  );
+  const { page, setPage, pageSize, setPageSize, pages, start: pageStart, rows: pagedScans } =
+    usePagination(sortedScans);
+  const selectedIDs = Object.keys(selected).filter((id) => selected[id]);
+  const allOnPage = pagedScans.length > 0 && pagedScans.every((s) => selected[s.id]);
+
+  function togglePage(on: boolean) {
+    setSelected((prev) => {
+      const next = { ...prev };
+      for (const s of pagedScans) next[s.id] = on;
+      return next;
+    });
+  }
+
+  async function confirmDeleteScans() {
+    if (!deleteTargets || deleteTargets.length === 0) return;
+    setBulkBusy(true);
+    setBulkErr("");
+    setBulkNote("");
+    try {
+      if (deleteTargets.length === 1) {
+        const s = deleteTargets[0];
+        await api(`/api/scans/${s.id}`, { method: "DELETE" });
+        setSelected((prev) => {
+          const next = { ...prev };
+          delete next[s.id];
+          return next;
+        });
+        setBulkNote(`Deleted scan ${shortId(s.id)} and its findings, evidence, and reports.`);
+      } else {
+        const res = await api<{
+          deleted: number;
+          failed: number;
+          results: { scan_id: string; deleted: boolean; error?: string }[];
+        }>("/api/scans/bulk-delete", {
+          method: "POST",
+          body: { scan_ids: deleteTargets.map((s) => s.id) },
+        });
+        const remaining: Record<string, boolean> = {};
+        for (const r of res.results) {
+          if (!r.deleted) remaining[r.scan_id] = true;
+        }
+        setSelected(remaining);
+        setBulkNote(
+          `Deleted ${res.deleted} scan(s) along with their findings, evidence, and reports.` +
+            (res.failed ? ` ${res.failed} skipped.` : ""),
+        );
+        const firstErr = res.results.find((r) => !r.deleted && r.error)?.error;
+        if (res.failed && firstErr) setBulkErr(firstErr);
+      }
+      setDeleteTargets(null);
+      refreshAll();
+    } catch (e) {
+      setBulkErr((e as Error).message);
+      setDeleteTargets(null);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
 
   async function create(start: boolean) {
     setError("");
@@ -424,6 +494,28 @@ export default function Scans() {
                     ))}
                   </select>
                 </Field>
+                <div className="sm:col-span-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowAdvanced((v) => !v)}
+                    className="flex w-full items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-2 text-left text-xs font-medium text-foreground hover:bg-muted/50"
+                  >
+                    <span className="flex items-center gap-2">
+                      <SlidersHorizontal className="size-3.5 text-muted-foreground" />
+                      Advanced options
+                      <span className="text-[11px] font-normal text-muted-foreground">
+                        (optional — defaults are automatic)
+                      </span>
+                    </span>
+                    {showAdvanced ? (
+                      <ChevronDown className="size-4 text-muted-foreground" />
+                    ) : (
+                      <ChevronRight className="size-4 text-muted-foreground" />
+                    )}
+                  </button>
+                </div>
+                {showAdvanced ? (
+                  <>
                 <Field label="Seeds" hint="One URL per line. Empty uses the target base URL." className="sm:col-span-2">
                   <Textarea
                     rows={2}
@@ -773,6 +865,8 @@ export default function Scans() {
                     />
                   </Field>
                 </div>
+                  </>
+                ) : null}
               </div>
               {error ? <Alert>{error}</Alert> : null}
               <div className="flex items-center justify-between gap-2">
@@ -837,23 +931,99 @@ export default function Scans() {
               <Empty>No scans in this project yet.</Empty>
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Scan</TableHead>
-                  <TableHead>State</TableHead>
-                  <TableHead>Profile</TableHead>
-                  <TableHead>Endpoints</TableHead>
-                  <TableHead>Confirmed</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {[...filtered]
-                  .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
-                  .map((s) => (
+            <>
+              <div className="flex flex-wrap items-center gap-3 border-b border-border px-3 py-2">
+                <label className="flex items-center gap-2 text-xs text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={allOnPage}
+                    onChange={(e) => togglePage(e.target.checked)}
+                  />
+                  Select all on this page
+                </label>
+                {selectedIDs.length > 0 ? (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      disabled={bulkBusy}
+                      onClick={() => {
+                        const chosen = sortedScans.filter((s) => selected[s.id]);
+                        if (chosen.length > 0) setDeleteTargets(chosen);
+                      }}
+                    >
+                      <Trash2 className="size-4" /> Delete selected ({selectedIDs.length})
+                    </Button>
+                    <button
+                      type="button"
+                      className="text-[11px] text-muted-foreground hover:text-foreground"
+                      onClick={() => setSelected({})}
+                    >
+                      Clear
+                    </button>
+                  </>
+                ) : (
+                  <span className="text-[11px] text-muted-foreground">
+                    Select scans to delete them together.
+                  </span>
+                )}
+                {bulkNote ? (
+                  <span className="text-[11px] text-emerald-700 dark:text-emerald-400">{bulkNote}</span>
+                ) : null}
+                <label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+                  Per page
+                  <select
+                    className="h-8 rounded-md border border-border bg-background px-2 text-xs text-foreground"
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setPage(1);
+                    }}
+                  >
+                    <option value={10}>10</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                  </select>
+                </label>
+              </div>
+              {bulkErr ? (
+                <div className="px-3 pt-2">
+                  <Alert className="border-amber-200 text-amber-800 dark:border-amber-900 dark:text-amber-300">
+                    {bulkErr}
+                  </Alert>
+                </div>
+              ) : null}
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-8">
+                      <input
+                        type="checkbox"
+                        aria-label="Select all scans on page"
+                        checked={allOnPage}
+                        onChange={(e) => togglePage(e.target.checked)}
+                      />
+                    </TableHead>
+                    <TableHead>Scan</TableHead>
+                    <TableHead>State</TableHead>
+                    <TableHead>Profile</TableHead>
+                    <TableHead>Endpoints</TableHead>
+                    <TableHead>Confirmed</TableHead>
+                    <TableHead>Created</TableHead>
+                    <TableHead />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {pagedScans.map((s) => (
                     <TableRow key={s.id} className="cursor-pointer" onClick={() => navigate(`/scans/${s.id}`)}>
+                      <TableCell onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          aria-label={`Select scan ${shortId(s.id)}`}
+                          checked={Boolean(selected[s.id])}
+                          onChange={(e) => setSelected((prev) => ({ ...prev, [s.id]: e.target.checked }))}
+                        />
+                      </TableCell>
                       <TableCell>
                         <div className="mono text-[11px] text-muted-foreground">{shortId(s.id)}</div>
                         <div className="max-w-[26rem] truncate text-xs text-foreground">
@@ -873,15 +1043,9 @@ export default function Scans() {
                           variant="ghost"
                           className="text-red-600 dark:text-red-400"
                           disabled={s.state === "running" || s.state === "canceling"}
-                          onClick={async (e) => {
+                          onClick={(e) => {
                             e.stopPropagation();
-                            if (!confirm(`Delete scan ${shortId(s.id)}? Its evidence and reports are removed too.`)) return;
-                            try {
-                              await api(`/api/scans/${s.id}`, { method: "DELETE" });
-                              refreshAll();
-                            } catch (err) {
-                              alert((err as Error).message);
-                            }
+                            setDeleteTargets([s]);
                           }}
                         >
                           delete
@@ -889,11 +1053,79 @@ export default function Scans() {
                       </TableCell>
                     </TableRow>
                   ))}
-              </TableBody>
-            </Table>
+                </TableBody>
+              </Table>
+              <Pagination
+                page={page}
+                pageSize={pageSize}
+                pages={pages}
+                total={sortedScans.length}
+                start={pageStart}
+                setPage={setPage}
+                setPageSize={setPageSize}
+              />
+            </>
           )}
         </CardContent>
       </Card>
+
+      <Dialog open={Boolean(deleteTargets)} onOpenChange={(v) => { if (!v && !bulkBusy) setDeleteTargets(null); }}>
+        <DialogContent
+          title={
+            deleteTargets && deleteTargets.length > 1
+              ? `Delete ${deleteTargets.length} scans?`
+              : `Delete scan ${deleteTargets?.[0] ? shortId(deleteTargets[0].id) : ""}?`
+          }
+          description="Findings and reports belong to their scan, so deleting a scan removes its related data too."
+        >
+          {deleteTargets ? (
+            <div className="space-y-3 text-xs">
+              {(() => {
+                const activeCount = deleteTargets.filter(
+                  (s) => s.state === "running" || s.state === "canceling",
+                ).length;
+                const confirmedCount = deleteTargets.reduce(
+                  (sum, s) => sum + (s.stats?.findings_confirmed ?? 0),
+                  0,
+                );
+                const endpointsCount = deleteTargets.reduce(
+                  (sum, s) => sum + (s.stats?.endpoints_discovered ?? 0),
+                  0,
+                );
+                return (
+                  <>
+                    <div className="rounded-md border border-border bg-muted/30 p-3 space-y-1">
+                      <p className="font-medium text-foreground">
+                        This permanently removes for the selected {deleteTargets.length === 1 ? "scan" : `${deleteTargets.length} scans`}:
+                      </p>
+                      <ul className="list-disc pl-4 text-muted-foreground space-y-0.5">
+                        <li>
+                          All findings (including <span className="font-medium text-foreground">{confirmedCount}</span> confirmed) &amp; <span className="font-medium text-foreground">{endpointsCount}</span> discovered endpoints
+                        </li>
+                        <li>All stored HTTP/DOM evidence blobs &amp; AI task history</li>
+                        <li>All generated reports (PDF, HTML, JSON, Markdown, SARIF)</li>
+                      </ul>
+                    </div>
+                    {activeCount > 0 ? (
+                      <Alert className="border-amber-200 text-amber-800 dark:border-amber-900 dark:text-amber-300">
+                        {activeCount} selected scan(s) are currently running or canceling and will be skipped automatically.
+                      </Alert>
+                    ) : null}
+                  </>
+                );
+              })()}
+              <div className="flex justify-end gap-2">
+                <Button variant="ghost" size="sm" disabled={bulkBusy} onClick={() => setDeleteTargets(null)}>
+                  Cancel
+                </Button>
+                <Button variant="destructive" size="sm" disabled={bulkBusy} onClick={confirmDeleteScans}>
+                  {bulkBusy ? "Deleting…" : "Delete permanently"}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

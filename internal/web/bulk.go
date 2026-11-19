@@ -28,15 +28,10 @@ type bulkDeleteProjectResult struct {
 	Error        string `json:"error,omitempty"`
 }
 
-func (s *Server) handleBulkDeleteProjects(w http.ResponseWriter, r *http.Request) {
-	var req bulkDeleteProjectsReq
-	if err := readJSON(r, &req); err != nil {
-		writeJSONBodyError(w, err)
-		return
-	}
-	ids := make([]domain.ID, 0, len(req.ProjectIDs))
-	seen := make(map[domain.ID]bool, len(req.ProjectIDs))
-	for _, raw := range req.ProjectIDs {
+func dedupeBulkIDs(rawIDs []string) []domain.ID {
+	ids := make([]domain.ID, 0, len(rawIDs))
+	seen := make(map[domain.ID]bool, len(rawIDs))
+	for _, raw := range rawIDs {
 		id := domain.ID(strings.TrimSpace(raw))
 		if id == "" || seen[id] {
 			continue
@@ -44,6 +39,16 @@ func (s *Server) handleBulkDeleteProjects(w http.ResponseWriter, r *http.Request
 		seen[id] = true
 		ids = append(ids, id)
 	}
+	return ids
+}
+
+func (s *Server) handleBulkDeleteProjects(w http.ResponseWriter, r *http.Request) {
+	var req bulkDeleteProjectsReq
+	if err := readJSON(r, &req); err != nil {
+		writeJSONBodyError(w, err)
+		return
+	}
+	ids := dedupeBulkIDs(req.ProjectIDs)
 	if len(ids) == 0 {
 		writeError(w, http.StatusBadRequest, "project_ids must contain at least one project")
 		return
@@ -103,6 +108,71 @@ func (s *Server) handleBulkDeleteProjects(w http.ResponseWriter, r *http.Request
 		res.Deleted = true
 		results = append(results, res)
 		s.log.Info("project deleted in bulk", "project", id, "scans", res.ScansDeleted)
+	}
+
+	deleted := 0
+	for _, res := range results {
+		if res.Deleted {
+			deleted++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"results": results,
+		"deleted": deleted,
+		"failed":  len(results) - deleted,
+	})
+}
+
+type bulkDeleteScansReq struct {
+	ScanIDs []string `json:"scan_ids"`
+}
+
+type bulkDeleteScanResult struct {
+	ScanID  string `json:"scan_id"`
+	Deleted bool   `json:"deleted"`
+	Error   string `json:"error,omitempty"`
+}
+
+// handleBulkDeleteScans deletes up to 200 non-active scans (including their
+// findings, evidence, and reports) in one request, skipping running/canceling scans.
+func (s *Server) handleBulkDeleteScans(w http.ResponseWriter, r *http.Request) {
+	var req bulkDeleteScansReq
+	if err := readJSON(r, &req); err != nil {
+		writeJSONBodyError(w, err)
+		return
+	}
+	ids := dedupeBulkIDs(req.ScanIDs)
+	if len(ids) == 0 {
+		writeError(w, http.StatusBadRequest, "scan_ids must contain at least one scan")
+		return
+	}
+	if len(ids) > 200 {
+		writeError(w, http.StatusBadRequest, "delete at most 200 scans per request")
+		return
+	}
+
+	results := make([]bulkDeleteScanResult, 0, len(ids))
+	for _, id := range ids {
+		res := bulkDeleteScanResult{ScanID: string(id)}
+		sc, err := s.store.Scans().Get(r.Context(), id)
+		if err != nil {
+			res.Error = "scan not found"
+			results = append(results, res)
+			continue
+		}
+		if sc.State == domain.ScanRunning || sc.State == domain.ScanCanceling {
+			res.Error = "scan is still active; stop it before deleting"
+			results = append(results, res)
+			continue
+		}
+		if err := s.deleteScanCascade(r, id); err != nil {
+			res.Error = "could not delete scan"
+			results = append(results, res)
+			continue
+		}
+		res.Deleted = true
+		results = append(results, res)
+		s.log.Info("scan deleted in bulk", "scan", id)
 	}
 
 	deleted := 0

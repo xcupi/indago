@@ -258,6 +258,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/scans", s.handleListScans)
 	mux.HandleFunc("POST /api/scans", s.handleCreateScan)
+	mux.HandleFunc("POST /api/scans/bulk-delete", s.handleBulkDeleteScans)
 	mux.HandleFunc("GET /api/scans/{id}", s.handleGetScan)
 	mux.HandleFunc("GET /api/scans/{id}/stats", s.handleScanStats)
 	mux.HandleFunc("GET /api/scans/{id}/endpoints", s.handleListEndpoints)
