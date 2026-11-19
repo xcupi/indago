@@ -28,18 +28,22 @@ func TestCreateReportAllFindingsEachFormat(t *testing.T) {
 	for _, tc := range []struct {
 		format string
 		ct     string
+		ext    string
 		marker string
 	}{
-		{"json", "application/json", `"id": "` + string(f.ID) + `"`},
-		{"markdown", "text/markdown", "# Indago Scan Report"},
-		{"html", "text/html", "<!doctype html>"},
-		{"sarif", "application/sarif+json", `"version": "2.1.0"`},
+		{"json", "application/json", ".json", `"id": "` + string(f.ID) + `"`},
+		{"markdown", "text/markdown", ".md", "# Indago Scan Report"},
+		{"html", "text/html", ".html", "<!doctype html>"},
+		{"sarif", "application/sarif+json", ".sarif", `"version": "2.1.0"`},
 	} {
 		var rpt domain.Report
 		rec := a.do("POST", "/api/scans/"+string(scanID)+"/reports", map[string]any{"format": tc.format})
 		a.mustJSON(rec, http.StatusCreated, &rpt)
 		if rpt.Format != domain.ReportFormat(tc.format) || rpt.ScanID != scanID {
 			t.Fatalf("%s: report row = %+v", tc.format, rpt)
+		}
+		if !strings.HasSuffix(rpt.Path, tc.ext) {
+			t.Fatalf("%s: stored path = %q, want %s suffix", tc.format, rpt.Path, tc.ext)
 		}
 		if rpt.Summary.TotalFindings != 1 {
 			t.Fatalf("%s: summary = %+v", tc.format, rpt.Summary)
@@ -55,14 +59,14 @@ func TestCreateReportAllFindingsEachFormat(t *testing.T) {
 		if !strings.Contains(content.Body.String(), tc.marker) {
 			t.Fatalf("%s: body missing marker %q:\n%s", tc.format, tc.marker, content.Body.String())
 		}
-		if d := content.Header().Get("Content-Disposition"); !strings.HasPrefix(d, "inline") {
-			t.Fatalf("%s: expected inline by default, got %q", tc.format, d)
+		if d := content.Header().Get("Content-Disposition"); !strings.HasPrefix(d, "inline") || !strings.Contains(d, tc.ext+`"`) {
+			t.Fatalf("%s: expected inline %s download name by default, got %q", tc.format, tc.ext, d)
 		}
 
 		assertSandboxedContent(t, content.Header())
 		download := a.do("GET", "/api/reports/"+string(rpt.ID)+"/content?download", nil)
-		if d := download.Header().Get("Content-Disposition"); !strings.HasPrefix(d, "attachment") {
-			t.Fatalf("%s: expected attachment with ?download, got %q", tc.format, d)
+		if d := download.Header().Get("Content-Disposition"); !strings.HasPrefix(d, "attachment") || !strings.Contains(d, tc.ext+`"`) {
+			t.Fatalf("%s: expected attachment %s with ?download, got %q", tc.format, tc.ext, d)
 		}
 	}
 }
