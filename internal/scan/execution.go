@@ -113,6 +113,9 @@ type execution struct {
 	pathTraversalPassDone atomic.Bool
 	// corsPassDone marks the one-time read-only CORS misconfiguration pass.
 	corsPassDone atomic.Bool
+	// securityHeadersPassDone marks the one-time read-only HTTP response
+	// security-headers / cookie-policy pass (one GET per origin).
+	securityHeadersPassDone atomic.Bool
 	// openRedirectPassDone marks the one-time server-side open redirect pass.
 	openRedirectPassDone atomic.Bool
 	// graphQLPassDone marks the one-time safe GraphQL exposure pass.
@@ -751,6 +754,15 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		ex.corsPassDone.Store(true)
 		if !sc.Config.SkipCORS {
 			c.enqueueCORSProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	// Read-only response security headers and cookie policy: ONE GET per
+	// origin, no mutation, no opt-in (see securityheaders.go).
+	if !ex.securityHeadersPassDone.Load() {
+		ex.securityHeadersPassDone.Store(true)
+		if !sc.Config.SkipSecurityHeaders {
+			c.enqueueSecurityHeadersProbes(ctx, ex.scanID)
 			passes = true
 		}
 	}

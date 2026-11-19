@@ -55,12 +55,22 @@ const (
 	// content, never by an LLM. The engine is read-only: it never writes,
 	// uploads or executes anything. See internal/scan/pathtraversal.go.
 	VulnPathTraversal VulnClass = "path_traversal"
+	// VulnSecurityHeaders is a missing or weak HTTP response security header
+	// (HSTS, X-Content-Type-Options, CSP/X-Frame-Options) or a version-revealing
+	// Server/X-Powered-By header. Decided from the response headers alone; the
+	// check is read-only. See internal/scan/securityheaders.go.
+	VulnSecurityHeaders VulnClass = "security_headers"
+	// VulnCookiePolicy is a Set-Cookie attribute weakness: a session-like
+	// cookie without HttpOnly, a cookie set over HTTPS without Secure, or a
+	// cookie without SameSite. Values are never recorded. See
+	// internal/scan/securityheaders.go.
+	VulnCookiePolicy VulnClass = "cookie_policy"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy:
 		return true
 	default:
 		return false

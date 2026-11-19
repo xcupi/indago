@@ -590,6 +590,7 @@ func (c *cli) scanCreate(args []string) error {
 	skipSSRF := fs.Bool("skip-ssrf", false, "omit the SSRF pass (ON by default): URL-like parameters are probed with an operator-supplied OAST canary and confirmed only by a marker-bearing callback, never by a blind internal fetch")
 	skipPathTraversal := fs.Bool("skip-path-traversal", false, "omit the READ-ONLY path-traversal / local file inclusion pass (ON by default): file/page-like parameters and file-shaped endpoints are asked for /etc/passwd or windows\\win.ini, and a finding is confirmed only when the file's own multi-token content comes back over a clean baseline and a nonexistent-path control")
 	skipCORS := fs.Bool("skip-cors", false, "omit the CORS misconfiguration pass (ON by default): a permissive policy is confirmed only when cross-origin credentials are actually readable")
+	skipSecurityHeaders := fs.Bool("skip-security-headers", false, "omit the READ-ONLY HTTP response security-headers and cookie-policy check (ON by default): one GET per origin, reporting missing HSTS/X-Content-Type-Options/CSP/X-Frame-Options, version-revealing Server/X-Powered-By headers and weak Set-Cookie flags (HttpOnly/Secure/SameSite), deduplicated per origin and header/cookie name")
 	skipOpenRedirect := fs.Bool("skip-open-redirect", false, "omit the open-redirect pass (ON by default): a redirect is confirmed only by an actual cross-origin Location — this is the SERVER-side redirect engine")
 	skipGraphQL := fs.Bool("skip-graphql", false, "omit the GraphQL introspection/exposure pass (ON by default)")
 	ssrfCallback := fs.String("ssrf-callback", "", "operator OAST collaborator base URL the target is asked to request, e.g. https://abc123.oast.example (absolute http(s); the engine refuses a loopback/instance-metadata callback, and a private one unless -allow-private-oast, and never substitutes a refused one)")
@@ -613,7 +614,7 @@ func (c *cli) scanCreate(args []string) error {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-openapi-spec-file FILE | -openapi-spec-url URL] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-sqli] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-path-traversal] [-skip-cors] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-openapi-spec-file FILE | -openapi-spec-url URL] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-sqli] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-path-traversal] [-skip-cors] [-skip-security-headers] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
@@ -679,6 +680,9 @@ func (c *cli) scanCreate(args []string) error {
 	}
 	if *skipCORS {
 		req["skip_cors"] = true
+	}
+	if *skipSecurityHeaders {
+		req["skip_security_headers"] = true
 	}
 	if *skipOpenRedirect {
 		req["skip_open_redirect"] = true

@@ -569,7 +569,17 @@ func TestRestartTestsInjectionPointWhoseJobWasLostToShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(findings) != 1 {
-		t.Fatalf("want exactly one finding after restart, got %d", len(findings))
+	// This test is about the RESTART not duplicating the reflected candidate's
+	// finding. Other engines (the origin-level security-headers and cookie
+	// policy pass) legitimately report findings of their own on the same scan,
+	// so the assertion is scoped to the reflected-XSS class.
+	reflected := 0
+	for _, f := range findings {
+		if f.VulnClass == domain.VulnReflectedXSS {
+			reflected++
+		}
+	}
+	if reflected != 1 {
+		t.Fatalf("want exactly one reflected-XSS finding after restart, got %d (of %d findings)", reflected, len(findings))
 	}
 }

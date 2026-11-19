@@ -293,12 +293,17 @@ const (
 	// content, which an untouched baseline and a nonexistent-path control did
 	// NOT produce. See internal/scan/pathtraversal.go.
 	JobPathTraversal JobType = "path_traversal"
+	// JobSecurityHeaders inspects ONE origin's HTTP response security headers
+	// and Set-Cookie attributes with a single read-only GET. Findings are
+	// deduplicated per origin and header/cookie name, never per URL. See
+	// internal/scan/securityheaders.go.
+	JobSecurityHeaders JobType = "security_headers"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders:
 		return true
 	default:
 		return false
