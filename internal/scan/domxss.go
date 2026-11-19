@@ -941,6 +941,18 @@ const domXSSHarnessTemplate = `(() => {
   } catch (e) {}
   // Navigation assignments. Location's own properties are exotic; the
   // method hooks are the portable half, and href is attempted separately.
+  // Any assignment targeting the reserved canary.invalid host is recorded and
+  // short-circuited so the browser never follows a redirect out of scope.
+  function isCanaryRedirect(v) {
+    try {
+      return String(v || '').toLowerCase().indexOf('canary.invalid') !== -1;
+    } catch (e) { return false; }
+  }
+  function reportRedirect(sink, v) {
+    try {
+      console.debug('__INDAGO_DOM_REDIRECT__' + JSON.stringify({sink: sink, target: String(v)}));
+    } catch (e) {}
+  }
   try {
     var hrefDesc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
     if (hrefDesc && hrefDesc.set) {
@@ -951,6 +963,10 @@ const domXSSHarnessTemplate = `(() => {
         get: hrefDesc.get,
         set: function (v) {
           report('location.assign', v);
+          if (isCanaryRedirect(v)) {
+            reportRedirect('location.href', v);
+            return;
+          }
           return origHrefSet.call(this, v);
         }
       });
@@ -965,11 +981,28 @@ const domXSSHarnessTemplate = `(() => {
         ...mDesc,
         value: function (v) {
           report('location.assign', v);
+          if (isCanaryRedirect(v)) {
+            reportRedirect('location.' + m, v);
+            return;
+          }
           return nativeM.apply(this, arguments);
         }
       });
     } catch (e) {}
   }
+  try {
+    var origWinOpen = window.open;
+    if (typeof origWinOpen === 'function') {
+      window.open = function (v) {
+        report('location.assign', v);
+        if (isCanaryRedirect(v)) {
+          reportRedirect('window.open', v);
+          return null;
+        }
+        return origWinOpen.apply(this, arguments);
+      };
+    }
+  } catch (e) {}
 
   try {
     const desc = Object.getOwnPropertyDescriptor(Range.prototype, 'createContextualFragment');
@@ -1891,16 +1924,12 @@ func (e *domXSSExecutor) handleDOMXSSSource(ctx context.Context, job *domain.Tes
 			tc := e.newTestCase(ctx, job, ep.URL)
 			e.finishTestCase(ctx, tc, nil, pageScripts.Note)
 		}
-		if domXSSHasRedirectLink(pageScripts.HTML) {
-			e.probeClientOpenRedirect(ctx, bctx, job, ep, marker)
-		}
+		selectors = mergeDOMXSSQuerySelectors(selectors, pageScripts.Params)
+		e.probeDOMOpenRedirectForQuery(ctx, bctx, job, ep, marker, pageScripts, selectors)
 		if domXSSCookieWritePattern(pageScripts.HTML) {
 			e.probeCookieReflection(ctx, bctx, job, ep, marker)
 		}
-		if domXSSClobberingCommentForm(pageScripts.HTML) {
-			e.probeDOMClobbering(ctx, bctx, job, ep, marker, pageScripts.HTML)
-		}
-		selectors = mergeDOMXSSQuerySelectors(selectors, pageScripts.Params)
+		e.probeDOMClobberingWithScripts(ctx, bctx, job, ep, marker, pageScripts, selectors)
 		if len(selectors) == 0 {
 			tc := e.newTestCase(ctx, job, ep.URL)
 			tc.Status = domain.TestCaseSkipped
@@ -2482,6 +2511,9 @@ func (e *domXSSExecutor) probeDOMXSSCandidate(ctx context.Context, bctx *browser
 		if stop {
 			return nil
 		}
+	}
+	if sink == detection.DOMSinkLocationAssign && source != detection.DOMSourceQuery {
+		e.probeDOMOpenRedirectSource(ctx, bctx, job, ep, source, selector, marker)
 	}
 	return nil
 }
@@ -3719,83 +3751,6 @@ func domXSSChildFrameExecution(rt browser.RuntimeObservations, marker string) bo
 	return false
 }
 
-// domXSSHasRedirectLink is a narrow, static gate for the client-side redirect
-// probe: a link whose onclick both reads a url= value and writes location.
-func domXSSHasRedirectLink(html string) bool {
-	low := strings.ToLower(html)
-	return strings.Contains(low, "onclick") && strings.Contains(low, "url=") && strings.Contains(low, "location")
-}
-
-// probeClientOpenRedirect executes the page's own onclick handler with a fake
-// location object, so the handler's real regex/assignment runs without a
-// navigation. A destination containing the marker on a foreign origin is
-// execution of attacker-controlled redirect logic, not a text match.
-func (e *domXSSExecutor) probeClientOpenRedirect(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, marker string) {
-	canary := "https://example.com/indago-redirect-" + marker
-	sep := "?"
-	if strings.Contains(ep.URL, "?") {
-		sep = "&"
-	}
-	navURL := ep.URL + sep + "url=" + canary
-	tc := e.newTestCase(ctx, job, navURL)
-	page, err := bctx.NewPage(ctx)
-	if err != nil {
-		e.finishTestCase(ctx, tc, err, "open-redirect probe: new page")
-		return
-	}
-	defer page.Close()
-	if _, err := page.Navigate(ctx, navURL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
-		e.finishTestCase(ctx, tc, err, "open-redirect probe: navigate")
-		return
-	}
-	script := `(() => {
-  const link = [...document.querySelectorAll('a[onclick]')].find(a => /url=/.test(a.getAttribute('onclick') || ''));
-  if (!link) return {found: false};
-  const fake = {href: location.href, toString() { return this.href; }};
-  try {
-    new Function('location', link.getAttribute('onclick')).call(window, fake);
-  } catch (err) {
-    return {found: true, error: String(err), target: fake.href};
-  }
-  return {found: true, target: fake.href};
-})()`
-	raw, err := page.Evaluate(ctx, script)
-	if err != nil {
-		e.finishTestCase(ctx, tc, err, "open-redirect probe: evaluate")
-		return
-	}
-	res, _ := raw.(map[string]any)
-	found, _ := res["found"].(bool)
-	target, _ := res["target"].(string)
-	if !found || !strings.Contains(target, "indago-redirect-"+marker) {
-		e.finishTestCase(ctx, tc, nil, "open-redirect probe: the page's handlers did not assign the supplied external target")
-		return
-	}
-	html, _ := page.Content(ctx)
-	shot, _ := page.Screenshot(ctx, browser.ScreenshotOptions{})
-	evIDs, _ := e.persistDOMXSSEvidence(ctx, job.ScanID, tc.ID, shot, html, []string{"open redirect target: " + target})
-	detail, _ := json.Marshal(map[string]any{
-		"source": "dom_link_onclick", "target": target, "canary": canary,
-		"test_case_ids": []domain.ID{tc.ID},
-	})
-	f := &domain.Finding{
-		ID: domain.NewID(), ScanID: job.ScanID, ProjectID: e.projectIDFor(ctx, job.ScanID),
-		VulnClass: domain.VulnOpenRedirect, Verdict: domain.VerdictConfirmed,
-		Severity: domain.SeverityMedium, Confidence: domain.ConfidenceHigh,
-		Title:      "Open redirect: a link on the page sends the user to an attacker-controlled URL",
-		Summary:    "The page's own click handler took the url parameter and assigned it to location, so a trusted link can redirect to " + target + ".",
-		EndpointID: ep.ID, EvidenceIDs: evIDs,
-		Provenance: domain.Provenance{Engine: "dom-open-redirect", DiscoverySource: ep.Source, DetectedAt: time.Now(), VerifiedAt: ptrTime(time.Now())},
-		Detail:     detail, CreatedAt: time.Now(), UpdatedAt: time.Now(),
-	}
-	tc.Status = domain.TestCaseCompleted
-	if err := e.store.Findings().Create(ctx, f); err != nil {
-		e.finishTestCase(ctx, tc, err, "open-redirect probe: create finding")
-		return
-	}
-	e.finishTestCase(ctx, tc, nil, "confirmed: the page's onclick assigned the supplied external target to location: "+target)
-}
-
 func ptrTime(t time.Time) *time.Time { return &t }
 
 func (e *domXSSExecutor) projectIDFor(ctx context.Context, scanID domain.ID) domain.ID {
@@ -3902,146 +3857,6 @@ func (e *domXSSExecutor) probeCookieReflection(ctx context.Context, bctx *browse
 		return
 	}
 	e.finishTestCase(ctx, tc, nil, "confirmed: the page's cookie was poisoned and the server reflected it into executing HTML")
-}
-
-// domXSSClobberingCommentForm detects a comment renderer that sanitises with
-// DOMPurify or HTMLJanitor and exposes an add-comment form. The clobbering
-// payload has to be persisted, so the probe submits it and reloads the post.
-func domXSSClobberingCommentForm(html string) bool {
-	low := strings.ToLower(html)
-	if !strings.Contains(low, "loadcomments") || !strings.Contains(low, "post/comment") {
-		return false
-	}
-	return strings.Contains(low, "dompurify") || strings.Contains(low, "htmljanitor")
-}
-
-func domXSSClobberingPayload(html, marker string) (payload, fragment string) {
-	if strings.Contains(strings.ToLower(html), "htmljanitor") {
-		id := "x" + marker
-		return `<form id=` + id + ` tabindex=0 onfocus=` + marker + `><input id=attributes>`, "#" + id
-	}
-	return `<a id=defaultAvatar><a id=defaultAvatar name=avatar href="cid:&quot;onerror=` + marker + `//">`, ""
-}
-
-func (e *domXSSExecutor) probeDOMClobbering(ctx context.Context, bctx *browser.Context, job *domain.TestJob, ep *domain.Endpoint, marker, pageHTML string) {
-	// This probe is the DOM engine's only write: it persists the clobbering
-	// payload as a comment through the page's own POST form. A default scan
-	// must not do that, and the browser context's method gate would refuse the
-	// POST anyway — record the policy boundary as a skipped test case instead
-	// of navigating into a guaranteed block. SkipWriteEndpoints suppresses the
-	// same write even when AllowStateChanging is on: the persisted comment
-	// outlives the scan, so a read-only scan must never create it.
-	if !e.allowStateChanging || e.skipWriteEndpoints {
-		reason := "AllowStateChanging is off"
-		if e.allowStateChanging {
-			reason = "SkipWriteEndpoints is on"
-		}
-		tc := e.newTestCase(ctx, job, ep.URL)
-		tc.Status = domain.TestCaseSkipped
-		e.finishTestCase(ctx, tc, nil, "DOM clobbering probe skipped: it must persist a comment through a browser POST, and "+reason)
-		return
-	}
-	// The persisted payload must not share the DOM probes' marker: once it is
-	// in the page, every later source probe would otherwise see it execute and
-	// confirm itself from the clobbering comment.
-	clobberMarker := "clb" + strings.TrimPrefix(marker, "ind")
-	payload, fragment := domXSSClobberingPayload(pageHTML, clobberMarker)
-	tc := e.newTestCase(ctx, job, ep.URL)
-	page, err := bctx.NewPage(ctx)
-	if err != nil {
-		e.finishTestCase(ctx, tc, err, "clobbering probe: new page")
-		return
-	}
-	if _, err := page.Navigate(ctx, ep.URL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
-		page.Close()
-		e.finishTestCase(ctx, tc, err, "clobbering probe: load post")
-		return
-	}
-	html, _ := page.Content(ctx)
-	csrf := domXSSHiddenValue(html, "csrf")
-	postID := domXSSHiddenValue(html, "postId")
-	if csrf == "" || postID == "" {
-		page.Close()
-		e.finishTestCase(ctx, tc, nil, "clobbering probe: comment form has no csrf/postId field")
-		return
-	}
-	base, _ := url.Parse(ep.URL)
-	action := base.Scheme + "://" + base.Host + "/post/comment"
-	fields := map[string]string{
-		"csrf": csrf, "postId": postID, "comment": payload,
-		"name": "indago", "email": "indago@example.com", "website": "https://example.com",
-	}
-	if _, err := page.NavigateForm(ctx, "POST", action, fields, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
-		page.Close()
-		e.finishTestCase(ctx, tc, err, "clobbering probe: submit comment")
-		return
-	}
-	// The clobbered global only exists once the payload comment is attached to
-	// the document; the renderer reads it while building the NEXT comment.
-	// Post one harmless follower so the read happens after attachment.
-	if _, err := page.Navigate(ctx, ep.URL, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err == nil {
-		if h, herr := page.Content(ctx); herr == nil {
-			csrf2 := domXSSHiddenValue(h, "csrf")
-			if csrf2 != "" {
-				follow := map[string]string{
-					"csrf": csrf2, "postId": postID, "comment": "indago follower",
-					"name": "indago", "email": "indago@example.com", "website": "https://example.com",
-				}
-				_, _ = page.NavigateForm(ctx, "POST", action, follow, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad})
-			}
-		}
-	}
-	page.Close()
-	obsPage, err := e.openObservedPage(ctx, bctx, clobberMarker)
-	if err != nil {
-		e.finishTestCase(ctx, tc, err, "clobbering probe: observed page")
-		return
-	}
-	defer obsPage.Close()
-	target := ep.URL + fragment
-	if _, err := obsPage.Navigate(ctx, target, browser.NavOptions{Limiter: e.limiter, WaitUntil: browser.WaitLoad}); err != nil {
-		e.finishTestCase(ctx, tc, err, "clobbering probe: reload post")
-		return
-	}
-	if fragment != "" {
-		if _, err := obsPage.Evaluate(ctx, `(() => { const el = document.getElementById(`+goQuoteJS(strings.TrimPrefix(fragment, "#"))+`); if (el && el.focus) el.focus(); })()`); err != nil {
-			e.finishTestCase(ctx, tc, err, "clobbering probe: focus the clobbered element")
-			return
-		}
-	}
-	obs, err := observePage(ctx, obsPage, 2*time.Second)
-	if err != nil {
-		e.finishTestCase(ctx, tc, err, "clobbering probe: observe")
-		return
-	}
-	_, _, matched := verification.MatchRuntimeExecution(clobberMarker, obs.Runtime)
-	if !matched {
-		e.finishTestCase(ctx, tc, nil, "clobbering probe: the persisted comment did not execute the marker")
-		return
-	}
-	out, _ := obsPage.Content(ctx)
-	shot, _ := obsPage.Screenshot(ctx, browser.ScreenshotOptions{})
-	evIDs, _ := e.persistDOMXSSEvidence(ctx, job.ScanID, tc.ID, shot, out, []string{"clobbering payload persisted: " + payload})
-	detail, _ := json.Marshal(map[string]any{
-		"source": "comment_html", "sink": "dom_clobbering", "payload": payload,
-		"test_case_ids": []domain.ID{tc.ID},
-	})
-	f := &domain.Finding{
-		ID: domain.NewID(), ScanID: job.ScanID, ProjectID: e.projectIDFor(ctx, job.ScanID),
-		VulnClass: domain.VulnDOMXSS, Verdict: domain.VerdictConfirmed,
-		Severity: domain.SeverityHigh, Confidence: domain.ConfidenceHigh,
-		Title:      "DOM clobbering: a persisted comment executes script in the page",
-		Summary:    "A comment carrying a clobbering payload was accepted by the page's sanitizer and executed after reload.",
-		EndpointID: ep.ID, EvidenceIDs: evIDs,
-		Provenance: domain.Provenance{Engine: "dom-clobbering", DiscoverySource: ep.Source, DetectedAt: time.Now(), VerifiedAt: ptrTime(time.Now())},
-		Detail:     detail, CreatedAt: time.Now(), UpdatedAt: time.Now(),
-	}
-	tc.Status = domain.TestCaseCompleted
-	if err := e.store.Findings().Create(ctx, f); err != nil {
-		e.finishTestCase(ctx, tc, err, "clobbering probe: create finding")
-		return
-	}
-	e.finishTestCase(ctx, tc, nil, "confirmed: clobbering comment executed the marker after reload")
 }
 
 func domXSSHiddenValue(html, name string) string {
