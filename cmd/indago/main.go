@@ -50,8 +50,9 @@ var (
 	buildDate = "unknown"
 )
 
-// apiTokenEnv names the environment variable holding the control API's bearer
-// token. It is deliberately never a command-line flag (see cmdServe).
+// apiTokenEnv names the environment variable holding the control API's token.
+// The same value can be supplied per invocation with -api-token (see
+// api_token_flags.go); the flag wins when both are present.
 const apiTokenEnv = "INDAGO_API_TOKEN"
 
 func main() {
@@ -95,9 +96,9 @@ Usage:
 Server:
   version        Print version information
   db init        Create the data directory and initialize the database
-  serve          Run the web UI + API server (flags: -data, -addr, -v, -tls-cert/-tls-key for HTTPS; env INDAGO_API_TOKEN enables the API bearer token)
+  serve          Run the web UI + API server (flags: -data, -addr, -v, -tls-cert/-tls-key for HTTPS; -api-token or $INDAGO_API_TOKEN enables API token authentication)
 
-Client (talk to a running server; -server URL or $INDAGO_SERVER_URL, default http://127.0.0.1:8750; $INDAGO_CA_CERT = PEM CA file for a private/self-signed https server; $INDAGO_API_TOKEN if the server requires a token):
+Client (talk to a running server; -server URL or $INDAGO_SERVER_URL, default http://127.0.0.1:8750; $INDAGO_CA_CERT = PEM CA file for a private/self-signed https server; -api-token or $INDAGO_API_TOKEN if the server requires a token):
   project create <name> | project list
   target add -project ID -name NAME -url URL | target list -project ID
   scope set -project ID -include host[,host] [-exclude ..] [-include-path ..] [-exclude-path ..] [-subdomains]
@@ -188,11 +189,16 @@ func cmdServe(args []string) error {
 	browserNoSandbox := fs.Bool("browser-no-sandbox", false,
 		"launch -browser Chromium WITHOUT its process sandbox (--no-sandbox). The sandbox is ON by default; use only when the host cannot provide it (e.g. an unprivileged container). Lowers isolation from hostile pages")
 	allowRemote := fs.Bool("allow-remote", false,
-		"allow binding a non-loopback address; requires INDAGO_API_TOKEN and -tls-cert/-tls-key (see docs/deployment.md)")
+		"allow binding a non-loopback address; requires an API token (-api-token or INDAGO_API_TOKEN) and -tls-cert/-tls-key (see docs/deployment.md)")
 	tlsCert := fs.String("tls-cert", "", "PEM certificate file: serve HTTPS (a path, not the certificate value)")
 	tlsKey := fs.String("tls-key", "", "PEM private key file for -tls-cert (a path; the key is never printed or logged)")
 	allowPlaintextRemote := fs.Bool("allow-plaintext-remote", false,
 		"permit a non-loopback bind WITHOUT TLS: the bearer token then travels unencrypted, and a warning is logged")
+	// The token is also read from INDAGO_API_TOKEN; this flag overrides it. A
+	// flag value is visible in shell history and `ps`, so the environment
+	// variable stays the recommended form for a long-lived service.
+	var apiTokenFlag apiTokenFlagState
+	apiTokenFlag.register(fs, apiTokenServeUsage())
 	apiRate := fs.Float64("api-rate", config.DefaultAPIRate,
 		"per-client-IP sustained requests/second on /api/ and /metrics; 0 disables (overrides config.json server.api_rate)")
 	apiBurst := fs.Int("api-burst", config.DefaultAPIBurst,
@@ -223,9 +229,13 @@ func cmdServe(args []string) error {
 		return err
 	}
 
-	// The API bearer token is read once, here, from the environment: never a
-	// flag (shell history, `ps`), never written to config.json, never logged.
-	apiToken := os.Getenv(apiTokenEnv)
+	// The API token is resolved once, here: -api-token wins over
+	// $INDAGO_API_TOKEN. It is never written to config.json, never logged, and
+	// never echoed in an error.
+	apiToken, apiTokenSource, err := resolveAPIToken(apiTokenFlag, os.Getenv(apiTokenEnv))
+	if err != nil {
+		return err
+	}
 
 	cfg, err := config.Load(cfgPath(*dataDir))
 	if err != nil {
@@ -239,11 +249,6 @@ func cmdServe(args []string) error {
 	}
 	if cfg.Server, err = overlayRateLimitFlags(cfg.Server, setFlags, *apiRate, *apiBurst); err != nil {
 		return err
-	}
-	if apiToken != "" {
-		if err := web.ValidateAPIToken(apiToken); err != nil {
-			return fmt.Errorf("%s: %w", apiTokenEnv, err)
-		}
 	}
 	if err := validateTLSFlags(*tlsCert, *tlsKey); err != nil {
 		return err
@@ -446,10 +451,13 @@ func cmdServe(args []string) error {
 		log.Warn("api rate limit DISABLED (-api-rate 0 or api_rate 0)")
 	}
 	if err := srv.SetAPIToken(apiToken); err != nil {
-		return fmt.Errorf("%s: %w", apiTokenEnv, err)
+		return fmt.Errorf("%s: %w", apiTokenSource, err)
 	}
 	if apiToken != "" {
-		log.Info("control API requires a bearer token", "env", apiTokenEnv)
+		log.Info("control API requires a bearer token", "source", apiTokenSource)
+		if apiTokenSource == apiTokenFlagName {
+			log.Warn("the API token was passed with " + apiTokenFlagName + ", which is visible in shell history and `ps`; prefer " + apiTokenEnv)
+		}
 	}
 	gw, err := ai.New(ai.Settings{
 		Enabled:  *aiProvider != "",
@@ -505,27 +513,27 @@ func cmdServe(args []string) error {
 }
 
 // checkRemoteBindAllowed refuses a non-loopback bind unless the operator opts
-// in with -allow-remote AND configures INDAGO_API_TOKEN AND serves TLS
-// (-tls-cert/-tls-key). The control API can start scans, read findings and
-// evidence (which may include captured session cookies), and generate reports;
-// a remote bind without the bearer token, or with the token in clear text,
-// would expose all of that. The only way around the TLS requirement is
-// -allow-plaintext-remote, which is allowed but returns a warning for the
-// caller to log. Every refusal is an error, not a log line, which is easy to
-// miss running as a daemon. The token value never appears in the returned
-// error or warning.
+// in with -allow-remote AND configures an API token (-api-token or
+// INDAGO_API_TOKEN) AND serves TLS (-tls-cert/-tls-key). The control API can
+// start scans, read findings and evidence (which may include captured session
+// cookies), and generate reports; a remote bind without the token, or with the
+// token in clear text, would expose all of that. The only way around the TLS
+// requirement is -allow-plaintext-remote, which is allowed but returns a
+// warning for the caller to log. Every refusal is an error, not a log line,
+// which is easy to miss running as a daemon. The token value never appears in
+// the returned error or warning.
 func checkRemoteBindAllowed(addr string, allowRemote bool, token string, tlsOn, allowPlaintext bool) (warning string, err error) {
 	if isLoopbackAddr(addr) {
 		return "", nil
 	}
 	if !allowRemote {
 		return "", fmt.Errorf("refusing to bind non-loopback address %q without -allow-remote; "+
-			"a remote bind also requires %s (the control API can start scans, read evidence, and generate reports) "+
+			"a remote bind also requires an API token (-api-token or %s; the control API can start scans, read evidence, and generate reports) "+
 			"and TLS (-tls-cert and -tls-key); see docs/deployment.md before exposing it beyond localhost", addr, apiTokenEnv)
 	}
 	if token == "" {
 		return "", fmt.Errorf("refusing to bind non-loopback address %q with -allow-remote and no API token: "+
-			"set %s to a random token of at least %d characters (for example: openssl rand -hex 32); "+
+			"pass -api-token or set %s to a random token of at least %d characters (for example: openssl rand -hex 32); "+
 			"see docs/deployment.md", addr, apiTokenEnv, web.MinAPITokenLen)
 	}
 	if tlsOn {

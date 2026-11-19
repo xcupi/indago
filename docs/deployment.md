@@ -167,16 +167,19 @@ beyond the tested Docker defaults are promised.
 
 ## 1. Network exposure — read this first
 
-**The control API (`/api/...`) has an optional bearer token and no per-operator
+**The control API (`/api/...`) has an optional token and no per-operator
 identity.** Whether it requires a token is decided at `indago serve` startup by
-the `INDAGO_API_TOKEN` environment variable:
+the `-api-token` flag or the `INDAGO_API_TOKEN` environment variable (the flag
+wins when both are set):
 
-- **Unset (default):** the API is open to anyone who can reach the port. This is
-  the single-operator loopback mode and is unchanged from before.
-- **Set:** every `/api/` request must send `Authorization: Bearer <token>`.
+- **Neither given (default):** the API is open to anyone who can reach the port.
+  This is the single-operator loopback mode and is unchanged from before.
+- **Either given:** every `/api/` request and `GET /metrics` must send
+  `Authorization: Bearer <token>` or `X-Indago-Token: <token>`.
   A missing or wrong token gets `401` with `WWW-Authenticate: Bearer`.
   `/healthz`, `/readyz` and the static UI stay open so the page can load and
-  prompt for the token, and orchestration probes keep working. The token is accepted only in that header — never in a query
+  prompt for the token, and orchestration probes keep working. The token is
+  accepted only in those two headers — never in a query
   string or a cookie.
 
 Rules for the token:
@@ -184,12 +187,15 @@ Rules for the token:
 - Use at least 32 characters with no whitespace, e.g.
   `export INDAGO_API_TOKEN="$(openssl rand -hex 32)"`. A shorter or malformed
   value makes `serve` refuse to start (the error does not print the value).
-- It is read once, at startup, from the environment. It is never a
-  command-line flag (shell history, `ps`), never written to `config.json`, and
+- It is read once, at startup. It is never written to `config.json`, and
   never logged or echoed in an error or response.
-- The CLI sends it on every request when `INDAGO_API_TOKEN` is set in its
-  environment. Without it, a token-protected server answers `401` and the CLI
-  says which variable to set.
+- The environment variable is the recommended form: a flag value is visible in
+  shell history and in `ps`. `-api-token` exists for wrappers that already build
+  the command line (systemd `ExecStart=`, a container entrypoint); `indago serve`
+  logs a warning when the token came from the flag.
+- The CLI sends the token on every request: `-api-token` on any client
+  subcommand overrides `INDAGO_API_TOKEN` for that invocation. Without either, a
+  token-protected server answers `401` and the CLI says what to set.
 - The web UI asks for the token on the first `401` and keeps it in
   `sessionStorage` — cleared when the tab closes, never in `localStorage` or a
   cookie. Evidence and report links are fetched with the token too.
@@ -415,11 +421,11 @@ Useful flags (`indago serve -h` or `cmd/indago/main.go` for the full list):
 | `-addr HOST:PORT` | Listen address (overrides `config.json`) |
 | `-api-rate N` | Per-client-IP sustained requests/second on `/api/` and `/metrics`. Default `50`; `0` disables. Overrides `server.api_rate`. Flag values apply to this run only; they are not written back to `config.json`. Negative is an error (§1, *Rate limiting*) |
 | `-api-burst N` | Per-client-IP burst size on `/api/` and `/metrics`. Default `200`; must be at least 1 while the rate is above 0. Overrides `server.api_burst` (§1) |
-| `GET /metrics` | Prometheus exposition. Unauthenticated when `INDAGO_API_TOKEN` is unset; needs the bearer token when set (§1, *Metrics*) |
-| `-allow-remote` | Allow binding a non-loopback address; also requires `INDAGO_API_TOKEN` and TLS (§1) |
+| `GET /metrics` | Prometheus exposition. Unauthenticated when no API token is configured; needs the token when one is (§1, *Metrics*) |
+| `-allow-remote` | Allow binding a non-loopback address; also requires an API token (`-api-token` or `INDAGO_API_TOKEN`) and TLS (§1) |
 | `-tls-cert FILE` / `-tls-key FILE` | Serve HTTPS with this PEM certificate and key. Give both or neither. Required for a remote bind (§1). Paths, not secret values |
 | `-allow-plaintext-remote` | Permit a remote bind without TLS. Off by default; logs a warning that the token travels unencrypted (§1) |
-| `INDAGO_API_TOKEN` (env) | Bearer token for the control API; unset = no token (§1). Never a flag |
+| `INDAGO_API_TOKEN` (env) / `-api-token TOKEN` | Control API token; neither = no token (§1). The flag overrides the variable for that run and warns that it is visible in `ps`/shell history; prefer the variable |
 | `-browser` | Enable browser-based discovery + verification (needs Chromium — §3) |
 | `-chromium PATH` | Chromium binary to use (overrides `$INDAGO_CHROMIUM_PATH` / the Playwright cache) |
 | `-allow-state-changing` | Also execute POST/PUT/PATCH/DELETE test requests against targets (default: GET/HEAD/OPTIONS only) |

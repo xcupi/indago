@@ -85,20 +85,34 @@ type cli struct {
 	server string
 	out    io.Writer
 	http   *http.Client
-	// token is $INDAGO_API_TOKEN, sent as a bearer token on every request when
-	// set. It is read from the environment only, never from a flag.
-	token string
+	// token is the -api-token value for this invocation; token.set records
+	// whether the operator passed it. Every client subcommand also accepts
+	// -api-token so a token-protected server can be driven without exporting a
+	// variable first.
+	token apiTokenFlagState
+	// envToken is $INDAGO_API_TOKEN, used when -api-token was not given. The
+	// flag wins over the environment.
+	envToken string
 	// setupErr is a startup failure (an unreadable $INDAGO_CA_CERT). It is
 	// returned by every request rather than silently ignoring the trust setting.
 	setupErr error
 }
 
+// apiToken returns the token to send: the -api-token value when it was given,
+// otherwise $INDAGO_API_TOKEN. Empty means "send no token".
+func (c *cli) apiToken() string {
+	if c.token.set {
+		return c.token.value
+	}
+	return c.envToken
+}
+
 func newCLI(server string, out io.Writer) *cli {
 	c := &cli{
-		server: strings.TrimRight(server, "/"),
-		out:    out,
-		http:   &http.Client{Timeout: 30 * time.Second},
-		token:  os.Getenv(apiTokenEnv),
+		server:   strings.TrimRight(server, "/"),
+		out:      out,
+		http:     &http.Client{Timeout: 30 * time.Second},
+		envToken: os.Getenv(apiTokenEnv),
 	}
 	tr, err := clientTransport()
 	if err != nil {
@@ -127,10 +141,12 @@ func (c *cli) send(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-// authorize adds the bearer token to req when one is configured.
+// authorize adds the control API token to req when one is configured, as
+// Authorization: Bearer. The server also accepts X-Indago-Token, but Bearer is
+// the conventional form and what the bundled UI uses.
 func (c *cli) authorize(req *http.Request) {
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if tok := c.apiToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 }
 
@@ -153,10 +169,10 @@ func (c *cli) failure(status int, data []byte) *apiError {
 		msg = e.Error
 	}
 	if status == http.StatusUnauthorized {
-		if c.token == "" {
-			msg = "the server requires an API token: set " + apiTokenEnv + " to the token the server was started with"
+		if c.apiToken() == "" {
+			msg = "the server requires an API token: pass " + apiTokenFlagName + " or set " + apiTokenEnv + " to the token the server was started with"
 		} else {
-			msg += "; check " + apiTokenEnv
+			msg += "; check " + apiTokenFlagName + "/" + apiTokenEnv
 		}
 	}
 	return &apiError{Status: status, Message: msg}
@@ -292,11 +308,12 @@ type flagHelp struct{ fs *flag.FlagSet }
 func (e *flagHelp) Error() string { return "help requested for " + e.fs.Name() }
 
 // newFlags builds a FlagSet whose errors are returned (not os.Exit) and which
-// shares the -server flag.
+// shares the -server and -api-token flags.
 func (c *cli) newFlags(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&c.server, "server", c.server, "indago server URL")
+	c.token.register(fs, "control API token for this invocation; overrides $"+apiTokenEnv)
 	return fs
 }
 
