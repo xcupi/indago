@@ -153,6 +153,46 @@ type CapturedRequest struct {
 	Body    []byte      `json:"body,omitempty"`
 }
 
+// TLSCertificate is one certificate from the chain the peer presented, reduced
+// to the fields a read-only hygiene inspection needs. It carries no key
+// material and no DER blob.
+type TLSCertificate struct {
+	Subject   string    `json:"subject"`
+	Issuer    string    `json:"issuer"`
+	NotBefore time.Time `json:"not_before"`
+	NotAfter  time.Time `json:"not_after"`
+	DNSNames  []string  `json:"dns_names,omitempty"`
+	// SelfSigned is derived from the certificate itself: its issuer matches its
+	// own subject AND its signature verifies with its own public key.
+	SelfSigned bool `json:"self_signed,omitempty"`
+}
+
+// TLSState is the TLS state of the connection that carried a response. It is a
+// factual capture — negotiated version, cipher, and the peer's certificate
+// facts — not a judgement: whether any of it is acceptable is the caller's
+// decision, and the transport deliberately has no opinion (this package is a
+// neutral transport).
+//
+// The negotiated version is the BEST the server and this client could agree
+// on: Go's client offers TLS 1.3 and 1.2 and never proposes anything older, so
+// a server that only speaks TLS 1.0/1.1 cannot be inspected here at all — it
+// answers the ClientHello with a protocol-version alert and the request fails
+// instead (see the caller that reads that alert).
+type TLSState struct {
+	Version         uint16 `json:"version"`
+	VersionName     string `json:"version_name"`
+	CipherSuite     uint16 `json:"cipher_suite"`
+	CipherSuiteName string `json:"cipher_suite_name"`
+	ServerName      string `json:"server_name,omitempty"`
+	ALPN            string `json:"alpn,omitempty"`
+	// Verified is true when the transport verified the peer's chain. It is
+	// false both when verification was disabled by configuration and when
+	// there was nothing to verify, so it must never be read as "the
+	// certificate is invalid".
+	Verified         bool             `json:"verified"`
+	PeerCertificates []TLSCertificate `json:"peer_certificates,omitempty"`
+}
+
 // Response captures an HTTP response plus timing and provenance for evidence.
 type Response struct {
 	Status        int              `json:"status"`
@@ -167,6 +207,10 @@ type Response struct {
 	Duration      time.Duration    `json:"duration"`
 	ReceivedAt    time.Time        `json:"received_at"`
 	Request       *CapturedRequest `json:"request,omitempty"`
+	// TLS is nil for a plain-HTTP response and for a transport whose
+	// connection the standard library cannot introspect (the randomized
+	// uTLS dialer hands back a non-*tls.Conn, so net/http records no state).
+	TLS *TLSState `json:"tls,omitempty"`
 }
 
 // Engine performs HTTP exchanges with a target.

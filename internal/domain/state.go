@@ -315,12 +315,19 @@ const (
 	// signature or an operator-versus-control differential independently
 	// agrees. See internal/scan/nosqli.go.
 	JobNoSQLi JobType = "nosqli"
+	// JobMethodTLS inspects ONE origin for HTTP method exposure and TLS
+	// transport hygiene: read-only OPTIONS and TRACE probes (TRACE is only
+	// reported when the server echoes the request back; OPTIONS only when it
+	// advertises write methods to an anonymous non-API page) plus the TLS
+	// state of the scan's own handshake. Findings are deduplicated per
+	// origin. See internal/scan/methodtls.go.
+	JobMethodTLS JobType = "method_tls_hygiene"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders, JobHostHeader, JobJWT, JobNoSQLi:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders, JobHostHeader, JobJWT, JobNoSQLi, JobMethodTLS:
 		return true
 	default:
 		return false

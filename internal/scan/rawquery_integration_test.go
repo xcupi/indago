@@ -151,6 +151,11 @@ func runRawQueryScan(t *testing.T, site *rawQuerySite, mode discovery.RawQueryMo
 	cfg := &domain.ScanConfig{
 		DiscoveryConcurrency: 4, HTTPConcurrency: 8, BrowserConcurrency: 0,
 		MaxDepth: 1, RawQueryInjection: string(mode),
+		// These fixtures count EVERY request that carries a query string, so
+		// the method/TLS pass's cache-busted OPTIONS/TRACE probes would be
+		// counted as raw-query traffic. It has its own tests
+		// (methodtls_test.go); keep this fixture about one engine's volume.
+		SkipMethodTLS: true,
 	}
 	opts := scan.Options{}
 	if withBrowser {

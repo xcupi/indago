@@ -71,6 +71,7 @@ enqueues each pass once per scan and gates it on the scan config.
 | XXE | `internal/scan/xxe.go` | opt-in — `EnableXXE` / `-enable-xxe` |
 | CORS misconfiguration | `internal/scan/cors.go` | ON — `SkipCORS` / `-skip-cors` omits it |
 | Security headers / cookie policy | `internal/scan/securityheaders.go` | ON — `SkipSecurityHeaders` / `-skip-security-headers` omits it |
+| HTTP method & TLS hygiene | `internal/scan/methodtls.go` | ON — `SkipMethodTLS` / `-skip-method-tls` omits it; read-only OPTIONS/TRACE probes plus the scan's own TLS handshake state |
 | Host header injection | `internal/scan/hostheader.go` | ON — `SkipHostHeader` / `-skip-host-header` omits it |
 | JWT validation & hygiene | `internal/scan/jwtcheck.go` | ON — `SkipJWT` / `-skip-jwt` omits it; only acts when the scan's session carries a Bearer JWT |
 | GraphQL exposure | `internal/scan/graphql.go` | ON — `SkipGraphQL` / `-skip-graphql` omits it |
@@ -93,6 +94,20 @@ covers the control plane. For the newest read-only capabilities on `8a26e33`
 - **OpenAPI v3 JSON import (`855d589`, `crAPI` scan `24132197-b33f-41ec-b9c5-7cc2e75c0fa2`)**: `43` endpoints discovered (`7` registered with `source=openapi`), `136` parameters, `332/332` jobs completed (`0` failed).
 - **Security headers & JWT validation (`8a26e33`, `crAPI` scan `846a32f0-ca89-4a87-b2c7-c80a6f67ad7f`, `crapi-auth.json`)**: `7/7` jobs completed (`0` failed), **`3` confirmed findings** (`security_headers` low: `Server header discloses the software version`; `jwt_validation` critical: `Unsigned alg=none JWT is accepted` and `JWT signature is not validated`).
 - **Host header & NoSQLi clean execution (`8a26e33`, `Juice Shop` scan `04044672-af41-4824-8dd1-7e940f64b317`)**: `70/70` jobs completed (`0` failed), `security_headers` (`1/1`), `host_header` (`1/1`), and `nosqli` (`35/35`) completed with `0` errors and `0` false positives. Positive live confirmation of `host_header` and `nosqli` against intentionally vulnerable targets remains to be recorded.
+
+**HTTP method & TLS hygiene (`feat/method-tls-hygiene`): unit and integration
+verified only.** `internal/scan/methodtls_test.go` exercises the engine against
+real `httptest` servers: a clean origin (GET/HEAD/POST + `Allow: GET, HEAD,
+OPTIONS` + `TRACE` → 405) records zero findings, a TRACE that echoes the
+request line and marker produces the `http_methods` finding with stored
+evidence, an anonymous OPTIONS advertising PUT/DELETE on a page produces one,
+and the same advertisement on an API path or in an authenticated scan produces
+none. On the TLS side a TLS 1.0-only listener (refused handshake → protocol
+alert) and an expired leaf certificate are both confirmed from a real
+handshake; a valid self-signed certificate is recorded in the detail but is
+deliberately NOT reported. No live run against the VM lab has been recorded for
+this engine yet, so treat "confirmed" here as "the code path produced the
+finding its fixture asserts".
 
 ### Discovery and recon
 

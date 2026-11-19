@@ -89,12 +89,24 @@ const (
 	// shapes, never $where/$function, updates or deletes.
 	// See internal/scan/nosqli.go.
 	VulnNoSQLi VulnClass = "nosqli"
+	// VulnHTTPMethods is an exposed or advertised dangerous HTTP method
+	// (CWE-749): TRACE answered by the server and echoing the request back
+	// (the cross-site tracing primitive), or an unauthenticated OPTIONS
+	// response advertising write methods (PUT/DELETE/PATCH) on a page that
+	// is not an API. Decided from the server's own responses to read-only
+	// probes; no write request is ever sent. See internal/scan/methodtls.go.
+	VulnHTTPMethods VulnClass = "http_methods"
+	// VulnTLSConfig is a TLS transport-hygiene weakness (CWE-326): the
+	// origin cannot negotiate TLS 1.2 or later, negotiated a weak cipher, or
+	// serves an expired certificate. Decided from the handshake the scan's
+	// own client performed, never by an LLM. See internal/scan/methodtls.go.
+	VulnTLSConfig VulnClass = "tls_config"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader, VulnJWT, VulnNoSQLi:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader, VulnJWT, VulnNoSQLi, VulnHTTPMethods, VulnTLSConfig:
 		return true
 	default:
 		return false

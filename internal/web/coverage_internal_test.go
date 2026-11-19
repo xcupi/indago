@@ -25,6 +25,7 @@ func TestClassifySkipKnowsTheNotesTheExecutorsWrite(t *testing.T) {
 		{"command-injection skipped: baseline was denied (HTTP 403): an authorization or prerequisite gate refused the unmutated request; no command payload was sent", "endpoint_gated"},
 		{"command-injection skipped: baseline was unavailable (HTTP 405): the endpoint does not serve this method and path; no command payload was sent", "endpoint_unavailable"},
 		{"security headers skipped: POST is state-changing; a security-header check only sends GET", "method_not_applicable"},
+		{"method and tls check skipped: PUT is state-changing; a method and tls check only sends GET, OPTIONS and TRACE", "method_not_applicable"},
 		{"jwt check skipped: POST is state-changing; the JWT validation differential only sends GET", "method_not_applicable"},
 		{"jwt check skipped: no bearer JWT was available for this origin", "jwt_not_applicable"},
 		{"nosqli skipped: state-changing endpoint skipped by policy", "nosqli_not_applicable"},
@@ -65,6 +66,7 @@ func TestClassifySkipPatternsStillExistInTheExecutors(t *testing.T) {
 		"baseline was denied",
 		"baseline was unavailable",
 		"security-header check only sends get",
+		"method and tls check only sends get",
 		"jwt validation differential only sends get",
 		"no bearer jwt was available",
 	} {

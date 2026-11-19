@@ -204,6 +204,31 @@ var classIntelByClass = map[domain.VulnClass]classIntel{
 			"with a revocable refresh token, and never place passwords, API keys or other secrets in the payload.",
 		References: []string{"https://cwe.mitre.org/data/definitions/347.html", "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/06-Session_Management_Testing/10-Testing_JSON_Web_Tokens"},
 	},
+	domain.VulnHTTPMethods: {
+		CWE:  "CWE-749",
+		Name: "Exposed dangerous HTTP method",
+		Impact: "The origin answers, or advertises, methods a page never needs. A TRACE that echoes the request hands " +
+			"back the headers the client sent — session cookies included — to whoever can make that client issue " +
+			"TRACE (the cross-site tracing primitive). An unauthenticated OPTIONS response advertising PUT, DELETE or " +
+			"PATCH tells an attacker the resource accepts writes; whether it truly does without authorization has to " +
+			"be confirmed separately, because Indago never sends the write itself.",
+		Remediation: "Disable TRACE at the server or reverse proxy (Apache: TraceEnable off; nginx: return 405 for " +
+			"TRACE). Answer OPTIONS with only the methods the route implements for that caller, require " +
+			"authentication before advertising write methods, and turn WebDAV off on origins that do not serve it.",
+		References: []string{"https://cwe.mitre.org/data/definitions/749.html", "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/06-Testing_for_HTTP_Verb_Tampering"},
+	},
+	domain.VulnTLSConfig: {
+		CWE:  "CWE-326",
+		Name: "Inadequate TLS transport configuration",
+		Impact: "A transport that cannot negotiate TLS 1.2 or better — or that negotiated a broken cipher or serves " +
+			"an expired certificate — does not provide the confidentiality and integrity its users assume. TLS 1.0 " +
+			"and 1.1 have known protocol weaknesses and are refused by current browsers, and an expired certificate " +
+			"makes every verifying client refuse the origin or train its users to click through warnings.",
+		Remediation: "Require TLS 1.2 as the minimum protocol version (prefer TLS 1.3), restrict the listener to AEAD " +
+			"cipher suites, disable export and NULL suites entirely, and automate certificate renewal so a " +
+			"certificate cannot expire unnoticed.",
+		References: []string{"https://cwe.mitre.org/data/definitions/326.html", "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html"},
+	},
 }
 
 func intelFor(class domain.VulnClass) classIntel {
