@@ -47,8 +47,9 @@ h1 { font: 700 30pt/1.12 Arial, sans-serif; letter-spacing: -.025em; color: #102
 .contents li { break-inside: avoid; padding: 1.2mm 0; display: flex; align-items: baseline; gap: 2.5mm; }
 .contents .tn { font: bold 7.5pt/1 Arial, sans-serif; color: #0f766e; min-width: 6mm; }
 .contents a { flex: 1; }
-/* No page numbers here: the print engine has no target-counter(), and a
-   wrong number is worse than none. Entries stay links in the HTML view. */
+.contents .tp { font: 7.5pt/1 Arial, sans-serif; color: #52657a; font-variant-numeric: tabular-nums; min-width: 6mm; text-align: right; }
+/* Page numbers are populated by a two-pass PDF render (omitted in HTML view,
+   where entries stay clickable links). */
 
 /* Sections */
 section { break-inside: auto; }
@@ -169,8 +170,14 @@ func (d doc) renderHTML(b *strings.Builder) {
 	if len(d.Sections) > 0 {
 		b.WriteString(`<nav class="contents"><div class="eyebrow">CONTENTS</div><ol>`)
 		for i, sec := range d.Sections {
-			fmt.Fprintf(b, `<li><span class="tn">%02d</span><a href="#s%d">%s</a></li>`,
-				i+1, i+1, html.EscapeString(sec.Heading))
+			id := fmt.Sprintf("s%d", i+1)
+			if p := d.PageNumbers[id]; p > 0 {
+				fmt.Fprintf(b, `<li><span class="tn">%02d</span><a href="#%s">%s</a><span class="tp">%d</span></li>`,
+					i+1, id, html.EscapeString(sec.Heading), p)
+			} else {
+				fmt.Fprintf(b, `<li><span class="tn">%02d</span><a href="#%s">%s</a></li>`,
+					i+1, id, html.EscapeString(sec.Heading))
+			}
 		}
 		b.WriteString(`</ol></nav>`)
 	}

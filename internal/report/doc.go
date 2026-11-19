@@ -56,8 +56,9 @@ type doc struct {
 	// Highlights are the cover KPI cards: a label and a short value. They are
 	// presentation only (a reader-facing summary of numbers already stated in
 	// the body), never a new claim about the target.
-	Highlights [][2]string
-	Sections   []docSection
+	Highlights  [][2]string
+	Sections    []docSection
+	PageNumbers map[string]int
 }
 
 func para(text string) docBlock { return docBlock{Kind: docParagraph, Text: text} }

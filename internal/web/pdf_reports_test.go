@@ -18,16 +18,22 @@ import (
 )
 
 type stubPDFRenderer struct {
-	doc   []byte
-	calls int
-	err   error
+	doc      []byte
+	docs     [][]byte
+	calls    int
+	err      error
+	response []byte
 }
 
 func (s *stubPDFRenderer) Render(_ context.Context, doc []byte) ([]byte, error) {
 	s.calls++
 	s.doc = doc
+	s.docs = append(s.docs, append([]byte(nil), doc...))
 	if s.err != nil {
 		return nil, s.err
+	}
+	if len(s.response) > 0 {
+		return s.response, nil
 	}
 	return []byte("%PDF-1.7\nstub pdf body\n"), nil
 }
@@ -161,5 +167,44 @@ func TestPDFRenderFailureIsReported(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "pdf export failed") {
 		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func TestPDFTwoPassInjectsTOCPageNumbers(t *testing.T) {
+	a := newPDFAPI(t, true)
+	a.stub.response = []byte(`%PDF-1.4
+1 0 obj
+<< /Type /Page >>
+endobj
+2 0 obj
+<< /Type /Page >>
+endobj
+3 0 obj
+<< /Type /Pages /Count 2 /Kids [1 0 R 2 0 R] >>
+endobj
+4 0 obj
+<< /s1 [2 0 R /XYZ 0 700 0] >>
+endobj
+5 0 obj
+<< /Type /Catalog /Pages 3 0 R /Dests 4 0 R >>
+endobj
+trailer
+<< /Root 5 0 R >>
+%%EOF`)
+	scanID := createTestScan(t, a.api)
+	seedFinding(t, a.api, scanID)
+
+	rec := a.do("POST", "/api/scans/"+string(scanID)+"/reports", map[string]any{"format": "pdf"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if a.stub.calls != 2 {
+		t.Fatalf("renderer calls = %d, want 2 (pass 1 + pass 2)", a.stub.calls)
+	}
+	if strings.Contains(string(a.stub.docs[0]), `<span class="tp">`) {
+		t.Fatal("pass 1 HTML should not have TOC page numbers")
+	}
+	if !strings.Contains(string(a.stub.docs[1]), `<a href="#s1">Statement of Confidentiality</a><span class="tp">2</span>`) {
+		t.Fatalf("pass 2 HTML missing injected page number for s1")
 	}
 }
