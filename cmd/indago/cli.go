@@ -1444,7 +1444,7 @@ func (c *cli) report(sub string, args []string) error {
 func (c *cli) reportCreate(args []string) error {
 	fs := c.newFlags("report create")
 	scanRef := fs.String("scan", "", "scan ID or prefix")
-	format := fs.String("format", "json", "json | markdown | html")
+	format := fs.String("format", "json", "json | markdown | html | sarif")
 	out := fs.String("out", "", "also write the rendered report to this file")
 	mode := fs.String("mode", "", "all | confirmed | selected (default: selected when -finding is given, else all)")
 	aiSummary := fs.Bool("ai-summary", false, "ask the AI Gateway (if configured with -ai-provider on `indago serve`) for an advisory executive summary, prepended to the report and clearly labeled; no effect if AI is disabled")
@@ -1454,7 +1454,7 @@ func (c *cli) reportCreate(args []string) error {
 		return err
 	}
 	if *scanRef == "" {
-		return errors.New("usage: indago report create -scan <scan-id|prefix> -format json|markdown|html [-mode all|confirmed|selected] [-finding ID]... [-ai-summary] [-out FILE]")
+		return errors.New("usage: indago report create -scan <scan-id|prefix> -format json|markdown|html|sarif [-mode all|confirmed|selected] [-finding ID]... [-ai-summary] [-out FILE]")
 	}
 	scanID, err := c.resolveScanID(*scanRef)
 	if err != nil {

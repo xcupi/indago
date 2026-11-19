@@ -116,7 +116,7 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER_URL, default htt
   finding poc -scan <scan-id|prefix> -out <file.html> <finding-id|prefix>   (standalone PoC artifact; Confirmed findings only)
   endpoint list -scan <scan-id|prefix> [-json]   (discovered endpoints + their parameters, for debugging why a scan is Inconclusive)
   auth login -login-url URL [-success-url GLOB]   (standalone interactive-login capture; requires indago serve -browser)
-  report create -scan <scan-id|prefix> -format json|markdown|html [-mode all|confirmed|selected] [-finding ID]... [-out FILE]
+  report create -scan <scan-id|prefix> -format json|markdown|html|sarif [-mode all|confirmed|selected] [-finding ID]... [-out FILE]
   report list -scan <scan-id|prefix> [-json]
   report show <report-id|prefix> [-out FILE] [-download]
 

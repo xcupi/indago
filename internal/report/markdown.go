@@ -103,7 +103,7 @@ func (MarkdownGenerator) Generate(w io.Writer, data Data) error {
 		}
 		fmt.Fprintf(&b, "## %s\n\n", sec.Title())
 		if sec == SectionDiagnostic {
-			b.WriteString("_These candidates reflected but browser verification found no execution. They are kept for diagnosis; they are not vulnerabilities._\n\n")
+			b.WriteString("_These attempts produced no confirming signal from their engine. They are kept for diagnosis; they are not vulnerabilities._\n\n")
 		}
 		for _, f := range inSec {
 			n++
@@ -154,6 +154,18 @@ func writeFinding(b *strings.Builder, n int, f *domain.Finding, v FindingView) {
 		}
 	} else {
 		fmt.Fprintf(b, "- **CWE / CVSS:** not classified — this vulnerability class has no baseline in Indago's table; no score is invented.\n")
+	}
+	if in := v.Intel; in != nil {
+		fmt.Fprintf(b, "- **Class:** %s\n", in.Name)
+		fmt.Fprintf(b, "- **Typical impact:** %s\n", in.Impact)
+		fmt.Fprintf(b, "- **Remediation:** %s\n", in.Remediation)
+		if len(in.References) > 0 {
+			links := make([]string, 0, len(in.References))
+			for _, ref := range in.References {
+				links = append(links, "<"+ref+">")
+			}
+			fmt.Fprintf(b, "- **References:** %s\n", strings.Join(links, ", "))
+		}
 	}
 	if f.EndpointID != "" {
 		fmt.Fprintf(b, "- **Endpoint:** `%s`\n", f.EndpointID)

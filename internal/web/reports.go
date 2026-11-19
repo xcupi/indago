@@ -210,11 +210,11 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist the layout that actually produced the file. JSON is a machine
-	// format with no layout, and an empty non-JSON template means the
-	// technical layout (the pre-template default).
+	// Persist the layout that actually produced the file. JSON and SARIF are
+	// machine formats with no layout, and an empty non-JSON template means
+	// the technical layout (the pre-template default).
 	storedTemplate := string(tmpl)
-	if format == domain.ReportJSON {
+	if isMachineReport(format) {
 		storedTemplate = ""
 	} else if storedTemplate == "" {
 		// Persist the UI's spelling so the reports table can say which
@@ -541,6 +541,8 @@ func reportExt(format domain.ReportFormat) string {
 		return ".html"
 	case domain.ReportPDF:
 		return ".pdf"
+	case domain.ReportSARIF:
+		return ".sarif"
 	default:
 		return ".json"
 	}
@@ -554,9 +556,18 @@ func reportContentType(format domain.ReportFormat) string {
 		return "text/html; charset=utf-8"
 	case domain.ReportPDF:
 		return "application/pdf"
+	case domain.ReportSARIF:
+		return "application/sarif+json; charset=utf-8"
 	default:
 		return "application/json; charset=utf-8"
 	}
+}
+
+// isMachineReport reports whether a format ignores the deliverable template:
+// JSON and SARIF have no human-facing layout, so no template is recorded for
+// them.
+func isMachineReport(format domain.ReportFormat) bool {
+	return format == domain.ReportJSON || format == domain.ReportSARIF
 }
 
 // handleGetReport returns a report's index entry (format, summary, timestamps)

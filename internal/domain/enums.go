@@ -103,6 +103,20 @@ const (
 	VulnTLSConfig VulnClass = "tls_config"
 )
 
+// AllVulnClasses returns every vulnerability class the domain defines, in a
+// stable order. It is the canonical enumeration for coverage tests and
+// reporting tables: adding a class constant here without adding it to a
+// classification table makes that table's coverage test fail.
+func AllVulnClasses() []VulnClass {
+	return []VulnClass{
+		VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl,
+		VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI,
+		VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal,
+		VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader, VulnJWT,
+		VulnNoSQLi, VulnHTTPMethods, VulnTLSConfig,
+	}
+}
+
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {

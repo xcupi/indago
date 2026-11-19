@@ -177,6 +177,18 @@ type FindingPoC struct {
 	Note string `json:"note,omitempty"`
 }
 
+// ClassIntelView is the class-level context that accompanies a finding in the
+// human-facing formats: what the class is called, the impact it normally has,
+// and the remediation that class is fixed with. It is reference material from
+// the built-in class table — never a claim about what this target exposed —
+// and is nil only for a class the table does not know.
+type ClassIntelView struct {
+	Name        string   `json:"name"`
+	Impact      string   `json:"impact"`
+	Remediation string   `json:"remediation"`
+	References  []string `json:"references,omitempty"`
+}
+
 // FindingView is a finding as presented: its section, the candidate whose
 // browser verification succeeded (confirmed findings only), every attempt kept
 // as a child diagnostic, and role-ordered evidence.
@@ -190,6 +202,12 @@ type FindingView struct {
 	// score. The vector is a documented BASELINE, not a measurement of this
 	// target's impact; Classification.Note says so and ships with it.
 	Classification *Classification `json:"classification,omitempty"`
+	// Intel is the class-level name/impact/remediation rendered with the
+	// finding, so every export format (technical Markdown/HTML, JSON and
+	// SARIF) carries the same context instead of leaving it to one template.
+	// Nil for an unknown class, which is reported as unclassified rather
+	// than given invented text.
+	Intel *ClassIntelView `json:"class_intel,omitempty"`
 	// CurlPoC reproduces the finding's stored HTTP request evidence as one
 	// runnable curl command with credentials redacted to shell variables.
 	// Nil when the caller supplied no request blob content (Data.
@@ -417,6 +435,10 @@ func newFindingView(f *domain.Finding, evidence map[domain.ID]*domain.Evidence, 
 	v := FindingView{Section: FindingSection(f), Method: d.Method, ParamName: d.ParameterName, Combined: d.Combined, ParamNameB: d.ParameterBName}
 	if c, ok := Classify(f.VulnClass); ok {
 		v.Classification = &c
+		in := intelFor(f.VulnClass)
+		if in.CWE != "n/a" {
+			v.Intel = &ClassIntelView{Name: in.Name, Impact: in.Impact, Remediation: in.Remediation, References: in.References}
+		}
 	}
 	if reason, ok := findingReviewReason(f.Verdict, d); ok {
 		v.ReviewReason = reason
