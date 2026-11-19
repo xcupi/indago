@@ -122,7 +122,7 @@ func AllVulnClasses() []VulnClass {
 		VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI,
 		VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal,
 		VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader, VulnJWT,
-		VulnNoSQLi, VulnHTTPMethods, VulnTLSConfig,
+		VulnNoSQLi, VulnHTTPMethods, VulnTLSConfig, VulnWebSocket,
 	}
 }
 
