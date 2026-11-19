@@ -19,14 +19,20 @@ const chatgptClientVersion = "0.153.0"
 
 // TestChatGPT checks the OAuth session in the Hermes auth store.
 func (p *Prober) TestChatGPT(ctx context.Context) ProbeResult {
+	return p.TestChatGPTDir(ctx, "")
+}
+
+// TestChatGPTDir checks the preferred ChatGPT OAuth session (Indago's own store
+// in dir first, then Hermes).
+func (p *Prober) TestChatGPTDir(ctx context.Context, dir string) ProbeResult {
 	res := ProbeResult{Provider: ProviderChatGPT, Model: "oauth"}
-	cred, err := chatgpt.Load("")
+	cred, err := chatgpt.LoadPreferred(dir)
 	if err != nil {
 		res.Error = err.Error()
 		return res
 	}
 	if cred.Expired() {
-		res.Error = "OAuth session expired — re-authenticate in Hermes"
+		res.Error = "ChatGPT OAuth session expired — log in again from Settings"
 		return res
 	}
 	res.Model = cred.Plan
@@ -69,3 +75,8 @@ func (c Credential) Config() Config {
 
 // ProbeChatGPT exposes the session probe for callers that hold no Config.
 func (p *Prober) ProbeChatGPT(ctx context.Context) ProbeResult { return p.TestChatGPT(ctx) }
+
+// ProbeChatGPTDir exposes the session probe checking dir before Hermes.
+func (p *Prober) ProbeChatGPTDir(ctx context.Context, dir string) ProbeResult {
+	return p.TestChatGPTDir(ctx, dir)
+}

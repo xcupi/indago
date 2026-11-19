@@ -44,6 +44,19 @@ func (s *Server) handleListLLMProviders(w http.ResponseWriter, r *http.Request) 
 		Providers []llm.Availability `json:"providers"`
 		Default   string             `json:"default"`
 	}{Providers: s.llmRegistry.List()}
+	if s.claudeStore != nil {
+		if c, err := s.claudeStore.Load(); err == nil && c.AccessToken != "" {
+			for i := range out.Providers {
+				if out.Providers[i].Provider == llm.ProviderClaude && out.Providers[i].Source != "settings" {
+					out.Providers[i].Configured = true
+					out.Providers[i].Source = "indago"
+					if out.Providers[i].Model == "" {
+						out.Providers[i].Model = "claude-sonnet-5-5"
+					}
+				}
+			}
+		}
+	}
 	if cfg, err := s.llm.Load(); err == nil {
 		out.Default = cfg.Provider
 	}
