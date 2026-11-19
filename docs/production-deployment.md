@@ -25,6 +25,31 @@ Indago can serve HTTPS itself (`-tls-cert`/`-tls-key`), but a reverse proxy that
 terminates TLS, owns the certificate, and enforces network policy is a normal
 deployment. Two shapes work; pick one deliberately.
 
+### Enabling the API token (`-api-token` / `INDAGO_API_TOKEN`)
+
+The control API is unauthenticated by default — the single-operator loopback
+mode. Turn the token on for **any shared or non-loopback deployment**; a
+non-loopback bind already refuses to start without it.
+
+```bash
+# Recommended: environment variable (not visible in `ps` or shell history).
+export INDAGO_API_TOKEN="$(openssl rand -hex 32)"
+indago serve -browser
+
+# Equivalent, for wrappers that build the command line; overrides the variable.
+indago serve -api-token "$(openssl rand -hex 32)"
+```
+
+- Both forms require ≥32 characters with no whitespace; a shorter or malformed
+  value refuses startup, and the error never prints it.
+- With a token configured, every `/api/...` request and `GET /metrics` requires
+  `Authorization: Bearer <token>` or `X-Indago-Token: <token>`. A missing or
+  wrong value gets `401` with `WWW-Authenticate: Bearer`.
+- `/healthz`, `/readyz` and the static UI stay open on purpose: probes have no
+  token, and the dashboard must load before it can ask for one (§2).
+- The CLI accepts the same variable, or `-api-token` on any client subcommand
+  (the flag wins for that invocation): `indago scan list -api-token "$TOKEN"`.
+
 ### Shape A — proxy on the same host, Indago on loopback (recommended)
 
 Run Indago with its default bind (`127.0.0.1:8750`) and proxy to it. No
@@ -82,10 +107,11 @@ Notes that matter:
   Origin gets `403 cross-origin request refused` on writes. The two
   `proxy_set_header` lines above are what make the dashboard fully usable
   through a proxy.
-- **Keep the bearer token.** Set `INDAGO_API_TOKEN` on the server and leave the
-  proxy's `Authorization` header untouched. The UI prompts for the token on the
-  first `401` and keeps it in `sessionStorage`. `/api/...` and `/metrics` require
-  it; `/healthz`, `/readyz` and the static UI deliberately do not.
+- **Keep the API token.** Set `INDAGO_API_TOKEN` on the server (or pass
+  `-api-token`) and leave the proxy's `Authorization` header untouched. The UI
+  prompts for the token on the first `401` and keeps it in `sessionStorage`.
+  `/api/...` and `/metrics` require it; `/healthz`, `/readyz` and the static UI
+  deliberately do not.
 - **Forwarded headers are ignored on purpose.** `X-Forwarded-For`/`X-Real-IP`
   are not trusted for client identity or rate limiting — any client can set
   them. Enforce per-client limits in the proxy.
@@ -107,8 +133,9 @@ indago serve -addr 0.0.0.0:8750 -allow-remote \
   -tls-cert /etc/indago/tls.crt -tls-key /etc/indago/tls.key
 ```
 
-- A non-loopback bind is refused unless `-allow-remote`, `INDAGO_API_TOKEN`, and
-  TLS are all present. `-allow-plaintext-remote` exists but logs a warning and
+- A non-loopback bind is refused unless `-allow-remote`, an API token
+  (`INDAGO_API_TOKEN` or `-api-token`), and TLS are all present.
+  `-allow-plaintext-remote` exists but logs a warning and
   sends the token in clear text; prefer TLS.
 - Binding a wildcard address disables the Host allow-list (the valid hostnames
   are unknowable), which is what lets a proxy forward the public Host and
@@ -348,6 +375,7 @@ browser engine.
 | `-tls-cert FILE` / `-tls-key FILE` | off | Native HTTPS (TLS 1.2 minimum); both or neither |
 | `-allow-remote` | off | Permit a non-loopback bind; requires token + TLS |
 | `-allow-plaintext-remote` | off | Accept a non-loopback bind without TLS (warned) |
+| `-api-token TOKEN` | empty → `$INDAGO_API_TOKEN` | Control API token; overrides the variable. Prefer the variable: a flag is visible in `ps`/shell history |
 | `-api-rate N` / `-api-burst N` | `50` / `200` | Per-client-IP limiter on `/api/` and `/metrics`; `0` disables |
 | `-browser` | off | Enable browser discovery/verification (needs Chromium) |
 | `-chromium PATH` | empty → `$INDAGO_CHROMIUM_PATH` → Playwright cache | Chromium executable for `-browser` and PDF export |
@@ -364,12 +392,12 @@ browser engine.
 
 | Variable | Read by | Purpose |
 |---|---|---|
-| `INDAGO_API_TOKEN` | server, CLI | Bearer token for `/api/` and `/metrics` (≥32 chars, read once at startup, never logged) |
+| `INDAGO_API_TOKEN` | server, CLI | Control API token for `/api/` and `/metrics` (≥32 chars, read once at startup, never logged); overridden by `-api-token` |
 | `INDAGO_CHROMIUM_PATH` | server | Chromium executable when `-chromium` is empty; also PDF export |
 | `INDAGO_AUTH_USER` / `INDAGO_AUTH_PASS` | server | Password-mode login credentials; never persisted or accepted over the API |
 | `INDAGO_AI_API_KEY` | server | Advisory AI key; never a flag, never stored |
 | `INDAGO_LLM_KEY_<PROVIDER>` | server | Per-provider advisory key override |
-| `INDAGO_SERVER_URL`, `INDAGO_CA_CERT` | CLI | Server URL and extra CA bundle for CLI calls |
+| `INDAGO_SERVER_URL`, `INDAGO_CA_CERT` | CLI | Server URL and extra CA bundle for CLI calls (token: `-api-token` or `INDAGO_API_TOKEN`) |
 | `INDAGO_HEALTH_CA` | container healthcheck | CA bundle used by `deploy/docker/healthcheck.sh` |
 
 Configuration precedence: `-addr`, `-api-rate`, and `-api-burst` override
@@ -411,12 +439,14 @@ an operator explicitly resumes the scan.
 ## 7. Production checklist
 
 - [ ] `indago serve` binds `127.0.0.1:8750` behind a same-host TLS proxy, or a
-      non-loopback bind has `-allow-remote`, `INDAGO_API_TOKEN`, and native TLS.
+      non-loopback bind has `-allow-remote`, an API token (`INDAGO_API_TOKEN` or
+      `-api-token`), and native TLS.
 - [ ] Proxy forwards `Host` as the upstream address and rewrites `Origin` for
       Shape A (or preserves the public Host with a wildcard, token-protected
       Shape B).
-- [ ] `INDAGO_API_TOKEN` is set, ≥32 random characters, and stored in the
-      service environment — not in `config.json`, shell history, or a unit file
+- [ ] An API token is set — `INDAGO_API_TOKEN` ≥32 random characters in the
+      service environment (preferred), or `-api-token` only where a wrapper
+      builds the command line — and it is not in `config.json` or in a file
       readable by others.
 - [ ] Liveness probes `/healthz`; readiness probes `/readyz`.
 - [ ] Orchestrator stop grace period ≥ 90s.
