@@ -6,8 +6,10 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
@@ -15,9 +17,21 @@ import (
 	"github.com/indago/indago/internal/store"
 )
 
+// closeCheckpointTimeout bounds the WAL checkpoint Close runs before closing
+// the handle. The busy timeout is 5s, so a checkpoint that cannot complete
+// promptly is abandoned (the WAL file stays, which SQLite tolerates) rather
+// than holding process shutdown open.
+const closeCheckpointTimeout = 5 * time.Second
+
 // DB is the SQLite-backed store.
 type DB struct {
 	db *sql.DB
+
+	// closeOnce makes Close idempotent: shutdown code closes the store
+	// explicitly and defers a safety-net Close, and a second checkpoint on a
+	// closed handle would fail with "database is closed" for no reason.
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Open opens (creating if necessary) a SQLite database at path and applies
@@ -57,8 +71,40 @@ func buildDSN(path string) string {
 // Ping verifies the database is reachable.
 func (d *DB) Ping(ctx context.Context) error { return d.db.PingContext(ctx) }
 
-// Close closes the underlying database.
-func (d *DB) Close() error { return d.db.Close() }
+// Close checkpoints the write-ahead log into the main database file and then
+// closes the handle. The TRUNCATE checkpoint leaves the WAL empty, so after a
+// clean shutdown the database file alone is a complete backup — the same thing
+// backup instructions assume when they tell an operator to stop the server and
+// copy the data directory. SQLite's own last-connection close does a passive
+// checkpoint, but it cannot truncate or remove the WAL while another
+// connection still has the database open, so the explicit checkpoint is what
+// makes the guarantee hold in that case.
+//
+// The checkpoint is bounded (closeCheckpointTimeout) and best effort: if it
+// cannot complete, Close still closes the handle and returns an error naming
+// the reason. Close is idempotent; later calls return the first result.
+func (d *DB) Close() error {
+	d.closeOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), closeCheckpointTimeout)
+		defer cancel()
+
+		// PRAGMA wal_checkpoint returns one row (busy, log pages, checkpointed
+		// pages) on a WAL database and (0, -1, -1) on a non-WAL one (":memory:"
+		// in tests), so scanning the row is valid for both.
+		var busy, logPages, checked int
+		err := d.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logPages, &checked)
+		if err == nil && busy != 0 {
+			err = fmt.Errorf("checkpoint incomplete: %d WAL pages remain", logPages)
+		}
+		if err != nil {
+			d.closeErr = fmt.Errorf("sqlite: wal checkpoint: %w", err)
+		}
+		if cerr := d.db.Close(); cerr != nil {
+			d.closeErr = errors.Join(d.closeErr, cerr)
+		}
+	})
+	return d.closeErr
+}
 
 // SQL exposes the underlying *sql.DB for advanced callers (e.g. a persistent
 // queue implementation). Most code should use the repository interfaces.

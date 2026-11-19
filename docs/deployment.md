@@ -103,8 +103,10 @@ Provision outside the checkout:
   self-signed leaf, this can be the leaf itself. The server certificate needs
   **IP:127.0.0.1 in its SAN** for the in-container strict healthcheck, plus any
   external names clients use. `INDAGO_HEALTH_CA` can name another mounted CA
-  bundle path. Healthcheck is `/healthz` (no bearer required); it never uses
-  `-k` or disables certificate verification. An invalid CA/SAN makes it unhealthy.
+  bundle path. The healthcheck uses `/readyz` (no bearer required; a bounded,
+  2s store ping — see §8), so a container whose database cannot be reached is
+  reported unhealthy. It never uses `-k` or disables certificate verification.
+  An invalid CA/SAN makes it unhealthy too.
 - `/srv/indago/server.env`: mode **0600**, host operator-owned, containing only
   `INDAGO_API_TOKEN=` followed by a securely generated token of at least 32
   characters. Generate through your secret manager or write directly to this
@@ -118,16 +120,16 @@ Provision outside the checkout:
 docker volume create indago-data
 docker run -d --name indago --restart unless-stopped \
   --read-only --cap-drop=ALL --security-opt=no-new-privileges:true \
-  --memory=2g --shm-size=256m --stop-timeout=60 \
+  `--memory=2g --shm-size=256m --stop-timeout=90 \
   --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 \
   --tmpfs /var/cache/indago:rw,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0750 \
   --env-file /srv/indago/server.env \
   --mount type=volume,src=indago-data,dst=/var/lib/indago \
   --mount type=bind,src=/srv/indago/tls,dst=/tls,readonly \
   -p 127.0.0.1:8750:8750 indago:p1-deployment
-curl --cacert /srv/indago/tls/ca.crt https://127.0.0.1:8750/healthz
+curl --cacert /srv/indago/tls/ca.crt https://127.0.0.1:8750/readyz
 docker inspect --format '{{.State.Health.Status}}' indago
-docker stop --time 60 indago
+docker stop --time 90 indago
 ```
 
 The default command enables `-browser` and binds `0.0.0.0` **inside** the
@@ -173,8 +175,8 @@ the `INDAGO_API_TOKEN` environment variable:
   the single-operator loopback mode and is unchanged from before.
 - **Set:** every `/api/` request must send `Authorization: Bearer <token>`.
   A missing or wrong token gets `401` with `WWW-Authenticate: Bearer`.
-  `/healthz` and the static UI stay open so the page can load and prompt for
-  the token. The token is accepted only in that header — never in a query
+  `/healthz`, `/readyz` and the static UI stay open so the page can load and
+  prompt for the token, and orchestration probes keep working. The token is accepted only in that header — never in a query
   string or a cookie.
 
 Rules for the token:
@@ -213,9 +215,9 @@ token bucket**, on by default:
 - The client is the TCP peer address (`RemoteAddr`). `X-Forwarded-For` and
   `X-Real-IP` are **ignored**: any client can send them, so trusting them would
   let one client pick a fresh bucket on every request.
-- `/healthz` and the static UI are not limited. The limiter runs after the
-  Host/CSRF check and before the token check, so unauthenticated floods are
-  limited too. Idle buckets are evicted after 10 minutes; at most 10,000 clients
+- `/healthz`, `/readyz` and the static UI are not limited. The limiter runs
+  after the Host/CSRF check and before the token check, so unauthenticated
+  floods are limited too. Idle buckets are evicted after 10 minutes; at most 10,000 clients
   are tracked, and clients beyond that are refused rather than growing memory.
 - The defaults clear the bundled UI and the CLI. The UI's "1 second" live
   refresh sends about one request per scan per tick on the Scans view (two per
@@ -270,7 +272,8 @@ extra dependency). It exposes:
 
 Access follows the token setting:
 
-- **`INDAGO_API_TOKEN` unset:** unauthenticated, the same as `/healthz`. This is
+- **`INDAGO_API_TOKEN` unset:** unauthenticated, the same as `/healthz` and
+  `/readyz`. This is
   acceptable only on loopback, the same rule as the rest of the server.
 - **`INDAGO_API_TOKEN` set:** requires `Authorization: Bearer <token>`, as the
   API does. A missing or wrong token gets `401`.
@@ -609,6 +612,13 @@ just `indago.db` can be missing recent writes. Either stop the process first
 backup mechanism (e.g. `sqlite3 indago.db ".backup backup.db"`, which is
 WAL-aware) if you need a backup without downtime.
 
+A clean stop now makes the single-file case safe: `Close` runs
+`PRAGMA wal_checkpoint(TRUNCATE)` before closing the store, so after
+`SIGINT`/`SIGTERM` the `-wal` file is empty and `indago.db` is complete on its
+own. If shutdown logs an incomplete checkpoint, copy the whole directory
+instead. See [production-deployment.md](production-deployment.md) §3 for the
+full WAL backup/verify procedure.
+
 ### Restore
 
 ```bash
@@ -778,8 +788,18 @@ been reviewed for your installation.
    handler or an unresponsive Chromium process can't block the others, or
    hang the whole shutdown indefinitely. A handler that doesn't return in
    time is logged and abandoned rather than waited on forever.
-3. Scan state is left exactly as restart recovery (§5) expects — no special
+3. The browser manager is closed explicitly (30s bound), after the workers that
+   could still be using a page.
+4. The store is closed last: `Close` runs `PRAGMA wal_checkpoint(TRUNCATE)`
+   (5s bound) and then closes the handle, so a clean stop leaves no committed
+   transaction only in the WAL. An incomplete checkpoint is logged, and the
+   `-wal` file is left intact rather than discarded.
+5. Scan state is left exactly as restart recovery (§5) expects — no special
    "clean shutdown" marker is needed or written.
+
+The worst case is about 70 seconds, so an orchestrator's kill grace period must
+exceed that (Docker's default 10s sends `SIGKILL` early). See
+[production-deployment.md](production-deployment.md) §6.
 
 A forced kill (`SIGKILL`, a host power loss) skips all of the above; restart
 recovery on the next `serve` is what makes that safe rather than shutdown
@@ -789,13 +809,26 @@ being graceful.
 
 ## 8. Health and status
 
-`GET /healthz` — `{"status":"ok"}` after a live store ping, `503` otherwise.
+`GET /healthz` — liveness: `200 {"status":"ok","version":"..."}` whenever the
+process is up and serving HTTP. It deliberately does not touch the store, so a
+transient database problem never triggers a process restart.
+
+`GET /readyz` — readiness: pings the store with a 2s bound. `200
+{"status":"ready","db":"ok"}` when it answers, `503
+{"status":"not_ready","db":"error"}` when it does not. The driver error is
+logged server-side and not returned (the endpoint is unauthenticated).
+
+Both probes are open by design: no bearer token, no `X-Indago-Client` header, no
+rate-limit budget, and no Host allow-list match — a kubelet, Docker
+`HEALTHCHECK`, or reverse-proxy check carries none of those, and a probe that
+fails for that reason would take a healthy instance out of rotation. They return
+only status/version, never a path, config, or scan counts.
+
 `GET /api/version` — `{"version": "...", "name": "indago"}`.
 `GET /metrics` — Prometheus exposition (§1, *Metrics*). Needs the bearer token
 when `INDAGO_API_TOKEN` is set, and is rate limited like the API.
 
-Neither requires the `X-Indago-Client` header (both are GET) and neither
-returns anything beyond those two fields — no internal paths, no config, no
-counts that could hint at scan activity to an unauthenticated prober. Use
-`GET /api/scans/{id}/status` (an authenticated-context operator call, not a
-health check) for actual scan/job/finding counts.
+Use `GET /api/scans/{id}/status` (an authenticated-context operator call, not a
+health check) for actual scan/job/finding counts. Probe wiring for Kubernetes,
+Docker, and proxies, including the `/healthz`-vs-`/readyz` distinction, is in
+[production-deployment.md](production-deployment.md) §2.

@@ -22,8 +22,22 @@ const ClientHeader = "X-Indago-Client"
 //  2. DNS rebinding: when allowedHosts is set, the Host header must be one of
 //     them (an attacker's domain rebound to 127.0.0.1 arrives with the attacker's
 //     Host and is refused). It is set when the server binds a specific address.
+//
+// /healthz and /readyz are exempt from both (see isProbePath): they must answer
+// orchestration probes, which know neither the token nor this server's names.
 func (s *Server) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Liveness/readiness probes are answered before every control-plane
+		// protection. A kubelet, Docker HEALTHCHECK or reverse-proxy health
+		// check sends its own Host (a pod IP, 127.0.0.1) that cannot match a
+		// bind-address allow-list, and carries no dashboard token or
+		// X-Indago-Client header. Refusing a probe because of that would make a
+		// healthy process look dead and take it out of rotation. The payload is
+		// only status/version, so the Host check buys nothing here.
+		if isProbePath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if s.allowedHosts != nil && !s.allowedHosts[strings.ToLower(hostOnly(r.Host))] {
 			writeError(w, http.StatusForbidden, "host not allowed")
 			return

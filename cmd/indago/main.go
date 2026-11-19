@@ -343,11 +343,16 @@ func cmdServe(args []string) error {
 		}
 	}
 	var loginFn web.LoginFunc
+	// bm is nil unless -browser. It is closed explicitly in the shutdown
+	// sequence below; the deferred Close is the safety net for early returns
+	// (Manager.Close is idempotent).
+	var bm *browser.Manager
 	if *useBrowser {
-		bm, err := browser.NewManager(browserCfg, log)
+		mgr, err := browser.NewManager(browserCfg, log)
 		if err != nil {
 			return fmt.Errorf("start browser (-browser): %w", err)
 		}
+		bm = mgr
 		defer bm.Close()
 		opts.Browser = bm
 		// Interactive login reuses the same manager; it opens its OWN visible
@@ -464,9 +469,39 @@ func cmdServe(args []string) error {
 		log.Info("AI gateway enabled (advisory only)", "provider", *aiProvider, "model", *aiModel)
 	}
 	log.Info("indago starting", "version", version, "data", cfg.DataDir)
-	err = srv.ListenAndServe(ctx, cfg.Server.Addr, tlsCfg)
+	serveErr := srv.ListenAndServe(ctx, cfg.Server.Addr, tlsCfg)
+
+	// Shutdown, in dependency order. ListenAndServe returns only after the HTTP
+	// server stopped accepting connections and drained in-flight requests
+	// (bounded at 5s inside serve). Workers stop next so no handler can touch
+	// the browser or the store afterwards; Controller.Shutdown bounds each
+	// scan's worker/browser pool at 30s. Then the browser manager (30s bound),
+	// then the store last so its Close can checkpoint the WAL with nothing
+	// writing. A wedged step is logged by the component that timed out; the
+	// process still exits rather than hanging forever.
+	if ctx.Err() != nil {
+		log.Info("shutdown signal received; HTTP server drained")
+	}
+	start := time.Now()
 	ctrl.Shutdown()
-	return err
+	log.Info("scan controller stopped", "dur", time.Since(start).Round(time.Millisecond))
+
+	if bm != nil {
+		start = time.Now()
+		if cerr := bm.Close(); cerr != nil {
+			log.Warn("browser manager close failed", "err", cerr)
+		} else {
+			log.Info("browser manager closed", "dur", time.Since(start).Round(time.Millisecond))
+		}
+	}
+
+	start = time.Now()
+	if cerr := db.Close(); cerr != nil {
+		log.Warn("store closed with an incomplete WAL checkpoint; the -wal file holds the remaining pages", "err", cerr)
+	} else {
+		log.Info("store closed; WAL checkpointed", "dur", time.Since(start).Round(time.Millisecond))
+	}
+	return serveErr
 }
 
 // checkRemoteBindAllowed refuses a non-loopback bind unless the operator opts

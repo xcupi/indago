@@ -44,9 +44,10 @@ func (s *Server) SetAPIToken(tok string) error {
 }
 
 // requireAPIToken enforces the bearer token on /api/ routes and /metrics when
-// one is configured. /healthz and the static UI stay open, so the page can load
-// and prompt for the token. The token is accepted only from the Authorization
-// header, never from the query string or a cookie.
+// one is configured. /healthz, /readyz and the static UI stay open, so the page
+// can load and prompt for the token while orchestration probes keep working.
+// The token is accepted only from the Authorization header, never from the
+// query string or a cookie.
 func (s *Server) requireAPIToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.apiTokenDigest == nil || !isGuardedPath(r.URL.Path) ||
