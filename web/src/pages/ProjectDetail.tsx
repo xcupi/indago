@@ -315,9 +315,92 @@ export default function ProjectDetail({ id }: { id: string }) {
         </Card>
 
 
-      <div className="grid items-start gap-4 lg:grid-cols-[1fr_1.3fr]">
-        <div className="space-y-4">
+      <div className="space-y-4">
           <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <LogIn className="size-4 text-emerald-700 dark:text-emerald-400" /> Auth sessions
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                One saved login can be shared by many targets — useful for SSO such as HackTheBox.
+                Assign a session per target in the Targets table. A target that needs another account
+                can point at a different session.
+              </p>
+              {(authProfiles.data ?? []).length === 0 ? (
+                <p className="text-[11px] text-muted-foreground">No auth sessions yet. Create one below.</p>
+              ) : (
+                <div className="space-y-1">
+                  {(authProfiles.data ?? []).map((p) => {
+                    const used = targetList.filter((t) => t.auth_profile_id === p.id).length;
+                    return (
+                      <div key={p.id} className="flex flex-wrap items-center gap-2 rounded-md border border-border px-2.5 py-2 text-[11px]">
+                        <div className="min-w-0 flex-1">
+                          <div className="font-medium text-foreground">{p.name}</div>
+                          <div className="text-muted-foreground">
+                            {p.state_path ? "session saved" : "no session yet"} · used by {used} target{used === 1 ? "" : "s"}
+                          </div>
+                        </div>
+                        <Button size="sm" variant="outline" onClick={() => editAuthProfile(p)}>
+                          Re-login
+                        </Button>
+                        <Button size="sm" variant="ghost" className="text-red-600 dark:text-red-400" onClick={() => deleteAuthProfile(p)}>
+                          Delete
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="border-t border-border pt-3">
+                <Field label="Session name" hint="A label for this login, e.g. HackTheBox SSO. Targets can share it.">
+                  <Input
+                    value={login.profileName}
+                    onChange={(e) => setLogin({ ...login, profileName: e.target.value })}
+                    placeholder="e.g. HackTheBox SSO"
+                    disabled={Boolean(login.profileId)}
+                  />
+                </Field>
+                {login.profileId ? (
+                  <p className="text-[11px] text-muted-foreground">
+                    Re-login mode. The saved session will be replaced for every target using it.{" "}
+                    <button
+                      className="underline"
+                      onClick={() => setLogin({ profileId: "", profileName: "", loginUrl: "", successUrl: "" })}
+                    >
+                      cancel
+                    </button>
+                  </p>
+                ) : null}
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  <Field label="Login URL" hint="The SSO/login page. Must be inside project scope.">
+                    <Input
+                      value={login.loginUrl}
+                      onChange={(e) => setLogin({ ...login, loginUrl: e.target.value })}
+                      placeholder="https://app.example.com/login"
+                    />
+                  </Field>
+                  <Field label="Success URL" hint="Optional. A URL only reachable after login.">
+                    <Input
+                      value={login.successUrl}
+                      onChange={(e) => setLogin({ ...login, successUrl: e.target.value })}
+                      placeholder="https://app.example.com/dashboard"
+                    />
+                  </Field>
+                </div>
+              </div>
+              {loginErr ? <Alert>{loginErr}</Alert> : null}
+              {loginNote ? <p className="break-all text-[11px] text-emerald-700 dark:text-emerald-400">{loginNote}</p> : null}
+              <div className="flex justify-end">
+                <Button size="sm" onClick={loginAndSave} disabled={loginBusy}>
+                  <LogIn className="size-4" /> {loginBusy ? "Waiting for browser…" : "Log in & save session"}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+        <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Globe2 className="size-4 text-sky-700 dark:text-sky-400" /> Targets
@@ -454,91 +537,6 @@ export default function ProjectDetail({ id }: { id: string }) {
             ) : null}
             </CardContent>
           </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <LogIn className="size-4 text-emerald-700 dark:text-emerald-400" /> Auth sessions
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <p className="text-xs text-muted-foreground">
-                One saved login can be shared by many targets — useful for SSO such as HackTheBox.
-                Assign a session per target in the Targets table. A target that needs another account
-                can point at a different session.
-              </p>
-              {(authProfiles.data ?? []).length === 0 ? (
-                <p className="text-[11px] text-muted-foreground">No auth sessions yet. Create one below.</p>
-              ) : (
-                <div className="space-y-1">
-                  {(authProfiles.data ?? []).map((p) => {
-                    const used = targetList.filter((t) => t.auth_profile_id === p.id).length;
-                    return (
-                      <div key={p.id} className="flex flex-wrap items-center gap-2 rounded-md border border-border px-2.5 py-2 text-[11px]">
-                        <div className="min-w-0 flex-1">
-                          <div className="font-medium text-foreground">{p.name}</div>
-                          <div className="text-muted-foreground">
-                            {p.state_path ? "session saved" : "no session yet"} · used by {used} target{used === 1 ? "" : "s"}
-                          </div>
-                        </div>
-                        <Button size="sm" variant="outline" onClick={() => editAuthProfile(p)}>
-                          Re-login
-                        </Button>
-                        <Button size="sm" variant="ghost" className="text-red-600 dark:text-red-400" onClick={() => deleteAuthProfile(p)}>
-                          Delete
-                        </Button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              <div className="border-t border-border pt-3">
-                <Field label="Session name" hint="A label for this login, e.g. HackTheBox SSO. Targets can share it.">
-                  <Input
-                    value={login.profileName}
-                    onChange={(e) => setLogin({ ...login, profileName: e.target.value })}
-                    placeholder="e.g. HackTheBox SSO"
-                    disabled={Boolean(login.profileId)}
-                  />
-                </Field>
-                {login.profileId ? (
-                  <p className="text-[11px] text-muted-foreground">
-                    Re-login mode. The saved session will be replaced for every target using it.{" "}
-                    <button
-                      className="underline"
-                      onClick={() => setLogin({ profileId: "", profileName: "", loginUrl: "", successUrl: "" })}
-                    >
-                      cancel
-                    </button>
-                  </p>
-                ) : null}
-                <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                  <Field label="Login URL" hint="The SSO/login page. Must be inside project scope.">
-                    <Input
-                      value={login.loginUrl}
-                      onChange={(e) => setLogin({ ...login, loginUrl: e.target.value })}
-                      placeholder="https://app.example.com/login"
-                    />
-                  </Field>
-                  <Field label="Success URL" hint="Optional. A URL only reachable after login.">
-                    <Input
-                      value={login.successUrl}
-                      onChange={(e) => setLogin({ ...login, successUrl: e.target.value })}
-                      placeholder="https://app.example.com/dashboard"
-                    />
-                  </Field>
-                </div>
-              </div>
-              {loginErr ? <Alert>{loginErr}</Alert> : null}
-              {loginNote ? <p className="break-all text-[11px] text-emerald-700 dark:text-emerald-400">{loginNote}</p> : null}
-              <div className="flex justify-end">
-                <Button size="sm" onClick={loginAndSave} disabled={loginBusy}>
-                  <LogIn className="size-4" /> {loginBusy ? "Waiting for browser…" : "Log in & save session"}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
 
         <Card>
           <CardHeader>

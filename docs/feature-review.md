@@ -311,11 +311,11 @@ is detected, header/comment/backup exposure is reported.
 
 | Priority | Work | Why |
 | --- | --- | --- |
-| **P1 (post-review)** | **Live-validate remaining opt-in/conditional engines** (NoSQLi positive target, SSTI, Command Injection, XXE, SSRF, Open Redirect, DOM Open-Redirect/Clobbering) | `graphql`, `sqli`, `cors`, `websocket_security`, `host_header`, `security_headers`, and `jwt_validation` have live confirmations; remaining opt-in/conditional passes still need positive live evidence |
+| ~~P1 (post-review)~~ | ~~**Live-validate remaining opt-in/conditional engines** (NoSQLi positive target, SSTI, Command Injection, XXE, SSRF, Open Redirect, DOM Open-Redirect/Clobbering)~~ | done (2026-11-19: bWAPP auth scan `839eddd8` confirmed `command_injection`, `xxe`, `open_redirect`; controlled lab fixture `192.168.103.1:18085` scans `7e254d21`, `ef9b884b`, `eb31c666` confirmed `ssti`, `xxe`, `ssrf`, `open_redirect`, `nosqli`, `dom-clobbering`, `dom-open-redirect`) |
 | P1 | ~~Finish DOM open-redirect and clobbering models~~ | done (`5d18556` — `internal/detection/dom_openredirect.go`, `internal/detection/dom_clobbering.go`, `internal/scan/dom_openredirect.go`, `internal/scan/dom_clobbering.go`, short-circuiting `canary.invalid` in harness) |
 | P1 | ~~Expose all 9 providers in Settings~~ | done |
 | P2 | ~~Token accounting~~ | done (tokens, not cost) |
-| P1 | Live Claude OAuth test | proves the second OAuth path end to end |
+| ~~P1~~ | ~~Live Claude OAuth test~~ | done (2026-11-19: `POST /api/llm/models` refreshed expired OAuth token `2026-11-10T07:24:55Z` -> `2026-11-19T23:58:54Z` returning 15 live models; `POST /api/scans/14659737-5964-4ea5-b9dc-867aec448bfb/ai/assist` `kind=triage` `provider=claude` `model=claude-sonnet-4-5` returned `200 OK`, `task_id=3a08f8b0-6d43-469d-aa30-2a2ea8ced07e`) |
 | P2 | ~~TOC page numbers via a two-pass render, or drop the page column~~ | done (`03baff9` — pure Go stdlib `ExtractPDFSectionPages` + two-pass render in `internal/web/reports.go`) |
 | P2 | ~~YesWeHack draft auto-fill (no submit)~~ | done (`fa98cfa` — `POST /api/scans/{id}/bounty/yeswehack/draft`, strictly no submit) |
 | P3 | Stored XSS and exploit chains | explicitly out of scope unless the product decision changes |
