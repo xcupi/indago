@@ -71,6 +71,90 @@ func ywhRemediation(c domain.VulnClass) string {
 	}
 }
 
+// YesWeHackDraft holds the structured fields and Markdown body for a single
+// confirmed finding formatted for a YesWeHack draft report.
+type YesWeHackDraft struct {
+	Title               string
+	BugType             string
+	Scope               string
+	EndPoint            string
+	VulnerablePart      string
+	PartName            string
+	Payload             string
+	TechnicalEnv        string
+	DescriptionMarkdown string
+}
+
+// BuildYesWeHackDraft builds the structured draft fields and Markdown body
+// (Description, Exploitation, PoC, Risk, Remediation) for a single finding.
+func BuildYesWeHackDraft(f *domain.Finding, endpoint string, ev []*domain.Evidence, toolVersion string) YesWeHackDraft {
+	idx := EvidenceIndex(ev)
+	v := NewFindingView(f, idx)
+	if endpoint == "" {
+		endpoint = "—"
+	}
+	payload := ""
+	if v.Verified != nil {
+		payload = v.Verified.CandidateValue
+	}
+	if payload == "" && len(v.Candidates) > 0 {
+		payload = v.Candidates[0].Value
+	}
+	var body strings.Builder
+	writeYesWeHackFindingBody(&body, f, v, endpoint, payload)
+	return YesWeHackDraft{
+		Title:               nonEmpty(f.Title, string(f.ID)),
+		BugType:             ywhBugType(f.VulnClass),
+		Scope:               endpoint,
+		EndPoint:            endpoint,
+		VulnerablePart:      string(f.Location),
+		PartName:            v.ParamName,
+		Payload:             payload,
+		TechnicalEnv:        fmt.Sprintf("indago %s, Chromium browser verification", nonEmpty(toolVersion, "dev")),
+		DescriptionMarkdown: body.String(),
+	}
+}
+
+func writeYesWeHackFindingBody(b *strings.Builder, f *domain.Finding, v FindingView, endpoint, payload string) {
+	b.WriteString("## Description\n\n")
+	fmt.Fprintf(b, "%s\n\n", nonEmpty(f.Summary, f.Title))
+	if v.Combined {
+		fmt.Fprintf(b, "This finding required two parameters mutated in the same request: `%s` and `%s`.\n\n", v.ParamName, v.ParamNameB)
+	}
+
+	b.WriteString("## Exploitation\n\n")
+	fmt.Fprintf(b, "1. Send a `%s` request to `%s`.\n", nonEmpty(v.Method, "GET"), endpoint)
+	if v.ParamName != "" {
+		fmt.Fprintf(b, "2. Inject the payload into the `%s` parameter:\n\n   ```\n   %s\n   ```\n\n", v.ParamName, payload)
+	} else {
+		fmt.Fprintf(b, "2. Inject the payload:\n\n   ```\n   %s\n   ```\n\n", payload)
+	}
+	if v.Verified != nil {
+		fmt.Fprintf(b, "3. The browser verification recorded the confirming signal: %s\n\n", nonEmpty(v.Verified.Notes, "the marker executed"))
+	} else {
+		b.WriteString("3. Observe the recorded execution signal in the captured evidence.\n\n")
+	}
+
+	b.WriteString("## PoC\n\n")
+	b.WriteString("```http\n")
+	fmt.Fprintf(b, "%s %s\n", nonEmpty(v.Method, "GET"), pocURL(endpoint, v, payload))
+	b.WriteString("```\n\n")
+	if len(v.Evidence) > 0 {
+		b.WriteString("Evidence captured by the scanner:\n\n")
+		for _, ev := range v.Evidence {
+			fmt.Fprintf(b, "- `%s` — %s (%d bytes)\n", ev.ID, ev.Kind, ev.Size)
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("## Risk\n\n")
+	fmt.Fprintf(b, "Severity %s, confidence %s. %s\n\n", f.Severity, f.Confidence,
+		riskSentence(f.VulnClass))
+
+	b.WriteString("## Remediation\n\n")
+	fmt.Fprintf(b, "%s\n", ywhRemediation(f.VulnClass))
+}
+
 func writeYesWeHackMarkdown(w io.Writer, data Data) error {
 	findings := Prioritized(data.Findings)
 	confirmed := make([]*domain.Finding, 0, len(findings))
@@ -136,43 +220,7 @@ func writeYesWeHackMarkdown(w io.Writer, data Data) error {
 		b.WriteString("**CVSS:** not scored by Indago (severity is the engine's verdict, not a CVSS computation) — assign the 3.1 vector in the form  \n")
 		b.WriteString("**IPs used:** — (add the egress IP you tested from)  \n\n")
 
-		b.WriteString("## Description\n\n")
-		fmt.Fprintf(&b, "%s\n\n", nonEmpty(f.Summary, f.Title))
-		if v.Combined {
-			fmt.Fprintf(&b, "This finding required two parameters mutated in the same request: `%s` and `%s`.\n\n", v.ParamName, v.ParamNameB)
-		}
-
-		b.WriteString("## Exploitation\n\n")
-		fmt.Fprintf(&b, "1. Send a `%s` request to `%s`.\n", nonEmpty(v.Method, "GET"), endpoint)
-		if v.ParamName != "" {
-			fmt.Fprintf(&b, "2. Inject the payload into the `%s` parameter:\n\n   ```\n   %s\n   ```\n\n", v.ParamName, payload)
-		} else {
-			fmt.Fprintf(&b, "2. Inject the payload:\n\n   ```\n   %s\n   ```\n\n", payload)
-		}
-		if v.Verified != nil {
-			fmt.Fprintf(&b, "3. The browser verification recorded the confirming signal: %s\n\n", nonEmpty(v.Verified.Notes, "the marker executed"))
-		} else {
-			b.WriteString("3. Observe the recorded execution signal in the captured evidence.\n\n")
-		}
-
-		b.WriteString("## PoC\n\n")
-		b.WriteString("```http\n")
-		fmt.Fprintf(&b, "%s %s\n", nonEmpty(v.Method, "GET"), pocURL(endpoint, v, payload))
-		b.WriteString("```\n\n")
-		if len(v.Evidence) > 0 {
-			b.WriteString("Evidence captured by the scanner:\n\n")
-			for _, ev := range v.Evidence {
-				fmt.Fprintf(&b, "- `%s` — %s (%d bytes)\n", ev.ID, ev.Kind, ev.Size)
-			}
-			b.WriteString("\n")
-		}
-
-		b.WriteString("## Risk\n\n")
-		fmt.Fprintf(&b, "Severity %s, confidence %s. %s\n\n", f.Severity, f.Confidence,
-			riskSentence(f.VulnClass))
-
-		b.WriteString("## Remediation\n\n")
-		fmt.Fprintf(&b, "%s\n", ywhRemediation(f.VulnClass))
+		writeYesWeHackFindingBody(&b, f, v, endpoint, payload)
 	}
 	if omitted > 0 {
 		fmt.Fprintf(&b, "\n_%d duplicate finding(s) for the same endpoint/parameter/payload were omitted._\n", omitted)

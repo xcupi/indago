@@ -10,6 +10,7 @@
 package bounty
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -29,6 +30,9 @@ var ErrNoToken = errors.New("bounty: this provider needs a personal access token
 
 // ErrUnauthorized is a provider 401/403.
 var ErrUnauthorized = errors.New("bounty: provider rejected the token")
+
+// ErrNotFound is a provider 404.
+var ErrNotFound = errors.New("bounty: resource not found")
 
 // Program is one program row from the list endpoint.
 type Program struct {
@@ -69,6 +73,47 @@ type ReportTemplate struct {
 	Name     string `json:"name"`
 	Template string `json:"template"`
 	Type     string `json:"type"`
+}
+
+// DraftReport is the payload for creating or updating a YesWeHack draft
+// report. Indago only ever writes to the draft endpoint; it never submits.
+type DraftReport struct {
+	Title               string `json:"title"`
+	BugType             string `json:"bug_type,omitempty"`
+	Scope               string `json:"scope,omitempty"`
+	EndPoint            string `json:"end_point,omitempty"`
+	VulnerablePart      string `json:"vulnerable_part,omitempty"`
+	PartName            string `json:"part_name,omitempty"`
+	Payload             string `json:"payload,omitempty"`
+	DescriptionMarkdown string `json:"description_markdown,omitempty"`
+	TechnicalEnv        string `json:"technical_environment,omitempty"`
+}
+
+// DraftResult is the platform response when reading, creating, or updating a
+// YesWeHack draft report.
+type DraftResult struct {
+	ID       json.RawMessage `json:"id,omitempty"`
+	DraftKey string          `json:"draft_id,omitempty"`
+	Title    string          `json:"title,omitempty"`
+	Slug     string          `json:"slug,omitempty"`
+	URL      string          `json:"url,omitempty"`
+}
+
+// DraftID returns the draft identifier as a string regardless of whether the
+// API returned a numeric id, string id, or draft_id field.
+func (d DraftResult) DraftID() string {
+	if s := strings.TrimSpace(d.DraftKey); s != "" {
+		return s
+	}
+	raw := strings.TrimSpace(string(d.ID))
+	if raw == "" || raw == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(d.ID, &s); err == nil {
+		return strings.TrimSpace(s)
+	}
+	return raw
 }
 
 // Query selects programs. Empty ScopeTypes defaults to web-application and
@@ -208,12 +253,88 @@ func (c *Client) ReportTemplates(ctx context.Context, slug string) ([]ReportTemp
 	return out.Items, nil
 }
 
+// GetDraft fetches the current draft report for a program, if one exists.
+// Requires a token.
+func (c *Client) GetDraft(ctx context.Context, slug string) (*DraftResult, error) {
+	if c.Token() == "" {
+		return nil, ErrNoToken
+	}
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return nil, errors.New("bounty: program slug is required")
+	}
+	var out DraftResult
+	if err := c.get(ctx, "/programs/"+url.PathEscape(slug)+"/reports/draft", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// CreateDraft creates a draft report on YesWeHack without submitting it.
+// Requires a token. Indago never calls the report submission endpoint.
+func (c *Client) CreateDraft(ctx context.Context, slug string, draft DraftReport) (*DraftResult, error) {
+	if c.Token() == "" {
+		return nil, ErrNoToken
+	}
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return nil, errors.New("bounty: program slug is required")
+	}
+	if strings.TrimSpace(draft.Title) == "" {
+		return nil, errors.New("bounty: draft title is required")
+	}
+	var out DraftResult
+	if err := c.doJSON(ctx, http.MethodPost, "/programs/"+url.PathEscape(slug)+"/reports/draft", draft, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// UpdateDraft updates an existing draft report on YesWeHack without submitting
+// it. Requires a token.
+func (c *Client) UpdateDraft(ctx context.Context, slug, draftID string, draft DraftReport) (*DraftResult, error) {
+	if c.Token() == "" {
+		return nil, ErrNoToken
+	}
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return nil, errors.New("bounty: program slug is required")
+	}
+	if strings.TrimSpace(draft.Title) == "" {
+		return nil, errors.New("bounty: draft title is required")
+	}
+	path := "/programs/" + url.PathEscape(slug) + "/reports/draft"
+	if id := strings.TrimSpace(draftID); id != "" {
+		path += "/" + url.PathEscape(id)
+	}
+	var out DraftResult
+	if err := c.doJSON(ctx, http.MethodPut, path, draft, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) get(ctx context.Context, path string, dst any) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.BaseURL+path, nil)
+	return c.doJSON(ctx, http.MethodGet, path, nil, dst)
+}
+
+func (c *Client) doJSON(ctx context.Context, method, path string, reqBody, dst any) error {
+	var bodyReader io.Reader
+	if reqBody != nil {
+		encoded, err := json.Marshal(reqBody)
+		if err != nil {
+			return fmt.Errorf("bounty: encode %s: %w", path, err)
+		}
+		bodyReader = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, bodyReader)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("User-Agent", "indago-bounty/1.0")
 	if tok := c.Token(); tok != "" {
 		// Two credential shapes reach this API: a personal access token
@@ -233,11 +354,16 @@ func (c *Client) get(ctx context.Context, path string, dst any) error {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	switch resp.StatusCode {
-	case 200:
-	case 401, 403:
+	case http.StatusOK, http.StatusCreated, http.StatusNoContent:
+	case http.StatusUnauthorized, http.StatusForbidden:
 		return fmt.Errorf("%w (status %d)", ErrUnauthorized, resp.StatusCode)
+	case http.StatusNotFound:
+		return fmt.Errorf("%w (%s)", ErrNotFound, path)
 	default:
 		return fmt.Errorf("bounty: %s returned %d", path, resp.StatusCode)
+	}
+	if dst == nil || len(bytes.TrimSpace(body)) == 0 {
+		return nil
 	}
 	if err := json.Unmarshal(body, dst); err != nil {
 		return fmt.Errorf("bounty: decode %s: %w", path, err)

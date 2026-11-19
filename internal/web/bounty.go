@@ -29,6 +29,7 @@ import (
 
 	"github.com/indago/indago/internal/bounty"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/report"
 	"github.com/indago/indago/internal/scan"
 )
 
@@ -989,4 +990,159 @@ func atoiDefault(v string, def int) int {
 		return n
 	}
 	return def
+}
+
+type ywhDraftReq struct {
+	ProgramSlug string `json:"program_slug,omitempty"`
+	FindingID   string `json:"finding_id,omitempty"`
+	DraftID     string `json:"draft_id,omitempty"`
+}
+
+// yesWeHackSlugFromNotes extracts the YesWeHack program slug from the note
+// written by handleImportBountyPrograms ("Imported from YesWeHack (<slug>)").
+func yesWeHackSlugFromNotes(notes string) string {
+	const prefix = "YesWeHack ("
+	i := strings.Index(notes, prefix)
+	if i < 0 {
+		return ""
+	}
+	rest := notes[i+len(prefix):]
+	j := strings.Index(rest, ")")
+	if j <= 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:j])
+}
+
+// handleYesWeHackDraft creates or updates a YesWeHack draft report for a
+// confirmed finding in the scan. It strictly writes to the draft endpoint and
+// never submits a report.
+func (s *Server) handleYesWeHackDraft(w http.ResponseWriter, r *http.Request) {
+	if s.bountyClient == nil || s.bountyStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "bounty integration is not configured on this server")
+		return
+	}
+	if !s.bountyStore.Configured() {
+		writeError(w, http.StatusBadRequest, "YesWeHack credential is not configured (set it on the Bug bounty page)")
+		return
+	}
+	scanID := domain.ID(r.PathValue("id"))
+	sc, err := s.store.Scans().Get(r.Context(), scanID)
+	if err != nil {
+		s.writeLookupError(w, err)
+		return
+	}
+	proj, err := s.store.Projects().Get(r.Context(), sc.ProjectID)
+	if err != nil {
+		s.writeInternalError(w, "load project", err)
+		return
+	}
+	var req ywhDraftReq
+	if err := readJSON(r, &req); err != nil {
+		writeJSONBodyError(w, err)
+		return
+	}
+	slug := strings.TrimSpace(req.ProgramSlug)
+	if slug == "" {
+		slug = yesWeHackSlugFromNotes(proj.Notes)
+	}
+	if slug == "" {
+		writeError(w, http.StatusBadRequest, "program_slug is required (this project was not imported from YesWeHack)")
+		return
+	}
+
+	all, err := s.store.Findings().ListByScan(r.Context(), scanID)
+	if err != nil {
+		s.writeInternalError(w, "list findings", err)
+		return
+	}
+	var targetFinding *domain.Finding
+	if fid := strings.TrimSpace(req.FindingID); fid != "" {
+		for _, f := range all {
+			if string(f.ID) == fid {
+				targetFinding = f
+				break
+			}
+		}
+		if targetFinding == nil {
+			writeError(w, http.StatusNotFound, "finding not found in this scan")
+			return
+		}
+		if targetFinding.Verdict != domain.VerdictConfirmed {
+			writeError(w, http.StatusBadRequest, "only confirmed findings can be drafted to YesWeHack")
+			return
+		}
+	} else {
+		for _, f := range report.Prioritized(all) {
+			if f.Verdict == domain.VerdictConfirmed {
+				targetFinding = f
+				break
+			}
+		}
+		if targetFinding == nil {
+			writeError(w, http.StatusBadRequest, "no confirmed findings in this scan to draft")
+			return
+		}
+	}
+
+	endpoints, err := s.store.Endpoints().ListByScan(r.Context(), scanID)
+	if err != nil {
+		s.writeInternalError(w, "list endpoints", err)
+		return
+	}
+	endpointURL := ""
+	for _, ep := range endpoints {
+		if ep.ID == targetFinding.EndpointID {
+			endpointURL = ep.URL
+			break
+		}
+	}
+	lookup, err := s.loadEvidence(r.Context(), scanID)
+	if err != nil {
+		s.writeInternalError(w, "list evidence", err)
+		return
+	}
+	built := report.BuildYesWeHackDraft(targetFinding, endpointURL, lookup.metadata(targetFinding), s.version)
+	draft := bounty.DraftReport{
+		Title:               built.Title,
+		BugType:             built.BugType,
+		Scope:               built.Scope,
+		EndPoint:            built.EndPoint,
+		VulnerablePart:      built.VulnerablePart,
+		PartName:            built.PartName,
+		Payload:             built.Payload,
+		DescriptionMarkdown: built.DescriptionMarkdown,
+		TechnicalEnv:        built.TechnicalEnv,
+	}
+
+	var res *bounty.DraftResult
+	action := "created"
+	status := http.StatusCreated
+	if draftID := strings.TrimSpace(req.DraftID); draftID != "" {
+		res, err = s.bountyClient.UpdateDraft(r.Context(), slug, draftID, draft)
+		action = "updated"
+		status = http.StatusOK
+	} else {
+		res, err = s.bountyClient.CreateDraft(r.Context(), slug, draft)
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, bounty.ErrNoToken):
+			writeError(w, http.StatusBadRequest, "YesWeHack credential is not configured")
+		case errors.Is(err, bounty.ErrUnauthorized):
+			writeError(w, http.StatusUnauthorized, "YesWeHack rejected the stored credential (401/403)")
+		default:
+			writeError(w, http.StatusBadGateway, "YesWeHack draft request failed: "+err.Error())
+		}
+		return
+	}
+	writeJSON(w, status, map[string]any{
+		"program_slug": slug,
+		"finding_id":   targetFinding.ID,
+		"draft_id":     res.DraftID(),
+		"action":       action,
+		"submitted":    false,
+		"url":          res.URL,
+		"draft":        draft,
+	})
 }

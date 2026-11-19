@@ -22,6 +22,92 @@ function decodeDetail(detail?: string): unknown {
   }
 }
 
+function YesWeHackDraftBar({
+  scanId,
+  findingId,
+  disabled,
+}: {
+  scanId: string;
+  findingId?: string;
+  disabled?: boolean;
+}) {
+  const [programSlug, setProgramSlug] = useState("");
+  const [draftId, setDraftId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<{
+    action: string;
+    draft_id?: string;
+    program_slug: string;
+    url?: string;
+    submitted: boolean;
+  } | null>(null);
+
+  async function saveDraft() {
+    setBusy(true);
+    setError("");
+    setResult(null);
+    try {
+      const body: Record<string, string> = {};
+      if (programSlug.trim()) body.program_slug = programSlug.trim();
+      if (findingId) body.finding_id = findingId;
+      if (draftId.trim()) body.draft_id = draftId.trim();
+      const res = await api<{
+        action: string;
+        draft_id?: string;
+        program_slug: string;
+        url?: string;
+        submitted: boolean;
+      }>(`/api/scans/${scanId}/bounty/yeswehack/draft`, { method: "POST", body });
+      setResult(res);
+      if (res.draft_id) setDraftId(res.draft_id);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-1.5 rounded-md border border-border p-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          className="h-7 w-40 text-xs"
+          value={programSlug}
+          onChange={(e) => setProgramSlug(e.target.value)}
+          placeholder="Program slug (optional)"
+          aria-label="YesWeHack program slug"
+        />
+        <Input
+          className="h-7 w-36 text-xs"
+          value={draftId}
+          onChange={(e) => setDraftId(e.target.value)}
+          placeholder="Draft ID (update)"
+          aria-label="YesWeHack draft ID"
+        />
+        <Button size="sm" variant="outline" onClick={saveDraft} disabled={busy || disabled}>
+          {busy ? "Saving draft…" : "Draft to YesWeHack (no submit)"}
+        </Button>
+      </div>
+      {error ? <div className="text-[11px] text-red-700 dark:text-red-400">{error}</div> : null}
+      {result ? (
+        <div className="text-[11px] text-emerald-700 dark:text-emerald-400">
+          Draft {result.action} on {result.program_slug}
+          {result.draft_id ? ` (id: ${result.draft_id})` : ""} — NOT submitted (manual submit only).
+          {result.url ? (
+            <>
+              {" "}
+              <a href={result.url} target="_blank" rel="noreferrer" className="underline">
+                open draft
+              </a>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /* Findings ---------------------------------------------------------------- */
 
 export function FindingsPanel({ scanId }: { scanId: string }) {
@@ -136,13 +222,16 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
                 <span className="mono">source {selected.provenance?.discovery_source ?? "—"}</span>
               </div>
               {selected.verdict === "confirmed" ? (
-                <div>
-                  <a
-                    href={`/api/scans/${scanId}/findings/${selected.id}/poc`}
-                    className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-emerald-700 dark:text-emerald-400 hover:bg-muted"
-                  >
-                    <Download className="size-3" /> download PoC (standalone HTML)
-                  </a>
+                <div className="space-y-2">
+                  <div>
+                    <a
+                      href={`/api/scans/${scanId}/findings/${selected.id}/poc`}
+                      className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-emerald-700 dark:text-emerald-400 hover:bg-muted"
+                    >
+                      <Download className="size-3" /> download PoC (standalone HTML)
+                    </a>
+                  </div>
+                  <YesWeHackDraftBar scanId={scanId} findingId={selected.id} />
                 </div>
               ) : null}
               {selected.evidence_ids?.length ? (
@@ -503,6 +592,14 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
           ) : null}
         </CardContent>
       </Card>
+
+      {template === "yeswehack" || confirmed.length > 0 ? (
+        <YesWeHackDraftBar
+          scanId={scanId}
+          findingId={mode === "selected" && picked.length === 1 ? picked[0] : undefined}
+          disabled={confirmed.length === 0}
+        />
+      ) : null}
 
       {mode === "selected" ? (
         <Card>

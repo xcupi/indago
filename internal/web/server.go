@@ -213,6 +213,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bounty/programs", s.handleBountyPrograms)
 	mux.HandleFunc("GET /api/bounty/programs/{slug}", s.handleBountyProgram)
 	mux.HandleFunc("POST /api/bounty/import", s.handleImportBountyPrograms)
+	mux.HandleFunc("POST /api/scans/{id}/bounty/yeswehack/draft", s.handleYesWeHackDraft)
 	mux.HandleFunc("GET /api/payload-library", s.handleListPayloadLibrary)
 	mux.HandleFunc("GET /api/llm/chatgpt/session", s.handleChatGPTStatus)
 	mux.HandleFunc("POST /api/llm/chatgpt/login", s.handleChatGPTLoginStart)

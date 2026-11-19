@@ -2,6 +2,7 @@ package bounty
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -139,5 +140,77 @@ func TestValidateSendsBearerForSessionToken(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "Bearer ") {
 		t.Fatalf("Authorization = %q", got)
+	}
+}
+
+func TestDraftCreateUpdateNeverSubmits(t *testing.T) {
+	var methods []string
+	var paths []string
+	var gotAuth string
+	var gotBody DraftReport
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		paths = append(paths, r.URL.Path)
+		gotAuth = r.Header.Get("Authorization")
+		if r.URL.Path == "/programs/acme/reports" {
+			t.Fatalf("submit endpoint /reports must never be called")
+		}
+		if r.Method == http.MethodPost || r.Method == http.MethodPut {
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatal(err)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{"id":42,"title":"Reflected XSS","url":"https://yeswehack.com/programs/acme/drafts/42"}`))
+			return
+		}
+		w.Write([]byte(`{"id":"42","title":"Reflected XSS v2","url":"https://yeswehack.com/programs/acme/drafts/42"}`))
+	}))
+	defer srv.Close()
+
+	// Missing token must fail closed.
+	noTok := NewClient(srv.URL, func() string { return "" })
+	if _, err := noTok.CreateDraft(context.Background(), "acme", DraftReport{Title: "XSS"}); err != ErrNoToken {
+		t.Fatalf("CreateDraft without token = %v, want ErrNoToken", err)
+	}
+	if _, err := noTok.UpdateDraft(context.Background(), "acme", "42", DraftReport{Title: "XSS"}); err != ErrNoToken {
+		t.Fatalf("UpdateDraft without token = %v, want ErrNoToken", err)
+	}
+
+	c := NewClient(srv.URL, func() string { return "a.b.c" })
+	created, err := c.CreateDraft(context.Background(), "acme", DraftReport{
+		Title:               "Reflected XSS",
+		BugType:             "Cross-Site Scripting (XSS)",
+		EndPoint:            "https://app.acme.test/search",
+		DescriptionMarkdown: "## Description\nTest",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.DraftID() != "42" {
+		t.Fatalf("created DraftID = %q, want 42", created.DraftID())
+	}
+	if gotAuth != "Bearer a.b.c" {
+		t.Fatalf("Authorization = %q", gotAuth)
+	}
+
+	updated, err := c.UpdateDraft(context.Background(), "acme", created.DraftID(), DraftReport{
+		Title: "Reflected XSS v2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.DraftID() != "42" || gotBody.Title != "Reflected XSS v2" {
+		t.Fatalf("updated = %+v body = %+v", updated, gotBody)
+	}
+
+	if len(methods) != 2 || methods[0] != http.MethodPost || methods[1] != http.MethodPut {
+		t.Fatalf("methods = %v, want [POST PUT]", methods)
+	}
+	if paths[0] != "/programs/acme/reports/draft" || paths[1] != "/programs/acme/reports/draft/42" {
+		t.Fatalf("paths = %v", paths)
 	}
 }
