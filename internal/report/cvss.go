@@ -342,6 +342,7 @@ var (
 	cweSQLi             = CWE{89, "Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"}
 	cweSecurityHeaders  = CWE{693, "Protection Mechanism Failure"}
 	cweCookiePolicy     = CWE{614, "Sensitive Cookie in HTTPS Session Without 'Secure' Attribute"}
+	cweJWT              = CWE{347, "Improper Verification of Cryptographic Signature"}
 )
 
 // classTable is the deterministic mapping. Order is documentation order and is
@@ -386,6 +387,13 @@ var classTable = []Classification{
 	// network interception or script access; the attacker still has to reach
 	// the cookie, so the baseline is low with a high attack complexity.
 	{Class: domain.VulnCookiePolicy, CWE: cweCookiePolicy, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"), Note: ClassificationNote},
+
+	// A server that accepts a modified signature or an unsigned alg=none
+	// token has no authentication boundary left: any caller can mint a token
+	// naming any subject, so confidentiality and integrity are high with no
+	// privileges or interaction required. Lower it when the finding is only a
+	// claim-level hygiene issue (missing exp, long lifetime, sensitive claim).
+	{Class: domain.VulnJWT, CWE: cweJWT, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"), Note: ClassificationNote},
 
 	// SSRF reaches internal services the attacker cannot address directly, so
 	// the security scope changes (S:C).

@@ -65,12 +65,20 @@ const (
 	// cookie without SameSite. Values are never recorded. See
 	// internal/scan/securityheaders.go.
 	VulnCookiePolicy VulnClass = "cookie_policy"
+	// VulnJWT is a JSON Web Token validation or hygiene weakness: a token the
+	// server accepts with a modified signature or an unverified "none"
+	// algorithm (CWE-347, improper verification of a cryptographic signature),
+	// or a token whose own claims break hygiene (no expiry, an excessive
+	// lifetime, secret material inside the payload). Decided from the token's
+	// bytes and from a bounded read-only request differential, never by an
+	// LLM. See internal/scan/jwtcheck.go.
+	VulnJWT VulnClass = "jwt_validation"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy, VulnJWT:
 		return true
 	default:
 		return false

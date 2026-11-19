@@ -328,7 +328,12 @@ type ScanConfig struct {
 	// and cookie-policy inspection. It is one GET per origin and is on by
 	// default, like the other passive header-reading engines; true omits only
 	// its jobs.
-	SkipSecurityHeaders bool   `json:"skip_security_headers,omitempty"`
+	SkipSecurityHeaders bool `json:"skip_security_headers,omitempty"`
+	// SkipJWT omits the READ-ONLY JWT validation & hygiene check. It only
+	// inspects a Bearer JWT this scan's own session actually carries (a scan
+	// with no bearer token sends nothing), and its differential keeps to GET
+	// on an authenticated endpoint; true omits only its jobs.
+	SkipJWT             bool   `json:"skip_jwt,omitempty"`
 	SSRFCallbackURL     string `json:"ssrf_callback_url,omitempty"`
 	SSRFCallbackPollURL string `json:"ssrf_callback_poll_url,omitempty"`
 	// AllowPrivateOAST lets THIS scan's SSRF engine use an OAST collaborator

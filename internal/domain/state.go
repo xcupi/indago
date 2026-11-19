@@ -298,12 +298,18 @@ const (
 	// deduplicated per origin and header/cookie name, never per URL. See
 	// internal/scan/securityheaders.go.
 	JobSecurityHeaders JobType = "security_headers"
+	// JobJWT inspects ONE origin's Bearer JWT: the token's own claims/header
+	// hygiene (offline) plus a bounded read-only GET differential that checks
+	// the server actually rejects a modified signature and an unverified
+	// "none" algorithm. Findings are deduplicated per origin/issuer, never per
+	// URL. See internal/scan/jwtcheck.go.
+	JobJWT JobType = "jwt_validation"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders, JobJWT:
 		return true
 	default:
 		return false

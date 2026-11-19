@@ -456,7 +456,10 @@ type createScanReq struct {
 	SkipPathTraversal bool `json:"skip_path_traversal"`
 	// SkipSecurityHeaders omits the READ-ONLY response security-headers and
 	// cookie-policy inspection (one GET per origin).
-	SkipSecurityHeaders             bool   `json:"skip_security_headers"`
+	SkipSecurityHeaders bool `json:"skip_security_headers"`
+	// SkipJWT omits the READ-ONLY JWT validation & hygiene check (offline
+	// claims analysis plus a bounded GET differential).
+	SkipJWT                         bool   `json:"skip_jwt"`
 	SSRFCallbackURL                 string `json:"ssrf_callback_url"`
 	SSRFCallbackPollURL             string `json:"ssrf_callback_poll_url"`
 	AllowPrivateOAST                bool   `json:"allow_private_oast"`
@@ -569,6 +572,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		SkipSSRF:                        req.SkipSSRF,
 		SkipPathTraversal:               req.SkipPathTraversal,
 		SkipSecurityHeaders:             req.SkipSecurityHeaders,
+		SkipJWT:                         req.SkipJWT,
 		SkipCORS:                        req.SkipCORS,
 		SkipOpenRedirect:                req.SkipOpenRedirect,
 		SkipGraphQL:                     req.SkipGraphQL,
@@ -674,7 +678,9 @@ type capabilitiesReq struct {
 	SkipPathTraversal bool `json:"skip_path_traversal"`
 	// SkipSecurityHeaders omits the READ-ONLY response security-headers and
 	// cookie-policy inspection.
-	SkipSecurityHeaders    bool   `json:"skip_security_headers"`
+	SkipSecurityHeaders bool `json:"skip_security_headers"`
+	// SkipJWT omits the READ-ONLY JWT validation & hygiene check.
+	SkipJWT                bool   `json:"skip_jwt"`
 	EnableCommandInjection bool   `json:"enable_command_injection"`
 	EnableSSTI             bool   `json:"enable_ssti"`
 	EnableSQLi             bool   `json:"enable_sqli"`
@@ -712,6 +718,7 @@ func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Req
 	sc.Config.SkipSSRF = req.SkipSSRF
 	sc.Config.SkipPathTraversal = req.SkipPathTraversal
 	sc.Config.SkipSecurityHeaders = req.SkipSecurityHeaders
+	sc.Config.SkipJWT = req.SkipJWT
 	sc.Config.SkipCORS = req.SkipCORS
 	sc.Config.SkipOpenRedirect = req.SkipOpenRedirect
 	sc.Config.SkipGraphQL = req.SkipGraphQL

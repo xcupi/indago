@@ -183,6 +183,9 @@ func legacyPipelineCfg(httpWorkers int) *domain.ScanConfig {
 	// job per origin, which this fixture's one-job-per-endpoint/injection-point
 	// arithmetic does not model. It has its own tests in securityheaders_test.go.
 	cfg.SkipSecurityHeaders = true
+	// The JWT validation & hygiene pass also adds one job per origin carrying a
+	// Bearer JWT; it has its own tests in jwtcheck_test.go.
+	cfg.SkipJWT = true
 	return cfg
 }
 
@@ -206,6 +209,7 @@ func createScan(t *testing.T, c *scan.Controller, proj, tgt domain.ID, cfg *doma
 		p.SkipPathTraversal = cfg.SkipPathTraversal
 		p.SkipCORS = cfg.SkipCORS
 		p.SkipSecurityHeaders = cfg.SkipSecurityHeaders
+		p.SkipJWT = cfg.SkipJWT
 		p.SkipOpenRedirect = cfg.SkipOpenRedirect
 		p.SkipGraphQL = cfg.SkipGraphQL
 		p.SkipWriteEndpoints = cfg.SkipWriteEndpoints
