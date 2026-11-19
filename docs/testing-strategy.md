@@ -86,8 +86,9 @@ JS string) is confirmed via the uncaught-exception signal, a merely-reflected
 `javascript:` URL is rejected (not activated by passive load), an authenticated
 session's cookie reaches the server, out-of-scope subresources and navigation
 are blocked, and timeout/cancellation are observed. Both run by default and skip
-when no Chromium is found (`$INDAGO_CHROMIUM_PATH` or
-`~/.cache/ms-playwright/chromium-*`; skipped in `-short`). Chromium is launched
+when no Chromium is found (`$INDAGO_CHROMIUM_PATH`, `~/.cache/ms-playwright/chromium-*`
+or a system-wide Chrome/Chromium — preferring an install this host can sandbox;
+skipped in `-short`). Chromium is launched
 by explicit path, so the Playwright driver and the installed revision need not
 match. The Playwright *driver* must match `go.mod`'s `playwright-go` version
 (currently `github.com/mxschmitt/playwright-go` v0.6201.1 → driver 1.62.1, see `docs/deployment.md` §3); without it these tests

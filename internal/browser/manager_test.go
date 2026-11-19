@@ -207,16 +207,16 @@ func (c *fakeContext) isClosed() bool {
 }
 
 type fakePage struct {
-	ctx          *fakeContext
-	gotoDelay    time.Duration
-	mu           sync.Mutex
-	closed       bool
-	reqFn        func(NetworkEvent)
-	conFn        func(ConsoleMessage)
-	dlgFn        func(string)
-	errFn        func(string)
-	localStorage map[string]string
-	initScripts  []string
+	ctx           *fakeContext
+	gotoDelay     time.Duration
+	mu            sync.Mutex
+	closed        bool
+	reqFn         func(NetworkEvent)
+	conFn         func(ConsoleMessage)
+	dlgFn         func(string)
+	errFn         func(string)
+	localStorage  map[string]string
+	initScripts   []string
 	lastReferer   string // records the referer passed to the most recent Goto, for TestNavigateThreadsRefererToGoto
 	lastGotoAt    time.Time
 	contentReadAt time.Time

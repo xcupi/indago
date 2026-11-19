@@ -1,9 +1,10 @@
 // These tests drive a REAL Chromium via Playwright. They run by default and skip
 // (quickly) when no Chromium can be found, so `go test ./...` never fails on a
-// machine without one. Chromium is located via $INDAGO_CHROMIUM_PATH or the
-// Playwright cache (~/.cache/ms-playwright/chromium-*); it is launched by
-// explicit path, so the Playwright driver and the installed revision need not
-// match. Install one with `playwright install chromium`.
+// machine without one. Chromium is located via $INDAGO_CHROMIUM_PATH, the
+// Playwright cache (~/.cache/ms-playwright/chromium-*) or a system-wide
+// Chrome/Chromium, preferring an install this host can actually sandbox; it is
+// launched by explicit path, so the Playwright driver and the installed
+// revision need not match. Install one with `playwright install chromium`.
 package browser_test
 
 import (
@@ -25,12 +26,65 @@ import (
 )
 
 // findChromium locates an installed Chromium: $INDAGO_CHROMIUM_PATH, then the
-// newest build in the Playwright cache. The Playwright driver and the installed
-// Chromium revision can differ; launching by explicit path lets them be paired.
+// newest build in the Playwright cache, then a system-wide install. Among those,
+// a build this host can actually sandbox wins, because every real-browser test
+// here launches with the sandbox ON by default: Playwright's bundled Chromium
+// ships its `chrome_sandbox` helper without the setuid bit, so on a host that
+// also denies unprivileged user namespaces (Ubuntu 23.10+ with
+// kernel.apparmor_restrict_unprivileged_userns=1) it aborts at startup with
+// "No usable sandbox!" before a page loads, while a system Google Chrome's
+// setuid helper still sandboxes. Choosing another installed binary never
+// weakens the sandbox; the tests still measure the launched renderers from
+// /proc. The Playwright driver and the installed Chromium revision need not
+// match; launching by explicit path lets them be paired.
 func findChromium() string {
 	if p := os.Getenv("INDAGO_CHROMIUM_PATH"); p != "" {
 		return p
 	}
+	candidates := chromiumInstalls()
+	for _, c := range candidates {
+		if chromiumCanSandbox(c) {
+			return c
+		}
+	}
+	if len(candidates) > 0 {
+		// Nothing here can sandbox: return an installed binary anyway so callers
+		// fail with Chromium's own diagnostic instead of "no Chromium found".
+		return candidates[0]
+	}
+	return ""
+}
+
+// systemChromiumCandidates lists well-known system-wide Chrome/Chromium install
+// locations, in preference order. Distribution and vendor packages ship a
+// setuid-root sandbox helper, which is what makes them usable on hosts that
+// deny unprivileged user namespaces (see chromiumCanSandbox).
+var systemChromiumCandidates = []string{
+	"/usr/bin/google-chrome",
+	"/usr/bin/google-chrome-stable",
+	"/usr/bin/chromium",
+	"/usr/bin/chromium-browser",
+}
+
+// chromiumInstalls lists the Chromium binaries installed here, preferring the
+// Playwright cache (what `playwright install chromium` provides) over
+// system-wide packages.
+func chromiumInstalls() []string {
+	var out []string
+	if p := playwrightCacheChromium(); p != "" {
+		out = append(out, p)
+	}
+	for _, p := range systemChromiumCandidates {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// playwrightCacheChromium returns the newest Chromium build in the Playwright
+// cache, or "" when none is installed.
+func playwrightCacheChromium() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
@@ -41,6 +95,52 @@ func findChromium() string {
 		return ""
 	}
 	return matches[len(matches)-1]
+}
+
+// chromiumCanSandbox reports whether exe can use Chromium's process sandbox on
+// this host. Chromium accepts two sandbox transports: a setuid-root
+// `chrome-sandbox`/`chrome_sandbox` helper next to the binary, or its
+// user-namespace sandbox, which needs the kernel to allow mapping the root UID
+// inside a new unprivileged user namespace. A host that denies both cannot run a
+// sandboxed renderer at all, and no test may paper over that with --no-sandbox.
+func chromiumCanSandbox(exe string) bool {
+	return hasSetuidSandboxHelper(exe) || usernsRestriction() == ""
+}
+
+// hasSetuidSandboxHelper reports whether the install containing exe carries a
+// setuid sandbox helper under either the Chromium (`chrome_sandbox`) or the
+// Google Chrome (`chrome-sandbox`) name. Only the setuid form counts: Chromium
+// ignores an unprivileged copy, which is exactly what Playwright's download
+// contains. Chromium itself remains the authority — this only chooses which
+// binary to try, and the sandbox tests then measure the launch from /proc.
+func hasSetuidSandboxHelper(exe string) bool {
+	dir := filepath.Dir(exe)
+	if real, err := filepath.EvalSymlinks(exe); err == nil {
+		dir = filepath.Dir(real)
+	}
+	for _, name := range []string{"chrome-sandbox", "chrome_sandbox"} {
+		if fi, err := os.Stat(filepath.Join(dir, name)); err == nil && fi.Mode()&os.ModeSetuid != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// usernsRestriction names the /proc/sys knob (as knob=value) that denies this
+// host's unprivileged user-namespace root mapping, or "" when none does. The
+// knobs do not exist on non-Linux hosts, where Chromium does not use that
+// sandbox transport.
+func usernsRestriction() string {
+	for _, probe := range []struct{ path, value string }{
+		{"/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "1"}, // Ubuntu 23.10+
+		{"/proc/sys/kernel/unprivileged_userns_clone", "0"},             // Debian/Ubuntu knob
+		{"/proc/sys/user/max_user_namespaces", "0"},
+	} {
+		if b, err := os.ReadFile(probe.path); err == nil && strings.TrimSpace(string(b)) == probe.value {
+			return probe.path + "=" + probe.value
+		}
+	}
+	return ""
 }
 
 func newManagerOrSkip(t *testing.T, cfg browser.Config) *browser.Manager {

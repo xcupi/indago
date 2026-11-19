@@ -30,16 +30,16 @@ type gqlNamedRef struct {
 }
 
 type gqlType struct {
-	Kind       string         `json:"kind"`
-	Name       string         `json:"name"`
-	EnumValues []gqlNamedRef  `json:"enumValues"`
-	Fields     []gqlField     `json:"fields"`
+	Kind       string        `json:"kind"`
+	Name       string        `json:"name"`
+	EnumValues []gqlNamedRef `json:"enumValues"`
+	Fields     []gqlField    `json:"fields"`
 }
 
 type gqlField struct {
-	Name string       `json:"name"`
-	Args []gqlArg     `json:"args"`
-	Type *gqlTypeRef  `json:"type"`
+	Name string      `json:"name"`
+	Args []gqlArg    `json:"args"`
+	Type *gqlTypeRef `json:"type"`
 }
 
 type gqlArg struct {

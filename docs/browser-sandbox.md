@@ -69,6 +69,38 @@ the probe discriminates; it reads the kernel's view, not only the command line.
   evidence), and deliberately breaking the recipe (dropping `chroot`) was shown
   locally to fail the check, with Chromium's own `sys_chroot` error as the reason.
 
+### Which Chromium the tests launch
+
+The real-browser tests resolve a binary in this order:
+
+1. `$INDAGO_CHROMIUM_PATH` — an explicit choice always wins (CI pins
+   `/usr/bin/google-chrome`).
+2. The newest Playwright-cache build (`~/.cache/ms-playwright/chromium-*`).
+3. A system-wide install (`/usr/bin/google-chrome`,
+   `/usr/bin/google-chrome-stable`, `/usr/bin/chromium`,
+   `/usr/bin/chromium-browser`).
+
+A candidate is passed over while choosing only when this host provably cannot
+sandbox it: no setuid `chrome-sandbox`/`chrome_sandbox` helper next to the
+binary **and** a `/proc/sys` knob denying unprivileged user-namespace root
+mapping (`kernel.apparmor_restrict_unprivileged_userns=1`, the Ubuntu 23.10+
+default; `kernel.unprivileged_userns_clone=0`; or
+`user.max_user_namespaces=0`). That is why a host with AppArmor's restriction
+runs the sandbox tests against a system Google Chrome — whose helper is setuid
+root — instead of Playwright's bundled build, whose `chrome_sandbox` is not
+setuid and which therefore aborts with `No usable sandbox!` before any page
+loads. Selecting a different installed binary never weakens the check: the
+assertions still read `--no-sandbox`, `Seccomp` and the namespaces of the
+launched renderers from `/proc`.
+
+If every installed binary is blocked that way, the default-config sandbox test
+**skips** and names the blocking knob and the install lacking the helper; the
+explicit opt-out control still runs, because it needs no sandbox. That skip is
+not a pass — `scripts/ci-browser-check.py` fails on it — so a CI environment
+must provide a Chromium that can sandbox (CI uses `/usr/bin/google-chrome`). A
+launch failure with a binary that could sandbox is still a test failure, never a
+skip.
+
 ## Docker
 
 Measured with the image built from `main` (Debian bookworm `chromium`
@@ -144,8 +176,12 @@ profile the image fails closed rather than falling back.
 ## Not established
 
 - Only this host (Ubuntu, kernel 7.0, vendor Google Chrome 155, AppArmor
-  `apparmor_restrict_unprivileged_userns=1`) was measured. Other distributions,
-  Playwright-bundled Chromium builds, and macOS/Windows were not.
+  `apparmor_restrict_unprivileged_userns=1`) was measured. Playwright's bundled
+  Chromium (`chromium-1234`, `chrome-linux64`) was measured only to the extent
+  that its non-setuid `chrome_sandbox` helper cannot sandbox under that
+  restriction — it aborts with `No usable sandbox!` — which is why the tests
+  prefer a system install there; its sandboxed behavior on a host without the
+  restriction was not measured. Other distributions and macOS/Windows were not.
 - No exploit was attempted: this shows the sandbox is configured and effective
   (filter and namespaces present), not that an escape is impossible.
 - Hosts that cannot provide the sandbox still need the opt-out, which lowers

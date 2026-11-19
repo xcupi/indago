@@ -102,12 +102,19 @@ func descendantChromium(t *testing.T) []chromiumProc {
 
 // renderersWithOpenPage keeps one page open and returns the live renderers.
 // Unlike newManagerOrSkip, a launch failure is a FAILURE here: a sandboxed
-// launch that cannot start must never be reported as a skipped test.
+// launch that cannot start must never be reported as a skipped test. The one
+// skip is a host that provably cannot sandbox any installed binary at all (see
+// chromiumCanSandbox), reported with the knob that blocks it and the install
+// that lacks a setuid helper; scripts/ci-browser-check.py turns that skip into a
+// CI failure, so coverage cannot silently disappear.
 func renderersWithOpenPage(t *testing.T, cfg browser.Config) []chromiumProc {
 	t.Helper()
 	exe := findChromium()
 	if exe == "" {
 		t.Skip("no Chromium found (set INDAGO_CHROMIUM_PATH)")
+	}
+	if !cfg.DisableSandbox && !chromiumCanSandbox(exe) {
+		t.Skipf("no installed Chromium can sandbox on this host: unprivileged user namespaces are denied (%s) and %s ships no setuid chrome-sandbox helper; point INDAGO_CHROMIUM_PATH at a Chrome/Chromium install that has one (e.g. /usr/bin/google-chrome) or allow user namespaces — see docs/browser-sandbox.md", usernsRestriction(), exe)
 	}
 	cfg.ExecutablePath = exe
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
