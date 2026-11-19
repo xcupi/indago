@@ -93,6 +93,7 @@ export default function Scans() {
     enableCommandInjection: false,
     enableSSTI: false,
     enableSQLi: false,
+    enableNoSQLi: false,
     enableXXE: false,
     allowPrivateOAST: false,
     skipWriteEndpoints: true,
@@ -250,6 +251,7 @@ export default function Scans() {
         enable_command_injection: form.enableCommandInjection,
         enable_ssti: form.enableSSTI,
         enable_sqli: form.enableSQLi,
+        enable_nosqli: form.enableNoSQLi,
         enable_xxe: form.enableXXE,
         allow_private_oast: form.allowPrivateOAST,
         skip_write_endpoints: form.skipWriteEndpoints,
@@ -575,6 +577,19 @@ export default function Scans() {
                       <span className="block text-[10px] text-muted-foreground">
                         Sends quote-breaking probes and boolean true/false pairs; confirmed by the database's own error
                         signature, never a computed marker.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="mt-2 flex items-start gap-2 border-t border-border pt-2 text-xs text-foreground">
+                    <Switch
+                      checked={form.enableNoSQLi}
+                      onCheckedChange={(v) => setForm({ ...form, enableNoSQLi: v })}
+                    />
+                    <span>
+                      NoSQL injection (opt-in, read-only)
+                      <span className="block text-[10px] text-muted-foreground">
+                        Sends array shapes and the selection operators $ne/$gt on GET query parameters; confirmed by a new
+                        document-database error or a control-checked differential. Never runs on state-changing endpoints.
                       </span>
                     </span>
                   </label>

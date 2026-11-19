@@ -80,12 +80,21 @@ const (
 	// bytes and from a bounded read-only request differential, never by an
 	// LLM. See internal/scan/jwtcheck.go.
 	VulnJWT VulnClass = "jwt_validation"
+	// VulnNoSQLi is NoSQL query-operator injection (CWE-943): a query
+	// parameter's ARRAY/OPERATOR shape reaches a document-database query, so
+	// the caller decides the query predicate instead of only a value.
+	// Confirmed only from a new database error signature or a stable
+	// operator-versus-control response differential. The engine is strictly
+	// read-only: it sends only selection operators ($ne, $gt) and array
+	// shapes, never $where/$function, updates or deletes.
+	// See internal/scan/nosqli.go.
+	VulnNoSQLi VulnClass = "nosqli"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader, VulnJWT:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader, VulnJWT, VulnNoSQLi:
 		return true
 	default:
 		return false

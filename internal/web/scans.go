@@ -470,6 +470,7 @@ type createScanReq struct {
 	EnableCommandInjection          bool   `json:"enable_command_injection"`
 	EnableSSTI                      bool   `json:"enable_ssti"`
 	EnableSQLi                      bool   `json:"enable_sqli"`
+	EnableNoSQLi                    bool   `json:"enable_nosqli"`
 	EnableXXE                       bool   `json:"enable_xxe"`
 	XXECallbackURL                  string `json:"xxe_callback_url"`
 	XXECallbackPollURL              string `json:"xxe_callback_poll_url"`
@@ -587,6 +588,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		EnableCommandInjection:          req.EnableCommandInjection,
 		EnableSSTI:                      req.EnableSSTI,
 		EnableSQLi:                      req.EnableSQLi,
+		EnableNoSQLi:                    req.EnableNoSQLi,
 		EnableXXE:                       req.EnableXXE,
 		XXECallbackURL:                  req.XXECallbackURL,
 		XXECallbackPollURL:              req.XXECallbackPollURL,
@@ -692,6 +694,7 @@ type capabilitiesReq struct {
 	EnableCommandInjection bool   `json:"enable_command_injection"`
 	EnableSSTI             bool   `json:"enable_ssti"`
 	EnableSQLi             bool   `json:"enable_sqli"`
+	EnableNoSQLi           bool   `json:"enable_nosqli"`
 	EnableXXE              bool   `json:"enable_xxe"`
 	XXECallbackURL         string `json:"xxe_callback_url"`
 	XXECallbackPollURL     string `json:"xxe_callback_poll_url"`
@@ -734,6 +737,7 @@ func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Req
 	sc.Config.EnableCommandInjection = req.EnableCommandInjection
 	sc.Config.EnableSSTI = req.EnableSSTI
 	sc.Config.EnableSQLi = req.EnableSQLi
+	sc.Config.EnableNoSQLi = req.EnableNoSQLi
 	sc.Config.EnableXXE = req.EnableXXE
 	sc.Config.XXECallbackURL = req.XXECallbackURL
 	sc.Config.XXECallbackPollURL = req.XXECallbackPollURL

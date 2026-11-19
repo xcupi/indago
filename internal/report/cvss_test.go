@@ -26,6 +26,7 @@ func TestClassifyCoversEveryIndagoClass(t *testing.T) {
 		domain.VulnSSTI:             {1336, 9.8},
 		domain.VulnCommandInjection: {78, 9.8},
 		domain.VulnSQLi:             {89, 9.8},
+		domain.VulnNoSQLi:           {943, 9.8},
 		domain.VulnXXE:              {611, 7.5},
 		report.ClassSSRF:            {918, 8.6},
 		domain.VulnIDOR:             {639, 6.5},

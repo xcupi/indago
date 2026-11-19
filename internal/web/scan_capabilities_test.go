@@ -54,6 +54,7 @@ func TestUpdateScanCapabilitiesPersistsEveryEngineSwitch(t *testing.T) {
 		"enable_command_injection": true,
 		"enable_ssti":              true,
 		"enable_sqli":              true,
+		"enable_nosqli":            true,
 		"enable_xxe":               true,
 	}
 	a.mustJSON(a.do("PUT", "/api/scans/"+string(id)+"/capabilities", body), 200, nil)
@@ -83,6 +84,7 @@ func TestUpdateScanCapabilitiesPersistsEveryEngineSwitch(t *testing.T) {
 		{"enable_command_injection", cfg.EnableCommandInjection},
 		{"enable_ssti", cfg.EnableSSTI},
 		{"enable_sqli", cfg.EnableSQLi},
+		{"enable_nosqli", cfg.EnableNoSQLi},
 		{"enable_xxe", cfg.EnableXXE},
 	} {
 		if !c.value {

@@ -93,6 +93,7 @@ export interface ScanConfig {
   enable_command_injection?: boolean;
   enable_ssti?: boolean;
   enable_sqli?: boolean;
+  enable_nosqli?: boolean;
   enable_xxe?: boolean;
   allow_private_oast?: boolean;
   skip_write_endpoints?: boolean;

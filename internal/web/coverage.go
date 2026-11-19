@@ -119,6 +119,13 @@ func classifySkip(note string) skipReason {
 	case strings.Contains(n, "no bearer jwt was available"):
 		return skipReason{"jwt_not_applicable", sevInfo, "No Bearer JWT in this scan's session",
 			"The JWT check inspects the bearer token the scan's own session carries. No such token was available for this origin (anonymous scan, cookie-only session, or an opaque non-JWT credential), so nothing was sent."}
+	case strings.Contains(n, "nosqli skipped:"):
+		// Every intentional NoSQL skip (state-changing endpoint, non-query
+		// location, download policy) is a read-only safety boundary, not a
+		// failed probe. Gate/unavailable notes are matched above and keep
+		// their own coverage reasons.
+		return skipReason{"nosqli_not_applicable", sevInfo, "NoSQL query-operator check skipped this injection point",
+			"The NoSQL engine is strictly read-only and GET-query-only: it never sends an operator to a state-changing endpoint, a non-query location, or a download route. Other engine passes still test this endpoint for their own classes."}
 	case strings.Contains(n, "path-segment injection point"):
 		return skipReason{"path_segment_not_testable", sevInfo, "Path traversal cannot be delivered through a URL path segment",
 			"The scope validator refuses dot segments, encoded slashes, NUL bytes and duplicate slashes in a request path (it fails closed), so no traversal payload can reach a path-segment injection point. Query and form parameters on the same endpoint are still tested."}
@@ -249,6 +256,8 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		{"command_injection", "OS command injection", cfg.EnableCommandInjection, "", domain.VulnCommandInjection},
 		{"ssti", "Server-side template injection", cfg.EnableSSTI, "", domain.VulnSSTI},
 		{"sqli", "SQL injection", cfg.EnableSQLi, "", domain.VulnSQLi},
+		{"nosqli", "NoSQL injection", cfg.EnableNoSQLi,
+			"Read-only query-operator probes on GET parameters; array shapes and $ne/$gt only, never on state-changing endpoints.", domain.VulnNoSQLi},
 		{"xxe", "XML external entity", cfg.EnableXXE, "", domain.VulnXXE},
 	}
 	out.Capabilities = make([]coverageCapability, len(specs))
@@ -326,6 +335,10 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 	if !st.Scan.Config.EnableSQLi {
 		out.Warnings = append(out.Warnings, coverageWarning{"sqli_disabled", sevInfo,
 			"SQL injection was not enabled for this scan; its bounded error/boolean probe pass was intentionally not run."})
+	}
+	if !st.Scan.Config.EnableNoSQLi {
+		out.Warnings = append(out.Warnings, coverageWarning{"nosqli_disabled", sevInfo,
+			"NoSQL injection was not enabled for this scan; its read-only query-operator pass was intentionally not run."})
 	}
 	if !st.Scan.Config.EnableXXE {
 		out.Warnings = append(out.Warnings, coverageWarning{"xxe_disabled", sevInfo,

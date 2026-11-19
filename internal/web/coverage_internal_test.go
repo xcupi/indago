@@ -27,6 +27,8 @@ func TestClassifySkipKnowsTheNotesTheExecutorsWrite(t *testing.T) {
 		{"security headers skipped: POST is state-changing; a security-header check only sends GET", "method_not_applicable"},
 		{"jwt check skipped: POST is state-changing; the JWT validation differential only sends GET", "method_not_applicable"},
 		{"jwt check skipped: no bearer JWT was available for this origin", "jwt_not_applicable"},
+		{"nosqli skipped: state-changing endpoint skipped by policy", "nosqli_not_applicable"},
+		{"nosqli skipped: parameter location is not a GET query parameter", "nosqli_not_applicable"},
 	}
 	for _, tc := range cases {
 		if got := classifySkip(tc.note).Code; got != tc.want {

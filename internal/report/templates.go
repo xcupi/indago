@@ -146,6 +146,17 @@ var classIntelByClass = map[domain.VulnClass]classIntel{
 			"only an allow-list of known files). Never pass a user-supplied name straight to a file API.",
 		References: []string{"https://cwe.mitre.org/data/definitions/22.html", "https://owasp.org/www-community/attacks/Path_Traversal"},
 	},
+	domain.VulnNoSQLi: {
+		CWE:  "CWE-943",
+		Name: "NoSQL query-operator injection",
+		Impact: "The caller controls the database query's own structure, not just a value: array-shaped or operator-shaped input " +
+			"reaches the document store and changes the predicate. That bypasses a login filter or filters the whole " +
+			"collection into the response, so stored data is exposed and, where the same query also writes, altered.",
+		Remediation: "Cast every user-supplied query value to its expected scalar type (or reject arrays/objects at the edge), " +
+			"validate against an allow-list of queryable fields, and never pass a request object straight into a query " +
+			"predicate. Use the driver's schema/ODM validation and least-privileged database users.",
+		References: []string{"https://cwe.mitre.org/data/definitions/943.html", "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection"},
+	},
 	domain.VulnSecurityHeaders: {
 		CWE:  "CWE-693",
 		Name: "Missing or weak response security headers",

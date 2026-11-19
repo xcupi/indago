@@ -564,7 +564,7 @@ func (c *cli) scanCreate(args []string) error {
 	loginUserSel := fs.String("login-username-selector", "", "CSS selector override for the username/email field; -auth password only, empty = heuristic")
 	loginPassSel := fs.String("login-password-selector", "", "CSS selector override for the password field; -auth password only, empty = heuristic (input[type=password])")
 	loginSubmitSel := fs.String("login-submit-selector", "", "CSS selector override for the submit control; -auth password only, empty = heuristic")
-	autoBounty := fs.Bool("auto-bounty", false, "automatic non-destructive bug-bounty preset: enables safe non-mutating engines (reflected/DOM XSS, SSRF, CORS, open redirect, GraphQL, command-injection arithmetic canary, SSTI, SQLi, raw-query=auto, safe recon, access-control-pages, role-param, bounded WAF evasion, and TLS fingerprint randomization when not proxied) under conservative human-like pacing; keeps state-changing probes OFF")
+	autoBounty := fs.Bool("auto-bounty", false, "automatic non-destructive bug-bounty preset: enables safe non-mutating engines (reflected/DOM XSS, SSRF, CORS, open redirect, GraphQL, command-injection arithmetic canary, SSTI, SQLi, NoSQLi, raw-query=auto, safe recon, access-control-pages, role-param, bounded WAF evasion, and TLS fingerprint randomization when not proxied) under conservative human-like pacing; keeps state-changing probes OFF")
 	candProfile := fs.String("candidate-profile", "", "XSS candidate profile: minimal | standard | thorough (default: server default)")
 	maxCand := registerMaxCandidates(fs)
 	enableEvasion := fs.Bool("enable-evasion", false, "eagerly try WAF/filter-bypass candidate variants (case variation, alt separators, double URL-encoding) ON TOP OF the canonical set; without this flag, Indago may run the same bounded Technique-only fallback only after canonical candidates at one in-scope point complete without confirmation (see AGENTS.md §2.2)")
@@ -586,6 +586,7 @@ func (c *cli) scanCreate(args []string) error {
 	enableCommandInjection := fs.Bool("enable-command-injection", false, "opt in to the bounded OS command-injection pass: harmless arithmetic markers are sent into likely command sinks and a finding is confirmed only by two independent executions — OFF by default")
 	enableSSTI := fs.Bool("enable-ssti", false, "opt in to the server-side template-injection pass: a bounded template expression marker is evaluated and a finding is confirmed only by the COMPUTED result appearing in the response — OFF by default")
 	enableSQLi := fs.Bool("enable-sqli", false, "opt in to the bounded SQL-injection pass: harmless quote-breaking probes look for a database error signature the baseline did not produce, and true/false boolean pairs must diverge consistently; a finding is confirmed only by two independent signals — OFF by default")
+	enableNoSQLi := fs.Bool("enable-nosqli", false, "opt in to the strictly READ-ONLY NoSQL query-operator pass: GET query parameters are sent array shapes (param[]=...) and the selection operators $ne/$gt, and a finding is confirmed only by a NEW document-database error signature or an operator-versus-benign-control differential (two independent signals); state-changing endpoints are never tested — OFF by default")
 	enableXXE := fs.Bool("enable-xxe", false, "opt in to the XML external-entity pass, which only runs against OBSERVED XML request bodies; it needs -xxe-callback and -xxe-poll (without them the engine records a clean skip, never a failure) — OFF by default")
 	skipSSRF := fs.Bool("skip-ssrf", false, "omit the SSRF pass (ON by default): URL-like parameters are probed with an operator-supplied OAST canary and confirmed only by a marker-bearing callback, never by a blind internal fetch")
 	skipPathTraversal := fs.Bool("skip-path-traversal", false, "omit the READ-ONLY path-traversal / local file inclusion pass (ON by default): file/page-like parameters and file-shaped endpoints are asked for /etc/passwd or windows\\win.ini, and a finding is confirmed only when the file's own multi-token content comes back over a clean baseline and a nonexistent-path control")
@@ -616,7 +617,7 @@ func (c *cli) scanCreate(args []string) error {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-openapi-spec-file FILE | -openapi-spec-url URL] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-sqli] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-path-traversal] [-skip-cors] [-skip-security-headers] [-skip-host-header] [-skip-jwt] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-openapi-spec-file FILE | -openapi-spec-url URL] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-sqli] [-enable-nosqli] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-path-traversal] [-skip-cors] [-skip-security-headers] [-skip-host-header] [-skip-jwt] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
@@ -629,6 +630,7 @@ func (c *cli) scanCreate(args []string) error {
 		req["enable_command_injection"] = true
 		req["enable_ssti"] = true
 		req["enable_sqli"] = true
+		req["enable_nosqli"] = true
 		req["enable_access_control_pages"] = true
 		req["enable_role_param"] = true
 		if len(rawQuery) == 0 {
@@ -670,6 +672,9 @@ func (c *cli) scanCreate(args []string) error {
 	}
 	if *enableSQLi {
 		req["enable_sqli"] = true
+	}
+	if *enableNoSQLi {
+		req["enable_nosqli"] = true
 	}
 	if *enableXXE {
 		req["enable_xxe"] = true

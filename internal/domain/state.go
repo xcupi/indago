@@ -309,12 +309,18 @@ const (
 	// "none" algorithm. Findings are deduplicated per origin/issuer, never per
 	// URL. See internal/scan/jwtcheck.go.
 	JobJWT JobType = "jwt_validation"
+	// JobNoSQLi probes one GET/query injection point for NoSQL query-operator
+	// injection. It sends only read-only selection operators ($ne, $gt) and
+	// array-shaped values, and confirms only when a new database error
+	// signature or an operator-versus-control differential independently
+	// agrees. See internal/scan/nosqli.go.
+	JobNoSQLi JobType = "nosqli"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders, JobHostHeader, JobJWT:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders, JobHostHeader, JobJWT, JobNoSQLi:
 		return true
 	default:
 		return false

@@ -57,13 +57,14 @@ deserialization, or stored XSS.
 ### Current build (post-review)
 
 The four-class sentence above is historical and is now wrong about what the code
-contains. Since this review was written, engines for seven further classes have
+contains. Since this review was written, engines for eight further classes have
 been added and are wired into the scan executor: `internal/scan/execution.go`
 enqueues each pass once per scan and gates it on the scan config.
 
 | Engine | Implementation | Default in a scan |
 | --- | --- | --- |
 | SQL injection | `internal/scan/sqli.go` | opt-in — `EnableSQLi` / `-enable-sqli` |
+| NoSQL injection (query operators) | `internal/scan/nosqli.go` | opt-in — `EnableNoSQLi` / `-enable-nosqli`; strictly READ-ONLY and GET-query-only |
 | SSRF | `internal/scan/ssrf.go` | ON — `SkipSSRF` / `-skip-ssrf` omits it |
 | SSTI | `internal/scan/ssti.go` | opt-in — `EnableSSTI` / `-enable-ssti` |
 | OS command injection | `internal/scan/commandinjection.go` | opt-in — `EnableCommandInjection` / `-enable-command-injection` |
@@ -89,7 +90,7 @@ them, and there is no dated validation record for them of the kind
 `docs/p0-live-validation.md` establishes for the control plane. Their only
 in-repo evidence is unit and integration coverage under `internal/scan/`, which
 is sufficient to show the engines do what their fixtures assert and is **not**
-sufficient to call any of these capabilities confirmed. Treat all seven as
+sufficient to call any of these capabilities confirmed. Treat all eight as
 unproven capability until a dated live run is written down.
 
 ### Discovery and recon
@@ -195,7 +196,7 @@ against the 141 event families in the cheat sheet excludes 28 with reasons
 ## PortSwigger mapping
 
 Everything in this section is the **2026-11-10** result set. The counts below
-cover only the four classes the review tested; the seven post-review engines
+cover only the four classes the review tested; the eight post-review engines
 have no lab row here because they did not exist yet. That absence means
 *untested*, not *passed* and not *failed* — the weakest of the three claims.
 
@@ -270,7 +271,7 @@ is detected, header/comment/backup exposure is reported.
 
 | Priority | Work | Why |
 | --- | --- | --- |
-| **P1 (post-review)** | **Live-validate the seven new engines** (SQLi, SSRF, SSTI, command injection, XXE, CORS, GraphQL) | they are implemented and QA-controlled but have **no current-build live evidence** — see [Current build (post-review)](#current-build-post-review) |
+| **P1 (post-review)** | **Live-validate the eight new engines** (SQLi, NoSQLi, SSRF, SSTI, command injection, XXE, CORS, GraphQL) | they are implemented and QA-controlled but have **no current-build live evidence** — see [Current build (post-review)](#current-build-post-review) |
 | P1 | Finish DOM open-redirect and clobbering models | the other sink models are in; these two need an engine that does not follow a redirect out of scope |
 | P1 | ~~Expose all 9 providers in Settings~~ | done |
 | P2 | ~~Token accounting~~ | done (tokens, not cost) |
@@ -303,4 +304,4 @@ Two caveats that make this block weaker than it looks:
 - Green test packages and `GET /api/capabilities` are **QA controls**. They show
   the tested code paths work and the server reports its flags correctly. They do
   **not** show that any detection capability is live-confirmed, and none of them
-  cover the seven post-review engines.
+  cover the eight post-review engines.
