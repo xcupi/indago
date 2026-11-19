@@ -34,7 +34,7 @@ func TestCLIScanCreateWiresWave1EngineFlags(t *testing.T) {
 	err := run("scan", "create", "-project", project, "-target", target,
 		"-enable-command-injection", "-enable-ssti", "-enable-sqli",
 		"-enable-xxe", "-xxe-callback", "https://oast.example.test/hook", "-xxe-poll", "https://oast.example.test/poll",
-		"-skip-ssrf", "-skip-cors", "-skip-security-headers", "-skip-host-header", "-skip-open-redirect", "-skip-graphql",
+		"-skip-ssrf", "-skip-cors", "-skip-security-headers", "-skip-host-header", "-skip-jwt", "-skip-open-redirect", "-skip-graphql",
 		"-ssrf-callback", "https://oast.example.test/ssrf", "-ssrf-poll", "https://oast.example.test/ssrf-poll",
 	)
 	if err != nil {
@@ -59,6 +59,7 @@ func TestCLIScanCreateWiresWave1EngineFlags(t *testing.T) {
 		{"skip_cors", cfg.SkipCORS},
 		{"skip_security_headers", cfg.SkipSecurityHeaders},
 		{"skip_host_header", cfg.SkipHostHeader},
+		{"skip_jwt", cfg.SkipJWT},
 		{"skip_open_redirect", cfg.SkipOpenRedirect},
 		{"skip_graphql", cfg.SkipGraphQL},
 	} {
@@ -107,7 +108,7 @@ func TestCLIScanCreateDefaultsLeaveWave1EnginesAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := sc.Config
-	if cfg.SkipSSRF || cfg.SkipCORS || cfg.SkipSecurityHeaders || cfg.SkipHostHeader || cfg.SkipOpenRedirect || cfg.SkipGraphQL {
+	if cfg.SkipSSRF || cfg.SkipCORS || cfg.SkipSecurityHeaders || cfg.SkipHostHeader || cfg.SkipJWT || cfg.SkipOpenRedirect || cfg.SkipGraphQL {
 		t.Errorf("an omitted -skip-* flag must not disable a default engine: %+v", cfg)
 	}
 	if cfg.EnableCommandInjection || cfg.EnableSSTI || cfg.EnableSQLi || cfg.EnableXXE {

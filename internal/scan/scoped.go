@@ -110,7 +110,15 @@ func (s *scopedEngine) WithRateLimiter(l *ratelimit.Limiter) *scopedEngine {
 // It is also how the IDOR engine reads the caller identity offline: the token
 // that authenticates a request also carries the claims that name the caller.
 func (s *scopedEngine) sessionBearerFor(rawURL string) string {
-	for _, h := range s.authHeaders {
+	return sessionBearerFrom(s.authHeaders, rawURL)
+}
+
+// sessionBearerFrom is sessionBearerFor's logic as a free function, so a caller
+// that has the scan's recovered headers but not the engine (the JWT pass's
+// bounded enqueue, which must know which origins even carry a bearer token)
+// applies exactly the same origin/host matching.
+func sessionBearerFrom(headers []sessionAuthHeader, rawURL string) string {
+	for _, h := range headers {
 		if !h.HostOnly && h.Origin != "" && sameURLOrigin(rawURL, h.Origin) {
 			return h.Value
 		}
@@ -123,7 +131,7 @@ func (s *scopedEngine) sessionBearerFor(rawURL string) string {
 	if host == "" {
 		return ""
 	}
-	for _, h := range s.authHeaders {
+	for _, h := range headers {
 		if !h.HostOnly || h.Origin == "" {
 			continue
 		}

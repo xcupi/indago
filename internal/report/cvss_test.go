@@ -38,6 +38,7 @@ func TestClassifyCoversEveryIndagoClass(t *testing.T) {
 		domain.VulnSecurityHeaders:  {693, 4.2},
 		domain.VulnCookiePolicy:     {614, 3.7},
 		domain.VulnHostHeader:       {644, 4.7},
+		domain.VulnJWT:              {347, 9.1},
 	}
 	classes := report.Classes()
 	if len(classes) != len(want) {

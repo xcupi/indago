@@ -180,6 +180,19 @@ var classIntelByClass = map[domain.VulnClass]classIntel{
 			"pass an unvalidated X-Forwarded-Host through.",
 		References: []string{"https://cwe.mitre.org/data/definitions/644.html", "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/17-Testing_for_Host_Header_Injection"},
 	},
+	domain.VulnJWT: {
+		CWE:  "CWE-347",
+		Name: "JWT validation and hygiene weakness",
+		Impact: "A token whose signature the server never verifies is not an authentication boundary: any caller can " +
+			"mint a token naming any subject and be treated as that user. Claim-level weaknesses are weaker but still " +
+			"real: a token with no expiry never stops working, a very long lifetime widens the window a leak is " +
+			"usable in, and secret material in the payload is readable by everyone who sees the token, because a JWT " +
+			"payload is only base64url-encoded.",
+		Remediation: "Verify every token's signature before trusting a claim, pin the accepted algorithms to an " +
+			"explicit allow-list that excludes none, reject failures with 401, keep access-token lifetimes short " +
+			"with a revocable refresh token, and never place passwords, API keys or other secrets in the payload.",
+		References: []string{"https://cwe.mitre.org/data/definitions/347.html", "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/06-Session_Management_Testing/10-Testing_JSON_Web_Tokens"},
+	},
 }
 
 func intelFor(class domain.VulnClass) classIntel {

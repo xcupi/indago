@@ -135,6 +135,7 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	h[domain.JobCORS] = newCORSExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobSecurityHeaders] = newSecurityHeadersExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobHostHeader] = newHostHeaderExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	h[domain.JobJWT] = newJWTExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobOpenRedirect] = newOpenRedirectExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobGraphQL] = newGraphQLExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	return h
@@ -214,6 +215,7 @@ func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 		domain.JobCORS:             noop(domain.JobCORS),
 		domain.JobSecurityHeaders:  noop(domain.JobSecurityHeaders),
 		domain.JobHostHeader:       noop(domain.JobHostHeader),
+		domain.JobJWT:              noop(domain.JobJWT),
 		domain.JobOpenRedirect:     noop(domain.JobOpenRedirect),
 		domain.JobGraphQL:          noop(domain.JobGraphQL),
 	}

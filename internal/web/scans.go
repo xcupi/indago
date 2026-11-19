@@ -461,6 +461,9 @@ type createScanReq struct {
 	// baseline plus control requests per origin).
 	SkipHostHeader bool `json:"skip_host_header"`
 
+	// SkipJWT omits the READ-ONLY JWT validation & hygiene check (offline
+	// claims analysis plus a bounded GET differential).
+	SkipJWT                         bool   `json:"skip_jwt"`
 	SSRFCallbackURL                 string `json:"ssrf_callback_url"`
 	SSRFCallbackPollURL             string `json:"ssrf_callback_poll_url"`
 	AllowPrivateOAST                bool   `json:"allow_private_oast"`
@@ -574,6 +577,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		SkipPathTraversal:               req.SkipPathTraversal,
 		SkipSecurityHeaders:             req.SkipSecurityHeaders,
 		SkipHostHeader:                  req.SkipHostHeader,
+		SkipJWT:                         req.SkipJWT,
 		SkipCORS:                        req.SkipCORS,
 		SkipOpenRedirect:                req.SkipOpenRedirect,
 		SkipGraphQL:                     req.SkipGraphQL,
@@ -683,6 +687,8 @@ type capabilitiesReq struct {
 	// SkipHostHeader omits the READ-ONLY host-header inspection.
 	SkipHostHeader bool `json:"skip_host_header"`
 
+	// SkipJWT omits the READ-ONLY JWT validation & hygiene check.
+	SkipJWT                bool   `json:"skip_jwt"`
 	EnableCommandInjection bool   `json:"enable_command_injection"`
 	EnableSSTI             bool   `json:"enable_ssti"`
 	EnableSQLi             bool   `json:"enable_sqli"`
@@ -721,6 +727,7 @@ func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Req
 	sc.Config.SkipPathTraversal = req.SkipPathTraversal
 	sc.Config.SkipSecurityHeaders = req.SkipSecurityHeaders
 	sc.Config.SkipHostHeader = req.SkipHostHeader
+	sc.Config.SkipJWT = req.SkipJWT
 	sc.Config.SkipCORS = req.SkipCORS
 	sc.Config.SkipOpenRedirect = req.SkipOpenRedirect
 	sc.Config.SkipGraphQL = req.SkipGraphQL

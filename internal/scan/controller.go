@@ -433,6 +433,9 @@ type CreateScanParams struct {
 	// See domain.ScanConfig.SkipHostHeader.
 	SkipHostHeader bool
 
+	// SkipJWT omits the read-only JWT validation and hygiene check. See
+	// domain.ScanConfig.SkipJWT.
+	SkipJWT             bool
 	SSRFCallbackURL     string
 	SSRFCallbackPollURL string
 	// AllowPrivateOAST opts this scan into using an OAST collaborator on a
@@ -639,6 +642,7 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.SkipPathTraversal = p.SkipPathTraversal
 	cfg.SkipSecurityHeaders = p.SkipSecurityHeaders
 	cfg.SkipHostHeader = p.SkipHostHeader
+	cfg.SkipJWT = p.SkipJWT
 	cfg.SkipCORS = p.SkipCORS
 	cfg.SkipOpenRedirect = p.SkipOpenRedirect
 	cfg.SkipGraphQL = p.SkipGraphQL
@@ -1577,7 +1581,7 @@ func (c *Controller) poolConfig(sc *domain.Scan) worker.Config {
 		ScanID: sc.ID,
 		Groups: []worker.GroupSpec{
 			{Name: GroupDiscovery, Types: []domain.JobType{domain.JobDiscovery}, Size: sc.Config.DiscoveryConcurrency},
-			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR, domain.JobAccessControl, domain.JobDisclosure, domain.JobCommandInjection, domain.JobSSTI, domain.JobSQLi, domain.JobXXE, domain.JobSSRF, domain.JobPathTraversal, domain.JobCORS, domain.JobSecurityHeaders, domain.JobHostHeader, domain.JobOpenRedirect, domain.JobGraphQL}, Size: sc.Config.HTTPConcurrency},
+			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR, domain.JobAccessControl, domain.JobDisclosure, domain.JobCommandInjection, domain.JobSSTI, domain.JobSQLi, domain.JobXXE, domain.JobSSRF, domain.JobPathTraversal, domain.JobCORS, domain.JobSecurityHeaders, domain.JobHostHeader, domain.JobJWT, domain.JobOpenRedirect, domain.JobGraphQL}, Size: sc.Config.HTTPConcurrency},
 			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify, domain.JobDOMXSS}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
 		},
 		LeaseDuration: c.opts.LeaseDuration,

@@ -119,6 +119,9 @@ type execution struct {
 	// hostHeaderPassDone marks the one-time read-only host-header inspection
 	// pass (one bounded GET baseline plus control requests per origin).
 	hostHeaderPassDone atomic.Bool
+	// jwtPassDone marks the one-time read-only JWT validation & hygiene pass
+	// (one job per origin carrying a Bearer JWT).
+	jwtPassDone atomic.Bool
 	// openRedirectPassDone marks the one-time server-side open redirect pass.
 	openRedirectPassDone atomic.Bool
 	// graphQLPassDone marks the one-time safe GraphQL exposure pass.
@@ -775,6 +778,15 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		ex.hostHeaderPassDone.Store(true)
 		if !sc.Config.SkipHostHeader {
 			c.enqueueHostHeaderProbes(ctx, ex.scanID)
+		}
+	}
+	// Read-only JWT validation & hygiene: offline claim/header analysis plus a
+	// bounded GET differential, only for an origin this session carries a
+	// Bearer JWT for (see jwtcheck.go).
+	if !ex.jwtPassDone.Load() {
+		ex.jwtPassDone.Store(true)
+		if !sc.Config.SkipJWT {
+			c.enqueueJWTProbes(ctx, ex.scanID)
 			passes = true
 		}
 	}

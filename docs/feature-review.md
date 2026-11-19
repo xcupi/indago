@@ -71,6 +71,7 @@ enqueues each pass once per scan and gates it on the scan config.
 | CORS misconfiguration | `internal/scan/cors.go` | ON — `SkipCORS` / `-skip-cors` omits it |
 | Security headers / cookie policy | `internal/scan/securityheaders.go` | ON — `SkipSecurityHeaders` / `-skip-security-headers` omits it |
 | Host header injection | `internal/scan/hostheader.go` | ON — `SkipHostHeader` / `-skip-host-header` omits it |
+| JWT validation & hygiene | `internal/scan/jwtcheck.go` | ON — `SkipJWT` / `-skip-jwt` omits it; only acts when the scan's session carries a Bearer JWT |
 | GraphQL exposure | `internal/scan/graphql.go` | ON — `SkipGraphQL` / `-skip-graphql` omits it |
 
 A server-side open-redirect probe (`SkipOpenRedirect` / `-skip-open-redirect`)

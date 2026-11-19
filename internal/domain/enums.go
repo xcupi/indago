@@ -72,12 +72,20 @@ const (
 	// the server itself returns, never by an LLM; the check is read-only.
 	// See internal/scan/hostheader.go.
 	VulnHostHeader VulnClass = "host_header"
+	// VulnJWT is a JSON Web Token validation or hygiene weakness: a token the
+	// server accepts with a modified signature or an unverified "none"
+	// algorithm (CWE-347, improper verification of a cryptographic signature),
+	// or a token whose own claims break hygiene (no expiry, an excessive
+	// lifetime, secret material inside the payload). Decided from the token's
+	// bytes and from a bounded read-only request differential, never by an
+	// LLM. See internal/scan/jwtcheck.go.
+	VulnJWT VulnClass = "jwt_validation"
 )
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader, VulnJWT:
 		return true
 	default:
 		return false
