@@ -113,6 +113,9 @@ func classifySkip(note string) skipReason {
 	case strings.Contains(n, "security-header check only sends get"):
 		return skipReason{"method_not_applicable", sevInfo, "Security-header check skipped a state-changing endpoint",
 			"The header/cookie check only sends GET. Another GET endpoint on the same origin carries the same header policy, so the origin is still inspected; this is not a failed test."}
+	case strings.Contains(n, "method and tls check only sends get"):
+		return skipReason{"method_not_applicable", sevInfo, "Method/TLS check skipped a state-changing endpoint",
+			"The method and TLS check only sends GET, OPTIONS and TRACE. Another GET endpoint on the same origin carries the same method and TLS policy, so the origin is still inspected; this is not a failed test."}
 	case strings.Contains(n, "jwt validation differential only sends get"):
 		return skipReason{"method_not_applicable", sevInfo, "JWT check skipped a state-changing endpoint",
 			"The JWT validation differential only sends GET. An invalid token is never replayed against a state-changing endpoint; this is a coverage decision, not a failed test."}
@@ -247,6 +250,8 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		{"path_traversal", "Path traversal / file inclusion", !cfg.SkipPathTraversal, "", domain.VulnPathTraversal},
 		{"security_headers", "Security headers & cookie policy", !cfg.SkipSecurityHeaders,
 			"Also reports Set-Cookie flag findings as cookie_policy. One read-only request per origin.", domain.VulnSecurityHeaders},
+		{"method_tls_hygiene", "HTTP method & TLS hygiene", !cfg.SkipMethodTLS,
+			"Read-only OPTIONS/TRACE probes per origin plus the TLS state of the scan's own handshake. No write method is ever sent; a self-signed lab certificate is recorded, not reported.", domain.VulnHTTPMethods},
 		{"host_header", "Host header injection", !cfg.SkipHostHeader,
 			"One read-only baseline plus control requests per origin, carrying a canary Host/X-Forwarded-Host value.", domain.VulnHostHeader},
 		{"jwt_validation", "JWT token validation", !cfg.SkipJWT,
@@ -265,6 +270,16 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 	for i, spec := range specs {
 		out.Capabilities[i] = coverageCapability{Key: spec.key, Label: spec.label, Enabled: spec.enabled, Note: spec.note}
 		capByClass[spec.vulnClass] = &out.Capabilities[i]
+	}
+	// One engine can report more than one class — the method/TLS pass reports
+	// http_methods AND tls_config — so the extra class is folded into the same
+	// capability row instead of adding a second, half-empty row.
+	for class, primary := range map[domain.VulnClass]domain.VulnClass{
+		domain.VulnTLSConfig: domain.VulnHTTPMethods,
+	} {
+		if cap, ok := capByClass[primary]; ok {
+			capByClass[class] = cap
+		}
 	}
 	groups := map[string]*coverageReason{}
 	seen := map[string]map[string]bool{}

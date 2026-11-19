@@ -609,6 +609,7 @@ func (c *cli) scanCreate(args []string) error {
 	skipPathTraversal := fs.Bool("skip-path-traversal", false, "omit the READ-ONLY path-traversal / local file inclusion pass (ON by default): file/page-like parameters and file-shaped endpoints are asked for /etc/passwd or windows\\win.ini, and a finding is confirmed only when the file's own multi-token content comes back over a clean baseline and a nonexistent-path control")
 	skipCORS := fs.Bool("skip-cors", false, "omit the CORS misconfiguration pass (ON by default): a permissive policy is confirmed only when cross-origin credentials are actually readable")
 	skipSecurityHeaders := fs.Bool("skip-security-headers", false, "omit the READ-ONLY HTTP response security-headers and cookie-policy check (ON by default): one GET per origin, reporting missing HSTS/X-Content-Type-Options/CSP/X-Frame-Options, version-revealing Server/X-Powered-By headers and weak Set-Cookie flags (HttpOnly/Secure/SameSite), deduplicated per origin and header/cookie name")
+	skipMethodTLS := fs.Bool("skip-method-tls", false, "omit the READ-ONLY HTTP method & TLS transport-hygiene check (ON by default): one GET baseline plus one OPTIONS and one TRACE probe per origin, reporting a TRACE that echoes the request back and an unauthenticated OPTIONS response advertising PUT/DELETE/PATCH on a non-API page, plus TLS protocol/cipher/certificate hygiene from the scan's own handshake (no write method is ever sent, and a self-signed lab certificate is recorded rather than reported)")
 	skipHostHeader := fs.Bool("skip-host-header", false, "omit the READ-ONLY host-header injection check (ON by default): one GET baseline plus control GETs carrying a canary X-Forwarded-Host/Host value per origin (cache-busted, never redirected), confirming only when the canary host appears in a Location/Refresh target or an absolute URL in the body that the baseline did not contain")
 	skipJWT := fs.Bool("skip-jwt", false, "omit the READ-ONLY JWT validation & hygiene check (ON by default): if the scan's own session carries a Bearer JWT, its claims/header are inspected (exp, lifetime > 30 days, secret material in the payload, alg=none) and ONE authenticated GET endpoint per origin is compared against an anonymous control and two invalid-token controls (modified signature, alg=none) that the server is expected to reject with 401/403. Token signatures are never stored")
 	skipOpenRedirect := fs.Bool("skip-open-redirect", false, "omit the open-redirect pass (ON by default): a redirect is confirmed only by an actual cross-origin Location — this is the SERVER-side redirect engine")
@@ -634,7 +635,7 @@ func (c *cli) scanCreate(args []string) error {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-openapi-spec-file FILE | -openapi-spec-url URL] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-sqli] [-enable-nosqli] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-path-traversal] [-skip-cors] [-skip-security-headers] [-skip-host-header] [-skip-jwt] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-openapi-spec-file FILE | -openapi-spec-url URL] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-sqli] [-enable-nosqli] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-path-traversal] [-skip-cors] [-skip-security-headers] [-skip-method-tls] [-skip-host-header] [-skip-jwt] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
@@ -707,6 +708,9 @@ func (c *cli) scanCreate(args []string) error {
 	}
 	if *skipSecurityHeaders {
 		req["skip_security_headers"] = true
+	}
+	if *skipMethodTLS {
+		req["skip_method_tls"] = true
 	}
 	if *skipHostHeader {
 		req["skip_host_header"] = true

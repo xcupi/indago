@@ -118,6 +118,9 @@ type execution struct {
 	// securityHeadersPassDone marks the one-time read-only HTTP response
 	// security-headers / cookie-policy pass (one GET per origin).
 	securityHeadersPassDone atomic.Bool
+	// methodTLSPassDone marks the one-time read-only HTTP method & TLS
+	// transport-hygiene pass (one bounded OPTIONS/TRACE inspection per origin).
+	methodTLSPassDone atomic.Bool
 	// hostHeaderPassDone marks the one-time read-only host-header inspection
 	// pass (one bounded GET baseline plus control requests per origin).
 	hostHeaderPassDone atomic.Bool
@@ -778,6 +781,16 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		ex.securityHeadersPassDone.Store(true)
 		if !sc.Config.SkipSecurityHeaders {
 			c.enqueueSecurityHeadersProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	// Read-only HTTP method & TLS transport hygiene: one GET baseline plus one
+	// OPTIONS and one TRACE probe per origin, no mutation, no opt-in (see
+	// methodtls.go).
+	if !ex.methodTLSPassDone.Load() {
+		ex.methodTLSPassDone.Store(true)
+		if !sc.Config.SkipMethodTLS {
+			c.enqueueMethodTLSProbes(ctx, ex.scanID)
 			passes = true
 		}
 	}

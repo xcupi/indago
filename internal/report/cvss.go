@@ -345,6 +345,8 @@ var (
 	cweCookiePolicy     = CWE{614, "Sensitive Cookie in HTTPS Session Without 'Secure' Attribute"}
 	cweHostHeader       = CWE{644, "Improper Neutralization of HTTP Headers for Scripting Syntax"}
 	cweJWT              = CWE{347, "Improper Verification of Cryptographic Signature"}
+	cweHTTPMethods      = CWE{749, "Exposed Dangerous Method or Function"}
+	cweTLSConfig        = CWE{326, "Inadequate Encryption Strength"}
 )
 
 // classTable is the deterministic mapping. Order is documentation order and is
@@ -410,6 +412,20 @@ var classTable = []Classification{
 	// privileges or interaction required. Lower it when the finding is only a
 	// claim-level hygiene issue (missing exp, long lifetime, sensitive claim).
 	{Class: domain.VulnJWT, CWE: cweJWT, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"), Note: ClassificationNote},
+
+	// An exposed method is an enabler, not an exploit by itself: TRACE echoes
+	// headers (including cookies) only for a client that is willing to send
+	// TRACE, and an OPTIONS Allow entry is an advertisement. Both need a
+	// victim or a legacy client, so attack complexity is high, interaction is
+	// required, and only confidentiality is affected.
+	{Class: domain.VulnHTTPMethods, CWE: cweHTTPMethods, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N"), Note: ClassificationNote},
+
+	// A transport that cannot do TLS 1.2 or better (or negotiated a weak
+	// cipher) is exposed to protocol-level cryptanalysis and to an on-path
+	// attacker who can influence the handshake. No privileges or interaction
+	// are needed by the attacker, and integrity is affected because a
+	// downgraded channel can be modified in flight.
+	{Class: domain.VulnTLSConfig, CWE: cweTLSConfig, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N"), Note: ClassificationNote},
 
 	// SSRF reaches internal services the attacker cannot address directly, so
 	// the security scope changes (S:C).

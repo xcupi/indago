@@ -339,7 +339,12 @@ type ScanConfig struct {
 	// inspects a Bearer JWT this scan's own session actually carries (a scan
 	// with no bearer token sends nothing), and its differential keeps to GET
 	// on an authenticated endpoint; true omits only its jobs.
-	SkipJWT             bool   `json:"skip_jwt,omitempty"`
+	SkipJWT bool `json:"skip_jwt,omitempty"`
+	// SkipMethodTLS omits the READ-ONLY HTTP method & TLS transport-hygiene
+	// check. It sends one GET baseline plus one OPTIONS and one TRACE probe
+	// per origin (all safe methods) and reads the TLS state of that
+	// handshake; true omits only its jobs.
+	SkipMethodTLS       bool   `json:"skip_method_tls,omitempty"`
 	SSRFCallbackURL     string `json:"ssrf_callback_url,omitempty"`
 	SSRFCallbackPollURL string `json:"ssrf_callback_poll_url,omitempty"`
 	// AllowPrivateOAST lets THIS scan's SSRF engine use an OAST collaborator

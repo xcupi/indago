@@ -457,6 +457,9 @@ type createScanReq struct {
 	// SkipSecurityHeaders omits the READ-ONLY response security-headers and
 	// cookie-policy inspection (one GET per origin).
 	SkipSecurityHeaders bool `json:"skip_security_headers"`
+	// SkipMethodTLS omits the READ-ONLY HTTP method & TLS transport-hygiene
+	// check (one bounded OPTIONS/TRACE inspection per origin).
+	SkipMethodTLS bool `json:"skip_method_tls"`
 	// SkipHostHeader omits the READ-ONLY host-header inspection (one bounded
 	// baseline plus control requests per origin).
 	SkipHostHeader bool `json:"skip_host_header"`
@@ -577,6 +580,7 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		SkipSSRF:                        req.SkipSSRF,
 		SkipPathTraversal:               req.SkipPathTraversal,
 		SkipSecurityHeaders:             req.SkipSecurityHeaders,
+		SkipMethodTLS:                   req.SkipMethodTLS,
 		SkipHostHeader:                  req.SkipHostHeader,
 		SkipJWT:                         req.SkipJWT,
 		SkipCORS:                        req.SkipCORS,
@@ -686,6 +690,9 @@ type capabilitiesReq struct {
 	// SkipSecurityHeaders omits the READ-ONLY response security-headers and
 	// cookie-policy inspection.
 	SkipSecurityHeaders bool `json:"skip_security_headers"`
+	// SkipMethodTLS omits the READ-ONLY HTTP method & TLS transport-hygiene
+	// check.
+	SkipMethodTLS bool `json:"skip_method_tls"`
 	// SkipHostHeader omits the READ-ONLY host-header inspection.
 	SkipHostHeader bool `json:"skip_host_header"`
 
@@ -729,6 +736,7 @@ func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Req
 	sc.Config.SkipSSRF = req.SkipSSRF
 	sc.Config.SkipPathTraversal = req.SkipPathTraversal
 	sc.Config.SkipSecurityHeaders = req.SkipSecurityHeaders
+	sc.Config.SkipMethodTLS = req.SkipMethodTLS
 	sc.Config.SkipHostHeader = req.SkipHostHeader
 	sc.Config.SkipJWT = req.SkipJWT
 	sc.Config.SkipCORS = req.SkipCORS

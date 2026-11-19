@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -372,7 +373,60 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 		Duration:      received.Sub(start),
 		ReceivedAt:    received,
 		Request:       captured,
+		TLS:           captureTLSState(resp.TLS),
 	}, nil
+}
+
+// captureTLSState reduces the transport's connection state to the factual TLS
+// capture stored on Response. nil in, nil out: a plain-HTTP response (or a
+// custom dialer the transport cannot introspect) has no TLS state to report.
+func captureTLSState(cs *tls.ConnectionState) *TLSState {
+	if cs == nil {
+		return nil
+	}
+	out := &TLSState{
+		Version:         cs.Version,
+		VersionName:     tlsVersionName(cs.Version),
+		CipherSuite:     cs.CipherSuite,
+		CipherSuiteName: tls.CipherSuiteName(cs.CipherSuite),
+		ServerName:      cs.ServerName,
+		ALPN:            cs.NegotiatedProtocol,
+		Verified:        len(cs.VerifiedChains) > 0,
+	}
+	for _, cert := range cs.PeerCertificates {
+		if cert == nil {
+			continue
+		}
+		out.PeerCertificates = append(out.PeerCertificates, TLSCertificate{
+			Subject:    cert.Subject.String(),
+			Issuer:     cert.Issuer.String(),
+			NotBefore:  cert.NotBefore,
+			NotAfter:   cert.NotAfter,
+			DNSNames:   append([]string(nil), cert.DNSNames...),
+			SelfSigned: certIsSelfSigned(cert),
+		})
+	}
+	return out
+}
+
+// tlsVersionName renders a negotiated protocol version. tls.VersionName covers
+// the versions this toolchain knows; an unknown value is still reported
+// faithfully rather than dropped.
+func tlsVersionName(v uint16) string {
+	if name := tls.VersionName(v); name != "" {
+		return name
+	}
+	return fmt.Sprintf("0x%04x", v)
+}
+
+// certIsSelfSigned reports whether the certificate was signed by its own key.
+// c.CheckSignatureFrom(c) is deliberately NOT used: it also enforces CA basic
+// constraints, which a self-signed leaf certificate need not carry.
+func certIsSelfSigned(c *x509.Certificate) bool {
+	if c == nil || !bytes.Equal(c.RawIssuer, c.RawSubject) {
+		return false
+	}
+	return c.CheckSignature(c.SignatureAlgorithm, c.RawTBSCertificate, c.Signature) == nil
 }
 
 func (c *Client) buildRequest(ctx context.Context, req *Request) (*http.Request, error) {

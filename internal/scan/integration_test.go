@@ -183,6 +183,10 @@ func legacyPipelineCfg(httpWorkers int) *domain.ScanConfig {
 	// job per origin, which this fixture's one-job-per-endpoint/injection-point
 	// arithmetic does not model. It has its own tests in securityheaders_test.go.
 	cfg.SkipSecurityHeaders = true
+	// The read-only method/TLS pass adds one origin-level job whose three
+	// read-only probes (GET/OPTIONS/TRACE) also do not fit that arithmetic. It
+	// has its own tests in methodtls_test.go.
+	cfg.SkipMethodTLS = true
 	// The read-only host-header inspection adds a baseline plus control
 	// requests per origin, which this fixture's one-job-per-endpoint/
 	// injection-point arithmetic does not model. It has its own tests in
@@ -214,6 +218,7 @@ func createScan(t *testing.T, c *scan.Controller, proj, tgt domain.ID, cfg *doma
 		p.SkipPathTraversal = cfg.SkipPathTraversal
 		p.SkipCORS = cfg.SkipCORS
 		p.SkipSecurityHeaders = cfg.SkipSecurityHeaders
+		p.SkipMethodTLS = cfg.SkipMethodTLS
 		p.SkipHostHeader = cfg.SkipHostHeader
 		p.SkipJWT = cfg.SkipJWT
 		p.SkipOpenRedirect = cfg.SkipOpenRedirect
@@ -287,6 +292,14 @@ func recordingHandlers() (map[domain.JobType]worker.Handler, func() []string) {
 		// The access-control bypass pass queues bounded per-path jobs; a real
 		// worker handles them, so this double must too.
 		domain.JobAccessControl: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
+			mu.Lock()
+			urls = append(urls, j.Target.URL)
+			mu.Unlock()
+			return nil
+		}),
+		// The read-only method/TLS pass queues one origin-level job; a real
+		// worker handles it, so this double must too.
+		domain.JobMethodTLS: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
 			mu.Lock()
 			urls = append(urls, j.Target.URL)
 			mu.Unlock()
