@@ -1052,8 +1052,18 @@ func (p *pwPage) AddInitScript(script string) error {
 func (p *pwPage) Close() error {
 	// Closing the page target automatically detaches its CDP session. Avoid a
 	// synchronous Detach here: Playwright can wait indefinitely for the session
-	// response while an in-flight request is deliberately hanging.
-	err := p.p.Close()
+	// response while an in-flight request is deliberately hanging. Guard
+	// p.p.Close() with a bounded timeout as well so a stuck renderer target
+	// cannot block worker/context teardown indefinitely.
+	done := make(chan error, 1)
+	go func() {
+		done <- p.p.Close()
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+	}
 	p.cdp = nil
 	return err
 }
