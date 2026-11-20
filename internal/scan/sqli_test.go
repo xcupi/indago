@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -194,6 +195,166 @@ func TestSQLiConfirmsBooleanDifferential(t *testing.T) {
 	}
 	if detail.PoC == nil || !strings.Contains(detail.PoC.Payload, "AND") {
 		t.Fatalf("PoC = %+v, want a boolean payload", detail.PoC)
+	}
+	// The timing phase is the slow fallback; a boolean confirmation must stop
+	// before spending delay probes on the target.
+	if detail.TimingSignals != 0 {
+		t.Fatalf("timing signal recorded after boolean confirmation: %+v", detail)
+	}
+	for _, a := range detail.Attempts {
+		if strings.HasPrefix(a.Kind, "timing-") {
+			t.Fatalf("timing probe sent after boolean confirmation: %+v", a)
+		}
+	}
+}
+
+// --- timing differential ---------------------------------------------------
+
+// A blind target whose page never changes (no error, no boolean divergence)
+// reveals itself only through a read-only delay. The delay must reproduce in a
+// second round with its own fast control before it confirms.
+func TestSQLiTimingDifferentialConfirmsBlindInjection(t *testing.T) {
+	const page = `<html><body><table><tr><td>widget</td><td>42</td></tr></table></body></html>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Give the baseline a measurable latency so the recorded median is
+		// meaningful even on loopback.
+		time.Sleep(5 * time.Millisecond)
+		if strings.Contains(r.URL.Query().Get("q"), "SLEEP(2)") {
+			time.Sleep(2 * time.Second)
+		}
+		fmt.Fprint(w, page)
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/item?q=widget", domain.MethodGET)
+	focus := env.param(ep, "q", domain.LocationQuery, "widget")
+	ip := env.injection(ep, focus)
+	runSQLiJob(t, sqliExecutorFor(t, env, ExecutorConfig{}), env, ep, focus, ip)
+
+	findings := sqliFindings(t, env)
+	if len(findings) != 1 || findings[0].VulnClass != domain.VulnSQLi || findings[0].Verdict != domain.VerdictConfirmed {
+		t.Fatalf("findings = %+v, want one confirmed timing SQL injection", findings)
+	}
+	if len(findings[0].EvidenceIDs) == 0 {
+		t.Fatal("a timing-confirmed finding must carry request/response evidence")
+	}
+
+	detail := sqliCaseDetail(t, env)
+	if detail.ErrorSignals != 0 || detail.BooleanSignals != 0 || detail.TimingSignals != 1 {
+		t.Fatalf("detail = %+v, want exactly one timing signal and no error/boolean signal", detail)
+	}
+	if detail.ConfirmMethod != "timing" || detail.IdentifiedDB != "MySQL" {
+		t.Fatalf("confirm method/db = %q/%q, want timing/MySQL", detail.ConfirmMethod, detail.IdentifiedDB)
+	}
+	if detail.TimingTechnique != "mysql-sleep/string" {
+		t.Fatalf("timing technique = %q, want mysql-sleep/string", detail.TimingTechnique)
+	}
+	if detail.BaselineLatencyMS <= 0 {
+		t.Fatalf("baseline latency not measured: %+v", detail)
+	}
+
+	var rounds []int
+	var delayed int
+	for _, a := range detail.Attempts {
+		if a.Kind != "timing-delay" || a.Pair != "mysql-sleep/string" {
+			continue
+		}
+		rounds = append(rounds, a.Round)
+		if a.Delayed {
+			delayed++
+		}
+	}
+	if len(rounds) != 2 || rounds[0] != 1 || rounds[1] != 2 {
+		t.Fatalf("timing delay rounds = %v, want two ordered rounds", rounds)
+	}
+	if delayed != 2 {
+		t.Fatalf("delayed rounds = %d, want both observations delayed", delayed)
+	}
+	if detail.PoC == nil || detail.PoC.Method != "GET" || !strings.Contains(detail.PoC.URL, "q=") {
+		t.Fatalf("PoC = %+v, want the exact GET request", detail.PoC)
+	}
+}
+
+// One slow response is not evidence: a random stall (or a rate-limit hiccup)
+// that does not reproduce on the confirmation retry must never confirm.
+func TestSQLiTimingSingleSlowResponseIsNotConfirmed(t *testing.T) {
+	const page = `<html><body><table><tr><td>widget</td><td>42</td></tr></table></body></html>`
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Millisecond)
+		if strings.Contains(r.URL.Query().Get("q"), "SLEEP(2)") {
+			once.Do(func() { time.Sleep(2 * time.Second) })
+		}
+		fmt.Fprint(w, page)
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/item?q=widget", domain.MethodGET)
+	focus := env.param(ep, "q", domain.LocationQuery, "widget")
+	ip := env.injection(ep, focus)
+	runSQLiJob(t, sqliExecutorFor(t, env, ExecutorConfig{}), env, ep, focus, ip)
+
+	if findings := sqliFindings(t, env); len(findings) != 0 {
+		t.Fatalf("one unreproduced slow response must not confirm: %+v", findings)
+	}
+	detail := sqliCaseDetail(t, env)
+	if detail.TimingSignals != 0 || detail.Verdict != domain.VerdictRejected {
+		t.Fatalf("detail = %+v, want no timing signal and a rejection", detail)
+	}
+	var slow, fast int
+	for _, a := range detail.Attempts {
+		if a.Kind != "timing-delay" {
+			continue
+		}
+		if a.Delayed {
+			slow++
+		} else {
+			fast++
+		}
+	}
+	if slow != 1 || fast == 0 {
+		t.Fatalf("delayed/fast retries = %d/%d, want one first-round delay and at least one fast retry", slow, fast)
+	}
+}
+
+// Every timing payload must remain a single read-only boolean expression:
+// no separator, comment, mutating keyword or UNION shape may ever be added.
+func TestSQLiTimingPayloadsAreReadOnly(t *testing.T) {
+	techs := sqlTimingTechniques()
+	if len(techs) < 2 {
+		t.Fatalf("techniques = %d, want at least 2 database families", len(techs))
+	}
+	seen := map[string]bool{}
+	for _, tech := range techs {
+		if tech.Name == "" || tech.DB == "" || seen[tech.Name] {
+			t.Fatalf("bad or duplicate technique: %+v", tech)
+		}
+		seen[tech.Name] = true
+		if tech.DelaySuffix == tech.ControlSuffix {
+			t.Fatalf("%s: delay and control suffixes are identical", tech.Name)
+		}
+		if !strings.Contains(tech.DelaySuffix, fmt.Sprintf("(%d)", sqliTimingDelaySeconds)) {
+			t.Fatalf("%s: delay suffix does not carry the configured delay", tech.Name)
+		}
+		for _, suffix := range []string{tech.ControlSuffix, tech.DelaySuffix} {
+			if !sqlReadOnlyTimingSuffix(suffix) {
+				t.Fatalf("%s: suffix is not read-only: %q", tech.Name, suffix)
+			}
+		}
+	}
+	for _, bad := range []string{
+		"'; DROP TABLE users; --",
+		"' AND 1=1 -- comment",
+		"' UNION SELECT password FROM users",
+		"' AND (SELECT SLEEP(2) INTO OUTFILE '/tmp/x')",
+		"'; UPDATE users SET admin=1 --",
+		"' /* comment */ AND 1=1",
+	} {
+		if sqlReadOnlyTimingSuffix(bad) {
+			t.Fatalf("mutation/exfiltration suffix accepted: %q", bad)
+		}
 	}
 }
 
