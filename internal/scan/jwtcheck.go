@@ -3,13 +3,23 @@ package scan
 // Read-only JWT token validation and hygiene check.
 //
 // One job acts on ONE origin (scheme://host[:port]) that the scan's own session
-// carries a Bearer JWT for. The job does two independent things:
+// carries a Bearer JWT for. The job does three independent things:
 //
 //  1. CLAIMS/HEADER HYGIENE (offline, no request): decode the token's header and
 //     payload and report what the token itself proves — no exp claim, an
 //     expiry beyond 30 days, secret material placed inside the payload, or an
 //     unverified "none" algorithm.
-//  2. VALIDATION DIFFERENTIAL (bounded, read-only GETs): against ONE
+//  2. KEY-SOURCE HYGIENE (offline, no request): the same decoded header, read as
+//     a key-selection surface — a kid whose shape is a filesystem path, an
+//     injection fragment or a URL; a jku/x5u reference that is cleartext,
+//     non-HTTP, credential-bearing, relative, or foreign to both the token's
+//     issuer and this application; header-embedded key material (jwk/x5c); and a
+//     header object that repeats a verification-relevant parameter (alg, kid,
+//     jku, ...), which two JSON parsers can read differently. These are
+//     preconditions, not demonstrations of exploitability: nothing here proves
+//     the verifier resolves the value the way the shape suggests, so they are
+//     reported at medium confidence and say so in the reason.
+//  3. VALIDATION DIFFERENTIAL (bounded, read-only GETs): against ONE
 //     authenticated GET endpoint on that origin, compare the honest baseline
 //     with an anonymous control and two invalid-token controls (a modified
 //     signature, and the same claims re-signed with alg=none). The server is
@@ -20,6 +30,12 @@ package scan
 //   - Read-only: GET/HEAD only, never a state-changing endpoint, never a body.
 //     The differential sends a credential the server is supposed to refuse; it
 //     never forges a *valid* token and never touches another principal.
+//   - No request is ever aimed at a jku/x5u location, and no header-mutated
+//     control is added for kid: fetching an attacker-named key URL is
+//     exfiltration, and a kid-tampered token would prove no more than the
+//     modified-signature control that already runs. The key-source half is
+//     therefore strictly offline — the request count of this engine is
+//     unchanged by it.
 //   - Token-only requests: every differential request carries the token and no
 //     cookies. The baseline must show the token ITSELF is a working credential,
 //     and a control's 200 must be attributable to the token — never to a
@@ -62,6 +78,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"reflect"
 	"sort"
 	"strings"
@@ -78,9 +95,12 @@ import (
 const (
 	jwtEngine = "jwt_validation"
 
-	// jwtCategoryClaims / jwtCategoryValidation separate the two finding
-	// families this one engine reports, so a report/UI can group them.
+	// jwtCategoryClaims / jwtCategoryHeader / jwtCategoryValidation separate the
+	// finding families this one engine reports, so a report/UI can group them:
+	// claims and header shape are offline observations about the token, while
+	// validation is what the server did with a refused token.
 	jwtCategoryClaims     = "claims"
+	jwtCategoryHeader     = "header"
 	jwtCategoryValidation = "validation"
 
 	// maxJWTOrigins bounds the pass: one job per origin carrying a token.
@@ -108,6 +128,14 @@ const (
 	jwtKindAlgNone       = "jwt_alg_none"
 	jwtKindSigNotChecked = "jwt_signature_not_validated"
 	jwtKindUnsignedTaken = "jwt_unsigned_token_accepted"
+	// Key-source hygiene. Every one of these is an observation about the
+	// token's header bytes, never a claim that the server acted on them.
+	jwtKindKidPath        = "jwt_kid_path_reference"
+	jwtKindKidInjection   = "jwt_kid_injection_shape"
+	jwtKindKidURL         = "jwt_kid_url_reference"
+	jwtKindUntrustedKey   = "jwt_untrusted_key_reference"
+	jwtKindEmbeddedKey    = "jwt_header_embedded_key"
+	jwtKindDuplicateParam = "jwt_duplicate_header_param"
 )
 
 // jwtSignal is one observed weakness. Its Key identifies the
@@ -134,15 +162,21 @@ type jwtSignal struct {
 type jwtTokenSummary struct {
 	// Fingerprint identifies the token across runs without being usable as
 	// one: the first 16 hex characters of its SHA-256.
-	Fingerprint  string     `json:"fingerprint,omitempty"`
-	Alg          string     `json:"alg,omitempty"`
-	Typ          string     `json:"typ,omitempty"`
-	Kid          string     `json:"kid,omitempty"`
-	HasSignature bool       `json:"has_signature"`
-	Issuer       string     `json:"issuer,omitempty"`
-	IssuedAt     *time.Time `json:"issued_at,omitempty"`
-	NotBefore    *time.Time `json:"not_before,omitempty"`
-	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	Fingerprint  string `json:"fingerprint,omitempty"`
+	Alg          string `json:"alg,omitempty"`
+	Typ          string `json:"typ,omitempty"`
+	Kid          string `json:"kid,omitempty"`
+	HasSignature bool   `json:"has_signature"`
+	// JKU / X5U are the key locations the header names, reduced to
+	// scheme://host/path: userinfo, query and fragment are dropped so a signed
+	// URL or an embedded credential can never be copied into a finding.
+	JKU         string     `json:"jku,omitempty"`
+	X5U         string     `json:"x5u,omitempty"`
+	EmbeddedKey string     `json:"embedded_key,omitempty"`
+	Issuer      string     `json:"issuer,omitempty"`
+	IssuedAt    *time.Time `json:"issued_at,omitempty"`
+	NotBefore   *time.Time `json:"not_before,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	// LifetimeHours is exp-iat when iat is present, otherwise the time left
 	// before exp at inspection time. 0 when exp is absent/unparseable.
 	LifetimeHours float64  `json:"lifetime_hours,omitempty"`
@@ -201,19 +235,33 @@ type jwtDetail struct {
 // token, its signature and its claim VALUES are deliberately not fields: this
 // value is what reaches the detail and the finding.
 type jwtToken struct {
-	fingerprint   string
-	alg           string
-	typ           string
-	kid           string
-	hasSignature  bool
-	issuer        string
-	issuedAt      *time.Time
-	notBefore     *time.Time
-	expiresAt     *time.Time
-	lifetime      time.Duration
-	expMissing    bool
-	claimNames    []string
-	sensitiveKeys []string
+	fingerprint  string
+	alg          string
+	typ          string
+	kid          string
+	hasSignature bool
+	// kidRaw is the header's kid exactly as decoded. kid is stored sanitized for
+	// display, but the shape checks must see the bytes (a NUL or a control
+	// character is part of what makes a kid file-shaped), and it is never
+	// serialized.
+	kidRaw string
+	// jku / x5u are sanitized and length-bounded; they are analysed offline and
+	// only ever stored as a scheme://host/path label.
+	jku      string
+	x5u      string
+	hasJWK   bool
+	x5cCount int
+	// duplicateParams lists verification-relevant header parameters that the
+	// header object repeats.
+	duplicateParams []string
+	issuer          string
+	issuedAt        *time.Time
+	notBefore       *time.Time
+	expiresAt       *time.Time
+	lifetime        time.Duration
+	expMissing      bool
+	claimNames      []string
+	sensitiveKeys   []string
 }
 
 // jwtOrigin is the scheme://host[:port] identity of a URL — the same
@@ -326,8 +374,22 @@ func parseJWT(raw string, now time.Time) (*jwtToken, bool) {
 		typ:          jwtStringClaim(header, "typ", 32),
 		kid:          jwtStringClaim(header, "kid", 128),
 		hasSignature: strings.TrimSpace(sigSeg) != "",
+		jku:          jwtStringClaim(header, "jku", 512),
+		x5u:          jwtStringClaim(header, "x5u", 512),
 		issuer:       jwtStringClaim(claims, "iss", 256),
 	}
+	// The kid shape checks must see the raw value, not the sanitized one: a NUL
+	// or a control byte is part of what makes a kid look like a file path.
+	if kid, ok := header["kid"].(string); ok {
+		tok.kidRaw = kid
+	}
+	if _, ok := header["jwk"]; ok {
+		tok.hasJWK = true
+	}
+	if chain, ok := header["x5c"].([]any); ok {
+		tok.x5cCount = len(chain)
+	}
+	tok.duplicateParams = jwtDuplicateHeaderParams(headerBytes)
 	if ts, ok := jwtTimeClaim(claims, "iat"); ok {
 		tok.issuedAt = &ts
 	}
@@ -483,6 +545,274 @@ func sortedKeys(m map[string]any) []string {
 	return keys
 }
 
+// ---------------------------------------------------------------------------
+// header hygiene: kid shape, key references, repeated parameters
+// ---------------------------------------------------------------------------
+
+// jwtGuardedHeaderParams are the JWS header parameters whose duplication can
+// change how a token is verified. A duplicated extension parameter nobody reads
+// is noise; a duplicated alg/kid/jku is a parser differential.
+var jwtGuardedHeaderParams = map[string]bool{
+	"alg": true, "kid": true, "jku": true, "x5u": true, "x5c": true, "jwk": true,
+	"crit": true, "typ": true, "cty": true, "enc": true, "zip": true,
+}
+
+// jwtDuplicateHeaderParams reports the guarded parameters that appear more than
+// once in the RAW header object. encoding/json keeps the last occurrence and
+// discards the rest, while other JOSE stacks keep the first, so two layers can
+// verify different headers from the same token. Pure: it walks the bytes it was
+// given and never re-serializes them.
+func jwtDuplicateHeaderParams(raw []byte) []string {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil
+	}
+	counts := make(map[string]int)
+	depth, expectKey := 1, true
+	for depth > 0 {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch t := tok.(type) {
+		case json.Delim:
+			switch t {
+			case '{', '[':
+				depth++
+				expectKey = false
+			default:
+				depth--
+				if depth == 1 {
+					// A container used as a value just closed: the next
+					// depth-1 token is a key again.
+					expectKey = true
+				}
+			}
+		case string:
+			if depth == 1 {
+				if expectKey {
+					counts[t]++
+					expectKey = false
+				} else {
+					expectKey = true
+				}
+			}
+		default:
+			if depth == 1 && !expectKey {
+				expectKey = true
+			}
+		}
+	}
+	var out []string
+	for name, n := range counts {
+		lower := strings.ToLower(name)
+		if n > 1 && jwtGuardedHeaderParams[lower] {
+			out = append(out, lower)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// kid shape classes, in the order they are reported.
+const (
+	jwtKidClassPath      = "path"
+	jwtKidClassInjection = "injection"
+	jwtKidClassURL       = "url"
+)
+
+// jwtKidInjectionMarkers are sequences an opaque key identifier never needs:
+// SQL, shell and template metacharacters. Base64url ids, hex thumbprints and
+// UUIDs contain none of them, so a hit is a shape observation rather than a
+// guess about intent.
+var jwtKidInjectionMarkers = []string{
+	"'", "\"", "`", "$(", "${", "{{", "}}", ";", "|", "/*", "*/",
+	" or ", " union ", " and ", "\r", "\n",
+}
+
+// jwtKidIsDrivePath reports whether v starts with a Windows drive reference
+// (C:, C:\). A forward slash after the letter is treated as a URL scheme
+// instead (http://), so it is not a drive.
+func jwtKidIsDrivePath(v string) bool {
+	if len(v) < 2 || v[1] != ':' {
+		return false
+	}
+	c := v[0] | 0x20
+	if c < 'a' || c > 'z' {
+		return false
+	}
+	return len(v) == 2 || v[2] == '\\'
+}
+
+// jwtKidClasses classifies a kid value by SHAPE only. It returns every class
+// the value matches, in a fixed order; a URL-shaped kid yields just the URL
+// class, because "remote key reference" is the dominant reading of it.
+//
+// This says nothing about whether the verifier uses kid as a path, a query
+// fragment or a URL — only that the value has the shape those uses need.
+func jwtKidClasses(kid string) []string {
+	v := strings.TrimSpace(kid)
+	if v == "" {
+		return nil
+	}
+	lower := strings.ToLower(v)
+	urlShape := (strings.Contains(v, "://") && !strings.HasPrefix(lower, "file:")) ||
+		strings.HasPrefix(v, "//") || strings.HasPrefix(lower, "javascript:") ||
+		strings.HasPrefix(lower, "data:")
+	if urlShape {
+		return []string{jwtKidClassURL}
+	}
+	pathShape := strings.Contains(lower, "../") || strings.Contains(lower, `..\`) ||
+		strings.Contains(lower, "%2e%2e") || strings.Contains(lower, "..%2f") ||
+		strings.Contains(lower, "..%5c") || strings.Contains(lower, "%00") ||
+		strings.ContainsRune(v, 0) ||
+		strings.HasPrefix(v, "/") || strings.HasPrefix(v, `\`) ||
+		jwtKidIsDrivePath(v) || strings.HasPrefix(lower, "file:")
+	injectionShape := false
+	for _, marker := range jwtKidInjectionMarkers {
+		if strings.Contains(lower, marker) {
+			injectionShape = true
+			break
+		}
+	}
+	var classes []string
+	if pathShape {
+		classes = append(classes, jwtKidClassPath)
+	}
+	if injectionShape {
+		classes = append(classes, jwtKidClassInjection)
+	}
+	return classes
+}
+
+// jwtKeyRefIssue is what is wrong with one jku/x5u reference. It carries the
+// safe label that may be persisted, never the value's query or userinfo.
+type jwtKeyRefIssue struct {
+	Severity   domain.Severity
+	Confidence domain.Confidence
+	Observed   string
+	Reason     string
+}
+
+// jwtKeyRefLabel renders a key reference for storage: scheme, host[:port] and
+// path only. Userinfo, query and fragment are dropped, so an embedded
+// credential or a signed URL can never be copied into a finding or the evidence
+// store. A value that is not a parseable absolute URL is sanitized and bounded
+// instead.
+func jwtKeyRefLabel(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" {
+		return sanitizeJWTText(raw, 96)
+	}
+	out := strings.ToLower(u.Scheme) + "://" + u.Host
+	if p := u.EscapedPath(); p != "" && p != "/" {
+		out += p
+	}
+	return sanitizeJWTText(out, 160)
+}
+
+// jwtTrustedKeyHosts returns the hosts a token's key reference may legitimately
+// name: the origin the token was observed on, and the host of its issuer claim.
+// Ports are ignored — a JWKS endpoint on another port of the same host is not a
+// different trust domain, and treating it as one would only add noise.
+func jwtTrustedKeyHosts(origin, issuer string) map[string]bool {
+	hosts := make(map[string]bool, 2)
+	add := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || strings.ContainsAny(raw, " 	") {
+			return
+		}
+		if !strings.Contains(raw, "://") {
+			// An issuer is often a bare hostname; resolve it as one so a
+			// self-hosted key set is not reported as foreign.
+			raw = "https://" + raw
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Hostname() == "" {
+			return
+		}
+		hosts[strings.ToLower(u.Hostname())] = true
+	}
+	add(origin)
+	add(issuer)
+	return hosts
+}
+
+// jwtMaxSeverity returns the stronger of two severities.
+func jwtMaxSeverity(a, b domain.Severity) domain.Severity {
+	if jwtSeverityRank(b) > jwtSeverityRank(a) {
+		return b
+	}
+	return a
+}
+
+// jwtKeyRefIssueFor inspects one jku/x5u value. ok is false when the header is
+// absent, empty, or names a location both this application and the token's own
+// issuer plausibly control over HTTPS — the normal self-hosted key set.
+//
+// Pure: it parses strings and compares hosts. It never contacts the reference.
+func jwtKeyRefIssueFor(name, value string, trusted map[string]bool) (jwtKeyRefIssue, bool) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return jwtKeyRefIssue{}, false
+	}
+	issue := jwtKeyRefIssue{Severity: domain.SeverityInfo, Confidence: domain.ConfidenceHigh}
+	var problems []string
+	// shape is true when the defect is visible in the value itself, which makes
+	// the observation certain; a merely foreign host depends on the verifier's
+	// allow-list and is reported at medium confidence.
+	shape := false
+
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil || (u.Scheme == "" && u.Host == ""):
+		problems = append(problems, "is not an absolute URL, so every verifier has to resolve it against a base of its own choosing")
+		issue.Severity, shape = domain.SeverityMedium, true
+	case u.Scheme == "":
+		problems = append(problems, "is protocol-relative, so it inherits the scheme of whatever fetches it and can be downgraded to plain HTTP")
+		issue.Severity, shape = domain.SeverityMedium, true
+	default:
+		switch scheme := strings.ToLower(u.Scheme); scheme {
+		case "https":
+		case "http":
+			problems = append(problems, "is fetched over plain HTTP, so a network attacker can replace the key set and mint tokens the server would accept")
+			issue.Severity = jwtMaxSeverity(issue.Severity, domain.SeverityMedium)
+			shape = true
+		default:
+			problems = append(problems, fmt.Sprintf("uses the %q scheme, which a key-set fetch must never reach: a generic fetcher can be steered at local files or another protocol", scheme))
+			issue.Severity = jwtMaxSeverity(issue.Severity, domain.SeverityHigh)
+			shape = true
+		}
+		if u.User != nil {
+			problems = append(problems, "embeds credentials in the URL")
+			issue.Severity = jwtMaxSeverity(issue.Severity, domain.SeverityHigh)
+			shape = true
+		}
+		host := strings.ToLower(u.Hostname())
+		switch {
+		case host == "":
+			problems = append(problems, "names no host")
+			issue.Severity = jwtMaxSeverity(issue.Severity, domain.SeverityMedium)
+			shape = true
+		case len(trusted) > 0 && !trusted[host]:
+			problems = append(problems, fmt.Sprintf("names %s, which is neither the token issuer's host nor this application's host", host))
+			issue.Severity = jwtMaxSeverity(issue.Severity, domain.SeverityLow)
+		}
+	}
+	if len(problems) == 0 {
+		return jwtKeyRefIssue{}, false
+	}
+	if !shape {
+		issue.Confidence = domain.ConfidenceMedium
+	}
+	issue.Observed = jwtKeyRefLabel(raw)
+	issue.Reason = fmt.Sprintf("the token header's %s %s. A verifier that follows a key location chosen by the token trusts whatever "+
+		"that location serves, so whoever can influence the header controls the key its tokens are checked against; the token "+
+		"alone does not show that this server fetches it", name, strings.Join(problems, " and "))
+	return issue, true
+}
+
 // summary renders the persisted, redaction-safe token view.
 func (t *jwtToken) summary() *jwtTokenSummary {
 	s := &jwtTokenSummary{
@@ -491,6 +821,8 @@ func (t *jwtToken) summary() *jwtTokenSummary {
 		Typ:           t.typ,
 		Kid:           t.kid,
 		HasSignature:  t.hasSignature,
+		JKU:           jwtKeyRefLabel(t.jku),
+		X5U:           jwtKeyRefLabel(t.x5u),
 		Issuer:        t.issuer,
 		IssuedAt:      t.issuedAt,
 		NotBefore:     t.notBefore,
@@ -498,6 +830,14 @@ func (t *jwtToken) summary() *jwtTokenSummary {
 		LifetimeHours: math.Round(t.lifetime.Hours()*10) / 10,
 		Claims:        t.claimNames,
 	}
+	var embedded []string
+	if t.hasJWK {
+		embedded = append(embedded, "jwk")
+	}
+	if t.x5cCount > 0 {
+		embedded = append(embedded, "x5c")
+	}
+	s.EmbeddedKey = strings.Join(embedded, ",")
 	return s
 }
 
@@ -508,7 +848,9 @@ func analyzeJWTToken(origin string, tok *jwtToken) []jwtSignal {
 	var signals []jwtSignal
 	add := func(s jwtSignal) {
 		s.Key = jwtDedupKey(origin, tok.issuer, s.Category, s.Subject)
-		s.Confidence = domain.ConfidenceHigh
+		if s.Confidence == "" {
+			s.Confidence = domain.ConfidenceHigh
+		}
 		signals = append(signals, s)
 	}
 
@@ -526,7 +868,102 @@ func analyzeJWTToken(origin string, tok *jwtToken) []jwtSignal {
 		})
 	}
 
-	// 2. No expiry: the credential lives until the signing key is rotated.
+	// 2. Key-source hygiene: the header as a key-selection surface. Everything
+	// here is read off the token's own bytes, so the observation is certain; the
+	// exploitability is not (it depends on what the verifier does with the
+	// value), which is why these carry medium confidence and the reasons say so.
+	for _, class := range jwtKidClasses(tok.kidRaw) {
+		s := jwtSignal{
+			Category:   jwtCategoryHeader,
+			Subject:    "kid/" + class,
+			Severity:   domain.SeverityMedium,
+			Confidence: domain.ConfidenceMedium,
+			Observed:   fmt.Sprintf("kid=%q", sanitizeJWTText(tok.kidRaw, 64)),
+		}
+		switch class {
+		case jwtKidClassPath:
+			s.Kind, s.Title = jwtKindKidPath, "JWT header kid looks like a filesystem path"
+			s.Reason = "the token header's kid is shaped like a file path: it carries a traversal sequence, an absolute path, a drive letter or a NUL byte. " +
+				"kid is routinely used to select a key file or a keystore entry, so a value that can escape the intended directory is exactly the precondition " +
+				"for loading a key the token's holder chose"
+			s.Remediation = "Treat kid as an opaque identifier: resolve it through a fixed table of key ids, never concatenate it into a file path, and reject a kid that is not in that table."
+		case jwtKidClassInjection:
+			s.Kind, s.Title = jwtKindKidInjection, "JWT header kid carries injection metacharacters"
+			s.Reason = "the token header's kid contains SQL, shell or template metacharacters, which an opaque key identifier never needs. " +
+				"If the verifier interpolates kid into a query, a command or a template, those characters change the meaning of that statement"
+			s.Remediation = "Never interpolate kid into a query, command or template; look it up as a value, and reject a kid that is not a plain identifier."
+		case jwtKidClassURL:
+			s.Kind, s.Title = jwtKindKidURL, "JWT header kid is a URL"
+			s.Reason = "the token header's kid is a URL rather than an identifier, so a verifier that resolves it may fetch key material from a location the token names — " +
+				"the same trust problem as an untrusted jku"
+			s.Remediation = "Treat kid as a local identifier only; never fetch key material from a URL carried in kid."
+		default:
+			continue
+		}
+		add(s)
+	}
+
+	// 3. jku/x5u: where the header says the verification key lives. Only a
+	// reference that is defective in shape, or foreign to both this application
+	// and the token's issuer, is reported; a self-hosted HTTPS key set is normal.
+	trustedKeyHosts := jwtTrustedKeyHosts(origin, tok.issuer)
+	for _, ref := range []struct{ name, value string }{
+		{"jku", tok.jku},
+		{"x5u", tok.x5u},
+	} {
+		issue, ok := jwtKeyRefIssueFor(ref.name, ref.value, trustedKeyHosts)
+		if !ok {
+			continue
+		}
+		add(jwtSignal{
+			Category: jwtCategoryHeader, Kind: jwtKindUntrustedKey, Subject: ref.name,
+			Severity: issue.Severity, Confidence: issue.Confidence,
+			Observed: ref.name + "=" + issue.Observed,
+			Reason:   issue.Reason,
+			Remediation: "Ignore jku and x5u unless the URL matches a fixed allow-list of key-set locations the issuer itself controls over HTTPS, " +
+				"and never fetch verification keys from a URL the token supplies.",
+			Title: fmt.Sprintf("JWT header points at an untrusted key location (%s)", ref.name),
+		})
+	}
+
+	// 4. Header-embedded key material: the token names the key it is checked
+	// with, which defeats the signature if the verifier honours it.
+	for _, embedded := range []struct {
+		name    string
+		present bool
+	}{
+		{"jwk", tok.hasJWK},
+		{"x5c", tok.x5cCount > 0},
+	} {
+		if !embedded.present {
+			continue
+		}
+		add(jwtSignal{
+			Category: jwtCategoryHeader, Kind: jwtKindEmbeddedKey, Subject: embedded.name,
+			Severity: domain.SeverityMedium, Confidence: domain.ConfidenceMedium,
+			Observed: embedded.name + " present in the token header",
+			Reason: fmt.Sprintf("the token header carries its own key material (%s), so a verifier that trusts a key named by the token accepts a token "+
+				"signed by whoever minted that header — the signature then proves nothing", embedded.name),
+			Remediation: "Verify tokens with keys from the server's own configured key store; ignore or reject jwk and x5c in a token header.",
+			Title:       fmt.Sprintf("JWT header carries embedded key material (%s)", embedded.name),
+		})
+	}
+
+	// 5. Repeated header parameters: JSON parsers disagree about which
+	// occurrence wins, so two layers can verify different tokens.
+	for _, name := range tok.duplicateParams {
+		add(jwtSignal{
+			Category: jwtCategoryHeader, Kind: jwtKindDuplicateParam, Subject: "header/" + name,
+			Severity: domain.SeverityMedium, Confidence: domain.ConfidenceHigh,
+			Observed: fmt.Sprintf("%q appears more than once in the header object", name),
+			Reason: fmt.Sprintf("the token's header JSON repeats the %q parameter. JSON parsers disagree about which occurrence wins, so a gateway and "+
+				"the verifier can act on different values from the same token", name),
+			Remediation: "Reject a JWS whose header object repeats a parameter name, and parse the header once with a strict decoder.",
+			Title:       fmt.Sprintf("JWT header repeats the %s parameter", name),
+		})
+	}
+
+	// 6. No expiry: the credential lives until the signing key is rotated.
 	if tok.expMissing {
 		add(jwtSignal{
 			Category: jwtCategoryClaims, Kind: jwtKindMissingExp, Subject: "exp",
@@ -550,7 +987,7 @@ func analyzeJWTToken(origin string, tok *jwtToken) []jwtSignal {
 		})
 	}
 
-	// 3. Secret material inside the payload. A JWT payload is only base64url:
+	// 7. Secret material inside the payload. A JWT payload is only base64url:
 	// every party that sees the token can read it.
 	for _, key := range tok.sensitiveKeys {
 		add(jwtSignal{

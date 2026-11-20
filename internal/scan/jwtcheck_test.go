@@ -925,3 +925,309 @@ func TestEnqueueJWTProbesPerOrigin(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// header hygiene: kid shape, jku/x5u key references, repeated parameters
+// ---------------------------------------------------------------------------
+
+// jwtTokenRawHeader builds a compact JWS from a hand-written header object, so
+// a test can express what a map cannot: a REPEATED header parameter.
+func jwtTokenRawHeader(t *testing.T, headerJSON string, claims map[string]any, sig string) string {
+	t.Helper()
+	c, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(headerJSON)) + "." +
+		base64.RawURLEncoding.EncodeToString(c) + "." + sig
+}
+
+// A kid is classified by shape only: opaque ids (uuid, hex, base64url, dotted
+// names) stay silent, file/injection/URL shapes are named.
+func TestJWTKidShapeClassification(t *testing.T) {
+	for _, tc := range []struct {
+		kid  string
+		want []string
+	}{
+		{"", nil},
+		{"2024-key-01", nil},
+		{"9f8a7c1e-2b3d-4e5f-8a9b-0c1d2e3f4a5b", nil},
+		{"aGVsbG8td29ybGQ", nil},
+		{"keys/primary.pem", nil},
+		{"../../etc/passwd", []string{jwtKidClassPath}},
+		{"..%2f..%2fetc%2fpasswd", []string{jwtKidClassPath}},
+		{`..\..\windows\win.ini`, []string{jwtKidClassPath}},
+		{"/var/keys/signing.pem", []string{jwtKidClassPath}},
+		{`C:\keys\signing.pem`, []string{jwtKidClassPath}},
+		{"file:///etc/passwd", []string{jwtKidClassPath}},
+		{"kid' OR 1=1--", []string{jwtKidClassInjection}},
+		{"$(id)", []string{jwtKidClassInjection}},
+		{"{{7*7}}", []string{jwtKidClassInjection}},
+		{"https://cdn.example.test/jwks.json", []string{jwtKidClassURL}},
+		{"//cdn.example.test/jwks.json", []string{jwtKidClassURL}},
+		{"javascript:alert(1)", []string{jwtKidClassURL}},
+	} {
+		if got := jwtKidClasses(tc.kid); strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("jwtKidClasses(%q) = %v, want %v", tc.kid, got, tc.want)
+		}
+	}
+}
+
+// A key reference is only reported when it is defective in shape or names a
+// host neither the issuer nor this application controls; a self-hosted HTTPS
+// key set is normal and must stay silent.
+func TestJWTKeyReferenceClassification(t *testing.T) {
+	trusted := jwtTrustedKeyHosts("https://app.example.test", "https://idp.example.test")
+	for _, tc := range []struct {
+		name     string
+		header   string
+		value    string
+		want     bool
+		severity domain.Severity
+		forbid   []string
+	}{
+		{"self-hosted jwks", "jku", "https://idp.example.test/.well-known/jwks.json", false, "", nil},
+		{"same host other port", "jku", "https://app.example.test:8443/jwks", false, "", nil},
+		{"metadata path on the app", "jku", "https://app.example.test/jwks.json", false, "", nil},
+		{"empty", "jku", "", false, "", nil},
+		{"foreign https host", "jku", "https://cdn.evil.test/jwks.json", true, domain.SeverityLow, nil},
+		{"cleartext", "x5u", "http://idp.example.test/certs.pem", true, domain.SeverityMedium, nil},
+		{"credentials", "jku", "https://user:pass@idp.example.test/jwks", true, domain.SeverityHigh,
+			[]string{"user", "pass", "@"}},
+		{"non-http scheme", "x5u", "file:///etc/passwd", true, domain.SeverityHigh, nil},
+		{"relative", "jku", "/jwks.json", true, domain.SeverityMedium, nil},
+		{"protocol relative", "jku", "//cdn.evil.test/jwks.json", true, domain.SeverityMedium, nil},
+		{"signed url", "jku", "https://cdn.evil.test/jwks.json?token=abc#frag", true, domain.SeverityLow,
+			[]string{"token=", "abc", "#"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issue, ok := jwtKeyRefIssueFor(tc.header, tc.value, trusted)
+			if ok != tc.want {
+				t.Fatalf("issue(%q) ok = %v, want %v", tc.value, ok, tc.want)
+			}
+			if !ok {
+				return
+			}
+			if issue.Severity != tc.severity {
+				t.Fatalf("severity = %q, want %q", issue.Severity, tc.severity)
+			}
+			if issue.Observed == "" || issue.Reason == "" {
+				t.Fatalf("issue is not reportable: %+v", issue)
+			}
+			// The stored label never carries userinfo, a query or a fragment.
+			for _, leak := range tc.forbid {
+				if strings.Contains(issue.Observed, leak) {
+					t.Fatalf("observed value leaks %q: %s", leak, issue.Observed)
+				}
+			}
+		})
+	}
+}
+
+// The analyzer turns header shape into signals: one per kid class, one per key
+// reference, one per embedded key, all offline and all free of the value's
+// query/userinfo.
+func TestJWTHeaderHygieneSignals(t *testing.T) {
+	now := time.Now()
+	const jkuSecret = "SUPERSECRET-QUERY-VALUE"
+	token := jwtTokenWith(t, map[string]any{
+		"alg": "HS256", "typ": "JWT",
+		"kid": "../../etc/passwd",
+		"jku": "https://cdn.evil.test/jwks.json?token=" + jkuSecret,
+		"x5u": "http://idp.example.test/certs.pem",
+		"jwk": map[string]any{"kty": "RSA"},
+	}, cleanJWTClaims(now), jwtTestSignature)
+
+	tok, ok := parseJWT(token, now)
+	if !ok {
+		t.Fatal("parse")
+	}
+	signals := analyzeJWTToken("https://app.example.test", tok)
+	if len(signals) != 4 {
+		t.Fatalf("signals = %d (%+v), want kid + jku + x5u + jwk", len(signals), signals)
+	}
+	want := []struct {
+		kind     string
+		subject  string
+		severity domain.Severity
+	}{
+		{jwtKindKidPath, "kid/path", domain.SeverityMedium},
+		{jwtKindUntrustedKey, "jku", domain.SeverityLow},
+		{jwtKindUntrustedKey, "x5u", domain.SeverityMedium},
+		{jwtKindEmbeddedKey, "jwk", domain.SeverityMedium},
+	}
+	for i, w := range want {
+		s := signals[i]
+		if s.Kind != w.kind || s.Subject != w.subject {
+			t.Fatalf("signal %d = %s/%s, want %s/%s", i, s.Kind, s.Subject, w.kind, w.subject)
+		}
+		if s.Severity != w.severity {
+			t.Fatalf("signal %d severity = %q, want %q", i, s.Severity, w.severity)
+		}
+		if s.Category != jwtCategoryHeader {
+			t.Fatalf("signal %d category = %q, want %q", i, s.Category, jwtCategoryHeader)
+		}
+		if s.Key == "" || s.Reason == "" || s.Remediation == "" || s.Title == "" {
+			t.Fatalf("signal %d is not reportable: %+v", i, s)
+		}
+	}
+	blob, err := json.Marshal(signals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{jkuSecret, token, jwtTestSignature} {
+		if strings.Contains(string(blob), leak) {
+			t.Fatalf("the header signals leaked %q: %s", leak, blob)
+		}
+	}
+	// The token summary keeps the key location as a safe label, without the
+	// query that could carry a credential.
+	if s := tok.summary(); s.JKU != "https://cdn.evil.test/jwks.json" || s.X5U != "http://idp.example.test/certs.pem" {
+		t.Fatalf("summary key references = %q / %q", s.JKU, s.X5U)
+	}
+	if s := tok.summary(); s.EmbeddedKey != "jwk" {
+		t.Fatalf("embedded key = %q, want jwk", s.EmbeddedKey)
+	}
+}
+
+// A header object that repeats a verification-relevant parameter is visible in
+// the bytes and is reported; a repeated extension parameter, or a repetition
+// nested inside jwk, is not.
+func TestJWTDuplicateHeaderParameter(t *testing.T) {
+	now := time.Now()
+
+	token := jwtTokenRawHeader(t, `{"alg":"HS256","typ":"JWT","kid":"k1","kid":"k2"}`, cleanJWTClaims(now), jwtTestSignature)
+	tok, ok := parseJWT(token, now)
+	if !ok {
+		t.Fatal("parse")
+	}
+	if strings.Join(tok.duplicateParams, ",") != "kid" {
+		t.Fatalf("duplicate params = %v, want [kid]", tok.duplicateParams)
+	}
+	signals := analyzeJWTToken("https://app.example.test", tok)
+	if len(signals) != 1 || signals[0].Kind != jwtKindDuplicateParam || signals[0].Subject != "header/kid" {
+		t.Fatalf("signals = %+v, want exactly the duplicate-kid signal", signals)
+	}
+	if signals[0].Severity != domain.SeverityMedium || signals[0].Confidence != domain.ConfidenceHigh {
+		t.Fatalf("signal = %+v, want medium/high", signals[0])
+	}
+
+	// An extension parameter nobody verifies is noise, and a repetition inside
+	// the nested jwk object is a different object (not a duplicate header).
+	for _, header := range []string{
+		`{"alg":"HS256","typ":"JWT","x-custom":1,"x-custom":2}`,
+		`{"alg":"HS256","typ":"JWT","kid":"k1","jwk":{"alg":"RS256","alg":"RS256"}}`,
+	} {
+		tok, ok := parseJWT(jwtTokenRawHeader(t, header, cleanJWTClaims(now), jwtTestSignature), now)
+		if !ok {
+			t.Fatalf("parse %s", header)
+		}
+		if len(tok.duplicateParams) != 0 {
+			t.Fatalf("header %s reported duplicates %v", header, tok.duplicateParams)
+		}
+		for _, s := range analyzeJWTToken("https://app.example.test", tok) {
+			if s.Kind == jwtKindDuplicateParam {
+				t.Fatalf("header %s produced a duplicate-parameter signal", header)
+			}
+		}
+	}
+}
+
+// The header checks add ZERO requests: a token with a path-shaped kid and two
+// untrusted key references still produces exactly the baseline, the anonymous
+// control and the two invalid-token controls, all GET, none with a body. That
+// is the whole non-destructive guarantee — nothing is sent to a jku/x5u host and
+// no server state is touched.
+func TestJWTHeaderHygieneChecksAreReadOnly(t *testing.T) {
+	now := time.Now()
+	const jkuSecret = "SUPERSECRET-QUERY-VALUE"
+	token := jwtTokenWith(t, map[string]any{
+		"alg": "HS256", "typ": "JWT",
+		"kid": "../../etc/passwd",
+		"jku": "https://cdn.evil.test/jwks.json?token=" + jkuSecret,
+		"x5u": "http://idp.example.test/certs.pem",
+		"jwk": map[string]any{"kty": "RSA"},
+	}, cleanJWTClaims(now), jwtTestSignature)
+
+	var hits, nonGet, withBody atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Method != http.MethodGet {
+			nonGet.Add(1)
+		}
+		if r.ContentLength > 0 {
+			withBody.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") == "Bearer "+token {
+			_, _ = w.Write([]byte(jwtSiteBody))
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid token"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/api/me", domain.MethodGET)
+	tc := runJWT(t, env, jwtEngineFor(t, srv.URL, token), ep, ExecutorConfig{})
+
+	if got := hits.Load(); got != 4 {
+		t.Fatalf("requests = %d, want 4 (baseline + anonymous + two controls); header hygiene must add none", got)
+	}
+	if got := nonGet.Load(); got != 0 {
+		t.Fatalf("non-GET requests = %d, want 0 (read-only)", got)
+	}
+	if got := withBody.Load(); got != 0 {
+		t.Fatalf("requests with a body = %d, want 0 (read-only)", got)
+	}
+
+	d := jwtDetailOf(t, tc)
+	if d.Verdict != domain.VerdictConfirmed {
+		t.Fatalf("verdict = %q, want confirmed (%s)", d.Verdict, d.Reason)
+	}
+	byKind := map[string]jwtSignal{}
+	for _, s := range d.Signals {
+		byKind[s.Kind] = s
+	}
+	for _, kind := range []string{jwtKindKidPath, jwtKindUntrustedKey, jwtKindEmbeddedKey} {
+		if _, ok := byKind[kind]; !ok {
+			t.Fatalf("missing %s in %+v", kind, d.Signals)
+		}
+	}
+	if d.Validation == nil || d.Validation.BaselineStatus != http.StatusOK || !d.Validation.AnonymousRejected {
+		t.Fatalf("validation = %+v, want an honest authenticated baseline", d.Validation)
+	}
+
+	findings := findingsByClass(t, env, domain.VulnJWT)
+	if len(findings) != 4 {
+		t.Fatalf("findings = %d, want one per header signal (%+v)", len(findings), findings)
+	}
+	for _, f := range findings {
+		if f.Verdict != domain.VerdictConfirmed || f.Title == "" || f.Summary == "" || len(f.EvidenceIDs) == 0 {
+			t.Fatalf("finding is not reportable: %+v", f)
+		}
+	}
+
+	// Nothing that identifies the token, and nothing from the key URL's query,
+	// may reach a persisted record.
+	secrets := []string{token, jwtTestSignature, strings.Split(token, ".")[1], jkuSecret}
+	blobs := [][]byte{tc.Detail, []byte(tc.Note)}
+	for _, f := range findings {
+		blobs = append(blobs, f.Detail, []byte(f.Title), []byte(f.Summary))
+	}
+	for _, id := range tc.EvidenceIDs {
+		_, body := env.evidenceBlob(id)
+		blobs = append(blobs, []byte(body))
+	}
+	for _, blob := range blobs {
+		for _, secret := range secrets {
+			if strings.Contains(string(blob), secret) {
+				t.Fatalf("a persisted record leaked %q", secret)
+			}
+		}
+	}
+	if d.Token == nil || d.Token.JKU != "https://cdn.evil.test/jwks.json" {
+		t.Fatalf("token summary = %+v, want a query-free jku label", d.Token)
+	}
+}
