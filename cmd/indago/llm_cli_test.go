@@ -68,7 +68,7 @@ func TestCLIConfigLLMSetShowTestClear(t *testing.T) {
 	} else if got := fi.Mode().Perm(); got != 0o600 {
 		t.Errorf("config mode = %04o, want 0600", got)
 	}
-	keyPath := filepath.Join(llmDir, "api_key")
+	keyPath := cliSavedKeyPath(t, llmDir, "custom")
 	if fi, err := os.Stat(keyPath); err != nil {
 		t.Fatal(err)
 	} else if got := fi.Mode().Perm(); got != 0o600 {
@@ -201,7 +201,7 @@ func TestCLIConfigLLMUsesEnvKeyAndKeepsItOnUpdate(t *testing.T) {
 	if strings.Contains(out.String(), cliLLMKey) {
 		t.Fatalf("set output contains the env key:\n%s", out.String())
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, "llm", "api_key"))
+	raw, err := os.ReadFile(cliSavedKeyPath(t, filepath.Join(dir, "llm"), "deepseek"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestCLIConfigLLMUsesEnvKeyAndKeepsItOnUpdate(t *testing.T) {
 
 	// An update without a key must keep the stored one.
 	mustConfig(t, c, "set", "-data", dir, "-provider", "deepseek", "-model", "deepseek-reasoner")
-	raw, err = os.ReadFile(filepath.Join(dir, "llm", "api_key"))
+	raw, err = os.ReadFile(cliSavedKeyPath(t, filepath.Join(dir, "llm"), "deepseek"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,5 +232,37 @@ func TestCLIConfigLLMUnknownSubcommand(t *testing.T) {
 	}
 	if err := c.config("oauth", []string{"login"}); err == nil {
 		t.Fatal("an unknown section was accepted")
+	}
+}
+
+func cliSavedKeyPath(t *testing.T, dir, provider string) string {
+	t.Helper()
+	keys, err := filepath.Glob(filepath.Join(dir, "api_key-"+provider+"-*"))
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("expected one saved key file, got %v, error=%v", keys, err)
+	}
+	return keys[0]
+}
+
+func TestCLIConfigLLMProviderEnvironmentKeyStaysInEnvironment(t *testing.T) {
+	c, out := newLLMCli(t)
+	dir := t.TempDir()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+cliLLMKey {
+			t.Error("provider environment key was not used for test")
+		}
+		io.WriteString(w, `{"choices":[{"message":{"content":"OK"}}]}`)
+	}))
+	defer upstream.Close()
+	t.Setenv("INDAGO_LLM_KEY_GOOGLE", cliLLMKey)
+	t.Setenv("INDAGO_LLM_BASE_URL_GOOGLE", upstream.URL)
+	mustConfig(t, c, "set", "-data", dir, "-provider", "google", "-model", "fixture-model")
+	keys, err := filepath.Glob(filepath.Join(dir, "llm", "api_key*"))
+	if err != nil || len(keys) != 0 {
+		t.Fatalf("unexpected persisted key files: %v, %v", keys, err)
+	}
+	mustConfig(t, c, "test", "-data", dir)
+	if raw := out.String(); strings.Contains(raw, cliLLMKey) || !strings.Contains(raw, "INDAGO_LLM_KEY_GOOGLE") {
+		t.Fatalf("unexpected CLI output: %q", raw)
 	}
 }

@@ -1,10 +1,8 @@
 # Local scope proxy (egress primitive)
 
-Status: **not wired into the browser yet.** This page documents a standalone
-primitive (`internal/scopeproxy`) and the measurements behind it. The browser
-integration (`ContextOptions.ProxyServer`, the launch flags in
-`internal/browser`) and the domain origin/path work are deliberately untouched
-so another in-flight change can land first; see §8 for the exact wiring.
+Indago uses this proxy for Chromium when the server starts with `-browser`.
+The browser's existing URL gate still checks scheme, path, method, and
+redirects. The local proxy checks destination host and port before DNS or TCP.
 
 ## 1. What problem it solves
 
@@ -12,8 +10,8 @@ The browser scope gate refuses *requests* before network dispatch. It does not
 prevent Chromium from opening a *connection*: for a navigation to an
 out-of-scope URL, Chromium preconnects, so the host sees a TCP connection and,
 for https, a TLS ClientHello carrying its own name in the SNI
-([browser-scope-boundary.md](browser-scope-boundary.md), "Known gap:
-connections"). A page with a third-party `<iframe>` therefore contacts that
+([browser-scope-boundary.md](browser-scope-boundary.md), "Route-only baseline").
+A page with a third-party `<iframe>` therefore contacts that
 third party even though no request, cookie or payload is sent.
 
 `internal/scopeproxy` moves the decision one layer earlier. The browser is
@@ -189,19 +187,19 @@ active, and `MaxConnections` (default 64) refuses rather than queues beyond it.
 Listener binding is verified loopback **after** the bind (`0.0.0.0:0` is
 refused), so a misconfigured address cannot expose the proxy to the network.
 
-## 8. Wiring (for the next slice, not done here)
+## 8. Browser integration
 
-1. Create the proxy with a policy derived from the project scope
-   (`Scope.PermitsHost` at the authority boundary), and one proxy per scan or
-   per browser context.
-2. Pass `proxy.ProxyURL()` as `ContextOptions.ProxyServer` and add
-   `ChromiumArgs(proxy.ProxyURL())` to the launch args (the driver currently
-   passes only `--disable-blink-features=SharedWorker`).
-3. Map `Event`s into the scan's log/evidence so a refusal is visible.
-4. Keep the existing request gate. The proxy constrains *where a socket may
-   go*; the gate still enforces *which request* (path, method, redirect hop).
-5. Do not enable chaining: `Config.UpstreamProxy` must stay empty, or scan
-   creation must reject the combination explicitly (§6).
+Chromium starts behind a deny-all proxy for traffic outside any project
+context. Each discovery, verification, or login context gets its own loopback
+proxy using the selected project's `Scope.PermitsHost` policy. The context
+removes Chromium's implicit loopback bypass. Closing the context closes its
+proxy and any open tunnels. Denials include the authority and reason in debug
+logs. This boundary covers Chromium's proxied HTTP(S) destinations. Use OS
+egress controls when policy requires a process-wide network boundary.
+
+The server rejects external `proxy_pool` settings for creation, start or
+restoration of a scan when Chromium is enabled, because the local proxy does
+not chain upstream. HTTP-only servers still support `proxy_pool`.
 
 ## 9. Validation
 

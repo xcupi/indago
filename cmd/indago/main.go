@@ -30,13 +30,10 @@ import (
 	"time"
 
 	"github.com/indago/indago/internal/ai"
-	"github.com/indago/indago/internal/browser"
 	"github.com/indago/indago/internal/config"
-	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
 	"github.com/indago/indago/internal/httpengine"
 	"github.com/indago/indago/internal/llm"
-	"github.com/indago/indago/internal/oast"
 	"github.com/indago/indago/internal/queue"
 	"github.com/indago/indago/internal/scan"
 	"github.com/indago/indago/internal/store/sqlite"
@@ -122,7 +119,7 @@ Client (talk to a running server; -server URL or $INDAGO_SERVER_URL, default htt
   report show <report-id|prefix> [-out FILE] [-download]
 
 Local configuration (reads/writes -data directly; no server needed):
-  config llm set -provider deepseek|openai|custom -api-key KEY [-model M] [-base-url URL] [-data DIR]
+  config llm set -provider deepseek|claude|openai|openrouter|google|custom -api-key KEY [-model M] [-base-url URL] [-data DIR]
                  (the key is stored 0600 under DIR/llm/; prefer $INDAGO_LLM_API_KEY over -api-key)
   config llm show|clear|test [-data DIR]
                  (test makes ONE small request to the configured provider; nothing else does)
@@ -183,9 +180,8 @@ func cmdServe(args []string) error {
 	dataDir := fs.String("data", config.DefaultDataDir, "data directory")
 	addr := fs.String("addr", "", "listen address (overrides config)")
 	debug := fs.Bool("v", false, "verbose (debug) logging")
-	allowUnsafe := fs.Bool("allow-state-changing", false,
-		"also execute POST/PUT/PATCH/DELETE endpoints (default: only GET/HEAD/OPTIONS; others are skipped)")
-	useBrowser := fs.Bool("browser", false, "enable browser network-observation discovery AND browser verification of reflected XSS candidates (needs Chromium; requests are scope-gated)")
+	allowUnsafe := fs.Bool("allow-state-changing", false, "legacy option; rejected by the read-only target policy")
+	useBrowser := fs.Bool("browser", false, "legacy scan option; target browser traffic is disabled; local PDF uses Chromium")
 	chromium := fs.String("chromium", "", "Chromium executable for -browser (default: $INDAGO_CHROMIUM_PATH or the Playwright cache)")
 	browserNoSandbox := fs.Bool("browser-no-sandbox", false,
 		"launch -browser Chromium WITHOUT its process sandbox (--no-sandbox). The sandbox is ON by default; use only when the host cannot provide it (e.g. an unprivileged container). Lowers isolation from hostile pages")
@@ -207,27 +203,21 @@ func cmdServe(args []string) error {
 	aiProvider := fs.String("ai-provider", "", "enable the advisory AI Gateway with this provider (openai|anthropic|openrouter|ollama|vllm); empty keeps AI fully disabled")
 	aiModel := fs.String("ai-model", "", "model name for -ai-provider (required if -ai-provider is set)")
 	aiBaseURL := fs.String("ai-base-url", "", "override the provider's default base URL (required for a non-default ollama/vllm deployment)")
-	oastAddr := fs.String("oast-addr", "",
-		"start the built-in OAST collaborator on this address (host:port, e.g. 127.0.0.1:0 for an ephemeral port): one local listener that confirms out-of-band callbacks for SSRF/XXE/command injection automatically. Empty (default) starts nothing")
-	oastPublicURL := fs.String("oast-public-url", "",
-		"URL a TARGET can reach for -oast-addr (a tunnel or reverse proxy, e.g. https://abc.example-tunnel.net). Without it the callback base URL is the loopback listener, which only a target on this host can reach and which SSRF refuses as a canary")
-	oastAllowExternalBind := fs.Bool("oast-allow-external-bind", false,
-		"allow -oast-addr to bind a non-loopback address; the callback listener is then reachable beyond this host (readily flooded — see docs/oast.md)")
-	allowPrivateOAST := fs.Bool("allow-private-oast", false,
-		"let the SSRF engine use an OAST collaborator on a literal private (RFC 1918/ULA) address, e.g. a lab listener at 192.168.103.1:8751 for a target at 192.168.103.20. OFF by default: a canary there asks the target to request the operator's own LAN. Loopback, link-local/instance-metadata, unspecified, multicast and CGNAT collaborators stay refused regardless")
+	oastAddr := fs.String("oast-addr", "", "legacy scan option; callback tests are disabled")
+	oastPublicURL := fs.String("oast-public-url", "", "legacy scan option; callback tests are disabled")
+	oastAllowExternalBind := fs.Bool("oast-allow-external-bind", false, "legacy scan option; callback tests are disabled")
+	allowPrivateOAST := fs.Bool("allow-private-oast", false, "legacy scan option; callback tests are disabled")
 	_ = fs.Parse(args)
 	setFlags := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 
 	log := newLogger(*debug)
 
-	browserCfg, err := browserConfigFromFlags(*useBrowser, *browserNoSandbox, *chromium)
-	if err != nil {
-		return err
+	if *allowUnsafe {
+		return errors.New("target read-only policy blocks -allow-state-changing")
 	}
-	oastCfg, wantOAST, err := oastConfigFromFlags(*oastAddr, *oastPublicURL, *oastAllowExternalBind)
-	if err != nil {
-		return err
+	if *useBrowser || *oastAddr != "" || *oastPublicURL != "" || *oastAllowExternalBind || *allowPrivateOAST {
+		log.Info("target read-only policy: live browser scans and callback tests are disabled")
 	}
 
 	// The API token is resolved once, here: -api-token wins over
@@ -286,13 +276,13 @@ func cmdServe(args []string) error {
 
 	q := queue.NewSQLite(db.SQL())
 
-	// Discovery's HTTP engine. FollowRedirects MUST be false: the scan controller
-	// wraps this engine in a scope check that follows redirects itself, so every
-	// hop is verified against scope. (Browser-network discovery is opt-in via
-	// -browser; its requests are scope-gated inside the browser.)
+	// A dedicated client for bounded reads. It has no shared cookie jar or
+	// redirect following. Saved session cookies are attached individually.
 	httpCfg := httpengine.DefaultConfig()
 	httpCfg.FollowRedirects = false
-	httpCfg.Timeout = 20 * time.Second
+	httpCfg.DisableCookies = true
+	httpCfg.Timeout = 10 * time.Second
+	httpCfg.MaxBodyBytes = 256 << 10
 	eng, err := httpengine.New(httpCfg)
 	if err != nil {
 		return err
@@ -304,83 +294,7 @@ func cmdServe(args []string) error {
 		return err
 	}
 
-	opts := scan.Options{
-		HTTP:             eng,
-		HTTPConfig:       httpCfg,
-		Evidence:         evStore,
-		Executor:         scan.ExecutorConfig{AllowStateChanging: *allowUnsafe, AllowPrivateOAST: *allowPrivateOAST},
-		SessionsDir:      cfg.SessionsDir(),
-		Preflight:        true,
-		AutoPauseOnBlock: true,
-	}
-	if *allowUnsafe {
-		log.Warn("state-changing methods (POST/PUT/PATCH/DELETE) will be executed against in-scope targets")
-	}
-	if *allowPrivateOAST {
-		log.Warn("SSRF may use an OAST collaborator on a private (RFC 1918/ULA) address; loopback, link-local/instance-metadata, unspecified, multicast and CGNAT collaborators stay refused")
-	}
-	// Built-in OAST collaborator. One listener + one loopback poll API for the
-	// whole process: the scan controller hands their URLs to every engine that
-	// confirms a vulnerability by callback (SSRF, XXE, command injection), so an
-	// operator needs no third-party webhook account — and nothing is started at
-	// all when -oast-addr is empty (the default).
-	var oastMgr *oast.Manager // nil unless -oast-addr: /api/capabilities reports it
-	if wantOAST {
-		oastCfg.Logger = log
-		mgr, oerr := oast.New(context.Background(), oastCfg)
-		if oerr != nil {
-			return fmt.Errorf("start OAST collaborator (-oast-addr): %w", oerr)
-		}
-		oastMgr = mgr
-		defer func() { _ = oastMgr.Close() }()
-		// Start the poll API now, not on the first scan: a listener that cannot
-		// report its own hits is worse than none, and this is where the
-		// operator can still see the failure.
-		pollURL, perr := oastMgr.PollURL()
-		if perr != nil {
-			return fmt.Errorf("start OAST poll API: %w", perr)
-		}
-		opts.OAST = oastMgr
-		log.Info("OAST collaborator listening",
-			"callback", oastMgr.BaseURL(), "listen", oastMgr.ListenAddr(), "poll", pollURL)
-		if oastCfg.PublicBaseURL == "" {
-			log.Info("OAST: no -oast-public-url, so only a target on this host can reach the collaborator; " +
-				"a remote target cannot call back to a loopback URL, and SSRF keeps its response-differential confirmation")
-		}
-	}
-	var loginFn web.LoginFunc
-	// bm is nil unless -browser. It is closed explicitly in the shutdown
-	// sequence below; the deferred Close is the safety net for early returns
-	// (Manager.Close is idempotent).
-	var bm *browser.Manager
-	if *useBrowser {
-		mgr, err := browser.NewManager(browserCfg, log)
-		if err != nil {
-			return fmt.Errorf("start browser (-browser): %w", err)
-		}
-		bm = mgr
-		defer bm.Close()
-		opts.Browser = bm
-		// Interactive login reuses the same manager; it opens its OWN visible
-		// browser (independent of the pool's headless setting) and saves the
-		// captured session under the data dir. The web layer only ever returns
-		// the saved file's path, never its contents.
-		sessionsDir := cfg.SessionsDir()
-		loginFn = func(ctx context.Context, p web.LoginParams) (string, string, error) {
-			statePath := filepath.Join(sessionsDir, "login-"+string(domain.NewID())+".json")
-			res, err := bm.InteractiveLogin(ctx, browser.LoginOptions{
-				LoginURL:         p.LoginURL,
-				AllowRequest:     p.AllowRequest,
-				SuccessURLGlob:   p.SuccessURL,
-				StorageStatePath: statePath,
-				UserAgent:        p.UserAgent,
-			})
-			if err != nil {
-				return "", "", err
-			}
-			return res.StorageStatePath, res.FinalURL, nil
-		}
-	}
+	opts := scan.Options{HTTP: eng, ReadOnlyTargets: true}
 	ctrl := scan.NewController(db, q, log, version, opts)
 
 	// Restart recovery, in order: requeue jobs left active by the previous run,
@@ -414,35 +328,12 @@ func cmdServe(args []string) error {
 	srv.SetLLMStore(llm.NewStore(filepath.Join(cfg.DataDir, "llm")))
 	// Bug-bounty platform tokens live under the same data directory, 0600.
 	srv.SetBountyStore(bounty.NewStore(filepath.Join(cfg.DataDir, "bounty")))
-	// Claude OAuth (PKCE) is Indago-owned, like the ChatGPT session.
-	srv.SetClaudeOAuthStore(filepath.Join(cfg.DataDir, "claude"))
-	srv.SetLoginFunc(loginFn) // nil unless -browser: endpoint then reports unavailable
 	// PDF export prints the HTML report through the same Chromium the browser
 	// engine uses; absent an executable the endpoint reports unavailability
 	// and every other report format keeps working.
 	if p := web.ChromiumForPDF(*chromium); p != "" {
 		srv.SetPDFRenderer(web.NewChromiumPDFRenderer(p, *browserNoSandbox))
 	}
-	// ChatGPT OAuth: Indago keeps its own session under the data directory so
-	// an operator can log in once here instead of borrowing another tool's.
-	srv.SetChatGPTCredDir(filepath.Join(cfg.DataDir, "chatgpt"))
-	// Callback-confirmed engines (SSRF/XXE/command injection) only get their
-	// collaborator when -oast-addr started one, and their silence must not read
-	// as a clean result when it did not. BaseURL is the public URL when the
-	// operator published one, otherwise the loopback listener.
-	oastEnabled := oastMgr != nil
-	var oastURL string
-	if oastEnabled {
-		oastURL = oastMgr.BaseURL()
-	}
-	srv.SetCapabilities(web.Capabilities{
-		BrowserEnabled:       *useBrowser,
-		BrowserSandbox:       *useBrowser && !*browserNoSandbox,
-		StateChangingAllowed: *allowUnsafe,
-		OASTEnabled:          oastEnabled,
-		OASTCallbackURL:      oastURL,
-		AllowPrivateOAST:     *allowPrivateOAST,
-	})
 	if err := srv.SetRateLimit(cfg.Server.APIRate, cfg.Server.APIBurst); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
@@ -481,28 +372,14 @@ func cmdServe(args []string) error {
 	serveErr := srv.ListenAndServe(ctx, cfg.Server.Addr, tlsCfg)
 
 	// Shutdown, in dependency order. ListenAndServe returns only after the HTTP
-	// server stopped accepting connections and drained in-flight requests
-	// (bounded at 5s inside serve). Workers stop next so no handler can touch
-	// the browser or the store afterwards; Controller.Shutdown bounds each
-	// scan's worker/browser pool at 30s. Then the browser manager (30s bound),
-	// then the store last so its Close can checkpoint the WAL with nothing
-	// writing. A wedged step is logged by the component that timed out; the
-	// process still exits rather than hanging forever.
+	// server stopped accepting connections and drained in-flight requests.
+	// Close the controller before the store so its WAL can checkpoint.
 	if ctx.Err() != nil {
 		log.Info("shutdown signal received; HTTP server drained")
 	}
 	start := time.Now()
 	ctrl.Shutdown()
 	log.Info("scan controller stopped", "dur", time.Since(start).Round(time.Millisecond))
-
-	if bm != nil {
-		start = time.Now()
-		if cerr := bm.Close(); cerr != nil {
-			log.Warn("browser manager close failed", "err", cerr)
-		} else {
-			log.Info("browser manager closed", "dur", time.Since(start).Round(time.Millisecond))
-		}
-	}
 
 	start = time.Now()
 	if cerr := db.Close(); cerr != nil {

@@ -1,7 +1,7 @@
 # AI advisory (optional)
 
 Indago works with no model configured. When one is configured, a model can do
-three things — and only three things:
+run the operations supported by its provider:
 
 1. **Answer an explicit question about an existing scan** (`POST /api/scans/{id}/ai/assist`):
    prioritise endpoints, triage findings, propose next manual checks.
@@ -28,8 +28,10 @@ Resolution order for one advisory call:
 2. The provider saved in Settings (`/api/llm/config`).
 3. `deepseek` by default.
 
-A stored configuration supplies its own provider. **Additional providers come
-from environment variables**, one key per provider, read at request time:
+Settings keeps each saved provider's key, model, and base URL when you switch
+the default provider. Saved values take priority. Provider-specific environment
+variables fill missing settings, and the API reads environment keys at request
+time without copying them into saved settings:
 
 ```bash
 INDAGO_LLM_KEY_OPENAI=sk-...            INDAGO_LLM_MODEL_OPENAI=gpt-4o-mini
@@ -39,37 +41,10 @@ INDAGO_LLM_KEY_CUSTOM=...               INDAGO_LLM_BASE_URL_CUSTOM=https://gatew
 
 `GET /api/llm/providers` reports which providers are usable and where the
 credential came from (`settings` or `environment`); it never returns a key.
-The Settings screen lists all nine ids the gateway understands: deepseek,
-claude, anthropic, openrouter, ollama, vllm, openai, custom, chatgpt.
-
-## Claude OAuth specifics
-
-The subscription route is stricter than the API-key route, and the details are
-not optional:
-
-- Authorization goes directly to `https://claude.ai/oauth/authorize` (the
-  `claude.com/cai/oauth/authorize` alias only 307-redirects there).
-- The scope set must match what Claude Code itself requests:
-  `org:create_api_key user:profile user:inference user:sessions:claude_code
-  user:mcp_servers user:file_upload user:plugins`. A partial set is rejected
-  with "Invalid request format".
-- The OAuth callback is `https://platform.claude.com/oauth/code/callback`
-  (the old console.anthropic.com path is rejected at authorize time).
-- Token refresh goes to `https://platform.claude.com/v1/oauth/token` (the
-  console host is a fallback) with `User-Agent: axios/1.7.9`. Browser-like and
-  `claude-code/` user agents are rejected at this endpoint.
-- Inference must send `User-Agent: claude-code/<version> (external, cli)`,
-  `x-app: cli`, and the four betas: `interleaved-thinking-2025-05-14`,
-  `fine-grained-tool-streaming-2025-05-14`, `claude-code-20250219`,
-  `oauth-2025-04-20`.
-- The system prompt must be the Claude Code identity line and nothing else. The
-  advisory framing travels in the user message on this route; a long
-  third-party system prompt is classified as another client and answered with
-  HTTP 429 `rate_limit_error: Error`.
-- A subscription model may still refuse active security-testing advice
-  (`stop_reason: refusal`). That is a provider policy answer, not a transport
-  error; Indago reports it as such. Report prose (executive summaries,
-  rewording) is accepted, which is the useful Claude role in this product.
+Settings offers `deepseek`, `claude`, `openai`, `openrouter`, and `google`.
+Installations can configure additional gateway providers by environment.
+Discover filters the catalog using reported capabilities and known specialized
+model IDs. Test checks that the selected model accepts Indago's text request.
 
 ## Token accounting
 
@@ -87,39 +62,28 @@ output ceiling, so OpenAI-compatible calls send `max_tokens: 8192`; without a
 ceiling a gateway default can be spent entirely on reasoning and return an
 empty answer. Diagnosis calls are allowed 180 s for the same reason.
 
-Naming: `<PROVIDER>` is the provider id uppercased, non-alphanumerics replaced
-by `_`. Supported: `deepseek`, `claude` (Anthropic Messages API), `openai`, `custom`
-(any OpenAI-compatible endpoint), `chatgpt` (OAuth), plus the gateway's own
-`anthropic`/`openrouter`/`ollama`/`vllm`.
+### Claude and OpenAI
 
-`claude` authenticates with `x-api-key` plus `anthropic-version`, not a Bearer
-token; model discovery works through the same `/models` probe, so
-`INDAGO_LLM_MODEL_CLAUDE` (or Settings) selects the model. ChatGPT's OAuth
-`/models` response is parsed separately and exposes only models the account can
-use through the API. Settings loads these version lists when ChatGPT or Claude
-is selected, and the AI advisory panel also has a per-call model picker. No
-model name is hardcoded beyond the provider default: names age fast.
+In Settings, select `claude` or `openai`, enter the provider's API key, then
+save. Use **Discover** for the API model catalog and **Test** to check the
+selected model. Environment-managed installations can set
+`INDAGO_LLM_KEY_CLAUDE` or `INDAGO_LLM_KEY_OPENAI` and the corresponding
+`INDAGO_LLM_MODEL_<PROVIDER>`.
 
-### ChatGPT via OAuth (`chatgpt`)
+Both providers can draft executive summaries for reports. The former ChatGPT
+setting is shown as OpenAI and requires an OpenAI API key. Claude also requires
+an Anthropic API key.
 
-No API key is involved. Indago logs in with the ChatGPT **device-code** flow and
-keeps its own session under `<data>/chatgpt/credentials.json` (0600 in a 0700
-directory):
+### OpenRouter and Google AI (Gemini)
 
-1. Settings → **ChatGPT OAuth session** → "Log in with ChatGPT".
-2. Open `https://auth.openai.com/codex/device`, enter the code shown, approve.
-3. Indago polls until OpenAI confirms, stores the tokens, and the provider list
-   flips to configured.
+In Settings, select **OpenRouter** or **Google AI (Gemini)** and save the API
+key from the corresponding service. **Discover** lists the provider's models.
+Save your preferred default model, then use **Test** to check it. Both
+providers can draft executive summaries for reports.
 
-API: `POST /api/llm/chatgpt/login` (returns a code), `POST
-/api/llm/chatgpt/login/poll` (`{"device_auth_id": ...}` → `pending`/`done`),
-`GET /api/llm/chatgpt/session`, `DELETE /api/llm/chatgpt/session`.
-
-Indago owns that token, so it refreshes it on expiry (`grant_type=refresh_token`)
-and saves the rotated pair. If no Indago session exists it falls back to the
-ChatGPT/Codex session a Hermes install holds (`~/.hermes/auth.json`) — read-only,
-never refreshed, never written back.
-
+Set `INDAGO_LLM_KEY_OPENROUTER` or `INDAGO_LLM_KEY_GOOGLE` to configure a
+provider through the server environment. Use `INDAGO_LLM_MODEL_OPENROUTER` or
+`INDAGO_LLM_MODEL_GOOGLE` to override its default model.
 
 ## During a scan
 
@@ -150,8 +114,9 @@ state. No evidence bytes, headers, cookies or request bodies.
 Set `ai_summary: true` and optionally `ai_provider` / `ai_model` when creating a
 report. The paragraph is inserted into the pentest template's Executive Summary
 as "AI-assisted draft (unverified, advisory only — the findings below are the
-authoritative record)". If the provider is missing or the call fails, the report
-is still generated, just without that paragraph.
+authoritative record)". The response includes `ai_summary_status` when requested,
+with an `added`, `failed`, or `skipped` result and a message. The report remains
+available if the summary is skipped or fails.
 
 ## Failure modes
 
@@ -161,22 +126,6 @@ is still generated, just without that paragraph.
 | provider known, no key anywhere | 400 naming `INDAGO_LLM_KEY_<PROVIDER>` |
 | provider unreachable / returns an error | 502 with the provider's redacted message |
 | gateway streams by default | handled: `stream:false` is sent, and an SSE-framed body is decoded |
-
-## Verified providers
-
-- **DeepSeek** (via an OpenAI-compatible gateway): connect probe, scan assist and
-  report narrative verified against a live endpoint.
-- **ChatGPT (OAuth)**: verified live end to end — session probe (GET /models),
-  scan assist (model `gpt-6-astra`) and report narrative, all through the Codex
-  OAuth session, no API key.
-- **OpenAI API key**: the same code path is exercised by tests against a stub
-  endpoint; a live check needs `INDAGO_LLM_KEY_OPENAI`. Until one is set the API
-  answers 400 with that exact instruction.
-
-Protocol notes for ChatGPT, all found the hard way: `/responses` (not
-`/chat/completions`), `"store": false`, `"stream": true` (non-streaming is
-rejected), and the answer arrives as `response.output_text.delta` SSE events.
-
 
 ## Payload diagnosis (`/ai/diagnose`)
 
@@ -266,27 +215,9 @@ A lab host (for example a `web-security-academy.net` instance) is correctly
 reported as out of scope by this pass. That is the intended behaviour: the
 reviewer checks the host against the program, not against the scan.
 
-## Claude OAuth (no API key)
-
-Claude can be connected exactly like ChatGPT, with Indago's own credential
-store instead of an API key: `POST /api/llm/claude/login/start` returns the
-authorization URL (PKCE S256, Claude Code client id), the user approves in
-their browser, and `POST /api/llm/claude/login/finish {"code":"…"}` exchanges
-the pasted code. Tokens live in `<data>/claude/credentials.json` (0600) and are
-refreshed automatically; `GET/DELETE /api/llm/claude/session` reports or clears
-the session. Settings → **Claude OAuth session** drives the flow.
-
-When the provider is `claude` and no API key exists, the gateway uses this
-session: requests carry `Authorization: Bearer`, `anthropic-beta:
-oauth-2025-04-20,claude-code-20250219` and `x-app: cli`, which is what
-Anthropic requires for subscription tokens (x-api-key would be rejected).
-`INDAGO_LLM_MODEL_CLAUDE` selects the model; the default is
-`claude-sonnet-4-5`.
-
 ## Audit: what is covered, what is not
 
-Covered: provider settings (DeepSeek, Claude API key, Claude OAuth, OpenAI,
-custom/OpenAI-compatible gateways, ChatGPT OAuth), a master on/off switch, a
+Covered: provider settings (DeepSeek, Claude, OpenAI and OpenAI-compatible gateways), a master on/off switch, a
 per-parameter attempt budget, payload diagnosis over stored evidence, report
 narration, triager review over the rendered YesWeHack template, redaction of
 cookies/keys before any evidence leaves the process, prompt-injection fencing of

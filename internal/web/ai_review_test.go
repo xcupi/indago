@@ -27,9 +27,9 @@ func TestReportReviewReturnsTriagerVerdict(t *testing.T) {
 		})
 	}))
 	defer model.Close()
-	t.Setenv("INDAGO_LLM_KEY_OPENAI", "k")
-	t.Setenv("INDAGO_LLM_BASE_URL_OPENAI", model.URL)
-	t.Setenv("INDAGO_LLM_MODEL_OPENAI", "test-model")
+	t.Setenv("INDAGO_LLM_KEY_DEEPSEEK", "k")
+	t.Setenv("INDAGO_LLM_BASE_URL_DEEPSEEK", model.URL)
+	t.Setenv("INDAGO_LLM_MODEL_DEEPSEEK", "test-model")
 
 	a := newAIAPI(t)
 	scanID := createTestScan(t, a)
@@ -49,11 +49,11 @@ func TestReportReviewReturnsTriagerVerdict(t *testing.T) {
 		Provider string `json:"provider"`
 	}
 	a.mustJSON(a.do("POST", "/api/scans/"+string(scanID)+"/ai/report-review",
-		map[string]any{"mode": "confirmed", "provider": "openai"}), http.StatusOK, &resp)
+		map[string]any{"mode": "confirmed", "provider": "deepseek"}), http.StatusOK, &resp)
 	if resp.Verdict != "NEEDS FIXES" || !resp.Advisory || len(resp.Issues) != 1 {
 		t.Fatalf("resp = %+v", resp)
 	}
-	if resp.Provider != "openai" {
+	if resp.Provider != "deepseek" {
 		t.Fatalf("provider = %q", resp.Provider)
 	}
 	// The reviewer must receive the platform's five sections, not a raw dump.

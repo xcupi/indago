@@ -130,7 +130,7 @@ func TestBountyProgramsAreNotFetchedImplicitly(t *testing.T) {
 	if calls != 0 {
 		t.Fatalf("providers endpoint contacted the platform %d times", calls)
 	}
-	if len(prov.Providers) != 1 || prov.Providers[0].ID != "yeswehack" || prov.Providers[0].Configured {
+	if len(prov.Providers) != 4 || prov.Providers[0].ID != "yeswehack" || prov.Providers[0].Configured {
 		t.Fatalf("providers = %+v", prov.Providers)
 	}
 

@@ -13,6 +13,9 @@ func TestBrowserConfigKeepsSandboxOnByDefault(t *testing.T) {
 	if cfg.DisableSandbox {
 		t.Fatal("the Chromium process sandbox must stay ON unless explicitly disabled")
 	}
+	if !cfg.EnforceScopeEgress {
+		t.Fatal("-browser must enforce scope at the connection boundary")
+	}
 	if !cfg.Headless || cfg.ExecutablePath != "/usr/bin/chromium" {
 		t.Fatalf("unrelated settings must be preserved: %+v", cfg)
 	}

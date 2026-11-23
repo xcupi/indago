@@ -43,9 +43,9 @@ func TestScanAIAssistUsesSelectedProvider(t *testing.T) {
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"1. Test GET /login first"}}],"model":"test-model","usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150}}`))
 	}))
 	defer model.Close()
-	t.Setenv("INDAGO_LLM_KEY_OPENAI", "test-key")
-	t.Setenv("INDAGO_LLM_BASE_URL_OPENAI", model.URL)
-	t.Setenv("INDAGO_LLM_MODEL_OPENAI", "test-model")
+	t.Setenv("INDAGO_LLM_KEY_DEEPSEEK", "test-key")
+	t.Setenv("INDAGO_LLM_BASE_URL_DEEPSEEK", model.URL)
+	t.Setenv("INDAGO_LLM_MODEL_DEEPSEEK", "test-model")
 
 	a := newAIAPI(t)
 	scanID := createTestScan(t, a)
@@ -57,12 +57,12 @@ func TestScanAIAssistUsesSelectedProvider(t *testing.T) {
 		Advisory bool   `json:"advisory"`
 	}
 	rec := a.do("POST", "/api/scans/"+string(scanID)+"/ai/assist",
-		map[string]any{"kind": "prioritize", "provider": "openai"})
+		map[string]any{"kind": "prioritize", "provider": "deepseek"})
 	a.mustJSON(rec, http.StatusOK, &resp)
 	if !strings.Contains(resp.Text, "GET /login") {
 		t.Fatalf("text = %q", resp.Text)
 	}
-	if resp.Provider != "openai" || resp.Model != "test-model" || !resp.Advisory {
+	if resp.Provider != "deepseek" || resp.Model != "test-model" || !resp.Advisory {
 		t.Fatalf("meta = %+v", resp)
 	}
 	if !strings.Contains(gotPrompt, "advisory only") && !strings.Contains(gotPrompt, "Advisory only") {
@@ -70,13 +70,89 @@ func TestScanAIAssistUsesSelectedProvider(t *testing.T) {
 	}
 
 	var usage struct {
-		Calls        int `json:"calls"`
-		TotalTokens  int `json:"total_tokens"`
-		PromptTokens int `json:"prompt_tokens"`
+		Calls            int     `json:"calls"`
+		TotalTokens      int     `json:"total_tokens"`
+		PromptTokens     int     `json:"prompt_tokens"`
+		EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+		CostKnown        bool    `json:"cost_known"`
 	}
 	a.mustJSON(a.do("GET", "/api/scans/"+string(scanID)+"/ai/usage", nil), http.StatusOK, &usage)
-	if usage.Calls != 1 || usage.TotalTokens != 150 || usage.PromptTokens != 120 {
+	if usage.Calls != 1 || usage.TotalTokens != 150 || usage.PromptTokens != 120 || usage.CostKnown || usage.EstimatedCostUSD != 0 {
 		t.Fatalf("usage = %+v", usage)
+	}
+}
+
+func TestScanAIUsageCostTracking(t *testing.T) {
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"1. Test GET /login first"}}],"model":"gpt-4o-mini","usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150}}`))
+	}))
+	defer model.Close()
+	t.Setenv("INDAGO_LLM_KEY_DEEPSEEK", "test-key")
+	t.Setenv("INDAGO_LLM_BASE_URL_DEEPSEEK", model.URL)
+	t.Setenv("INDAGO_LLM_MODEL_DEEPSEEK", "gpt-4o-mini")
+
+	a := newAIAPI(t)
+	scanID := createTestScan(t, a)
+
+	rec := a.do("POST", "/api/scans/"+string(scanID)+"/ai/assist",
+		map[string]any{"kind": "prioritize", "provider": "deepseek"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var usage struct {
+		Calls            int     `json:"calls"`
+		PromptTokens     int     `json:"prompt_tokens"`
+		CompletionTokens int     `json:"completion_tokens"`
+		TotalTokens      int     `json:"total_tokens"`
+		EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+		CostKnown        bool    `json:"cost_known"`
+		Items            []struct {
+			Model            string  `json:"model"`
+			EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+			CostKnown        bool    `json:"cost_known"`
+		} `json:"items"`
+	}
+	a.mustJSON(a.do("GET", "/api/scans/"+string(scanID)+"/ai/usage", nil), http.StatusOK, &usage)
+	if usage.Calls != 1 || !usage.CostKnown || usage.EstimatedCostUSD != 0.000036 {
+		t.Fatalf("usage = %+v", usage)
+	}
+	if len(usage.Items) != 1 || !usage.Items[0].CostKnown || usage.Items[0].EstimatedCostUSD != 0.000036 {
+		t.Fatalf("items = %+v", usage.Items)
+	}
+
+	// Add a local ollama call with unknown cost: total keeps known cost, CostKnown becomes false.
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"local advice"}}],"model":"llama3.2","usage":{"prompt_tokens":200,"completion_tokens":50,"total_tokens":250}}`))
+	}))
+	defer ollama.Close()
+	t.Setenv("INDAGO_LLM_BASE_URL_OLLAMA", ollama.URL)
+	t.Setenv("INDAGO_LLM_MODEL_OLLAMA", "llama3.2")
+
+	rec = a.do("POST", "/api/scans/"+string(scanID)+"/ai/assist",
+		map[string]any{"kind": "triage", "provider": "ollama"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ollama status = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	usage = struct {
+		Calls            int     `json:"calls"`
+		PromptTokens     int     `json:"prompt_tokens"`
+		CompletionTokens int     `json:"completion_tokens"`
+		TotalTokens      int     `json:"total_tokens"`
+		EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+		CostKnown        bool    `json:"cost_known"`
+		Items            []struct {
+			Model            string  `json:"model"`
+			EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+			CostKnown        bool    `json:"cost_known"`
+		} `json:"items"`
+	}{}
+	a.mustJSON(a.do("GET", "/api/scans/"+string(scanID)+"/ai/usage", nil), http.StatusOK, &usage)
+	if usage.Calls != 2 || usage.TotalTokens != 400 || usage.CostKnown || usage.EstimatedCostUSD != 0.000036 {
+		t.Fatalf("mixed usage = %+v", usage)
 	}
 }
 

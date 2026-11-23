@@ -24,10 +24,10 @@ export function setToken(token: string) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
-export async function api<T>(
+export async function apiResponse(
   path: string,
-  init: { method?: string; body?: unknown } = {},
-): Promise<T> {
+  init: { method?: string; body?: unknown; signal?: AbortSignal } = {},
+): Promise<Response> {
   const headers: Record<string, string> = { [CLIENT_HEADER]: CLIENT_VALUE };
   if (init.body !== undefined) headers["Content-Type"] = "application/json";
   const token = getToken();
@@ -36,8 +36,21 @@ export async function api<T>(
     method: init.method ?? "GET",
     headers,
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    signal: init.signal,
   });
-  const text = await res.text();
+  if (res.ok) return res;
+  const data = await res.json().catch(() => null);
+  const message = data && typeof data === "object" && "error" in data
+    ? String(data.error)
+    : `HTTP ${res.status}`;
+  throw new ApiError(message, res.status);
+}
+
+export async function api<T>(
+  path: string,
+  init: { method?: string; body?: unknown } = {},
+): Promise<T> {
+  const text = await (await apiResponse(path, init)).text();
   let data: unknown = null;
   if (text) {
     try {
@@ -45,13 +58,6 @@ export async function api<T>(
     } catch {
       data = text;
     }
-  }
-  if (!res.ok) {
-    const message =
-      data && typeof data === "object" && "error" in (data as Record<string, unknown>)
-        ? String((data as Record<string, unknown>).error)
-        : `HTTP ${res.status}`;
-    throw new ApiError(message, res.status);
   }
   return data as T;
 }

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"github.com/indago/indago/internal/config"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -49,5 +51,16 @@ func TestServeInvalidFlagsDoNotModifyConfig(t *testing.T) {
 				t.Fatal("invalid startup modified config", err)
 			}
 		})
+	}
+}
+
+func TestServeRejectsTargetWritesBeforeOpeningWorkspace(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "unopened")
+	err := cmdServe([]string{"-data", dir, "-allow-state-changing"})
+	if err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("expected read-only policy error, got %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("invalid launch touched data directory: %v", err)
 	}
 }

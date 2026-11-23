@@ -225,8 +225,8 @@ func TestCoverageReportsCapabilityMatrix(t *testing.T) {
 	}
 	var c coverageResp
 	a.mustJSON(a.do("GET", "/api/scans/"+string(id)+"/coverage", nil), 200, &c)
-	if len(c.Capabilities) != 20 {
-		t.Fatalf("capabilities = %d, want 20", len(c.Capabilities))
+	if len(c.Capabilities) != 25 {
+		t.Fatalf("capabilities = %d, want 25", len(c.Capabilities))
 	}
 	byKey := map[string]bool{}
 	labels := map[string]string{}
@@ -241,7 +241,7 @@ func TestCoverageReportsCapabilityMatrix(t *testing.T) {
 			t.Fatalf("%s is disabled for this scan but reported enabled: %+v", k, byKey)
 		}
 	}
-	for _, k := range []string{"dom_xss", "access_control", "information_disclosure", "open_redirect", "path_traversal", "security_headers", "method_tls_hygiene", "websocket_security", "host_header", "jwt_validation"} {
+	for _, k := range []string{"dom_xss", "access_control", "information_disclosure", "open_redirect", "path_traversal", "security_headers", "method_tls_hygiene", "websocket_security", "csrf", "prototype_pollution", "cache_poisoning", "file_upload", "host_header", "jwt_validation"} {
 		if !byKey[k] {
 			t.Fatalf("%s is enabled for this scan but reported disabled: %+v", k, byKey)
 		}

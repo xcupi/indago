@@ -48,6 +48,10 @@ func TestUpdateScanCapabilitiesPersistsEveryEngineSwitch(t *testing.T) {
 		"skip_security_headers":    true,
 		"skip_method_tls":          true,
 		"skip_websocket":           true,
+		"skip_csrf":                true,
+		"skip_prototype_pollution": true,
+		"skip_cache_poisoning":     true,
+		"skip_file_upload":         true,
 		"skip_host_header":         true,
 		"skip_jwt":                 true,
 		"skip_cors":                true,
@@ -58,6 +62,7 @@ func TestUpdateScanCapabilitiesPersistsEveryEngineSwitch(t *testing.T) {
 		"enable_sqli":              true,
 		"enable_nosqli":            true,
 		"enable_xxe":               true,
+		"enable_stored_xss":        true,
 		"allow_insecure_tls":       true,
 	}
 	a.mustJSON(a.do("PUT", "/api/scans/"+string(id)+"/capabilities", body), 200, nil)
@@ -81,6 +86,10 @@ func TestUpdateScanCapabilitiesPersistsEveryEngineSwitch(t *testing.T) {
 		{"skip_security_headers", cfg.SkipSecurityHeaders},
 		{"skip_method_tls", cfg.SkipMethodTLS},
 		{"skip_websocket", cfg.SkipWebSocket},
+		{"skip_csrf", cfg.SkipCSRF},
+		{"skip_prototype_pollution", cfg.SkipPrototypePollution},
+		{"skip_cache_poisoning", cfg.SkipCachePoisoning},
+		{"skip_file_upload", cfg.SkipFileUpload},
 		{"skip_host_header", cfg.SkipHostHeader},
 		{"skip_jwt", cfg.SkipJWT},
 		{"skip_cors", cfg.SkipCORS},
@@ -91,6 +100,7 @@ func TestUpdateScanCapabilitiesPersistsEveryEngineSwitch(t *testing.T) {
 		{"enable_sqli", cfg.EnableSQLi},
 		{"enable_nosqli", cfg.EnableNoSQLi},
 		{"enable_xxe", cfg.EnableXXE},
+		{"enable_stored_xss", cfg.EnableStoredXSS},
 		{"allow_insecure_tls", cfg.AllowInsecureTLS},
 	} {
 		if !c.value {

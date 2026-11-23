@@ -37,10 +37,11 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		"version":                s.version,
 		"browser_enabled":        s.caps.BrowserEnabled,
 		"browser_sandbox":        s.caps.BrowserEnabled && s.caps.BrowserSandbox,
-		"state_changing_allowed": s.caps.StateChangingAllowed,
+		"state_changing_allowed": s.caps.StateChangingAllowed && !s.ctrl.ReadOnlyTargets(),
+		"target_read_only":       s.ctrl.ReadOnlyTargets(),
 		"oast_enabled":           s.caps.OASTEnabled,
 		"allow_private_oast":     s.caps.AllowPrivateOAST,
-		"interactive_login":      s.login != nil,
+		"interactive_login":      s.login != nil && !s.ctrl.ReadOnlyTargets(),
 	}
 	// Only meaningful when a collaborator exists, and an empty string would read
 	// as "no callback URL" anyway, so it is omitted rather than sent blank.
@@ -123,12 +124,8 @@ func classifySkip(note string) skipReason {
 		return skipReason{"jwt_not_applicable", sevInfo, "No Bearer JWT in this scan's session",
 			"The JWT check inspects the bearer token the scan's own session carries. No such token was available for this origin (anonymous scan, cookie-only session, or an opaque non-JWT credential), so nothing was sent."}
 	case strings.Contains(n, "nosqli skipped:"):
-		// Every intentional NoSQL skip (state-changing endpoint, non-query
-		// location, download policy) is a read-only safety boundary, not a
-		// failed probe. Gate/unavailable notes are matched above and keep
-		// their own coverage reasons.
 		return skipReason{"nosqli_not_applicable", sevInfo, "NoSQL query-operator check skipped this injection point",
-			"The NoSQL engine is strictly read-only and GET-query-only: it never sends an operator to a state-changing endpoint, a non-query location, or a download route. Other engine passes still test this endpoint for their own classes."}
+			"The endpoint or parameter did not qualify under the scan's method, request body or safety policy."}
 	case strings.Contains(n, "path-segment injection point"):
 		return skipReason{"path_segment_not_testable", sevInfo, "Path traversal cannot be delivered through a URL path segment",
 			"The scope validator refuses dot segments, encoded slashes, NUL bytes and duplicate slashes in a request path (it fails closed), so no traversal payload can reach a path-segment injection point. Query and form parameters on the same endpoint are still tested."}
@@ -254,6 +251,16 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 			"Read-only OPTIONS/TRACE probes per origin plus the TLS state of the scan's own handshake. No write method is ever sent; a self-signed lab certificate is recorded, not reported.", domain.VulnHTTPMethods},
 		{"websocket_security", "WebSocket handshake & origin", !cfg.SkipWebSocket,
 			"Two bounded read-only HTTP Upgrade handshakes per discovered WebSocket endpoint: an untrusted Origin (reported only on 101 Switching Protocols) and an anonymous handshake. No WebSocket frame is ever sent.", domain.VulnWebSocket},
+		{"csrf", "Cross-Site Request Forgery (CSRF)", !cfg.SkipCSRF,
+			"Requires an authenticated session, server permission for state-changing requests, and a scan that includes write-like endpoints.", domain.VulnCSRF},
+		{"prototype_pollution", "Client-side prototype pollution", !cfg.SkipPrototypePollution,
+			"Browser-backed check that probes query and fragment vectors in Chromium and confirms only when Object.prototype mutation is observed.", domain.VulnPrototypePollution},
+		{"cache_poisoning", "Web cache poisoning", !cfg.SkipCachePoisoning,
+			"Read-only GET probe with a unique cache-buster query parameter and unkeyed forwarding headers, confirmed only when a clean follow-up GET receives the poisoned response.", domain.VulnCachePoisoning},
+		{"file_upload", "Unrestricted file upload", !cfg.SkipFileUpload,
+			"Requires server permission for state-changing requests and a scan that includes write-like endpoints.", domain.VulnFileUpload},
+		{"stored_xss", "Stored XSS", cfg.EnableStoredXSS,
+			"Opt-in check that requires server permission for state-changing requests and a scan that includes write-like endpoints.", domain.VulnStoredXSS},
 		{"host_header", "Host header injection", !cfg.SkipHostHeader,
 			"One read-only baseline plus control requests per origin, carrying a canary Host/X-Forwarded-Host value.", domain.VulnHostHeader},
 		{"jwt_validation", "JWT token validation", !cfg.SkipJWT,
@@ -264,7 +271,7 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 		{"ssti", "Server-side template injection", cfg.EnableSSTI, "", domain.VulnSSTI},
 		{"sqli", "SQL injection", cfg.EnableSQLi, "", domain.VulnSQLi},
 		{"nosqli", "NoSQL injection", cfg.EnableNoSQLi,
-			"Read-only query-operator probes on GET parameters; array shapes and $ne/$gt only, never on state-changing endpoints.", domain.VulnNoSQLi},
+			"Checks GET query parameters. JSON request bodies on POST, PUT or PATCH require server permission for state-changing requests and a scan that includes write-like endpoints.", domain.VulnNoSQLi},
 		{"xxe", "XML external entity", cfg.EnableXXE, "", domain.VulnXXE},
 	}
 	out.Capabilities = make([]coverageCapability, len(specs))
@@ -355,7 +362,7 @@ func (s *Server) handleScanCoverage(w http.ResponseWriter, r *http.Request) {
 	}
 	if !st.Scan.Config.EnableNoSQLi {
 		out.Warnings = append(out.Warnings, coverageWarning{"nosqli_disabled", sevInfo,
-			"NoSQL injection was not enabled for this scan; its read-only query-operator pass was intentionally not run."})
+			"NoSQL injection was disabled for this scan."})
 	}
 	if !st.Scan.Config.EnableXXE {
 		out.Warnings = append(out.Warnings, coverageWarning{"xxe_disabled", sevInfo,

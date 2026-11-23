@@ -14,6 +14,7 @@ import type { AuthProfile, Project, Scan, Scope, Target } from "@/lib/types";
 import { navigate } from "@/lib/router";
 import { formatTime, shortId } from "@/lib/utils";
 import { Pagination, usePagination } from "@/components/Pagination";
+import { ReadSnapshot } from "@/components/ReadSnapshot";
 
 function lines(value: string): string[] {
   return value
@@ -23,6 +24,7 @@ function lines(value: string): string[] {
 }
 
 export default function ProjectDetail({ id }: { id: string }) {
+  const caps = useApi<{ target_read_only: boolean }>("/api/capabilities");
   const project = useApi<Project>(`/api/projects/${id}`);
   const targets = useApi<Target[]>(`/api/projects/${id}/targets`);
   const scope = useApi<Scope>(`/api/projects/${id}/scope`);
@@ -316,7 +318,9 @@ export default function ProjectDetail({ id }: { id: string }) {
 
 
       <div className="space-y-4">
-          <Card>
+          {caps.error ? <Alert>{caps.error}</Alert> : null}
+          {caps.data?.target_read_only ? <ReadSnapshot key={id} projectId={id} profiles={authProfiles.data ?? []} /> : null}
+          {caps.data?.target_read_only === false ? <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <LogIn className="size-4 text-emerald-700 dark:text-emerald-400" /> Auth sessions
@@ -398,7 +402,7 @@ export default function ProjectDetail({ id }: { id: string }) {
                 </Button>
               </div>
             </CardContent>
-          </Card>
+          </Card> : null}
 
         <Card>
           <CardHeader>

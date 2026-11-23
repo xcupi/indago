@@ -18,29 +18,26 @@ AI gateway all live under one data directory.
 
 ---
 
-## What it does
+## Target read-only mode
 
-| Area | Coverage |
-| --- | --- |
-| **Reflected XSS** | Parameter discovery, context-aware payload selection, browser marker execution, bounded filter-bypass fallback |
-| **DOM XSS** | `location.*`, `document.referrer`, `window.name`, `postMessage`, `JSON.parse` taint; `innerHTML`, `outerHTML`, `document.write`, `insertAdjacentHTML`, `Range.createContextualFragment`, navigation/`src` sinks, `document.cookie`, string timers |
-| **DOM clobbering** | Clobbering-to-XSS and attribute-filter bypass, confirmed in a real browser |
-| **Open redirect** | Server-side and client-side `location` assignment, with a scope-checked navigation proof |
-| **Access control** | Role/identity differentials, forced browsing, method and path bypasses, response-cookie continuity, page disclosure |
-| **IDOR** | ID harvesting, object-family enumeration, redirect/body leak checks, automatic confirmation |
-| **Information disclosure** | `.git` history, backup/config files, verbose errors, TRACE/IP headers, HTML comments |
-| **Discovery** | Crawl, forms, sitemap/robots, wordlists, JavaScript/network observation, parameter mining |
-| **Evidence** | Request/response blobs, browser signals, screenshots, per-finding provenance, standalone PoC |
-| **Reports** | JSON, Markdown, HTML, SARIF, PDF; `technical`, `pentest`, `bug_bounty`, `yeswehack` templates |
-| **Bug bounty** | YesWeHack program search, public scope/rules import, project creation, submission template |
-| **AI advisory** | Optional multi-provider assistant for payload diagnosis, triage and report narration; never changes a verdict |
+The served application keeps projects, scan history, evidence, reports, and API
+settings in the local workspace. To collect new target evidence, open the
+project and use **Read-only snapshot**. Confirm the exact scoped URL is a read
+operation and, when needed, select a previously saved session from a read-only
+account.
 
-Validation against the PortSwigger Web Security Academy catalogue is tracked in
-[`docs/feature-review.md`](docs/feature-review.md): **48 of 55 catalogued labs
-confirmed by the engine**, with the remaining seven XSS/exploit-chain labs
-documented as out of scope.
+A capture sends one bodyless GET and records the response status, content type,
+capture time, and SHA-256 of the captured bytes. Redirects are returned as
+evidence and require their own approval. Text can be inspected in Indago or
+downloaded as JSON for offline review. The preview displays captured markup as
+text, with no target scripts, assets, or forms running.
 
----
+Active scan execution, interactive or password target login, and remote bounty
+draft writes are blocked in this mode. Existing reports can still be exported
+locally. Browsing historical scan data does not rerun the scan.
+
+[Historical validation and prior scan coverage](docs/feature-review.md) documents
+the build and limitations of older results.
 
 ## Screenshots
 
@@ -54,103 +51,26 @@ documented as out of scope.
 
 ---
 
-## Why Indago
-
-- **Scope first.** A project scope is required before any request. Redirects,
-  browser navigations and login flows are checked against it, not just the
-  initial URL.
-- **Evidence, not reflections.** A marker appearing in a response is a
-  candidate. Confirmation needs a marker-specific runtime signal from a real
-  browser (or an equivalent server-side proof for the relevant class).
-- **Honest verdicts.** Findings are `confirmed`, `inconclusive`, `rejected`,
-  `pending` or a documented gap. The scanner does not promote a lab or a
-  hypothesis without its own evidence.
-- **Local by default.** SQLite, evidence and reports stay under `./data`.
-  There is no telemetry and no cloud dependency. The AI gateway is off until
-  you configure it, and it is advisory only.
-- **Bounded behavior.** Conservative rate/concurrency defaults, explicit
-  `-allow-state-changing` opt-in, no CAPTCHA solving, no identity rotation, no
-  weaponized payloads.
-
----
-
 ## Quick start
 
-Requirements:
-
-- Go 1.26+ (the module is pinned to 1.26 and CI builds with the version in
-  `go.mod`)
-- Node 24 + npm for the SPA
-- Chromium/Chrome for browser discovery and DOM verification
+Build with Go 1.26 and Node 24. Chromium is optional for local PDF export.
 
 ```bash
-git clone https://github.com/xcupi/indago.git
-cd indago
-
-make ui-install     # first checkout, or after changing web/
-make ui             # rebuild the embedded SPA
-make build          # produces ./bin/indago
-
+make ui-install
+make ui
+make build
 ./bin/indago db init
-./bin/indago serve -browser
+./bin/indago serve
 ```
 
-Open <http://127.0.0.1:8750>. The SPA is embedded in the binary; the API is on
-the same origin.
+Open <http://127.0.0.1:8750> and create or select a project. Define its exact
+scope, then open **Read-only snapshot** to approve a URL and capture it. For
+authenticated reads, import an existing browser session from a read-only
+account. Leave the session selector at **Anonymous** for public data.
 
-For browser-backed scans, point Indago at Chromium if it is not on `PATH`:
-
-```bash
-INDAGO_CHROMIUM_PATH=/usr/bin/google-chrome ./bin/indago serve -browser
-```
-
-### A scan from the CLI
-
-The CLI talks to the running server. Scope is mandatory:
-
-```bash
-./bin/indago project create "Acme store"
-./bin/indago scope set -project <PID> -include shop.example.com -include-path /app
-./bin/indago target add -project <PID> -name store -url https://shop.example.com/app
-./bin/indago scan create -project <PID> -target <TID> -profile conservative
-./bin/indago scan start <SCAN>
-./bin/indago scan status <SCAN>
-./bin/indago finding list -scan <SCAN>
-./bin/indago report create -scan <SCAN> -format html -template technical -out report.html
-```
-
-Use `-allow-state-changing` only when you intend to exercise POST/PUT/PATCH/
-DELETE endpoints. Use `-browser` for DOM XSS, browser discovery and browser
-verification; without it those probes are skipped rather than guessed.
-
-### Web UI workflow
-
-1. **Projects → New project**, then open the project.
-2. **Scope** — include hosts and optional path prefixes; fail-closed.
-3. **Scan login** (optional) — for targets that need an account, log in through
-   a visible browser once; the Playwright session is saved on the project and
-   new scans pick it up automatically.
-4. **New scan** — choose target, profile, seeds and limits; start.
-5. Inspect **Findings / Coverage / Explorer / Tests / Evidence** while it runs.
-6. Generate a report, or import a bug-bounty program and use its scope.
-
----
-
-## Finding classes and verification
-
-| Class | Confirmation signal |
-| --- | --- |
-| Reflected XSS | Marker executes in the browser at the reflected context |
-| DOM XSS | Marker reaches the modelled sink and executes in the page/frame |
-| DOM clobbering | Persisted markup clobbers the modelled global and changes execution |
-| Open redirect | The page's own handler navigates to an out-of-origin URL |
-| Access control | Differential response for a lower-privilege identity, with a stable endpoint and body signal |
-| IDOR | Another object is readable through the same authorized request shape |
-| Information disclosure | The disclosed content is retrieved and matched to the expected artifact |
-
-A finding carries its request/response evidence, the verification signal, a
-severity and a verdict. Reports can regenerate from stored evidence without
-re-running the scan.
+Use **Scans**, **Findings**, and **Reports** to inspect historical results and
+generate local reports. New snapshots can be downloaded from the project and
+opened again as local text without contacting any target.
 
 ---
 
@@ -167,10 +87,9 @@ findings, or a selected subset.
 
 ## AI gateway (optional)
 
-Indago supports nine provider ids: `deepseek`, `openai`, `anthropic`, `claude`,
-`chatgpt`, `openrouter`, `ollama`, `vllm`, `custom`. Settings groups provider
-configuration, OAuth sessions and workspace details into collapsible sections.
-A saved key is never echoed back; the UI only shows a masked hint.
+Settings offers DeepSeek, Claude, OpenAI, OpenRouter, and Google AI (Gemini)
+with API-key authentication. Claude, OpenAI, OpenRouter, and Google AI can draft
+executive summaries for reports. Settings shows a masked hint for the saved key.
 
 The gateway is advisory:
 
@@ -179,9 +98,9 @@ The gateway is advisory:
 - it is disabled with one toggle;
 - token usage is recorded per AI task.
 
-Provider keys can also be supplied as `INDAGO_LLM_KEY_<PROVIDER>` environment
-variables. Claude and ChatGPT subscription OAuth sessions are stored under the
-data directory with owner-only permissions.
+Settings retains each provider's key and model when you switch the default.
+Provider keys can also be supplied through `INDAGO_LLM_KEY_<PROVIDER>` environment
+variables.
 
 ---
 
@@ -223,10 +142,10 @@ Read the design docs:
 - [`docs/scope-semantics.md`](docs/scope-semantics.md) — what scope permits
 - [`docs/dom-xss.md`](docs/dom-xss.md) — DOM source/sink model and limits
 - [`docs/reports.md`](docs/reports.md) — report formats and templates
-- [`docs/ai.md`](docs/ai.md) — providers, OAuth, advisory boundaries
+- [`docs/ai.md`](docs/ai.md) — providers, API keys, advisory boundaries
 - [`docs/bounty.md`](docs/bounty.md) — YesWeHack import and submission
 - [`docs/oast.md`](docs/oast.md) — built-in OAST collaborator (`-oast-addr`) and its poll API
-- [`docs/feature-review.md`](docs/feature-review.md) — coverage scoreboard and gaps
+- [`docs/feature-review.md`](docs/feature-review.md) — historical validation and coverage limitations
 
 ---
 
@@ -241,9 +160,10 @@ make ui         # rebuild the embedded SPA after web/ changes
 Frontend stack: TypeScript, React, Vite, Tailwind CSS and shadcn-style
 primitives under `web/`.
 
-CI runs the full quality gate and builds the container image; the
-`docker-sandbox` job proves Chromium's process sandbox inside the shipped
-image. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+CI rebuilds the frontend from the lockfile, checks that the embedded bundle
+matches, and runs the Go quality gate. The container also builds its frontend
+from source. The `docker-sandbox` job verifies Chromium's process sandbox using local PDF
+exports from the shipped image. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 Deployment (TLS, API token, Docker, retention) is documented in
 [`docs/deployment.md`](docs/deployment.md).
@@ -260,8 +180,6 @@ data/
   evidence/        request/response blobs, browser screenshots
   reports/         generated reports
   llm/             provider configuration (keys stored 0600)
-  claude/          Claude OAuth credential (0600)
-  chatgpt/         ChatGPT OAuth credential (0600)
   auth/            saved browser sessions for scans
 ```
 

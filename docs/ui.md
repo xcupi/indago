@@ -50,7 +50,7 @@ primitives (Radix + cva, vendored as source under `web/src/components/ui/`).
 | `GET /api/scans/{id}/explorer` | Explorer tab (search, gap filter, DOM sinks) |
 | `GET /api/scans/{id}/endpoints` | Endpoints tab |
 | `GET /api/scans/{id}/tests` | Tests tab (class filter) |
-| `GET /api/scans/{id}/findings`, `.../findings/{fid}` | Findings tab + detail dialog |
+| `GET /api/scans/{id}/findings`, `.../findings/{fid}` | Findings tab and detail dialog, including a local review of stored CSRF artifacts |
 | `GET /api/scans/{id}/evidence`, `/api/evidence/{id}/content` | Evidence tab with blob links |
 | `GET/POST /api/scans/{id}/reports`, `.../preview`, `/api/reports/{id}/content` | Reports tab |
 | `GET /api/scans/{id}/idor/candidates` | IDOR tab |
@@ -108,7 +108,7 @@ server rather than by reading code:
 | Model discovery (`POST /api/llm/models`) | Settings → AI Gateway → "Discover", or pick ChatGPT/Claude to load versions automatically; AI advisory has a per-call Model picker | ChatGPT returns its OAuth model list and Claude returns its OAuth model list; provider errors are shown in the note instead of throwing |
 | Finding PoC (`GET .../findings/{fid}/poc`) | Finding detail dialog → "download PoC" | `200`, `Content-Disposition: attachment`, 2.1 KB artifact |
 | Selective report (`finding_ids`) | Reports tab → mode "selected findings" + checkbox list | report generated from the UI contains exactly the one selected finding |
-| AI summary (`ai_summary`) | Reports tab → "AI summary" switch | sent in the create body alongside `format`/`mode` |
+| AI summary (`ai_summary`) | Reports tab → "AI summary" switch | Sent with `format` and `mode`. The create response includes `ai_summary_status` with the outcome and a message shown on the Reports tab. |
 | `proxy_pool`, `stop{mode,confirmed_limit}`, `max_candidates`, `login_*_selector` | Scan create form | intercepted create payload carries all of them with the entered values |
 | Concurrency at create (`config`) | Scan create form (four fields, 0 = profile) | the same payload carries `config.{discovery,http,browser}_concurrency` and `requests_per_second` |
 

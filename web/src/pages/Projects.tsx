@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/controls";
 import { Field, Input, Textarea } from "@/components/ui/input";
-import { Empty, Loading } from "@/components/ui/misc";
+import { Empty, LoadError, Loading } from "@/components/ui/misc";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api, refreshAll, useApi } from "@/lib/api";
 import type { Project } from "@/lib/types";
@@ -143,7 +143,9 @@ export default function Projects() {
 
       <Card>
         <CardContent className="p-0">
-          {projects.loading && !projects.data ? (
+          {projects.error ? (
+            <div className="p-4"><LoadError resource="projects" error={projects.error} /></div>
+          ) : projects.loading && !projects.data ? (
             <Loading />
           ) : projectsList.length === 0 ? (
             <div className="p-4">

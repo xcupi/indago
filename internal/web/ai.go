@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -40,26 +39,18 @@ func (s *Server) handleListLLMProviders(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusServiceUnavailable, "LLM settings are not available on this server")
 		return
 	}
+	providers, selected, err := s.llmRegistry.List()
+	if err != nil {
+		s.writeInternalError(w, "read LLM providers", err)
+		return
+	}
+	for i := range providers {
+		providers[i].ReportOnly = ai.ReportOnlyProvider(providers[i].Provider)
+	}
 	out := struct {
 		Providers []llm.Availability `json:"providers"`
 		Default   string             `json:"default"`
-	}{Providers: s.llmRegistry.List()}
-	if s.claudeStore != nil {
-		if c, err := s.claudeStore.Load(); err == nil && c.AccessToken != "" {
-			for i := range out.Providers {
-				if out.Providers[i].Provider == llm.ProviderClaude && out.Providers[i].Source != "settings" {
-					out.Providers[i].Configured = true
-					out.Providers[i].Source = "indago"
-					if out.Providers[i].Model == "" {
-						out.Providers[i].Model = "claude-sonnet-5-5"
-					}
-				}
-			}
-		}
-	}
-	if cfg, err := s.llm.Load(); err == nil {
-		out.Default = cfg.Provider
-	}
+	}{Providers: providers, Default: selected}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -78,28 +69,11 @@ func (s *Server) aiGatewayFor(provider, model string) (ai.Gateway, error) {
 	}
 	cred, err := s.llmRegistry.Resolve(provider, model)
 	if err != nil {
-		// Claude can authenticate with Indago's own OAuth session instead of an
-		// API key. Resolve reports "no credential" when no key exists anywhere,
-		// so this is the point to fall back to the stored PKCE token.
-		if errors.Is(err, llm.ErrNoCredential) {
-			if gw, ok := s.claudeOAuthGateway(provider, model); ok {
-				return gw, nil
-			}
-		}
 		return nil, err
-	}
-	// A saved Claude/Anthropic provider may have no API key at all: the
-	// credential is the OAuth session. Resolve succeeds in that case, so the
-	// fallback has to happen here, not only on ErrNoCredential.
-	if !cred.HasKey() && (strings.EqualFold(cred.Provider, "claude") || strings.EqualFold(cred.Provider, "anthropic")) {
-		if gw, ok := s.claudeOAuthGateway(cred.Provider, model); ok {
-			return gw, nil
-		}
 	}
 	return ai.New(ai.Settings{
 		Enabled: true, Provider: cred.Provider, Model: cred.Model,
 		BaseURL: cred.BaseURL, APIKey: cred.APIKey(),
-		CredentialsDir: s.chatgptDir,
 	})
 }
 
@@ -284,68 +258,6 @@ func (s *Server) scanAssistContext(ctx context.Context, scanID domain.ID, sc *do
 	}, nil
 }
 
-// claudeOAuthGateway builds a Claude gateway from Indago's PKCE session when
-// the provider is Claude and no API key is configured.
-func (s *Server) claudeOAuthGateway(provider, model string) (ai.Gateway, bool) {
-	if s.claudeLogin == nil {
-		return nil, false
-	}
-	prov := strings.ToLower(strings.TrimSpace(provider))
-	if prov == "" {
-		if s.llm != nil {
-			if c, err := s.llm.Load(); err == nil {
-				prov = strings.ToLower(c.Provider)
-			}
-		}
-		if prov == "" {
-			prov = "deepseek" // the default provider; not Claude
-		}
-	}
-	if prov != "claude" && prov != "anthropic" {
-		return nil, false
-	}
-	tok, err := s.claudeLogin.Token(context.Background())
-	if err != nil || tok == "" {
-		return nil, false
-	}
-	m := strings.TrimSpace(model)
-	if m == "" {
-		m = strings.TrimSpace(os.Getenv("INDAGO_LLM_MODEL_CLAUDE"))
-	}
-	if m == "" {
-		if s.llm != nil {
-			if c, err := s.llm.Load(); err == nil && c.Provider == "claude" {
-				m = c.Model
-			}
-		}
-	}
-	if m == "" {
-		if models, err := s.claudeLogin.ListModels(context.Background()); err == nil {
-			for _, id := range models {
-				if strings.Contains(id, "sonnet") {
-					m = id
-					break
-				}
-			}
-			if m == "" && len(models) > 0 {
-				m = models[0]
-			}
-		}
-	}
-	if m == "" {
-		m = "claude-sonnet-4-5"
-	}
-	base := strings.TrimSpace(os.Getenv("INDAGO_LLM_BASE_URL_CLAUDE"))
-	if base == "" {
-		base = "https://api.anthropic.com/v1"
-	}
-	gw, err := ai.New(ai.Settings{Enabled: true, Provider: "claude", Model: m, BaseURL: base, OAuthToken: tok})
-	if err != nil {
-		return nil, false
-	}
-	return gw, true
-}
-
 // recordAIUsage copies the provider-reported token counts onto the task. It
 // never estimates: a provider that does not report usage leaves zeros.
 func recordAIUsage(task *domain.AITask, resp *ai.Response) {
@@ -358,8 +270,7 @@ func recordAIUsage(task *domain.AITask, resp *ai.Response) {
 }
 
 // handleScanAIUsage reports the token counts providers returned for this
-// scan's advisory calls. Tokens, not money: Indago has no price table, and a
-// guessed cost would be worse than none.
+// scan's advisory calls alongside estimated USD costs from ai.EstimateCost.
 func (s *Server) handleScanAIUsage(w http.ResponseWriter, r *http.Request) {
 	scanID := domain.ID(r.PathValue("id"))
 	if _, err := s.store.Scans().Get(r.Context(), scanID); err != nil {
@@ -379,30 +290,47 @@ func (s *Server) handleScanAIUsage(w http.ResponseWriter, r *http.Request) {
 		PromptTokens     int       `json:"prompt_tokens"`
 		CompletionTokens int       `json:"completion_tokens"`
 		TotalTokens      int       `json:"total_tokens"`
+		EstimatedCostUSD float64   `json:"estimated_cost_usd"`
+		CostKnown        bool      `json:"cost_known"`
 		CreatedAt        string    `json:"created_at"`
 	}
 	out := struct {
-		Calls            int    `json:"calls"`
-		PromptTokens     int    `json:"prompt_tokens"`
-		CompletionTokens int    `json:"completion_tokens"`
-		TotalTokens      int    `json:"total_tokens"`
-		Items            []call `json:"items"`
+		Calls            int     `json:"calls"`
+		PromptTokens     int     `json:"prompt_tokens"`
+		CompletionTokens int     `json:"completion_tokens"`
+		TotalTokens      int     `json:"total_tokens"`
+		EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+		CostKnown        bool    `json:"cost_known"`
+		Items            []call  `json:"items"`
 	}{}
+	allKnown := true
 	for _, t := range tasks {
 		if t.State != domain.AISucceeded {
 			continue
+		}
+		est := ai.EstimateCost(t.Provider, t.Model, ai.Usage{
+			PromptTokens:     t.PromptTokens,
+			CompletionTokens: t.CompletionTokens,
+			TotalTokens:      t.TotalTokens,
+		})
+		if !est.CostKnown {
+			allKnown = false
 		}
 		out.Calls++
 		out.PromptTokens += t.PromptTokens
 		out.CompletionTokens += t.CompletionTokens
 		out.TotalTokens += t.TotalTokens
+		out.EstimatedCostUSD += est.EstimatedCostUSD
 		if len(out.Items) < 50 {
 			out.Items = append(out.Items, call{
 				ID: t.ID, Kind: string(t.Kind), Provider: t.Provider, Model: t.Model,
 				PromptTokens: t.PromptTokens, CompletionTokens: t.CompletionTokens,
-				TotalTokens: t.TotalTokens, CreatedAt: t.CreatedAt.Format(time.RFC3339),
+				TotalTokens: t.TotalTokens, EstimatedCostUSD: est.EstimatedCostUSD,
+				CostKnown: est.CostKnown, CreatedAt: t.CreatedAt.Format(time.RFC3339),
 			})
 		}
 	}
+	out.EstimatedCostUSD = ai.RoundUSD(out.EstimatedCostUSD)
+	out.CostKnown = out.Calls > 0 && allKnown
 	writeJSON(w, http.StatusOK, out)
 }

@@ -390,10 +390,8 @@ type createScanReq struct {
 	// domain.ScanConfig.RawQueryInjection and docs/raw-query-injection.md.
 	RawQueryInjection string `json:"raw_query_injection"`
 
-	// ProxyPool, when non-empty, routes this scan's outbound traffic (raw HTTP
-	// and browser verification alike) through one of the listed proxies,
-	// round-robin. See domain.ScanConfig.ProxyPool. Empty (the default) means
-	// a direct connection.
+	// ProxyPool routes raw HTTP through operator-supplied proxies on HTTP-only
+	// servers. See domain.ScanConfig.ProxyPool.
 	ProxyPool []string `json:"proxy_pool"`
 
 	// RandomizeTLSFingerprint — see domain.ScanConfig.RandomizeTLSFingerprint.
@@ -471,6 +469,18 @@ type createScanReq struct {
 	// SkipWebSocket omits the READ-ONLY WebSocket handshake & Origin
 	// inspection (two bounded Upgrade handshakes per discovered endpoint).
 	SkipWebSocket bool `json:"skip_websocket"`
+	// SkipCSRF omits the Cross-Site Request Forgery check on state-changing
+	// endpoints.
+	SkipCSRF bool `json:"skip_csrf"`
+	// SkipPrototypePollution omits the browser-backed client-side prototype
+	// pollution check.
+	SkipPrototypePollution bool `json:"skip_prototype_pollution"`
+	// SkipCachePoisoning omits the read-only cache-busted unkeyed header check.
+	SkipCachePoisoning bool `json:"skip_cache_poisoning"`
+	// SkipFileUpload omits the bounded multipart file upload check.
+	SkipFileUpload bool `json:"skip_file_upload"`
+	// EnableStoredXSS opts into bounded stored XSS probing.
+	EnableStoredXSS bool `json:"enable_stored_xss"`
 	// SkipHostHeader omits the READ-ONLY host-header inspection (one bounded
 	// baseline plus control requests per origin).
 	SkipHostHeader bool `json:"skip_host_header"`
@@ -594,6 +604,11 @@ func (s *Server) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		SkipSecurityHeaders:             req.SkipSecurityHeaders,
 		SkipMethodTLS:                   req.SkipMethodTLS,
 		SkipWebSocket:                   req.SkipWebSocket,
+		SkipCSRF:                        req.SkipCSRF,
+		SkipPrototypePollution:          req.SkipPrototypePollution,
+		SkipCachePoisoning:              req.SkipCachePoisoning,
+		SkipFileUpload:                  req.SkipFileUpload,
+		EnableStoredXSS:                 req.EnableStoredXSS,
 		SkipHostHeader:                  req.SkipHostHeader,
 		SkipJWT:                         req.SkipJWT,
 		SkipCORS:                        req.SkipCORS,
@@ -709,6 +724,18 @@ type capabilitiesReq struct {
 	// SkipWebSocket omits the READ-ONLY WebSocket handshake & Origin
 	// inspection.
 	SkipWebSocket bool `json:"skip_websocket"`
+	// SkipCSRF omits the Cross-Site Request Forgery check on state-changing
+	// endpoints.
+	SkipCSRF bool `json:"skip_csrf"`
+	// SkipPrototypePollution omits the browser-backed client-side prototype
+	// pollution check.
+	SkipPrototypePollution bool `json:"skip_prototype_pollution"`
+	// SkipCachePoisoning omits the read-only cache-busted unkeyed header check.
+	SkipCachePoisoning bool `json:"skip_cache_poisoning"`
+	// SkipFileUpload omits the bounded multipart file upload check.
+	SkipFileUpload bool `json:"skip_file_upload"`
+	// EnableStoredXSS opts into bounded stored XSS probing.
+	EnableStoredXSS bool `json:"enable_stored_xss"`
 	// SkipHostHeader omits the READ-ONLY host-header inspection.
 	SkipHostHeader bool `json:"skip_host_header"`
 
@@ -762,6 +789,11 @@ func (s *Server) handleUpdateScanCapabilities(w http.ResponseWriter, r *http.Req
 	sc.Config.SkipSecurityHeaders = req.SkipSecurityHeaders
 	sc.Config.SkipMethodTLS = req.SkipMethodTLS
 	sc.Config.SkipWebSocket = req.SkipWebSocket
+	sc.Config.SkipCSRF = req.SkipCSRF
+	sc.Config.SkipPrototypePollution = req.SkipPrototypePollution
+	sc.Config.SkipCachePoisoning = req.SkipCachePoisoning
+	sc.Config.SkipFileUpload = req.SkipFileUpload
+	sc.Config.EnableStoredXSS = req.EnableStoredXSS
 	sc.Config.SkipHostHeader = req.SkipHostHeader
 	sc.Config.SkipJWT = req.SkipJWT
 	sc.Config.SkipCORS = req.SkipCORS
@@ -837,6 +869,10 @@ type loginReq struct {
 // until the login completes, times out, or the request is canceled, so the UI
 // shows a waiting/MFA state meanwhile.
 func (s *Server) handleInteractiveLogin(w http.ResponseWriter, r *http.Request) {
+	if s.ctrl.ReadOnlyTargets() {
+		writeError(w, http.StatusForbidden, "target login is disabled; import an existing read-only session")
+		return
+	}
 	if s.login == nil {
 		writeError(w, http.StatusNotImplemented, "interactive login is not available (start the server with a browser configured: indago serve -browser)")
 		return
@@ -895,10 +931,11 @@ func (s *Server) handleInteractiveLogin(w http.ResponseWriter, r *http.Request) 
 		ua = httpengine.DefaultUserAgent + " " + ua
 	}
 	statePath, finalURL, err := s.login(r.Context(), LoginParams{
-		AllowRequest: allow,
-		LoginURL:     u.String(),
-		SuccessURL:   strings.TrimSpace(req.SuccessURL),
-		UserAgent:    ua,
+		AllowRequest:   allow,
+		AllowAuthority: scope.PermitsHost,
+		LoginURL:       u.String(),
+		SuccessURL:     strings.TrimSpace(req.SuccessURL),
+		UserAgent:      ua,
 	})
 	if err != nil {
 		if r.Context().Err() != nil {
@@ -953,6 +990,8 @@ func (s *Server) handleInteractiveLogin(w http.ResponseWriter, r *http.Request) 
 // wrong lifecycle state → 409, missing → 404, shutting down → 503.
 func (s *Server) writeScanError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, scan.ErrTargetReadOnly):
+		writeError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, scan.ErrScopeRequired), errors.Is(err, scan.ErrScopeEmpty),

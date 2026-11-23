@@ -114,7 +114,7 @@ cross-process targets that a route cannot see were not enumerated and may exist.
 The earlier "reasoned, not verified" statement for `Refresh`, meta-refresh and
 cross-site iframes/workers is now measured for requests.
 
-**Known gap: connections.** The gate refuses *requests*; it does not prevent
+**Route-only baseline.** The gate refuses *requests*; it does not prevent
 Chromium from opening a *connection*. For six shapes that start a navigation to an
 out-of-scope URL (`Refresh` header, meta-refresh, `location.href`, `<iframe src>`,
 meta-refresh inside an iframe, meta-refresh inside a cross-site iframe) the
@@ -141,10 +141,9 @@ What that means in practice: no request, cookie, path or payload reaches an
 out-of-scope host, but the host can see the scanner's address connect and, for
 https, can read its own name in the SNI. A page that embeds a third-party
 `<iframe src="https://…">` (embeds, ads, captchas) triggers this for each one. A
-person browsing the same page makes the same connections. If a program forbids
-*any* contact with out-of-scope infrastructure, the browser path does not meet
-that on its own: enforce it with egress filtering outside Indago, or a
-scope-enforcing proxy (not implemented). The test records the gap with
+person browsing the same page makes the same connections. Indago's production
+browser uses a [scope-enforcing proxy](scope-proxy.md) to deny unauthorized
+HTTP(S) authorities before DNS or TCP. The route-only test records the gap with
 `KNOWN GAP` log lines and asserts only what is true (zero requests everywhere,
 zero connections for non-navigations); if a future Chromium or a fix closes it,
 the log lines change and this section must be updated.

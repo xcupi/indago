@@ -29,6 +29,19 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build and verify the embedded frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix web --no-audit --no-fund
+          make ui
+          if [ -n "$(git status --porcelain --untracked-files=all -- internal/web/assets/next)" ]; then
+            git status --short --untracked-files=all -- internal/web/assets/next
+            echo "::error::Embedded frontend assets are stale. Run make ui and include the generated changes."
+            exit 1
+          fi
       - name: Verify dependencies and required runtime
         shell: bash
         run: |

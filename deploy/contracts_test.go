@@ -24,6 +24,11 @@ func requireText(t *testing.T, path string, required ...string) string {
 
 func TestCIContract(t *testing.T) {
 	s := requireText(t, ".github/workflows/ci.yml", "push:", "pull_request:", "workflow_dispatch:", "contents: read", "cancel-in-progress: true", "timeout-minutes:", "go-version-file: go.mod", "node-version: '24'", "PLAYWRIGHT_NODEJS_PATH", "--version", "go mod verify", "go clean -testcache", "make check", "make build", "python3 scripts/ci-browser-check.py")
+	requireText(t, ".github/workflows/ci.yml",
+		"cache-dependency-path: web/package-lock.json",
+		"npm ci --prefix web",
+		"make ui",
+		"git status --porcelain --untracked-files=all -- internal/web/assets/next")
 	pins := regexp.MustCompile(`uses: ([^\s@]+)@([^\s]+)`).FindAllStringSubmatch(s, -1)
 	if len(pins) < 3 {
 		t.Fatal("expected checkout, Go and Node setup actions")
@@ -38,10 +43,14 @@ func TestCIContract(t *testing.T) {
 
 func TestDockerContract(t *testing.T) {
 	s := requireText(t, "Dockerfile", "AS build", "go mod verify", "make build", "PLAYWRIGHT_DRIVER_PATH=/opt/playwright", "--version", "chromium", "ca-certificates", "USER 10001:10001", "VOLUME [\"/var/lib/indago\"]", "HEALTHCHECK", "STOPSIGNAL SIGTERM", "-allow-remote", "-tls-cert", "-tls-key", "-browser-no-sandbox")
+	requireText(t, "Dockerfile",
+		"AS ui-build", "COPY web/package.json web/package-lock.json",
+		"RUN npm ci", "RUN npm run build",
+		"COPY --from=ui-build /src/internal/web/assets/next/ ./internal/web/assets/next/")
 	if strings.Contains(s, "allow-plaintext-remote") {
 		t.Error("image must not downgrade remote TLS")
 	}
-	requireText(t, ".dockerignore", "!third_party/", "!third_party/playwright-go/", "!third_party/playwright-go/**", "data/", ".git", ".env", "sessions/", "*.key", "bin/", "*.log")
+	requireText(t, ".dockerignore", "internal/web/assets/next/", "!web/src/**", "!web/package-lock.json", "!third_party/", "!third_party/playwright-go/", "!third_party/playwright-go/**", "data/", ".git", ".env", "sessions/", "*.key", "bin/", "*.log")
 	requireText(t, "deploy/docker/healthcheck.sh", "--cacert", "INDAGO_HEALTH_CA", "https://127.0.0.1:8750/readyz")
 	runtime := strings.SplitN(s, "FROM runtime-base AS runtime", 2)
 	if len(runtime) != 2 || !strings.Contains(runtime[1], "COPY --from=build /src/third_party/playwright-go/LICENSE /usr/share/licenses/indago/playwright-go.LICENSE") {

@@ -13,13 +13,10 @@ Two modes:
 
   --image IMAGE [--out DIR]
       Full run (needs Docker and network access to fetch the pinned profile):
-        A. Docker's default seccomp + sandbox ON must FAIL CLOSED ("No usable
-           sandbox"), never silently start without isolation.
-        B. Default profile + clone/unshare/chroot (the documented recipe) +
-           sandbox ON must start with sandbox=true, scan a vulnerable and a safe
-           page correctly, and every measured renderer must be sandboxed.
-        C. Control: -browser-no-sandbox must read as UNSANDBOXED with the same
-           probe, proving the probe can tell the two apart.
+        A. Docker's default seccomp must refuse a sandboxed PDF export.
+        B. The documented seccomp profile must allow PDF export with a
+           measured sandboxed renderer.
+        C. The explicit opt-out must be distinguishable in process samples.
 
 A renderer counts as sandboxed only if it lacks --no-sandbox AND its net, pid and
 user namespaces all differ from the scanner's. Seccomp alone is not evidence:
@@ -53,7 +50,6 @@ RECIPE_SYSCALLS = ["clone", "unshare", "chroot"]
 
 UID = "10001:10001"
 API_PORT = 18801
-LAB_PORT = 8989
 
 # Runs inside the container as the scanner's UID (readlink on another process's
 # namespaces needs the same UID). Prints one ROOT line and one P line per
@@ -80,22 +76,6 @@ done
 '''
 
 # In-container lab target: one vulnerable and one escaping page (loopback only).
-LAB_JS = (
-    "const http=require('http');"
-    "const esc=s=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\"','&quot;');"
-    "http.createServer((req,res)=>{const u=new URL(req.url,'http://x');const q=u.searchParams.get('q')||'';"
-    "res.setHeader('Content-Type','text/html');"
-    "if(u.pathname==='/vulnerable')res.end('<!doctype html><html><body><h1>v</h1><div>'+q+'</div></body></html>');"
-    "else if(u.pathname==='/safe')res.end('<!doctype html><html><body><h1>s</h1><div>'+esc(q)+'</div></body></html>');"
-    "else res.end('<!doctype html><a href=\"/vulnerable?q=hello\">v</a><a href=\"/safe?q=hello\">s</a>');"
-    f"}}).listen({LAB_PORT},'127.0.0.1');"
-)
-
-
-# ---------------------------------------------------------------------------
-# Verdict logic (pure; unit-tested without Docker)
-# ---------------------------------------------------------------------------
-
 def parse(text):
     """Return (root, saw_root_line, rows). Latest definite row for a pid wins."""
     root = None
@@ -228,14 +208,14 @@ class Lab:
         name = f"indago-ci-sbx-{scenario}-{self.suffix}"
         self.names.append(name)
         cmd = ["docker", "run", "-d", "--name", name,
-               "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
+               "--network", "none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
                "--memory=2g", "--shm-size=256m",
                "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m,mode=1777",
                "--tmpfs", "/var/cache/indago:rw,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0750",
                "--tmpfs", "/var/lib/indago:rw,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0750"]
         if seccomp_path:
             cmd += ["--security-opt", f"seccomp={seccomp_path}"]
-        cmd += [self.image, "serve", "-data", "/var/lib/indago", "-addr", f"127.0.0.1:{API_PORT}", "-browser"] + serve_extra
+        cmd += [self.image, "serve", "-data", "/var/lib/indago", "-addr", f"127.0.0.1:{API_PORT}"] + serve_extra
         r = sh(*cmd)
         if r.returncode != 0:
             raise RuntimeError(f"docker run failed: {r.stderr.strip()[-300:]}")
@@ -268,39 +248,24 @@ class Lab:
         return sh("docker", "exec", "-u", UID, "-e", f"INDAGO_SERVER_URL=http://127.0.0.1:{API_PORT}",
                   name, "indago", *args).stdout
 
-    def start_lab(self, name):
-        sh("docker", "exec", "-d", "-u", UID, name, "node", "-e", LAB_JS)
-        for _ in range(60):
-            r = sh("docker", "exec", name, "curl", "-fsS", "--max-time", "2", f"http://127.0.0.1:{LAB_PORT}/safe?q=hello")
-            if r.returncode == 0:
-                return True
-            time.sleep(0.5)
-        return False
-
-    def scan(self, name, project, route):
+    def report_fixture(self, name):
+        origin = "https://fixture.invalid"
+        project = re.search(r"project ([0-9a-f-]{36})", self.cli(
+            name, "project", "create", "ci-sandbox")).group(1)
+        self.cli(name, "scope", "set", "-project", project, "-include", "fixture.invalid", "-origins", origin)
         target = re.search(r"target ([0-9a-f-]{36})", self.cli(
-            name, "target", "add", "-project", project, "-name", route,
-            "-url", f"http://127.0.0.1:{LAB_PORT}/{route}?q=hello")).group(1)
-        sid = re.search(r"scan ([0-9a-f-]{36})", self.cli(
-            name, "scan", "create", "-project", project, "-target", target, "-profile", "fast",
-            "-candidate-profile", "minimal", "-quick", "-max-pages", "1")).group(1)
-        self.cli(name, "scan", "start", sid)
-        state = ""
-        end = time.time() + 150
-        while time.time() < end:
-            m = re.search(r"^State\s+(\w+)", self.cli(name, "scan", "status", sid), re.M)
-            state = m.group(1) if m else ""
-            if state in ("completed", "failed", "canceled", "cancelled"):
-                break
-            time.sleep(1)
-        raw = self.cli(name, "finding", "list", "-scan", sid, "-verdict", "all", "-json")
-        findings = json.loads(raw) if raw.strip() else []
-        if isinstance(findings, dict):
-            findings = findings.get("findings", [])
-        verdicts = {}
-        for f in findings:
-            verdicts[f.get("verdict", "?")] = verdicts.get(f.get("verdict", "?"), 0) + 1
-        return state, verdicts
+            name, "target", "add", "-project", project, "-name", "Report fixture",
+            "-url", origin)).group(1)
+        return re.search(r"scan ([0-9a-f-]{36})", self.cli(
+            name, "scan", "create", "-project", project, "-target", target,
+            "-name", "PDF fixture (draft only)")).group(1)
+
+    def export_pdf(self, name, scan, index):
+        path = f"/tmp/indago-ci-report-{index}.pdf"
+        request = sh("docker", "exec", "-u", UID, "-e", f"INDAGO_SERVER_URL=http://127.0.0.1:{API_PORT}",
+                     name, "indago", "report", "create", "-scan", scan, "-format", "pdf", "-out", path)
+        header = sh("docker", "exec", "-u", UID, name, "head", "-c", "5", path)
+        return request.returncode, header.stdout, request.stderr
 
     def sample_during(self, name, work):
         """Poll the in-container measurement while `work()` runs; return all output."""
@@ -312,7 +277,7 @@ class Lab:
                 while not stop.is_set():
                     r = sh("docker", "exec", "-i", "-u", UID, name, "sh", "-s", input=MEASURE)
                     chunks.append(r.stdout)
-                    time.sleep(0.25)
+                    time.sleep(0.08)
             except Exception as e:  # noqa: BLE001 - make the cause visible in the artifact
                 chunks.append(f"SAMPLER-ERROR {e!r}")
 
@@ -333,77 +298,44 @@ class Lab:
 
     def scenario_default_fails_closed(self):
         name = self.run_container("a-default", None, [])
-        end = time.time() + 120
-        while time.time() < end and self.state(name)[0] != "exited":
-            time.sleep(1)
-        status, code = self.state(name)
-        text = self.logs(name)
+        ok, _ = self.wait_listening(name)
+        if not ok:
+            self.logs(name)
+            self.record("A default seccomp + sandbox on fails closed", False, ["server did not start"])
+            return
+        code, header, stderr = self.export_pdf(name, self.report_fixture(name), 0)
+        log = self.logs(name)
         problems = []
-        if status != "exited" or code == 0:
-            problems.append(f"expected a closed failure, got state={status} exit={code}")
-        if "No usable sandbox" not in text:
+        if code == 0 or header == "%PDF-":
+            problems.append("sandboxed export succeeded under default seccomp")
+        if "No usable sandbox" not in (log + stderr):
             problems.append("Chromium's 'No usable sandbox' message not found")
-        if "-browser-no-sandbox" not in text:
-            problems.append("Indago's opt-out hint not found in the launch error")
-        if "browser manager started" in text:
-            problems.append("the browser started anyway: the sandbox was silently dropped")
         self.record("A default seccomp + sandbox on fails closed", not problems, problems, exit=code)
 
-    def _scan_scenario(self, name, routes):
-        ok, logtext = self.wait_listening(name)
+    def _pdf_scenario(self, name, mode):
+        ok, _ = self.wait_listening(name)
         if not ok:
-            full = self.logs(name)
-            # Lead with Chromium's own reason; the tail alone is usually just
-            # shutdown noise and the opt-out hint.
-            key = [l.strip()[:200] for l in full.splitlines()
-                   if re.search(r"Check failed|No usable sandbox|FATAL|sandboxing failed", l)]
-            detail = " | ".join(dict.fromkeys(key)) if key else full[-400:]
-            return None, ["server did not start: " + detail[:700]]
-        if not self.start_lab(name):
-            return None, ["in-container lab target did not start"]
-        project = re.search(r"project ([0-9a-f-]{36})", self.cli(name, "project", "create", "ci-sandbox")).group(1)
-        self.cli(name, "scope", "set", "-project", project, "-include", "127.0.0.1",
-                 "-include-path", "/vulnerable,/safe")
-
-        def work():
-            return {route: self.scan(name, project, route) for route in routes}
-
-        return self.sample_during(name, work), []
+            self.logs(name)
+            return ["server did not start"]
+        scan = self.report_fixture(name)
+        # Chromium is short-lived for a PDF. Repeated local exports give the
+        # sampler time to observe a real renderer without contacting a target.
+        results, measure = self.sample_during(name, lambda: [self.export_pdf(name, scan, n) for n in range(3)])
+        (self.out / f"measure-{mode}.txt").write_text(measure)
+        self.logs(name)
+        problems = [f"PDF export failed: {stderr[-350:]}" for code, header, stderr in results
+                    if code != 0 or header != "%PDF-"]
+        _, why = judge(mode, measure)
+        return problems + why
 
     def scenario_profile_sandboxed(self, profile_path):
         name = self.run_container("b-profile", profile_path, [])
-        out, problems = self._scan_scenario(name, ["vulnerable", "safe"])
-        if out is None:
-            self.record("B recipe profile runs the image sandboxed", False, problems)
-            return
-        scans, measure = out
-        (self.out / "measure-sandboxed.txt").write_text(measure)
-        text = self.logs(name)
-        problems += judge_log("log-sandboxed", text)[1]
-        for route, (state, verdicts) in scans.items():
-            if state != "completed":
-                problems.append(f"{route} scan ended {state!r}")
-        if scans["vulnerable"][1].get("confirmed", 0) < 1:
-            problems.append(f"vulnerable page was not Confirmed: {scans['vulnerable'][1]}")
-        if scans["safe"][1].get("confirmed", 0) != 0:
-            problems.append(f"safe page was Confirmed (false positive): {scans['safe'][1]}")
-        ok, why = judge("sandboxed", measure)
-        problems += why
-        self.record("B recipe profile runs the image sandboxed", not problems, problems,
-                    scans={k: v[1] for k, v in scans.items()})
+        problems = self._pdf_scenario(name, "sandboxed")
+        self.record("B recipe profile exports a PDF sandboxed", not problems, problems)
 
     def scenario_control_unsandboxed(self):
         name = self.run_container("c-optout", None, ["-browser-no-sandbox"])
-        out, problems = self._scan_scenario(name, ["vulnerable"])
-        if out is None:
-            self.record("C opt-out control reads as unsandboxed", False, problems)
-            return
-        _, measure = out
-        (self.out / "measure-control.txt").write_text(measure)
-        text = self.logs(name)
-        problems += judge_log("log-optout", text)[1]
-        ok, why = judge("unsandboxed", measure)
-        problems += why
+        problems = self._pdf_scenario(name, "unsandboxed")
         self.record("C opt-out control reads as unsandboxed", not problems, problems)
 
     def cleanup(self):

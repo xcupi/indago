@@ -1,10 +1,10 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, KeyRound, Layers, RefreshCw, Save, Server, Trash2, Zap } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, Input } from "@/components/ui/input";
-import { Alert, Code, Loading } from "@/components/ui/misc";
+import { Alert, Code, LoadError, Loading } from "@/components/ui/misc";
 import { Switch } from "@/components/ui/controls";
 import { api, getToken, refreshAll, setToken, useApi } from "@/lib/api";
 import { formatTime } from "@/lib/utils";
@@ -16,17 +16,35 @@ interface LLMStatus {
   provider?: string;
   model?: string;
   base_url?: string;
+  providers?: { id: string; label: string; default_model?: string; default_base_url?: string }[];
+}
+
+interface ProviderAvailability {
+  provider: string;
+  label: string;
+  configured: boolean;
+  report_only?: boolean;
+  model?: string;
+  base_url?: string;
   key_hint?: string;
-  key_set?: boolean;
-  providers?: Array<Record<string, unknown>>;
+  source?: string;
+}
+
+const defaultForm = { provider: "", model: "", base_url: "", api_key: "", enabled: true, max_attempts: 10 };
+
+interface LLMTestResult {
+  ok: boolean;
+  latency_ms?: number;
+  error?: string;
+}
+
+function testResultMessage(result: LLMTestResult) {
+  if (!result.ok) return result.error || "Connection test failed.";
+  return `Model test succeeded (${result.latency_ms ?? 0} ms).`;
 }
 
 function sourceLabel(source?: string): string {
   switch (source) {
-    case "hermes":
-      return "Hermes session (borrowed)";
-    case "indago":
-      return "Indago session";
     case "environment":
       return "environment";
     case "settings":
@@ -80,36 +98,30 @@ function CollapsibleSection({
 export default function Settings() {
   const status = useApi<LLMStatus>("/api/llm/config");
   const availability = useApi<{
-    providers: { provider: string; label: string; configured: boolean; model?: string; source?: string }[];
+    providers: ProviderAvailability[];
     default?: string;
   }>("/api/llm/providers");
   const caps = useApi<Record<string, unknown>>("/api/capabilities");
   const version = useApi<{ version?: string }>("/api/version");
 
-  const [form, setForm] = useState({ provider: "", model: "", base_url: "", api_key: "", enabled: true, max_attempts: 10 });
+  const [form, setForm] = useState(defaultForm);
   const [token, setLocalToken] = useState(getToken());
   const [msg, setMsg] = useState("");
   const [probe, setProbe] = useState<Record<string, string>>({});
-  const cg = useApi<{ logged_in: boolean; source: string; account?: string; plan?: string; expires_at?: string }>(
-    "/api/llm/chatgpt/session",
-  );
-  const claude = useApi<{ connected: boolean; expires_at?: string }>("/api/llm/claude/session");
-  const [cgLogin, setCgLogin] = useState<{ device_auth_id: string; user_code: string; url: string; interval_seconds: number } | null>(null);
-  const [claudeUrl, setClaudeUrl] = useState("");
-  const [claudeState, setClaudeState] = useState("");
-  const [claudeCode, setClaudeCode] = useState("");
-  const [claudeMsg, setClaudeMsg] = useState("");
-  const [cgMsg, setCgMsg] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
   const [models, setModels] = useState<string[]>([]);
+  const [manualModel, setManualModel] = useState(false);
   const [modelBusy, setModelBusy] = useState(false);
   const [modelNote, setModelNote] = useState("");
+  const modelRequest = useRef(0);
+  const providerInfo = availability.data?.providers.find((p) => p.provider === form.provider);
 
   // POST /api/llm/models asks the selected provider for its model list. The
   // endpoint returns {models, error} with 200 even when discovery fails, so
   // the note carries the provider's message instead of throwing.
   async function discoverModels(providerOverride?: string) {
+    const request = ++modelRequest.current;
     setModelBusy(true);
     setModelNote("");
     setErr("");
@@ -118,6 +130,7 @@ export default function Settings() {
         method: "POST",
         body: { provider: providerOverride ?? form.provider },
       });
+      if (request !== modelRequest.current) return;
       setModels(res.models ?? []);
       if (!res.models?.length) {
         setModelNote(res.error ? `No models: ${res.error}` : "The provider returned no models.");
@@ -125,62 +138,47 @@ export default function Settings() {
         setModelNote(`${res.models.length} models discovered — pick one.`);
       }
     } catch (e) {
-      setErr((e as Error).message);
+      if (request === modelRequest.current) setErr((e as Error).message);
     } finally {
-      setModelBusy(false);
+      if (request === modelRequest.current) setModelBusy(false);
     }
   }
 
   // Auto-discover models whenever the selected provider already has a usable
-  // credential (OAuth session, saved Settings key, or env var).
-  const selectedProviderReady =
-    form.provider === "chatgpt" ||
-    form.provider === "claude" ||
-    form.provider === "anthropic" ||
-    Boolean((availability.data?.providers ?? []).find((p) => p.provider === form.provider)?.configured);
+  // credential (a saved key or environment variable).
+  const selectedProviderReady = Boolean(providerInfo?.configured);
+  const usesEnvironmentKey = providerInfo?.source === "environment";
+  const hasStoredKey = providerInfo?.source === "settings";
+  const storedKeyHint = hasStoredKey ? providerInfo.key_hint : undefined;
+  const providerStatus = availability.data
+    ? (selectedProviderReady ? "configured" : "not configured")
+    : (availability.loading ? "loading credentials…" : "credentials unavailable");
 
   useEffect(() => {
     if (form.provider && selectedProviderReady) {
       void discoverModels(form.provider);
+    } else {
+      setModels([]);
+      setModelBusy(false);
+      setModelNote("");
     }
+    return () => { modelRequest.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.provider, selectedProviderReady]);
 
   useEffect(() => {
     if (!status.data) return;
+    const saved = status.data;
+    const provider = saved.provider === "custom" ? "" : saved.provider ?? "";
     setForm((f) => ({
-      ...f,
-      provider: status.data?.provider ?? f.provider,
-      model: status.data?.model ?? f.model,
-      base_url: status.data?.base_url ?? f.base_url,
-      enabled: status.data?.enabled ?? f.enabled,
-      max_attempts: status.data?.max_attempts ?? f.max_attempts,
+      provider,
+      model: provider ? saved.model ?? "" : "",
+      base_url: provider ? saved.base_url ?? "" : "",
+      api_key: f.provider === provider ? f.api_key : "",
+      enabled: saved.enabled ?? defaultForm.enabled,
+      max_attempts: saved.max_attempts ?? defaultForm.max_attempts,
     }));
-  }, [status.data?.provider, status.data?.model, status.data?.base_url]);
-
-  // Poll the device-code login until OpenAI confirms it, then refresh the
-  // provider list so "chatgpt" flips to configured without a reload.
-  useEffect(() => {
-    if (!cgLogin) return;
-    const ms = Math.max(3, cgLogin.interval_seconds || 5) * 1000;
-    const timer = setInterval(async () => {
-      try {
-        const res = await api<{ state: string; account?: string }>("/api/llm/chatgpt/login/poll", {
-          method: "POST",
-          body: { device_auth_id: cgLogin.device_auth_id },
-        });
-        if (res.state === "done") {
-          setCgLogin(null);
-          setCgMsg(`Logged in${res.account ? ` as ${res.account}` : ""}.`);
-          refreshAll();
-        }
-      } catch (e) {
-        setCgLogin(null);
-        setCgMsg((e as Error).message);
-      }
-    }, ms);
-    return () => clearInterval(timer);
-  }, [cgLogin]);
+  }, [status.data?.provider, status.data?.model, status.data?.base_url, status.data?.enabled, status.data?.max_attempts]);
 
   async function save() {
     setBusy("save");
@@ -193,12 +191,12 @@ export default function Settings() {
           provider: form.provider,
           model: form.model,
           base_url: form.base_url,
-          api_key: form.api_key, // empty keeps the stored key
+          api_key: form.api_key,
           enabled: form.enabled,
           max_attempts: Number(form.max_attempts) || 0,
         },
       });
-      setForm({ ...form, api_key: "" });
+      setForm((current) => ({ ...current, api_key: "" }));
       setMsg("LLM configuration saved.");
       refreshAll();
     } catch (e) {
@@ -213,8 +211,9 @@ export default function Settings() {
     setErr("");
     setMsg("");
     try {
-      const res = await api<Record<string, unknown>>("/api/llm/test", { method: "POST", body: {} });
-      setMsg("LLM test OK: " + JSON.stringify(res));
+      const res = await api<LLMTestResult>(`/api/llm/test?provider=${encodeURIComponent(form.provider)}`, { method: "POST" });
+      if (res.ok) setMsg(testResultMessage(res));
+      else setErr(testResultMessage(res));
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -223,12 +222,16 @@ export default function Settings() {
   }
 
   async function remove() {
+    if (!window.confirm("Clear all stored provider credentials and AI settings?")) return;
     setBusy("delete");
     setErr("");
     setMsg("");
     try {
       await api("/api/llm/config", { method: "DELETE" });
-      setMsg("LLM configuration cleared.");
+      setForm(defaultForm);
+      setProbe({});
+      setManualModel(false);
+      setMsg("Saved AI configuration cleared.");
       refreshAll();
     } catch (e) {
       setErr((e as Error).message);
@@ -237,9 +240,10 @@ export default function Settings() {
     }
   }
 
-  const providers = (status.data?.providers ?? []).map((p) => String((p as { id?: string }).id ?? p));
-  const providerList = availability.data?.providers ?? [];
+  const providers = (status.data?.providers ?? []).filter((p) => p.id !== "custom");
+  const providerList = (availability.data?.providers ?? []).filter((p) => p.provider !== "custom");
   const readyProviders = providerList.filter((p) => p.configured).length;
+  const savedProvider = status.data?.provider === "custom" ? undefined : status.data?.provider;
 
   return (
     <div>
@@ -247,231 +251,74 @@ export default function Settings() {
 
       <div className="space-y-6">
         <CollapsibleSection
-          title="1. Authentication (Sessions & Credentials)"
-          description="Connect a subscription session (Claude / ChatGPT) or check which providers already have credentials."
+          title="1. Provider Credentials"
+          description="Check which AI providers have an API key configured."
           icon={<KeyRound className="size-4" />}
-          badge={`${readyProviders} of ${providerList.length || 0} ready`}
+          badge={availability.data ? `${readyProviders} of ${providerList.length} ready` : undefined}
           defaultOpen
         >
-        <div className="space-y-4">
-        <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <KeyRound className="size-4 text-emerald-700 dark:text-emerald-400" /> Claude OAuth session
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-[11px]">
-            {claude.data?.connected ? (
-              <p className="text-foreground">
-                connected{claude.data.expires_at ? ` · expires ${formatTime(claude.data.expires_at)}` : ""} · token refreshed automatically
-              </p>
-            ) : (
-              <p className="text-muted-foreground">
-                No session yet. Connect your Claude account without an API key (PKCE, same flow Claude Code uses).
-              </p>
-            )}
-            {claudeUrl ? (
-              <div className="space-y-1 rounded-md border border-border bg-muted/30 p-2">
-                <p>
-                  Open{" "}
-                  <a className="break-all text-emerald-700 underline dark:text-emerald-400" href={claudeUrl} target="_blank" rel="noreferrer">
-                    the authorization page
-                  </a>{" "}
-                  and approve. Copy the code it shows, paste it below.
-                </p>
-                <div className="flex gap-2">
-                  <Input value={claudeCode} onChange={(e) => setClaudeCode(e.target.value)} placeholder="code (or code#state)" />
-                  <Button
-                    size="sm"
-                    onClick={async () => {
-                      setClaudeMsg("");
-                      try {
-                        await api("/api/llm/claude/login/finish", {
-                          method: "POST",
-                          body: { code: claudeCode, state: claudeState },
-                        });
-                        setClaudeMsg("Claude connected.");
-                        setClaudeCode("");
-                        setClaudeUrl("");
-                        refreshAll();
-                      } catch (e) {
-                        setClaudeMsg((e as Error).message);
-                      }
-                    }}
-                  >
-                    Finish
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-            {claudeMsg ? <p className="text-muted-foreground">{claudeMsg}</p> : null}
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                onClick={async () => {
-                  setClaudeMsg("");
-                  try {
-                    const d = await api<{ url: string; state: string }>("/api/llm/claude/login/start", { method: "POST", body: {} });
-                    setClaudeUrl(d.url);
-                    setClaudeState(d.state);
-                  } catch (e) {
-                    setClaudeMsg((e as Error).message);
-                  }
-                }}
-              >
-                Connect Claude
-              </Button>
-              {claude.data?.connected ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={async () => {
-                    try {
-                      await api("/api/llm/claude/session", { method: "DELETE" });
-                      setClaudeMsg("Disconnected.");
-                      refreshAll();
-                    } catch (e) {
-                      setClaudeMsg((e as Error).message);
-                    }
-                  }}
-                >
-                  Disconnect
-                </Button>
-              ) : null}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Zap className="size-4 text-emerald-700 dark:text-emerald-400" /> ChatGPT OAuth session
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-[11px]">
-            {cg.data?.logged_in ? (
-              <p className="text-foreground">
-                signed in{cg.data.account ? ` as ${cg.data.account}` : ""}
-                {cg.data.plan ? ` · plan ${cg.data.plan}` : ""} · {sourceLabel(cg.data.source)}
-                {cg.data.expires_at ? ` · expires ${formatTime(cg.data.expires_at)}` : ""}
-              </p>
-            ) : (
-              <p className="text-muted-foreground">No session yet. Log in with a device code — no API key.</p>
-            )}
-            {cg.data?.logged_in && cg.data.source === "hermes" ? (
-              <p className="text-amber-700 dark:text-amber-400">
-                Indago has no ChatGPT session of its own, so it is borrowing the Hermes credential (read-only).
-                Log in here to connect directly to ChatGPT and let Indago own the session.
-              </p>
-            ) : null}
-            {cgLogin ? (
-              <div className="space-y-1 rounded-md border border-border bg-muted/30 p-2">
-                <p>
-                  Open{" "}
-                  <a className="text-emerald-700 underline dark:text-emerald-400" href={cgLogin.url} target="_blank" rel="noreferrer">
-                    {cgLogin.url}
-                  </a>{" "}
-                  and enter:
-                </p>
-                <p className="mono text-base tracking-widest text-foreground">{cgLogin.user_code}</p>
-                <p className="text-muted-foreground">Waiting for sign-in…</p>
-              </div>
-            ) : null}
-            {cgMsg ? <p className="text-muted-foreground">{cgMsg}</p> : null}
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                onClick={async () => {
-                  setCgMsg("");
-                  try {
-                    const d = await api<{ device_auth_id: string; user_code: string; url: string; interval_seconds: number }>(
-                      "/api/llm/chatgpt/login",
-                      { method: "POST", body: {} },
-                    );
-                    setCgLogin(d);
-                  } catch (e) {
-                    setCgMsg((e as Error).message);
-                  }
-                }}
-              >
-                Log in with ChatGPT
-              </Button>
-              {cg.data?.source === "indago" ? (
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={async () => {
-                    await api("/api/llm/chatgpt/session", { method: "DELETE" });
-                    setCgMsg("Indago session cleared.");
-                    refreshAll();
-                  }}
-                >
-                  Log out
-                </Button>
-              ) : null}
-            </div>
-          </CardContent>
-        </Card>
-        </div>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Layers className="size-4 text-sky-700 dark:text-sky-400" /> Usable providers ({readyProviders}/{providerList.length})
+              <Layers className="size-4 text-sky-700 dark:text-sky-400" /> Usable providers{availability.data ? ` (${readyProviders}/${providerList.length})` : ""}
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="space-y-1 rounded-md border border-border bg-muted/30 p-2">
-              {(availability.data?.providers ?? []).map((p) => (
-                <div key={p.provider} className="flex items-center justify-between gap-2 text-[11px]">
-                  <span className="text-foreground">{p.label}</span>
-                  <span className="flex items-center gap-2">
-                    <span className={p.configured ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>
-                      {p.configured ? `${p.model || "model: auto"} · ${sourceLabel(p.source)}` : "no credential"}
+            {availability.error ? (
+              <LoadError resource="AI provider credentials" error={availability.error} />
+            ) : availability.loading && !availability.data ? (
+              <Loading />
+            ) : (
+              <div className="space-y-1 rounded-md border border-border bg-muted/30 p-2">
+                {providerList.map((p) => (
+                  <div key={p.provider} className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className="text-foreground">{p.label}</span>
+                    <span className="flex items-center gap-2">
+                      <span className={p.configured ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>
+                        {p.configured ? `${p.model || "model: auto"} · ${sourceLabel(p.source)}` : "no credential"}
+                      </span>
+                      {p.configured ? (
+                        <button
+                          className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+                          onClick={async () => {
+                            try {
+                              const res = await api<LLMTestResult>(
+                                `/api/llm/test?provider=${p.provider}`,
+                                { method: "POST", body: {} },
+                              );
+                              setProbe((prev) => ({
+                                ...prev,
+                                [p.provider]: testResultMessage(res),
+                              }));
+                            } catch (e) {
+                              setProbe((prev) => ({ ...prev, [p.provider]: (e as Error).message }));
+                            }
+                          }}
+                        >
+                          test
+                        </button>
+                      ) : null}
+                      {probe[p.provider] ? (
+                        <span className="text-[10px] text-muted-foreground">{probe[p.provider]}</span>
+                      ) : null}
                     </span>
-                    {p.configured ? (
-                      <button
-                        className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
-                        onClick={async () => {
-                          try {
-                            const res = await api<{ ok: boolean; latency_ms?: number; error?: string }>(
-                              `/api/llm/test?provider=${p.provider}`,
-                              { method: "POST", body: {} },
-                            );
-                            setProbe((prev) => ({
-                              ...prev,
-                              [p.provider]: res.ok ? `ok ${res.latency_ms ?? 0}ms` : res.error || "failed",
-                            }));
-                          } catch (e) {
-                            setProbe((prev) => ({ ...prev, [p.provider]: (e as Error).message }));
-                          }
-                        }}
-                      >
-                        test
-                      </button>
-                    ) : null}
-                    {probe[p.provider] ? (
-                      <span className="text-[10px] text-muted-foreground">{probe[p.provider]}</span>
-                    ) : null}
-                  </span>
-                </div>
-              ))}
-              <p className="pt-1 text-[10px] text-muted-foreground">
-                Add a second API provider without moving the stored key: start the server with
-                INDAGO_LLM_KEY_&lt;PROVIDER&gt; (e.g. INDAGO_LLM_KEY_OPENAI). Scans and reports can then pick either.
-              </p>
-            </div>
+                  </div>
+                ))}
+                <p className="pt-1 text-[10px] text-muted-foreground">
+                  Credentials and models are saved per provider. A provider can also use a server
+                  key set through INDAGO_LLM_KEY_&lt;PROVIDER&gt;.
+                </p>
+              </div>
+            )}
           </CardContent>
         </Card>
-        </div>
         </CollapsibleSection>
 
         <CollapsibleSection
           title="2. Default Gateway & Model Selection"
-          description="Pick your active provider, configure API credentials if needed, then choose the default model."
+          description="Choose a provider and its default model."
           icon={<Zap className="size-4" />}
-          badge={status.data?.provider ? `${status.data.provider}${status.data.model ? ` · ${status.data.model}` : ""}` : "not set"}
+          badge={status.data ? (savedProvider ? `${savedProvider}${status.data.model ? ` · ${status.data.model}` : ""}` : "not set") : undefined}
           defaultOpen
         >
         <Card>
@@ -481,49 +328,56 @@ export default function Settings() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            {status.loading && !status.data ? (
+            {status.error ? (
+              <LoadError resource="AI gateway settings" error={status.error} />
+            ) : status.loading && !status.data ? (
               <Loading />
             ) : (
               <>
                 <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
                   <span>status:</span>
-                  <span className={status.data?.configured ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>
-                    {status.data?.configured ? "configured" : "not configured"}
+                  <span className={providerInfo?.configured ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>
+                    {providerStatus}
                   </span>
-                  {status.data?.key_set ? (
-                    <span className="mono">key {status.data?.key_hint}</span>
-                  ) : null}
+                  {storedKeyHint ? <span className="mono">key {storedKeyHint}</span> : null}
+                  {usesEnvironmentKey ? <span>key from environment</span> : null}
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <Field label="Provider" className="sm:col-span-2">
                     <select
                       className="h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
+                      aria-label="Provider"
                       value={form.provider}
+                      disabled={!availability.data || Boolean(busy)}
                       onChange={(e) => {
                         const provider = e.target.value;
-                        const def = (status.data?.providers ?? []).find((p) => String(p.id) === provider) as
-                          | { default_base_url?: string }
-                          | undefined;
+                        const def = status.data?.providers?.find((p) => p.id === provider);
+                        const selected = providerList.find((p) => p.provider === provider);
                         setModels([]);
+                        setManualModel(false);
                         setModelNote("");
+                        setModelBusy(false);
+                        modelRequest.current++;
                         setForm({
                           ...form,
                           provider,
-                          model: provider === form.provider ? form.model : "",
-                          base_url: def?.default_base_url ?? "",
+                          model: selected?.model ?? def?.default_model ?? "",
+                          base_url: selected?.base_url ?? def?.default_base_url ?? "",
+                          api_key: "",
                         });
                       }}
                     >
                       <option value="">Select…</option>
                       {providers.map((p) => (
-                        <option key={p}>{p}</option>
+                        <option key={p.id} value={p.id}>{p.label}</option>
                       ))}
                     </select>
                   </Field>
-                  {form.provider !== "chatgpt" ? (
+                  {form.provider ? (
                     <>
                       <Field label="Base URL" hint="Optional for providers with a default endpoint." className="sm:col-span-2">
                         <Input
+                          aria-label="Base URL"
                           value={form.base_url}
                           onChange={(e) => setForm({ ...form, base_url: e.target.value })}
                           placeholder="https://api.example.com/v1"
@@ -531,57 +385,61 @@ export default function Settings() {
                       </Field>
                       <Field
                         label="API key"
-                        hint={
-                          form.provider === "claude" && claude.data?.connected
-                            ? "Optional — Claude OAuth session is connected above. Only paste a key to override OAuth."
-                            : "Empty keeps the stored key. Never echoed back."
-                        }
+                        hint={usesEnvironmentKey ? "Leave blank to use the server environment key." : "Leave blank to keep this provider’s stored key."}
                         className="sm:col-span-2"
                       >
                         <Input
+                          aria-label="API key"
                           type="password"
                           value={form.api_key}
                           onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-                          placeholder={status.data?.key_set ? "•••• stored" : "paste a key"}
+                          placeholder={hasStoredKey ? "•••• stored" : usesEnvironmentKey ? "server environment" : "paste a key"}
                         />
                       </Field>
                     </>
-                  ) : (
-                    <p className="text-[11px] text-emerald-700 dark:text-emerald-400 sm:col-span-2">
-                      Uses the ChatGPT OAuth session connected above — no API key needed.
-                    </p>
-                  )}
+                  ) : null}
                   <Field
                     label="Default Model"
-                    hint="Discovered from your connected session or saved API credential; empty lets the provider choose."
+                    hint="Choose a text model from the API catalog or enter a model ID. Save it before testing."
                     className="sm:col-span-2"
                   >
                     <div className="flex gap-2">
-                      <Input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+                      {models.length > 0 && !manualModel ? (
+                        <select
+                          aria-label="Default model"
+                          className="h-9 min-w-0 flex-1 rounded-md border border-border bg-card px-2 text-sm"
+                          value={form.model}
+                          onChange={(e) => setForm({ ...form, model: e.target.value })}
+                        >
+                          <option value="">Select a model…</option>
+                          {form.model && !models.includes(form.model) ? <option value={form.model}>{form.model}</option> : null}
+                          {models.map((m) => <option key={m} value={m}>{m}</option>)}
+                        </select>
+                      ) : <Input aria-label="Default model" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />}
                       <Button
                         size="sm"
                         variant="outline"
                         onClick={() => discoverModels()}
-                        disabled={modelBusy}
+                        disabled={modelBusy || !selectedProviderReady || Boolean(busy)}
                         title="Ask the selected provider for its model list"
                       >
                         <RefreshCw className="size-3.5" /> {modelBusy ? "…" : "Discover"}
                       </Button>
                     </div>
-                    {models.length ? (
-                      <select
-                        className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
-                        value={models.includes(form.model) ? form.model : ""}
-                        onChange={(e) => e.target.value && setForm({ ...form, model: e.target.value })}
+                    {models.length > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => setManualModel(!manualModel)}
+                        className="text-[11px] text-muted-foreground underline-offset-2 hover:underline"
                       >
-                        <option value="">Pick a discovered model…</option>
-                        {models.map((m) => (
-                          <option key={m}>{m}</option>
-                        ))}
-                      </select>
+                        {manualModel ? "Use catalog" : "Enter model ID"}
+                      </button>
                     ) : null}
                     {modelNote ? <p className="text-[11px] text-muted-foreground">{modelNote}</p> : null}
                   </Field>
+                  {providerInfo?.report_only ? (
+                    <p className="text-[11px] text-muted-foreground sm:col-span-2">This provider is available for executive report summaries.</p>
+                  ) : null}
                   <Field
                     label="AI advisory"
                     hint="Master switch. Off means no advisory call at all — scanning and reports keep working without a model."
@@ -609,14 +467,14 @@ export default function Settings() {
                   </Field>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button size="sm" onClick={save} disabled={busy === "save"}>
+                  <Button size="sm" onClick={save} disabled={Boolean(busy) || !form.provider || !availability.data}>
                     <Save className="size-4" /> Save
                   </Button>
-                  <Button size="sm" variant="secondary" onClick={test} disabled={busy === "test"}>
+                  <Button size="sm" variant="secondary" onClick={test} disabled={Boolean(busy) || !selectedProviderReady}>
                     <Zap className="size-4" /> Test
                   </Button>
-                  <Button size="sm" variant="destructive" onClick={remove} disabled={busy === "delete"}>
-                    <Trash2 className="size-4" /> Clear
+                  <Button size="sm" variant="destructive" onClick={remove} disabled={Boolean(busy) || !status.data?.configured || !availability.data}>
+                    <Trash2 className="size-4" /> Clear all
                   </Button>
                 </div>
               </>
@@ -686,19 +544,26 @@ export default function Settings() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-xs text-foreground">
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Version</span>
-                <span className="mono">{version.data?.version ?? "—"}</span>
-              </div>
+              {version.error ? <LoadError resource="server version" error={version.error} /> : (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Version</span>
+                  <span className="mono">{version.data?.version ?? "—"}</span>
+                </div>
+              )}
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Now</span>
                 <span>{formatTime(new Date().toISOString())}</span>
               </div>
               <div>
                 <div className="mb-1 text-[11px] uppercase tracking-wide text-muted-foreground">Capabilities</div>
-                <Code className="max-h-56">
-                  {caps.data ? JSON.stringify(caps.data, null, 2) : "—"}
-                </Code>
+                {caps.data?.target_read_only ? (
+                  <p className="mb-1 text-xs text-muted-foreground">Targets are read-only. Capture approved URLs from Projects.</p>
+                ) : null}
+                {caps.error ? <LoadError resource="server capabilities" error={caps.error} /> : (
+                  <Code className="max-h-56">
+                    {caps.data ? JSON.stringify(caps.data, null, 2) : "—"}
+                  </Code>
+                )}
               </div>
             </CardContent>
           </Card>

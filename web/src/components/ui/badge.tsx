@@ -38,6 +38,8 @@ const STATE_TONE: Record<string, BadgeProps["tone"]> = {
   running: "info",
   completed: "success",
   paused: "warn",
+  awaiting_auth: "warn",
+  canceling: "info",
   failed: "danger",
   canceled: "neutral",
   cancelled: "neutral",

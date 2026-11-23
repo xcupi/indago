@@ -17,6 +17,7 @@ package web
 //     nothing here confirms, scores or reports a finding.
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
@@ -33,13 +34,51 @@ import (
 	"github.com/indago/indago/internal/scan"
 )
 
-// SetBountyStore wires the token store and its client. INDAGO_YESWEHACK_API
-// overrides the API base (mirror or test server).
+type ywhPlatformClient struct {
+	c *bounty.Client
+}
+
+func (y ywhPlatformClient) Provider() string { return bounty.ProviderYesWeHack }
+func (y ywhPlatformClient) Validate(ctx context.Context, token string) error {
+	return y.c.Validate(ctx, token)
+}
+func (y ywhPlatformClient) ListPrograms(ctx context.Context, q bounty.Query, refresh bool) ([]bounty.Program, int, bool, error) {
+	return y.c.ListPrograms(ctx, q, refresh)
+}
+func (y ywhPlatformClient) GetProgram(ctx context.Context, slug string) (bounty.Program, error) {
+	d, err := y.c.Detail(ctx, slug)
+	if err != nil {
+		return bounty.Program{}, err
+	}
+	return d.Program, nil
+}
+
+// SetBountyStore wires the token store and platform clients. INDAGO_*_API
+// environment variables override each platform's API base (mirror or test server).
 func (s *Server) SetBountyStore(st *bounty.Store) {
 	s.bountyStore = st
-	s.bountyClient = bounty.NewClient(os.Getenv("INDAGO_YESWEHACK_API"), st.Token)
+	ywh := bounty.NewClient(os.Getenv("INDAGO_YESWEHACK_API"), func() string {
+		return st.TokenFor(bounty.ProviderYesWeHack)
+	})
 	if web := os.Getenv("INDAGO_YESWEHACK_WEB"); web != "" {
-		s.bountyClient.WebBase = web
+		ywh.WebBase = web
+	}
+	s.bountyClient = ywh
+	s.bountyClients = map[string]bounty.PlatformClient{
+		bounty.ProviderYesWeHack: ywhPlatformClient{c: ywh},
+	}
+	envBase := map[string]string{
+		bounty.ProviderHackerOne: os.Getenv("INDAGO_HACKERONE_API"),
+		bounty.ProviderBugcrowd:  os.Getenv("INDAGO_BUGCROWD_API"),
+		bounty.ProviderIntigriti: os.Getenv("INDAGO_INTIGRITI_API"),
+	}
+	for _, p := range []string{bounty.ProviderHackerOne, bounty.ProviderBugcrowd, bounty.ProviderIntigriti} {
+		provider := p
+		if c, err := bounty.NewPlatformClient(provider, envBase[provider], func() string {
+			return st.TokenFor(provider)
+		}); err == nil {
+			s.bountyClients[provider] = c
+		}
 	}
 }
 
@@ -54,33 +93,95 @@ type bountyProvider struct {
 	Note         string `json:"note"`
 }
 
+func providerLabel(id string) string {
+	switch id {
+	case bounty.ProviderYesWeHack:
+		return "YesWeHack"
+	case bounty.ProviderHackerOne:
+		return "HackerOne"
+	case bounty.ProviderBugcrowd:
+		return "Bugcrowd"
+	case bounty.ProviderIntigriti:
+		return "Intigriti"
+	default:
+		return id
+	}
+}
+
 func (s *Server) handleListBountyProviders(w http.ResponseWriter, r *http.Request) {
-	configured := s.bountyStore != nil && s.bountyStore.Configured()
-	kind, expires := "", time.Time{}
-	if configured {
-		kind, expires = bounty.CredentialInfo(s.bountyStore.Token())
+	specs := []struct {
+		id           string
+		publicBrowse bool
+		note         string
+	}{
+		{
+			id:           bounty.ProviderYesWeHack,
+			publicBrowse: true,
+			note:         "Hunter session token: copy localStorage.access_token from a logged-in yeswehack.com tab. It expires with that browser session. Managers can use a personal access token instead.",
+		},
+		{
+			id:           bounty.ProviderHackerOne,
+			publicBrowse: false,
+			note:         "HackerOne API v1 credential: enter username:api_token for HTTP Basic auth (recommended for Hacker API tokens), or a Bearer token.",
+		},
+		{
+			id:           bounty.ProviderBugcrowd,
+			publicBrowse: false,
+			note:         "Bugcrowd API token: enter your Bugcrowd API Bearer token.",
+		},
+		{
+			id:           bounty.ProviderIntigriti,
+			publicBrowse: false,
+			note:         "Intigriti Personal Access Token: enter your Intigriti External Researcher API Bearer token.",
+		},
 	}
-	p := bountyProvider{
-		ID: "yeswehack", Label: "YesWeHack", Configured: configured, PublicBrowse: true,
-		Credential: kind,
-		Note:       "Hunter session token: copy localStorage.access_token from a logged-in yeswehack.com tab. It expires with that browser session. Managers can use a personal access token instead.",
+
+	providers := make([]bountyProvider, 0, len(specs))
+	for _, sp := range specs {
+		configured := s.bountyStore != nil && s.bountyStore.ConfiguredFor(sp.id)
+		p := bountyProvider{
+			ID:           sp.id,
+			Label:        providerLabel(sp.id),
+			Configured:   configured,
+			PublicBrowse: sp.publicBrowse,
+			Note:         sp.note,
+		}
+		if configured && sp.id == bounty.ProviderYesWeHack {
+			kind, expires := bounty.CredentialInfo(s.bountyStore.TokenFor(sp.id))
+			p.Credential = kind
+			if !expires.IsZero() {
+				p.ExpiresAt = expires.Format(time.RFC3339)
+				p.Expired = time.Now().After(expires)
+			}
+		}
+		providers = append(providers, p)
 	}
-	if !expires.IsZero() {
-		p.ExpiresAt = expires.Format(time.RFC3339)
-		p.Expired = time.Now().After(expires)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"providers": []bountyProvider{p}})
+	writeJSON(w, http.StatusOK, map[string]any{"providers": providers})
 }
 
 type setBountyTokenReq struct {
 	Token string `json:"token"`
 }
 
-// handleSetBountyToken validates the token against the API before storing it,
-// so "saved" always means "the platform accepted it".
+func bountyProviderParam(raw string) string {
+	p := strings.ToLower(strings.TrimSpace(raw))
+	if p == "" {
+		return bounty.ProviderYesWeHack
+	}
+	return p
+}
+
+// handleSetBountyToken validates the token against the provider's API before
+// storing it, so "saved" always means "the platform accepted it".
 func (s *Server) handleSetBountyToken(w http.ResponseWriter, r *http.Request) {
-	if s.bountyStore == nil || s.bountyClient == nil {
+	if s.bountyStore == nil || s.bountyClients == nil {
 		writeError(w, http.StatusServiceUnavailable, "bounty integration is not configured on this server")
+		return
+	}
+	provider := bountyProviderParam(r.PathValue("provider"))
+	client, ok := s.bountyClients[provider]
+	if !ok {
+		writeError(w, http.StatusBadRequest, "unsupported bounty provider: "+provider)
 		return
 	}
 	var req setBountyTokenReq
@@ -93,25 +194,32 @@ func (s *Server) handleSetBountyToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "token is required")
 		return
 	}
-	// Validate against an endpoint every credential can read; 401 means the
+	// Validate against an endpoint every credential can read; 401/403 means the
 	// credential is bad, anything else means it was accepted.
-	if err := s.bountyClient.Validate(r.Context(), token); err != nil {
+	if err := client.Validate(r.Context(), token); err != nil {
 		if errors.Is(err, bounty.ErrUnauthorized) {
-			writeError(w, http.StatusBadRequest, "YesWeHack rejected this credential (401). Paste the session token from a logged-in yeswehack.com tab, or a personal access token.")
+			if provider == bounty.ProviderYesWeHack {
+				writeError(w, http.StatusBadRequest, "YesWeHack rejected this credential (401). Paste the session token from a logged-in yeswehack.com tab, or a personal access token.")
+			} else {
+				writeError(w, http.StatusBadRequest, providerLabel(provider)+" rejected this credential (401).")
+			}
 			return
 		}
 		writeError(w, http.StatusBadGateway, "could not verify the credential: "+err.Error())
 		return
 	}
-	if err := s.bountyStore.Set(token); err != nil {
+	if err := s.bountyStore.SetFor(provider, token); err != nil {
 		s.writeInternalError(w, "store bounty token", err)
 		return
 	}
-	s.log.Info("bounty token configured", "provider", "yeswehack")
-	kind, expires := bounty.CredentialInfo(token)
-	out := map[string]any{"configured": true, "kind": kind}
-	if !expires.IsZero() {
-		out["expires_at"] = expires.UTC().Format(time.RFC3339)
+	s.log.Info("bounty token configured", "provider", provider)
+	out := map[string]any{"configured": true, "provider": provider}
+	if provider == bounty.ProviderYesWeHack {
+		kind, expires := bounty.CredentialInfo(token)
+		out["kind"] = kind
+		if !expires.IsZero() {
+			out["expires_at"] = expires.UTC().Format(time.RFC3339)
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -121,32 +229,27 @@ func (s *Server) handleClearBountyToken(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusServiceUnavailable, "bounty integration is not configured on this server")
 		return
 	}
-	if err := s.bountyStore.Clear(); err != nil {
+	provider := bountyProviderParam(r.PathValue("provider"))
+	if _, ok := s.bountyClients[provider]; !ok {
+		writeError(w, http.StatusBadRequest, "unsupported bounty provider: "+provider)
+		return
+	}
+	if err := s.bountyStore.ClearFor(provider); err != nil {
 		s.writeInternalError(w, "clear bounty token", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"configured": false})
+	writeJSON(w, http.StatusOK, map[string]any{"configured": false, "provider": provider})
 }
 
 // handleBountyPrograms lists programs. refresh=1 bypasses the ten-minute
 // cache; without it the cached page is served, which is what the Load button's
 // normal path uses.
 func (s *Server) handleBountyPrograms(w http.ResponseWriter, r *http.Request) {
-	if s.bountyClient == nil {
+	if s.bountyClients == nil && s.bountyClient == nil {
 		writeError(w, http.StatusServiceUnavailable, "bounty integration is not configured on this server")
 		return
 	}
-	client := s.bountyClient
-	if s.bountyStore != nil && s.bountyStore.Configured() {
-		_, expires := bounty.CredentialInfo(s.bountyStore.Token())
-		if !expires.IsZero() && time.Now().After(expires) {
-			// Program browsing is public. An expired hunter session must not
-			// turn that into a 401: show the public list and let the UI ask
-			// for a replacement token for scopes/templates.
-			client = bounty.NewClient(client.BaseURL, nil)
-			client.WebBase = s.bountyClient.WebBase
-		}
-	}
+	provider := bountyProviderParam(r.URL.Query().Get("provider"))
 	q := bounty.Query{
 		Search:     strings.TrimSpace(r.URL.Query().Get("search")),
 		ScopeTypes: splitCSV(r.URL.Query().Get("scope_type")),
@@ -154,13 +257,49 @@ func (s *Server) handleBountyPrograms(w http.ResponseWriter, r *http.Request) {
 		Page:       atoiDefault(r.URL.Query().Get("page"), 1),
 	}
 	refresh := r.URL.Query().Get("refresh") == "1"
+
+	var client bounty.PlatformClient
+	if provider == bounty.ProviderYesWeHack {
+		if s.bountyClient == nil {
+			writeError(w, http.StatusServiceUnavailable, "bounty integration is not configured on this server")
+			return
+		}
+		ywh := s.bountyClient
+		if s.bountyStore != nil && s.bountyStore.Configured() {
+			_, expires := bounty.CredentialInfo(s.bountyStore.Token())
+			if !expires.IsZero() && time.Now().After(expires) {
+				// Program browsing is public. An expired hunter session must not
+				// turn that into a 401: show the public list and let the UI ask
+				// for a replacement token for scopes/templates.
+				ywh = bounty.NewClient(ywh.BaseURL, nil)
+				ywh.WebBase = s.bountyClient.WebBase
+			}
+		}
+		client = ywhPlatformClient{c: ywh}
+	} else {
+		var ok bool
+		client, ok = s.bountyClients[provider]
+		if !ok {
+			writeError(w, http.StatusBadRequest, "unsupported bounty provider: "+provider)
+			return
+		}
+		if s.bountyStore == nil || !s.bountyStore.ConfiguredFor(provider) {
+			writeError(w, http.StatusUnauthorized, providerLabel(provider)+" requires an API token")
+			return
+		}
+	}
+
 	items, total, cached, err := client.ListPrograms(r.Context(), q, refresh)
 	if err != nil {
+		if errors.Is(err, bounty.ErrUnauthorized) {
+			writeError(w, http.StatusUnauthorized, providerLabel(provider)+" rejected the configured token")
+			return
+		}
 		writeError(w, http.StatusBadGateway, "listing programs failed: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"provider": "yeswehack", "items": items, "cached": cached, "count": len(items),
+		"provider": provider, "items": items, "cached": cached, "count": len(items),
 		"total": total, "page": q.Page, "per_page": 50,
 		"has_more":   q.Page*50 < total,
 		"fetched_at": time.Now().Format(time.RFC3339),
@@ -170,17 +309,54 @@ func (s *Server) handleBountyPrograms(w http.ResponseWriter, r *http.Request) {
 // handleBountyProgram returns one program with its rules and — when a token is
 // configured — its scopes and report templates.
 func (s *Server) handleBountyProgram(w http.ResponseWriter, r *http.Request) {
+	if s.bountyClients == nil && s.bountyClient == nil {
+		writeError(w, http.StatusServiceUnavailable, "bounty integration is not configured on this server")
+		return
+	}
+	provider := bountyProviderParam(r.URL.Query().Get("provider"))
+	slug := r.PathValue("slug")
+	if provider != bounty.ProviderYesWeHack {
+		client, ok := s.bountyClients[provider]
+		if !ok {
+			writeError(w, http.StatusBadRequest, "unsupported bounty provider: "+provider)
+			return
+		}
+		if s.bountyStore == nil || !s.bountyStore.ConfiguredFor(provider) {
+			writeError(w, http.StatusUnauthorized, providerLabel(provider)+" requires an API token")
+			return
+		}
+		prog, err := client.GetProgram(r.Context(), slug)
+		if err != nil {
+			if errors.Is(err, bounty.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "program not found")
+				return
+			}
+			if errors.Is(err, bounty.ErrUnauthorized) {
+				writeError(w, http.StatusUnauthorized, providerLabel(provider)+" rejected the configured token")
+				return
+			}
+			writeError(w, http.StatusBadGateway, "loading program failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"provider":  provider,
+			"program":   prog,
+			"scopes":    prog.Scopes,
+			"templates": []bounty.ReportTemplate{},
+		})
+		return
+	}
+
 	if s.bountyClient == nil {
 		writeError(w, http.StatusServiceUnavailable, "bounty integration is not configured on this server")
 		return
 	}
-	slug := r.PathValue("slug")
 	detail, err := s.bountyClient.Detail(r.Context(), slug)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "loading program failed: "+err.Error())
 		return
 	}
-	resp := map[string]any{"program": detail, "scopes": []bounty.Scope{}, "templates": []bounty.ReportTemplate{}}
+	resp := map[string]any{"provider": provider, "program": detail, "scopes": []bounty.Scope{}, "templates": []bounty.ReportTemplate{}}
 	if s.bountyStore != nil && s.bountyStore.Configured() {
 		if scopes, err := s.bountyClient.Scopes(r.Context(), slug); err == nil {
 			resp["scopes"] = scopes
@@ -201,7 +377,8 @@ func (s *Server) handleBountyProgram(w http.ResponseWriter, r *http.Request) {
 }
 
 type importProgramsReq struct {
-	Slugs []string `json:"slugs"`
+	Provider string   `json:"provider"`
+	Slugs    []string `json:"slugs"`
 }
 
 type importedProgram struct {
@@ -222,12 +399,30 @@ type importedProgram struct {
 	Skipped            []string `json:"skipped,omitempty"`
 }
 
+func platformScopesToBountyScopes(assets []bounty.ScopeAsset) []bounty.Scope {
+	out := make([]bounty.Scope, 0, len(assets))
+	for _, a := range assets {
+		if !a.Eligible {
+			continue
+		}
+		scopeType := strings.ToLower(strings.TrimSpace(a.Type))
+		if scopeType == "url" || scopeType == "wildcard" {
+			scopeType = "web-application"
+		}
+		out = append(out, bounty.Scope{
+			Scope:     strings.TrimSpace(a.Target),
+			ScopeType: scopeType,
+		})
+	}
+	return out
+}
+
 // handleImportBountyPrograms turns selected programs into projects with an
 // explicit scope and one draft scan for the first target, using anonymous auth.
 // The scan is created but not started: the operator reviews the target/scope,
 // sets the program's hunting User-Agent when required, then starts it.
 func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Request) {
-	if s.bountyClient == nil || s.bountyStore == nil {
+	if (s.bountyClient == nil && s.bountyClients == nil) || s.bountyStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "bounty integration is not configured on this server")
 		return
 	}
@@ -241,39 +436,82 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	provider := bountyProviderParam(req.Provider)
+	var platformClient bounty.PlatformClient
+	if provider == bounty.ProviderYesWeHack {
+		if s.bountyClient == nil {
+			writeError(w, http.StatusServiceUnavailable, "bounty integration is not configured on this server")
+			return
+		}
+	} else {
+		var ok bool
+		platformClient, ok = s.bountyClients[provider]
+		if !ok {
+			writeError(w, http.StatusBadRequest, "unsupported bounty provider: "+provider)
+			return
+		}
+		if !s.bountyStore.ConfiguredFor(provider) {
+			writeError(w, http.StatusUnauthorized, providerLabel(provider)+" requires an API token")
+			return
+		}
+	}
+
 	var out []importedProgram
 	for _, slug := range req.Slugs {
 		slug = strings.TrimSpace(slug)
 		if slug == "" {
 			continue
 		}
-		detail, err := s.bountyClient.Detail(r.Context(), slug)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "loading "+slug+" failed: "+err.Error())
-			return
-		}
-		// Authenticated accounts read scopes from the API; hunter accounts
-		// cannot create a token, so they fall back to the public program page,
-		// which ships the same table in its transfer state.
-		scopes, err := s.bountyClient.Scopes(r.Context(), slug)
-		if err != nil {
-			if !errors.Is(err, bounty.ErrNoToken) && !errors.Is(err, bounty.ErrUnauthorized) {
-				writeError(w, http.StatusBadGateway, "loading scopes for "+slug+" failed: "+err.Error())
-				return
-			}
-			scopes, err = s.bountyClient.PublicScopes(r.Context(), slug)
+		var title, ruleText string
+		var scopes []bounty.Scope
+		if provider == bounty.ProviderYesWeHack {
+			detail, err := s.bountyClient.Detail(r.Context(), slug)
 			if err != nil {
-				writeError(w, http.StatusBadGateway, "loading public scopes for "+slug+" failed: "+err.Error())
+				writeError(w, http.StatusBadGateway, "loading "+slug+" failed: "+err.Error())
 				return
 			}
+			title = detail.Title
+			ruleText = strings.ToLower(detail.Rules + " " + detail.RulesHTML)
+			// Authenticated accounts read scopes from the API; hunter accounts
+			// cannot create a token, so they fall back to the public program page,
+			// which ships the same table in its transfer state.
+			scopes, err = s.bountyClient.Scopes(r.Context(), slug)
+			if err != nil {
+				if !errors.Is(err, bounty.ErrNoToken) && !errors.Is(err, bounty.ErrUnauthorized) {
+					writeError(w, http.StatusBadGateway, "loading scopes for "+slug+" failed: "+err.Error())
+					return
+				}
+				scopes, err = s.bountyClient.PublicScopes(r.Context(), slug)
+				if err != nil {
+					writeError(w, http.StatusBadGateway, "loading public scopes for "+slug+" failed: "+err.Error())
+					return
+				}
+			}
+		} else {
+			prog, err := platformClient.GetProgram(r.Context(), slug)
+			if err != nil {
+				if errors.Is(err, bounty.ErrUnauthorized) {
+					writeError(w, http.StatusUnauthorized, providerLabel(provider)+" rejected the configured token")
+					return
+				}
+				writeError(w, http.StatusBadGateway, "loading "+slug+" failed: "+err.Error())
+				return
+			}
+			title = prog.Title
+			if title == "" {
+				title = slug
+			}
+			scopes = platformScopesToBountyScopes(prog.Scopes)
 		}
+
 		// Importing the same program twice would create a second project with
 		// the same scope; skip it and say so.
+		noteTag := providerLabel(provider) + " (" + slug + ")"
 		existing, _ := s.store.Projects().List(r.Context())
 		already := false
 		existingProjectID := ""
 		for _, p := range existing {
-			if strings.Contains(p.Notes, "YesWeHack ("+slug+")") {
+			if strings.Contains(p.Notes, noteTag) {
 				already = true
 				existingProjectID = string(p.ID)
 				break
@@ -282,7 +520,7 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 		if already {
 			// A repeated import is not an error: keep one project per program
 			// and point the operator at the existing one instead.
-			out = append(out, importedProgram{Slug: slug, Title: detail.Title, ProjectID: existingProjectID, Skipped: []string{"already imported"}})
+			out = append(out, importedProgram{Slug: slug, Title: title, ProjectID: existingProjectID, Skipped: []string{"already imported"}})
 			continue
 		}
 		hosts, subdomainOnly, targets, prefixes, origins, skipped, blocked := webScopeTargets(scopes)
@@ -291,11 +529,11 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 			// hosts/origins, and a project scope has one global prefix list.
 			// Nothing is created rather than a scope that authorizes the
 			// cross product of host, scheme/port and path.
-			out = append(out, importedProgram{Slug: slug, Title: detail.Title, Skipped: append(skipped, blocked)})
+			out = append(out, importedProgram{Slug: slug, Title: title, Skipped: append(skipped, blocked)})
 			continue
 		}
 		if len(hosts) == 0 && len(subdomainOnly) == 0 {
-			out = append(out, importedProgram{Slug: slug, Title: detail.Title, Skipped: append(skipped, "no web-application scope asset")})
+			out = append(out, importedProgram{Slug: slug, Title: title, Skipped: append(skipped, "no web-application scope asset")})
 			continue
 		}
 		// Fail closed: an empty origin list means "every scheme and port" to
@@ -303,16 +541,15 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 		// kept asset row states its own scheme, so this only fires if the
 		// asset parsing above let a host through without an origin.
 		if len(origins) == 0 {
-			out = append(out, importedProgram{Slug: slug, Title: detail.Title, Skipped: append(skipped, "no asset states an http(s) scheme; an imported scope never authorizes every scheme and port")})
+			out = append(out, importedProgram{Slug: slug, Title: title, Skipped: append(skipped, "no asset states an http(s) scheme; an imported scope never authorizes every scheme and port")})
 			continue
 		}
 		now := time.Now()
-		p := &domain.Project{ID: domain.NewID(), Name: detail.Title, Notes: "Imported from YesWeHack (" + slug + ")", CreatedAt: now, UpdatedAt: now}
+		p := &domain.Project{ID: domain.NewID(), Name: title, Notes: "Imported from " + noteTag, CreatedAt: now, UpdatedAt: now}
 		// Some programs put the hunting User-Agent only in the public page's
 		// "User agent" section (the API rules field is often abbreviated).
 		// Best effort: a failed lookup must not fail the import.
-		ruleText := strings.ToLower(detail.Rules + " " + detail.RulesHTML)
-		if strings.Contains(ruleText, "user-agent") || strings.Contains(ruleText, "user agent") || strings.Contains(ruleText, "hunting requirement") {
+		if provider == bounty.ProviderYesWeHack && (strings.Contains(ruleText, "user-agent") || strings.Contains(ruleText, "user agent") || strings.Contains(ruleText, "hunting requirement")) {
 			if ua, replace, err := s.bountyClient.PublicHuntingUserAgent(r.Context(), slug); err == nil && ua != "" {
 				p.HuntingUserAgent = ua
 				p.HuntingUserAgentReplace = replace
@@ -374,7 +611,7 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 				created, err := s.ctrl.CreateScan(r.Context(), scan.CreateScanParams{
 					ProjectID: p.ID,
 					TargetID:  targetID,
-					Name:      "Imported: " + detail.Title + " — " + targetURLs[targetID],
+					Name:      "Imported: " + title + " — " + targetURLs[targetID],
 					// Conservative, not balanced: the operator did not choose
 					// this program's rate, and docs/bounty.md promises the
 					// quiet preset. The crawl controls are explicit so the
@@ -410,8 +647,8 @@ func (s *Server) handleImportBountyPrograms(w http.ResponseWriter, r *http.Reque
 		if len(scanIDs) > 0 {
 			scanID = scanIDs[0]
 		}
-		out = append(out, importedProgram{Slug: slug, Title: detail.Title, ProjectID: string(p.ID), Targets: targets, Hosts: hosts, SubdomainOnlyHosts: subdomainOnly, ScanID: scanID, ScanIDs: scanIDs, ScanError: scanErr, UserAgent: p.HuntingUserAgent, Skipped: skipped})
-		s.log.Info("bounty program imported", "provider", "yeswehack", "slug", slug, "hosts", len(hosts), "targets", len(targets))
+		out = append(out, importedProgram{Slug: slug, Title: title, ProjectID: string(p.ID), Targets: targets, Hosts: hosts, SubdomainOnlyHosts: subdomainOnly, ScanID: scanID, ScanIDs: scanIDs, ScanError: scanErr, UserAgent: p.HuntingUserAgent, Skipped: skipped})
+		s.log.Info("bounty program imported", "provider", provider, "slug", slug, "hosts", len(hosts), "targets", len(targets))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"imported": out})
 }
@@ -1018,6 +1255,10 @@ func yesWeHackSlugFromNotes(notes string) string {
 // confirmed finding in the scan. It strictly writes to the draft endpoint and
 // never submits a report.
 func (s *Server) handleYesWeHackDraft(w http.ResponseWriter, r *http.Request) {
+	if s.ctrl.ReadOnlyTargets() {
+		writeError(w, http.StatusForbidden, "remote draft writes are disabled; export a local report")
+		return
+	}
 	if s.bountyClient == nil || s.bountyStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "bounty integration is not configured on this server")
 		return

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -95,6 +96,24 @@ func putLLMConfig(t *testing.T, h http.Handler, body map[string]any) *httptest.R
 	return rec
 }
 
+func TestLLMHostedProvidersRequireAPIKeys(t *testing.T) {
+	for _, provider := range []string{llm.ProviderClaude, llm.ProviderOpenAI, llm.ProviderOpenRouter, llm.ProviderGoogle} {
+		t.Run(provider, func(t *testing.T) {
+			h, _, _ := newLLMServer(t)
+			const model = "fixture-selected-model"
+			rec := llmRequest(t, h, "PUT", "/api/llm/config", map[string]any{"provider": provider, "model": model})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("missing API key returned %d, want 400", rec.Code)
+			}
+			putLLMConfig(t, h, map[string]any{"provider": provider, "model": model, "api_key": llmTestKey})
+			got := decodeLLMStatus(t, llmRequest(t, h, "GET", "/api/llm/config", nil))
+			if !got.Configured || got.Provider != provider || got.Model != model || !got.KeySet {
+				t.Fatalf("expected API-key model settings, got %+v", got)
+			}
+		})
+	}
+}
+
 func TestLLMConfigKeyIsNeverReturned(t *testing.T) {
 	h, logs, store := newLLMServer(t)
 	rec := putLLMConfig(t, h, map[string]any{
@@ -113,8 +132,8 @@ func TestLLMConfigKeyIsNeverReturned(t *testing.T) {
 	if want := "****" + llmTestKey[len(llmTestKey)-4:]; st.KeyHint != want {
 		t.Fatalf("key hint = %q, want %q", st.KeyHint, want)
 	}
-	if len(st.Providers) != 4 {
-		t.Fatalf("%d provider definitions returned, want the four visible providers", len(st.Providers))
+	if len(st.Providers) != 6 {
+		t.Fatalf("%d provider definitions returned, want six provider definitions", len(st.Providers))
 	}
 
 	rec = llmRequest(t, h, "GET", "/api/llm/config", nil)
@@ -137,7 +156,11 @@ func TestLLMConfigKeyIsNeverReturned(t *testing.T) {
 	if strings.Contains(string(raw), llmTestKey) {
 		t.Fatalf("config.json contains the literal key:\n%s", raw)
 	}
-	keyRaw, err := os.ReadFile(store.KeyPath())
+	keys, err := filepath.Glob(filepath.Join(store.Dir(), "api_key-deepseek-*"))
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("could not locate the saved provider credential: %v, %v", keys, err)
+	}
+	keyRaw, err := os.ReadFile(keys[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,10 +219,12 @@ func TestLLMConfigDeleteClearsEverything(t *testing.T) {
 	if _, err := store.Load(); !errors.Is(err, llm.ErrNotConfigured) {
 		t.Fatalf("Load after DELETE = %v, want ErrNotConfigured", err)
 	}
-	for _, p := range []string{store.Path(), store.KeyPath()} {
-		if _, err := os.Stat(p); !os.IsNotExist(err) {
-			t.Errorf("%s still exists after DELETE", p)
-		}
+	if _, err := os.Stat(store.Path()); !os.IsNotExist(err) {
+		t.Errorf("configuration exists after DELETE: %v", err)
+	}
+	keys, err := filepath.Glob(filepath.Join(store.Dir(), "api_key*"))
+	if err != nil || len(keys) != 0 {
+		t.Fatalf("credential files after DELETE: %v, %v", keys, err)
 	}
 }
 
@@ -386,8 +411,8 @@ func TestLLMConfigNotConfiguredState(t *testing.T) {
 	if st.Configured || st.KeySet || st.Provider != "" || st.Model != "" || st.BaseURL != "" || st.KeyHint != "" {
 		t.Fatalf("fresh status = %+v, want an explicit not-configured state", st)
 	}
-	if len(st.Providers) != 4 {
-		t.Fatalf("providers = %+v, want the four visible providers", st.Providers)
+	if len(st.Providers) != 6 {
+		t.Fatalf("providers = %+v, want six provider definitions", st.Providers)
 	}
 }
 
@@ -451,5 +476,42 @@ func TestLLMRoutesRequireTheSameBearerTokenAsOtherProtectedRoutes(t *testing.T) 
 	}
 	if strings.Contains(rec.Body.String(), llmTestKey) {
 		t.Fatal("authorized PUT response contains the key")
+	}
+}
+
+func TestLLMConfigPersistsProviderProfilesAndUsesEnvironmentKeys(t *testing.T) {
+	h, _, _ := newLLMServer(t)
+	t.Setenv(llm.KeyEnvName(llm.ProviderClaude), "fixture-claude-env-key")
+	t.Setenv("INDAGO_LLM_MODEL_CLAUDE", "fixture-env-default")
+	putLLMConfig(t, h, map[string]any{
+		"provider": llm.ProviderOpenRouter, "api_key": llmTestKey, "model": "fixture/original",
+	})
+	putLLMConfig(t, h, map[string]any{
+		"provider": llm.ProviderClaude, "model": "fixture-selected",
+	})
+	rec := llmRequest(t, h, "GET", "/api/llm/providers", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list providers = %d: %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		Default   string             `json:"default"`
+		Providers []llm.Availability `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]llm.Availability)
+	for _, p := range result.Providers {
+		byID[p.Provider] = p
+	}
+	if p := byID[llm.ProviderClaude]; result.Default != p.Provider || !p.Configured || p.Source != "environment" || p.Model != "fixture-selected" || p.KeyHint != "" {
+		t.Fatalf("environment-backed profile did not resolve: %+v", p)
+	}
+	if p := byID[llm.ProviderOpenRouter]; !p.Configured || p.Source != "settings" || p.Model != "fixture/original" || p.KeyHint == "" {
+		t.Fatalf("previous profile did not stay available: %+v", p)
+	}
+	rec = putLLMConfig(t, h, map[string]any{"provider": llm.ProviderOpenRouter})
+	if cfg := decodeLLMStatus(t, rec); cfg.Provider != llm.ProviderOpenRouter || cfg.Model != "fixture/original" || !cfg.KeySet {
+		t.Fatalf("reselected profile: %+v", cfg)
 	}
 }

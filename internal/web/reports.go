@@ -15,6 +15,7 @@ import (
 
 	"github.com/indago/indago/internal/ai"
 	"github.com/indago/indago/internal/domain"
+	"github.com/indago/indago/internal/llm"
 	"github.com/indago/indago/internal/report"
 )
 
@@ -47,16 +48,24 @@ type createReportReq struct {
 	Template string `json:"template,omitempty"`
 	// AISummary requests an advisory executive-summary paragraph from the
 	// AI Gateway, prepended to the report and clearly labeled as such (see
-	// report.Data.AISummary). Ignored (no error) when AI is disabled or
-	// unconfigured — report creation always succeeds either way; a failed
-	// or skipped advisory call just means no AI section in the output.
+	// report.Data.AISummary). The response records whether the AI summary
+	// was added, failed, or skipped.
 	AISummary bool `json:"ai_summary,omitempty"`
 	// AIProvider / AIModel select the model used for that advisory paragraph.
 	// Empty uses the provider saved in Settings (or INDAGO_LLM_KEY_* env
-	// credentials). A provider with no credential is a 400 naming the env var;
-	// the report itself is never blocked by AI.
+	// credentials). AI summary failures do not block report creation.
 	AIProvider string `json:"ai_provider,omitempty"`
 	AIModel    string `json:"ai_model,omitempty"`
+}
+
+type reportAISummaryStatus struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+type createReportResp struct {
+	*domain.Report
+	AISummaryStatus *reportAISummaryStatus `json:"ai_summary_status,omitempty"`
 }
 
 // handleCreateReport renders a report over the selected (or, if none given,
@@ -167,12 +176,18 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	var aiSummary string
+	var aiSummaryStatus *reportAISummaryStatus
 	if req.AISummary {
-		if allowed, why := s.aiAdvisoryAllowed(); !allowed {
-			s.log.Info("report ai summary skipped: advisory disabled in Settings", "reason", why)
-		} else {
-			aiSummary = s.draftAISummary(r.Context(), scanID, proj, sc, findings, len(all), req.AIProvider, req.AIModel)
+		var status reportAISummaryStatus
+		switch allowed, _ := s.aiAdvisoryAllowed(); {
+		case !supportsReportAISummary(format, tmpl):
+			status = reportAISummaryStatus{"skipped", "Report generated. Select the technical or pentest template in PDF, HTML, or Markdown to include an AI summary."}
+		case !allowed:
+			status = reportAISummaryStatus{"skipped", "Report generated. Enable AI in Settings to include a summary."}
+		default:
+			aiSummary, status = s.draftAISummary(r.Context(), scanID, proj, sc, findings, len(all), req.AIProvider, req.AIModel)
 		}
+		aiSummaryStatus = &status
 	}
 	var buf bytes.Buffer
 	data := report.Data{
@@ -263,7 +278,7 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		s.writeInternalError(w, "create report", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, rpt)
+	writeJSON(w, http.StatusCreated, createReportResp{Report: rpt, AISummaryStatus: aiSummaryStatus})
 }
 
 // draftAISummaryTimeout bounds the advisory call specifically, separate
@@ -275,18 +290,15 @@ const draftAISummaryTimeout = 30 * time.Second
 // draftAISummary asks the AI Gateway for an advisory executive-summary
 // paragraph over the report's findings, persisting the attempt as a
 // domain.AITask (succeeded or failed) for audit regardless of outcome.
-// Returns "" on any error or when AI is disabled — the caller always
-// still produces a complete, correct report; this is best-effort, never a
-// precondition. See AGENTS.md §2.5 and report.Data.AISummary's doc comment:
-// AI output here is prose only, never a finding, verdict, or evidence.
-func (s *Server) draftAISummary(ctx context.Context, scanID domain.ID, proj *domain.Project, sc *domain.Scan, findings []*domain.Finding, totalInScan int, provider, model string) string {
+// The outcome uses local messages because upstream errors may contain secrets.
+func (s *Server) draftAISummary(ctx context.Context, scanID domain.ID, proj *domain.Project, sc *domain.Scan, findings []*domain.Finding, totalInScan int, provider, model string) (string, reportAISummaryStatus) {
 	gw, err := s.aiGatewayFor(provider, model)
-	if err != nil {
-		s.log.Warn("ai: provider unavailable for report summary", "err", err)
-		return ""
+	if errors.Is(err, llm.ErrNoCredential) || (err == nil && !gw.Enabled()) {
+		return "", reportAISummaryStatus{"skipped", "Report generated. Configure an AI provider in Settings to include a summary."}
 	}
-	if !gw.Enabled() {
-		return ""
+	if err != nil {
+		s.log.Warn("ai: provider unavailable for report summary", "scan_id", scanID)
+		return "", reportAISummaryStatus{"failed", "Report generated. Check the AI provider and model in Settings to include a summary."}
 	}
 
 	byVerdict := map[domain.Verdict]int{}
@@ -340,22 +352,35 @@ func (s *Server) draftAISummary(ctx context.Context, scanID domain.ID, proj *dom
 	defer cancel()
 	resp, err := gw.Advise(callCtx, ai.Request{Kind: domain.AIDraftReport, Prompt: prompt, Context: reqCtx})
 	task.UpdatedAt = time.Now()
-	if err != nil {
-		s.log.Warn("ai: draft report summary failed", "err", err)
-		task.State = domain.AIFailed
-		task.Error = err.Error()
-		_ = s.store.AITasks().Update(ctx, task)
-		return ""
+	if resp != nil {
+		task.Provider = resp.Provider
+		task.Model = resp.Model
+		recordAIUsage(task, resp)
 	}
-	task.State = domain.AISucceeded
-	task.Provider = resp.Provider
-	task.Model = resp.Model
-	recordAIUsage(task, resp)
-	task.Response = []byte(resp.Text)
+	var failure string
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		failure = "The AI provider timed out while drafting the summary."
+	case err != nil:
+		failure = "The AI provider failed to draft a summary. Test the connection in Settings."
+	case resp == nil || strings.TrimSpace(resp.Text) == "":
+		failure = "The AI provider returned an empty summary. Try a different model."
+	}
+	if failure != "" {
+		s.log.Warn("ai: draft report summary failed", "scan_id", scanID, "reason", failure)
+		task.State = domain.AIFailed
+		task.Error = failure
+	} else {
+		task.State = domain.AISucceeded
+		task.Response = []byte(resp.Text)
+	}
 	if err := s.store.AITasks().Update(ctx, task); err != nil {
 		s.log.Warn("ai: record task result", "err", err)
 	}
-	return resp.Text
+	if failure != "" {
+		return "", reportAISummaryStatus{"failed", "Report generated. " + failure}
+	}
+	return resp.Text, reportAISummaryStatus{"added", "Report generated with an AI summary."}
 }
 
 // resolveSelection applies a report selection mode to the scan's findings
@@ -585,6 +610,19 @@ func reportContentType(format domain.ReportFormat) string {
 // them.
 func isMachineReport(format domain.ReportFormat) bool {
 	return format == domain.ReportJSON || format == domain.ReportSARIF
+}
+
+// supportsReportAISummary mirrors the layouts that render advisory prose.
+// Platform-specific Markdown templates and the bug bounty layout omit it.
+func supportsReportAISummary(format domain.ReportFormat, tmpl report.Template) bool {
+	switch format {
+	case domain.ReportMarkdown:
+		return tmpl == report.TemplateTechnical || tmpl == report.TemplatePentest
+	case domain.ReportHTML, domain.ReportPDF:
+		return tmpl != report.TemplateBugBounty
+	default:
+		return false
+	}
 }
 
 // handleGetReport returns a report's index entry (format, summary, timestamps)

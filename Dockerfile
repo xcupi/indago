@@ -5,6 +5,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium ca-certificates curl fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
+FROM node:24-bookworm-slim AS ui-build
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
 FROM golang:1.26-bookworm AS build
 ARG TARGETARCH
 RUN test "$TARGETARCH" = amd64
@@ -20,6 +27,7 @@ RUN module_version=$(go list -m -f '{{.Version}}' github.com/mxschmitt/playwrigh
 COPY Makefile ./
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
+COPY --from=ui-build /src/internal/web/assets/next/ ./internal/web/assets/next/
 ARG VERSION=dev
 ARG COMMIT=none
 ARG BUILD_DATE

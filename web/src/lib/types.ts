@@ -90,11 +90,16 @@ export interface ScanConfig {
   skip_cors?: boolean;
   skip_open_redirect?: boolean;
   skip_graphql?: boolean;
+  skip_csrf?: boolean;
+  skip_prototype_pollution?: boolean;
+  skip_cache_poisoning?: boolean;
+  skip_file_upload?: boolean;
   enable_command_injection?: boolean;
   enable_ssti?: boolean;
   enable_sqli?: boolean;
   enable_nosqli?: boolean;
   enable_xxe?: boolean;
+  enable_stored_xss?: boolean;
   allow_private_oast?: boolean;
   skip_write_endpoints?: boolean;
   skip_download_endpoints?: boolean;
@@ -136,7 +141,9 @@ export interface Finding {
   endpoint_id?: ID;
   location?: string;
   evidence_ids?: ID[];
-  provenance?: { engine?: string; discovery_source?: string; detected_at?: string };
+  provenance?: { engine?: string; discovery_source?: string; detected_at?: string; assessment?: string };
+  review_reason?: string;
+  review_reason_label?: string;
   detail?: string;
   created_at: string;
   updated_at?: string;
@@ -260,3 +267,26 @@ export interface LLMConfigView {
   enabled?: boolean;
   [key: string]: unknown;
 }
+
+export interface TechItem {
+  name: string;
+  category: string;
+  confidence?: string;
+  count: number;
+  sources?: string[];
+  examples?: string[];
+}
+
+export interface ScanTechInventory {
+  scan_id: ID;
+  endpoints_analyzed: number;
+  technologies: TechItem[];
+  languages: string[];
+  frameworks: string[];
+  templates: string[];
+  servers: string[];
+  powered_by?: string[];
+  waf_vendors?: string[];
+  content_kinds?: Record<string, number>;
+}
+

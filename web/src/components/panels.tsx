@@ -5,12 +5,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, Switch } from "@/components/ui/controls";
 import { Input } from "@/components/ui/input";
-import { Code, Empty, Loading } from "@/components/ui/misc";
+import { Code, Empty, LoadError, Loading } from "@/components/ui/misc";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api, refreshAll, useApi } from "@/lib/api";
 import type { Coverage, EndpointRow, Evidence, Finding, Report, ScanEvidenceGroup, TestRow } from "@/lib/types";
 import { formatTime, shortId } from "@/lib/utils";
 import { Pagination, usePagination } from "@/components/Pagination";
+import { ReportDownload, ReportPreview } from "@/components/ReportFile";
 
 function decodeDetail(detail?: string): unknown {
   if (!detail) return undefined;
@@ -31,6 +32,7 @@ function YesWeHackDraftBar({
   findingId?: string;
   disabled?: boolean;
 }) {
+  const policy = useApi<{ target_read_only: boolean }>("/api/capabilities");
   const [programSlug, setProgramSlug] = useState("");
   const [draftId, setDraftId] = useState("");
   const [busy, setBusy] = useState(false);
@@ -67,6 +69,8 @@ function YesWeHackDraftBar({
       setBusy(false);
     }
   }
+
+  if (policy.data?.target_read_only !== false) return null;
 
   return (
     <div className="space-y-1.5 rounded-md border border-border p-2.5">
@@ -110,7 +114,44 @@ function YesWeHackDraftBar({
 
 /* Findings ---------------------------------------------------------------- */
 
+function CSRFEvidenceReview({ scanId, findingId }: { scanId: string; findingId: string }) {
+  const { data, error, loading } = useApi<{
+    csrf_evidence_review?: {
+      requests_read: number;
+      requests_with_credentials: number;
+      response_statuses: number[];
+      browser_artifacts_linked: number;
+      unread_or_unreviewed: number;
+    };
+  }>(`/api/scans/${encodeURIComponent(scanId)}/findings/${encodeURIComponent(findingId)}`);
+  const review = data?.csrf_evidence_review;
+  if (error) return <LoadError resource="stored CSRF evidence" error={error} />;
+  if (loading) return <Loading label="Reviewing stored CSRF evidence…" />;
+  if (!review) return null;
+  return (
+    <section aria-label="Automatic CSRF evidence review" className="space-y-2 rounded-md border border-border p-3 text-xs">
+      <h3 className="font-medium">Automatic CSRF evidence review</h3>
+      <dl className="grid gap-1 sm:grid-cols-[auto_1fr] sm:gap-x-4">
+        <dt>Recorded Cookie or Authorization</dt>
+        <dd className="tabular-nums">{review.requests_read ? `${review.requests_with_credentials} of ${review.requests_read} readable request captures` : "None readable"}</dd>
+        <dt>Recorded HTTP statuses</dt>
+        <dd>{review.response_statuses.join(", ") || "None readable"}</dd>
+        <dt>Linked browser artifacts</dt>
+        <dd className="tabular-nums">{review.browser_artifacts_linked}</dd>
+        {review.unread_or_unreviewed > 0 ? <>
+          <dt>HTTP captures outside this review</dt>
+          <dd className="tabular-nums">{review.unread_or_unreviewed}</dd>
+        </> : null}
+      </dl>
+      <p className="text-muted-foreground">
+        Confirmation requires independent evidence of browser behavior and the resulting action.
+      </p>
+    </section>
+  );
+}
+
 export function FindingsPanel({ scanId }: { scanId: string }) {
+  const policy = useApi<{ target_read_only: boolean }>("/api/capabilities");
   const [verdict, setVerdict] = useState("");
   const [severity, setSeverity] = useState("");
   const [selected, setSelected] = useState<Finding | null>(null);
@@ -185,7 +226,12 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
                 {paged.rows.map((f) => (
                   <TableRow key={f.id} className="cursor-pointer" onClick={() => setSelected(f)}>
                     <TableCell>
-                      <VerdictBadge verdict={f.verdict} />
+                      {f.provenance?.assessment === "configuration_observed" ? (
+                        <Badge tone="neutral">Observed</Badge>
+                      ) : <VerdictBadge verdict={f.verdict} />}
+                      {f.review_reason === "browser_artifacts_withheld" ? (
+                        <span className="mt-1 block text-[11px] text-muted-foreground">Limited evidence</span>
+                      ) : null}
                     </TableCell>
                     <TableCell>
                       <SeverityBadge severity={f.severity} />
@@ -211,17 +257,23 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
         {selected ? (
           <DialogContent
             title={selected.title}
-            description={`${selected.vuln_class} · ${selected.verdict} · ${selected.severity} · confidence ${selected.confidence}`}
+            description={`${selected.vuln_class} · ${selected.provenance?.assessment === "configuration_observed" ? "observed" : selected.verdict} · ${selected.severity} · confidence ${selected.confidence}`}
             className="max-w-3xl"
           >
             <div className="max-h-[65vh] space-y-3 overflow-y-auto pr-1">
               <p className="text-xs leading-relaxed text-foreground">{selected.summary}</p>
+              {selected.review_reason === "browser_artifacts_withheld" ? (
+                <p className="text-xs leading-relaxed text-muted-foreground">{selected.review_reason_label}</p>
+              ) : null}
               <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
                 <span className="mono">id {shortId(selected.id)}</span>
                 <span className="mono">engine {selected.provenance?.engine ?? "—"}</span>
                 <span className="mono">source {selected.provenance?.discovery_source ?? "—"}</span>
               </div>
-              {selected.verdict === "confirmed" ? (
+              {selected.vuln_class === "csrf" ? (
+                <CSRFEvidenceReview key={selected.id} scanId={scanId} findingId={selected.id} />
+              ) : null}
+              {selected.verdict === "confirmed" && policy.data?.target_read_only === false ? (
                 <div className="space-y-2">
                   <div>
                     <a
@@ -249,7 +301,12 @@ export function FindingsPanel({ scanId }: { scanId: string }) {
                   ))}
                 </div>
               ) : null}
-              {selected.detail ? (
+              {selected.detail && selected.provenance?.assessment ? (
+                <details>
+                  <summary className="cursor-pointer text-xs text-muted-foreground">Recorded engine observations</summary>
+                  <Code>{JSON.stringify(decodeDetail(selected.detail), null, 2)}</Code>
+                </details>
+              ) : selected.detail ? (
                 <Code>{JSON.stringify(decodeDetail(selected.detail), null, 2)}</Code>
               ) : null}
               <PayloadDoctor scanId={scanId} finding={selected} />
@@ -361,6 +418,11 @@ const REPORT_FORMATS = [
 // are previewed as source text rather than rendered inline.
 const isMachineFormat = (format: string) => format === "json" || format === "sarif";
 
+interface ReportAISummaryStatus {
+  status: "added" | "failed" | "skipped";
+  message: string;
+}
+
 export function ReportsPanel({ scanId }: { scanId: string }) {
   const reports = useApi<Report[]>(`/api/scans/${scanId}/reports`);
   const findings = useApi<Finding[]>(`/api/scans/${scanId}/findings?verdict=confirmed`);
@@ -370,16 +432,13 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
   const [picked, setPicked] = useState<string[]>([]);
   const [ai, setAi] = useState(false);
   const [previewReport, setPreviewReport] = useState<Report | null>(null);
-  const [previewText, setPreviewText] = useState("");
-  const [previewError, setPreviewError] = useState("");
   const [aiProvider, setAiProvider] = useState("");
   const [aiModel, setAiModel] = useState("");
   const [aiModels, setAiModels] = useState<string[]>([]);
-  const providers = useApi<{ providers: { provider: string; label: string; configured: boolean; model?: string }[]; default?: string }>(
-    "/api/llm/providers",
-  );
+  const providers = useApi<ProvidersResponse>("/api/llm/providers");
   const aiProviders = (providers.data?.providers ?? []).filter((p) => p.configured);
-  const aiEffective = aiProvider || providers.data?.default || aiProviders[0]?.provider || "";
+  const aiEffective = aiProviders.find((p) => p.provider === (aiProvider || providers.data?.default))?.provider || aiProviders[0]?.provider || "";
+  const summaryOnly = aiProviders.some((p) => p.provider === aiEffective && p.report_only);
 
   useEffect(() => {
     let alive = true;
@@ -395,6 +454,7 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
   }, [aiEffective]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [aiSummaryStatus, setAISummaryStatus] = useState<ReportAISummaryStatus | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [review, setReview] = useState<{
     verdict: string;
@@ -411,6 +471,7 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
 
   async function create() {
     setError("");
+    setAISummaryStatus(null);
     if (mode === "selected" && picked.length === 0) {
       setError("Pick at least one finding for a selected report.");
       return;
@@ -425,7 +486,10 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
         if (aiEffective) body.ai_provider = aiEffective;
         if (aiModel) body.ai_model = aiModel;
       }
-      await api(`/api/scans/${scanId}/reports`, { method: "POST", body });
+      const report = await api<Report & { ai_summary_status?: ReportAISummaryStatus }>(
+        `/api/scans/${scanId}/reports`, { method: "POST", body },
+      );
+      setAISummaryStatus(report.ai_summary_status ?? null);
       refreshAll();
     } catch (e) {
       setError((e as Error).message);
@@ -482,12 +546,22 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
                   setTemplate(e.target.value);
                   // The platform takes Markdown; switch the format with it so
                   // the two choices cannot disagree.
-                  if (e.target.value === "yeswehack") setFormat("markdown");
+                  if (
+                    e.target.value === "yeswehack" ||
+                    e.target.value === "hackerone" ||
+                    e.target.value === "bugcrowd" ||
+                    e.target.value === "intigriti"
+                  ) {
+                    setFormat("markdown");
+                  }
                 }}
               >
                 <option value="pentest">pentest</option>
                 <option value="bug_bounty">bug bounty</option>
                 <option value="yeswehack">YesWeHack submission (markdown)</option>
+                <option value="hackerone">HackerOne submission (markdown)</option>
+                <option value="bugcrowd">Bugcrowd submission (markdown)</option>
+                <option value="intigriti">Intigriti submission (markdown)</option>
                 <option value="technical">technical</option>
               </select>
             </div>
@@ -543,7 +617,8 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
           <Button size="sm" onClick={create} disabled={busy}>
             <Plus className="size-4" /> {busy ? "Generating…" : "Generate report"}
           </Button>
-          <Button size="sm" variant="outline" onClick={runReview} disabled={reviewBusy}>
+          <Button size="sm" variant="outline" onClick={runReview} disabled={reviewBusy || summaryOnly}
+            title={summaryOnly ? "This provider is available for executive report summaries." : undefined}>
             {reviewBusy ? "Reviewing…" : "Review with AI"}
           </Button>
           <a
@@ -555,6 +630,9 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
             selection summary
           </a>
           {error ? <span className="text-[11px] text-red-700 dark:text-red-400">{error}</span> : null}
+          <p role="status" className={!aiSummaryStatus ? "sr-only" : `w-full text-xs ${aiSummaryStatus.status === "added" ? "text-emerald-700 dark:text-emerald-400" : "text-amber-800 dark:text-amber-300"}`}>
+            {aiSummaryStatus?.message}
+          </p>
           {review ? (
             <div className="w-full rounded-md border border-border p-2.5 text-[11px]">
               <div className="flex flex-wrap items-center gap-2">
@@ -632,7 +710,9 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
         </Card>
       ) : null}
 
-      {reports.loading && !reports.data ? (
+      {reports.error ? (
+        <LoadError resource="reports" error={reports.error} />
+      ) : reports.loading && !reports.data ? (
         <Loading />
       ) : (reports.data ?? []).length === 0 ? (
         <Empty>No reports generated for this scan yet.</Empty>
@@ -665,29 +745,11 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
                         <button
                           type="button"
                           className="text-[11px] text-emerald-700 hover:underline dark:text-emerald-400"
-                          onClick={async () => {
-                            setPreviewReport(r);
-                            setPreviewText("");
-                            setPreviewError("");
-                            if (r.format === "markdown" || isMachineFormat(r.format)) {
-                              try {
-                                const res = await fetch(`/api/reports/${r.id}/content`);
-                                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                                setPreviewText(await res.text());
-                              } catch (e) {
-                                setPreviewError((e as Error).message);
-                              }
-                            }
-                          }}
+                          onClick={() => setPreviewReport(r)}
                         >
-                          preview
+                          Preview
                         </button>
-                        <a
-                          href={`/api/reports/${r.id}/content?download`}
-                          className="text-[11px] text-muted-foreground hover:underline"
-                        >
-                          download
-                        </a>
+                        <ReportDownload report={r} />
                       </div>
                     </TableCell>
                   </TableRow>
@@ -698,45 +760,9 @@ export function ReportsPanel({ scanId }: { scanId: string }) {
         </Card>
       )}
 
-      <Dialog open={Boolean(previewReport)} onOpenChange={(v) => !v && setPreviewReport(null)}>
-        {previewReport ? (
-          <DialogContent
-            title={`Report ${shortId(previewReport.id)}`}
-            description={`${previewReport.format} · ${previewReport.template || "—"}`}
-            className="max-w-5xl"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] text-muted-foreground">
-                {previewReport.format === "pdf" || previewReport.format === "html"
-                  ? "rendered inline"
-                  : previewReport.format === "markdown"
-                    ? "markdown source"
-                    : previewReport.format === "sarif"
-                      ? "SARIF 2.1.0 source"
-                      : "JSON source"}
-              </span>
-              <a
-                href={`/api/reports/${previewReport.id}/content?download`}
-                className="inline-flex items-center gap-1 text-[11px] text-emerald-700 hover:underline dark:text-emerald-400"
-              >
-                <Download className="size-3" /> download
-              </a>
-            </div>
-            {previewError ? <p className="text-[11px] text-red-700 dark:text-red-400">{previewError}</p> : null}
-            {previewReport.format === "pdf" || previewReport.format === "html" ? (
-              <iframe
-                title={`report ${previewReport.id}`}
-                src={`/api/reports/${previewReport.id}/content`}
-                className="h-[65vh] w-full rounded-md border border-border bg-white"
-              />
-            ) : (
-              <pre className="max-h-[65vh] overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted p-3 text-[11px]">
-                {previewText || "loading…"}
-              </pre>
-            )}
-          </DialogContent>
-        ) : null}
-      </Dialog>
+      {previewReport ? (
+        <ReportPreview key={previewReport.id} report={previewReport} onClose={() => setPreviewReport(null)} />
+      ) : null}
     </div>
   );
 }
@@ -1118,6 +1144,7 @@ interface ProviderAvailability {
   provider: string;
   label: string;
   configured: boolean;
+  report_only?: boolean;
   model?: string;
   source?: string;
 }
@@ -1132,6 +1159,8 @@ interface AIUsageResponse {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  estimated_cost_usd?: number;
+  cost_known?: boolean;
 }
 
 /** Ask the selected model for advisory guidance about this scan. The result is
@@ -1147,12 +1176,11 @@ export function AIAssistPanel({ scanId }: { scanId: string }) {
   const [error, setError] = useState("");
   const [result, setResult] = useState<{ text: string; provider: string; model: string } | null>(null);
 
-  const usable = (providers.data?.providers ?? []).filter((p) => p.configured);
-  const effective = provider || providers.data?.default || usable[0]?.provider || "";
+  const usable = (providers.data?.providers ?? []).filter((p) => p.configured && !p.report_only);
+  const savedDefault = providers.data?.default;
+  const effective = usable.find((p) => p.provider === (provider || savedDefault))?.provider || (!savedDefault ? usable[0]?.provider : "") || "";
 
-  // Model versions to match the selected provider. ChatGPT and Claude list
-  // these from their own OAuth session; other providers return their /models
-  // list. Empty means "let the provider choose".
+  // Use the selected provider's API model catalog where available.
   useEffect(() => {
     let alive = true;
     setModels([]);
@@ -1207,7 +1235,7 @@ export function AIAssistPanel({ scanId }: { scanId: string }) {
               value={effective}
               onChange={(e) => setProvider(e.target.value)}
             >
-              {usable.length === 0 ? <option value="">none</option> : null}
+              {!effective ? <option value="">{usable.length ? "Select a provider…" : "none"}</option> : null}
               {usable.map((p) => (
                 <option key={p.provider} value={p.provider}>
                   {p.label}
@@ -1254,6 +1282,9 @@ export function AIAssistPanel({ scanId }: { scanId: string }) {
               AI usage: {usage.data.total_tokens.toLocaleString()} tokens over {usage.data.calls} call
               {usage.data.calls === 1 ? "" : "s"} ({usage.data.prompt_tokens.toLocaleString()} prompt /{" "}
               {usage.data.completion_tokens.toLocaleString()} completion)
+              {usage.data.cost_known && typeof usage.data.estimated_cost_usd === "number"
+                ? ` · ~$${usage.data.estimated_cost_usd.toFixed(4)}`
+                : " · Cost estimate unavailable"}
             </span>
           ) : null}
         </div>
@@ -1302,7 +1333,7 @@ interface Diagnosis {
  * It is advisory: nothing here confirms a finding or changes a verdict.
  */
 function PayloadDoctor({ scanId, finding }: { scanId: string; finding: Finding }) {
-  const providers = useApi<{ providers: { provider: string; label: string; configured: boolean }[] }>("/api/llm/providers");
+  const providers = useApi<ProvidersResponse>("/api/llm/providers");
   const [mode, setMode] = useState("why_failed");
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
@@ -1312,7 +1343,7 @@ function PayloadDoctor({ scanId, finding }: { scanId: string; finding: Finding }
   const [res, setRes] = useState<Diagnosis | null>(null);
   const [copied, setCopied] = useState("");
 
-  const usable = (providers.data?.providers ?? []).filter((p) => p.configured);
+  const usable = (providers.data?.providers ?? []).filter((p) => p.configured && !p.report_only);
   const effective = provider || usable[0]?.provider || "";
 
   useEffect(() => {
@@ -1390,7 +1421,7 @@ function PayloadDoctor({ scanId, finding }: { scanId: string; finding: Finding }
             <option key={m} value={m}>{m}</option>
           ))}
         </select>
-        <Button size="sm" variant="outline" onClick={run} disabled={busy}>
+        <Button size="sm" variant="outline" onClick={run} disabled={busy || !effective}>
           {busy ? "reading evidence…" : "Diagnose"}
         </Button>
         {finding.verdict === "confirmed" ? (

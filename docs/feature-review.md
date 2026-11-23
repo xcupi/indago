@@ -64,7 +64,7 @@ enqueues each pass once per scan and gates it on the scan config.
 | Engine | Implementation | Default in a scan |
 | --- | --- | --- |
 | SQL injection | `internal/scan/sqli.go` | opt-in — `EnableSQLi` / `-enable-sqli` |
-| NoSQL injection (query operators) | `internal/scan/nosqli.go` | opt-in — `EnableNoSQLi` / `-enable-nosqli`; strictly READ-ONLY and GET-query-only |
+| NoSQL injection (query operators) | `internal/scan/nosqli.go` | opt-in — `EnableNoSQLi` / `-enable-nosqli`; GET query parameters by default, with JSON bodies on write methods gated by server and scan policy |
 | SSRF | `internal/scan/ssrf.go` | ON — `SkipSSRF` / `-skip-ssrf` omits it |
 | SSTI | `internal/scan/ssti.go` | opt-in — `EnableSSTI` / `-enable-ssti` |
 | OS command injection | `internal/scan/commandinjection.go` | opt-in — `EnableCommandInjection` / `-enable-command-injection` |
@@ -132,6 +132,33 @@ upgraded tunnel, and the handshake is forced over HTTP/1.1) is pinned in
 `internal/httpengine/upgrade_test.go`. No live run against the VM lab has been
 recorded for this engine yet, and no target's WebSocket support is claimed on
 the strength of these fixtures alone.
+
+#### 2026-11-20 update (Wave 1–4)
+
+The following capabilities were added or extended in the working tree on `2026-11-20`. **Verification status:** all items below are **unit/integration-verified only** against local fixtures (`httptest` / mock / Playwright integration tests) unless explicitly noted; no new live-lab confirmation runs against `192.168.103.20` are recorded for these changes.
+
+**Wave 1 improvements (unit/integration-verified):**
+
+- **NoSQLi JSON body operator injection (`internal/scan/nosqli.go`, `internal/scan/nosqli_test.go`)**: extended beyond GET query operators to test body-carrying JSON endpoints (`POST`/`PUT`/`PATCH` with JSON parameters when `EnableNoSQLi` is enabled and `SkipWriteEndpoints` is off) using `$ne` / `$gt` / array-shape operator payloads.
+- **Bounded browser replay (`internal/scan/verify.go`, `internal/verification/browser.go`, `internal/browser/`)**: extended browser document replay beyond `GET`/`HEAD` and `POST` to support `PUT`/`PATCH`/`DELETE` JSON bodies and `PUT`/`PATCH` `application/x-www-form-urlencoded` bodies (`NavigateBody`).
+- **XXE OAST polling (`internal/scan/xxe.go`, `internal/scan/oast_wiring_test.go`)**: fixed `pollForCallback` to poll immediately on the first iteration (`i == 0`) instead of sleeping a full second before the first poll.
+- **OpenAPI 3.x & Swagger 2.0 YAML (`internal/discovery/openapi.go`, `internal/discovery/openapi_test.go`)**: added YAML parsing (`gopkg.in/yaml.v3` normalized to JSON-compatible structures) and Swagger 2.0 `definitions` / non-body parameter schema support alongside OpenAPI 3.x JSON.
+- **AI advisory cost tracking (`internal/ai/pricing.go`, `internal/web/ai.go`, `web/src/components/panels.tsx`)**: added per-model USD pricing estimation (`LookupPrice`, `EstimateCost`), `GET /api/scans/{id}/ai/usage`, and UI cost display.
+- **HTTP method & TLS hygiene tests (`internal/scan/methodtls_test.go`)**: expanded unit tests (e.g., `TestMethodTLSNonEchoing200TraceAndCORSOptionsAreClean` verifying non-echoing `200` `TRACE` and CORS `Access-Control-Allow-Methods` `OPTIONS` responses do not false-positive).
+
+**Wave 2–4 new capabilities (unit/integration-verified):**
+
+| Capability | Implementation | Config / Route |
+| --- | --- | --- |
+| CSRF detection | `internal/scan/csrf.go` | ON — `SkipCSRF` omits it |
+| Client-Side Prototype Pollution | `internal/scan/prototype_pollution.go` | ON — `SkipPrototypePollution` omits it |
+| Web Cache Poisoning | `internal/scan/cache_poisoning.go` | ON — `SkipCachePoisoning` omits it |
+| Unrestricted File Upload | `internal/scan/fileupload.go` | ON — `SkipFileUpload` omits it (requires `AllowStateChanging`) |
+| Stored XSS (bounded) | `internal/scan/storedxss.go` | opt-in — `EnableStoredXSS` |
+| Tech-Stack Fingerprinting Inventory | `internal/web/tech.go`, `web/src/pages/ScanDetail.tsx` | `GET /api/scans/{id}/tech` |
+| HackerOne & Bugcrowd report templates | `internal/report/bounty_templates.go`, `web/src/components/panels.tsx` | `template=hackerone` / `template=bugcrowd` (Markdown, confirmed findings only) |
+
+`internal/report/templates.go` was also updated with `CWE`/impact/remediation metadata for `VulnCSRF`, `VulnPrototypePollution`, and `VulnCachePoisoning`.
 
 ### Discovery and recon
 

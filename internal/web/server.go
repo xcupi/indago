@@ -25,7 +25,6 @@ import (
 
 	"github.com/indago/indago/internal/ai"
 	"github.com/indago/indago/internal/bounty"
-	"github.com/indago/indago/internal/claudeoauth"
 	"github.com/indago/indago/internal/config"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/evidence"
@@ -72,16 +71,12 @@ type Server struct {
 	// creation then skips AI-drafted summaries, never fails because of it.
 	ai ai.Gateway
 
-	// bountyStore keeps the bug-bounty platform token (see internal/bounty).
+	// bountyStore keeps the bug-bounty platform tokens (see internal/bounty).
 	// Nil leaves the bounty endpoints reporting that the integration is not
 	// configured; it never blocks the scanner.
-	bountyStore  *bounty.Store
-	bountyClient *bounty.Client
-
-	// claudeStore/claudeLogin hold Indago's own Claude OAuth session (PKCE),
-	// independent of any API key or another tool's credential store.
-	claudeStore *claudeoauth.Store
-	claudeLogin *claudeoauth.Login
+	bountyStore   *bounty.Store
+	bountyClient  *bounty.Client
+	bountyClients map[string]bounty.PlatformClient
 
 	// llm is the LLM provider configuration store behind /api/llm/* (see
 	// internal/llm). Nil leaves those endpoints reporting that configuration
@@ -91,12 +86,6 @@ type Server struct {
 	// stored settings plus per-provider env keys (INDAGO_LLM_KEY_<PROVIDER>),
 	// so a scan or report can name its provider. Nil with no store.
 	llmRegistry *llm.Registry
-	// chatgptDir is where Indago keeps its own ChatGPT OAuth session. Empty
-	// means only the borrowed Hermes session is available.
-	chatgptDir string
-	// pendingLogins holds in-flight ChatGPT device-code logins.
-	pendingLogins pendingLogins
-
 	// apiTokenDigest is SHA-256 of the configured bearer token (see
 	// SetAPIToken). Nil means the control API is unauthenticated.
 	apiTokenDigest []byte
@@ -124,9 +113,10 @@ type LoginFunc func(ctx context.Context, p LoginParams) (statePath, finalURL str
 // LoginParams are the inputs to an interactive login.
 type LoginParams struct {
 	// AllowRequest carries the selected project scope; mandatory for browser login.
-	AllowRequest func(string) bool
-	LoginURL     string // page to open for the operator to log in on
-	SuccessURL   string // optional glob; login is considered done when the browser reaches it
+	AllowRequest   func(string) bool
+	AllowAuthority func(string) bool
+	LoginURL       string // page to open for the operator to log in on
+	SuccessURL     string // optional glob; login is considered done when the browser reaches it
 	// UserAgent is the project's hunting identity, when configured. Login
 	// traffic must carry it too: a program can require it on every request.
 	UserAgent string
@@ -139,21 +129,6 @@ func (s *Server) SetLoginFunc(fn LoginFunc) { s.login = fn }
 // SetPDFRenderer wires the HTML-to-PDF converter behind report format "pdf".
 // Not calling it (or passing nil) reports PDF export as unavailable.
 func (s *Server) SetPDFRenderer(r PDFRenderer) { s.pdf = r }
-
-// SetClaudeOAuthStore wires Indago's own Claude OAuth store (PKCE login).
-func (s *Server) SetClaudeOAuthStore(dir string) {
-	s.claudeStore = claudeoauth.NewStore(dir)
-	s.claudeLogin = claudeoauth.NewLogin(s.claudeStore)
-}
-
-// SetChatGPTCredDir wires Indago's own ChatGPT OAuth store (the device-code
-// login below writes here). Unset keeps login endpoints unavailable.
-func (s *Server) SetChatGPTCredDir(dir string) {
-	s.chatgptDir = dir
-	if s.llmRegistry != nil {
-		s.llmRegistry.SetChatGPTCredDir(dir)
-	}
-}
 
 // SetAIGateway wires the advisory AI Gateway. Not calling this (or passing
 // nil) leaves AI disabled — aiGateway() below falls back to ai.Disabled{}.
@@ -205,28 +180,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/llm/models", s.handleListLLMModels)
 	mux.HandleFunc("GET /api/llm/providers", s.handleListLLMProviders)
 
-	// Bug-bounty platform integration (YesWeHack first). GET lists programs;
-	// PUT/DELETE manage the token; POST imports a program's scope.
+	// Bug-bounty platform integration (YesWeHack, HackerOne, Bugcrowd, Intigriti).
+	// GET lists programs; PUT/DELETE manage tokens; POST imports a program's scope.
 	mux.HandleFunc("GET /api/bounty/providers", s.handleListBountyProviders)
 	mux.HandleFunc("PUT /api/bounty/providers/yeswehack/token", s.handleSetBountyToken)
 	mux.HandleFunc("DELETE /api/bounty/providers/yeswehack/token", s.handleClearBountyToken)
+	mux.HandleFunc("PUT /api/bounty/providers/{provider}/token", s.handleSetBountyToken)
+	mux.HandleFunc("DELETE /api/bounty/providers/{provider}/token", s.handleClearBountyToken)
 	mux.HandleFunc("GET /api/bounty/programs", s.handleBountyPrograms)
 	mux.HandleFunc("GET /api/bounty/programs/{slug}", s.handleBountyProgram)
 	mux.HandleFunc("POST /api/bounty/import", s.handleImportBountyPrograms)
 	mux.HandleFunc("POST /api/scans/{id}/bounty/yeswehack/draft", s.handleYesWeHackDraft)
 	mux.HandleFunc("GET /api/payload-library", s.handleListPayloadLibrary)
-	mux.HandleFunc("GET /api/llm/chatgpt/session", s.handleChatGPTStatus)
-	mux.HandleFunc("POST /api/llm/chatgpt/login", s.handleChatGPTLoginStart)
-	mux.HandleFunc("POST /api/llm/chatgpt/login/poll", s.handleChatGPTLoginPoll)
-	mux.HandleFunc("DELETE /api/llm/chatgpt/session", s.handleChatGPTLogout)
 	mux.HandleFunc("POST /api/scans/{id}/ai/assist", s.handleScanAIAssist)
 	mux.HandleFunc("GET /api/scans/{id}/ai/usage", s.handleScanAIUsage)
 	mux.HandleFunc("POST /api/scans/{id}/ai/diagnose", s.handleDiagnosePayload)
 	mux.HandleFunc("POST /api/scans/{id}/ai/report-review", s.handleReportReview)
-	mux.HandleFunc("POST /api/llm/claude/login/start", s.handleClaudeLoginStart)
-	mux.HandleFunc("POST /api/llm/claude/login/finish", s.handleClaudeLoginFinish)
-	mux.HandleFunc("GET /api/llm/claude/session", s.handleClaudeSession)
-	mux.HandleFunc("DELETE /api/llm/claude/session", s.handleClaudeLogout)
 
 	mux.HandleFunc("GET /api/projects", s.handleListProjects)
 	mux.HandleFunc("POST /api/projects", s.handleCreateProject)
@@ -246,6 +215,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/projects/{id}/targets/{tid}", s.handleGetTarget)
 	mux.HandleFunc("GET /api/projects/{id}/scope", s.handleGetScope)
 	mux.HandleFunc("PUT /api/projects/{id}/scope", s.handlePutScope)
+	mux.HandleFunc("POST /api/projects/{id}/read-snapshot", s.handleReadSnapshot)
 	mux.HandleFunc("GET /api/projects/{id}/findings", s.handleListProjectFindings)
 	mux.HandleFunc("GET /api/projects/{id}/reports", s.handleListProjectReports)
 	mux.HandleFunc("GET /api/findings", s.handleListAllFindings)
@@ -256,6 +226,7 @@ func (s *Server) Handler() http.Handler {
 	// server was given a login function (indago serve -browser).
 	mux.HandleFunc("POST /api/auth/login", s.handleInteractiveLogin)
 
+	mux.HandleFunc("GET /api/dashboard/scans", s.handleDashboardScans)
 	mux.HandleFunc("GET /api/scans", s.handleListScans)
 	mux.HandleFunc("POST /api/scans", s.handleCreateScan)
 	mux.HandleFunc("POST /api/scans/bulk-delete", s.handleBulkDeleteScans)
@@ -264,6 +235,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/scans/{id}/endpoints", s.handleListEndpoints)
 	mux.HandleFunc("GET /api/scans/{id}/status", s.handleScanStatus)
 	mux.HandleFunc("GET /api/scans/{id}/coverage", s.handleScanCoverage)
+	mux.HandleFunc("GET /api/scans/{id}/tech", s.handleScanTech)
 	mux.HandleFunc("GET /api/scans/{id}/tests", s.handleListScanTests)
 	mux.HandleFunc("GET /api/scans/{id}/idor/candidates", s.handleIDORCandidates)
 	mux.HandleFunc("GET /api/scans/{id}/explorer", s.handleScanExplorer)
@@ -495,6 +467,15 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
+}
+
+func (s *Server) handleDashboardScans(w http.ResponseWriter, r *http.Request) {
+	overview, err := s.store.Scans().Overview(r.Context(), 8)
+	if err != nil {
+		s.writeInternalError(w, "load dashboard scans", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, overview)
 }
 
 func (s *Server) handleListScans(w http.ResponseWriter, r *http.Request) {

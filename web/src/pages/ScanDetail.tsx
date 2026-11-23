@@ -9,7 +9,7 @@ import { Field, Input } from "@/components/ui/input";
 import { Alert, Code, Loading, Stat } from "@/components/ui/misc";
 import { AIAssistPanel, CoveragePanel, EndpointsPanel, EvidencePanel, ExplorerPanel, FindingsPanel, IDORPanel, ReportsPanel, TestsPanel } from "@/components/panels";
 import { api, refreshAll, useApi } from "@/lib/api";
-import type { Scan } from "@/lib/types";
+import type { Scan, ScanTechInventory } from "@/lib/types";
 import { formatTime, pct, shortId } from "@/lib/utils";
 
 interface QueueStats {
@@ -30,11 +30,17 @@ function currentTab(): string {
 }
 
 export default function ScanDetail({ id }: { id: string }) {
+  const targetPolicy = useApi<{ target_read_only: boolean }>("/api/capabilities");
   const scan = useApi<Scan>(`/api/scans/${id}`, [], 3000);
   // The queue is the source of truth for job progress. Reading it separately
   // keeps the denominator stable when cancel moves queued jobs to canceled:
   // 1200/1400 must not become 1200/1200.
   const jobStats = useApi<QueueStats>(`/api/scans/${id}/stats`, [], 3000);
+  const tech = useApi<ScanTechInventory>(
+    `/api/scans/${id}/tech`,
+    [id, scan.data?.state],
+    scan.data?.state === "running" ? 5000 : 0,
+  );
   const [tab, setTab] = useState(currentTab());
 
   // Keep the active tab in the hash so a deep link, a reload and Back/Forward
@@ -65,11 +71,16 @@ export default function ScanDetail({ id }: { id: string }) {
     cors: true,
     openRedirect: true,
     graphql: true,
+    csrf: true,
+    prototypePollution: true,
+    cachePoisoning: true,
+    fileUpload: true,
     command: false,
     ssti: false,
     sqli: false,
     nosqli: false,
     xxe: false,
+    storedXSS: false,
   });
 
   useEffect(() => {
@@ -96,11 +107,16 @@ export default function ScanDetail({ id }: { id: string }) {
       cors: !c.skip_cors,
       openRedirect: !c.skip_open_redirect,
       graphql: !c.skip_graphql,
+      csrf: !c.skip_csrf,
+      prototypePollution: !c.skip_prototype_pollution,
+      cachePoisoning: !c.skip_cache_poisoning,
+      fileUpload: !c.skip_file_upload,
       command: Boolean(c.enable_command_injection),
       ssti: Boolean(c.enable_ssti),
       sqli: Boolean(c.enable_sqli),
       nosqli: Boolean(c.enable_nosqli),
       xxe: Boolean(c.enable_xxe),
+      storedXSS: Boolean(c.enable_stored_xss),
     });
   }, [scan.data?.id, scan.data?.updated_at]);
 
@@ -155,11 +171,16 @@ export default function ScanDetail({ id }: { id: string }) {
           skip_cors: !caps.cors,
           skip_open_redirect: !caps.openRedirect,
           skip_graphql: !caps.graphql,
+          skip_csrf: !caps.csrf,
+          skip_prototype_pollution: !caps.prototypePollution,
+          skip_cache_poisoning: !caps.cachePoisoning,
+          skip_file_upload: !caps.fileUpload,
           enable_command_injection: caps.command,
           enable_ssti: caps.ssti,
           enable_sqli: caps.sqli,
           enable_nosqli: caps.nosqli,
           enable_xxe: caps.xxe,
+          enable_stored_xss: caps.storedXSS,
         },
       });
       setCapOpen(false);
@@ -183,9 +204,10 @@ export default function ScanDetail({ id }: { id: string }) {
   const jobsDone = jobStats.data?.succeeded ?? stats?.jobs_completed ?? 0;
   const jobsCanceled = jobStats.data?.canceled ?? stats?.jobs_canceled ?? 0;
   const jobsFailed = jobStats.data?.failed ?? stats?.jobs_failed ?? 0;
-  const canStart = s.state === "created" || s.state === "queued" || s.state === "draft";
+  const activeScanAllowed = targetPolicy.data?.target_read_only === false;
+  const canStart = activeScanAllowed && ["created", "queued", "draft"].includes(s.state);
   const canPause = s.state === "running";
-  const canResume = s.state === "paused";
+  const canResume = activeScanAllowed && ["paused", "awaiting_auth"].includes(s.state);
   const canCancel = ["running", "paused", "queued"].includes(s.state);
 
   return (
@@ -215,10 +237,10 @@ export default function ScanDetail({ id }: { id: string }) {
                 <Square className="size-4" /> Cancel
               </Button>
             ) : null}
-            <Button size="sm" variant="outline" onClick={() => setTuneOpen(true)}>
+            {activeScanAllowed ? <Button size="sm" variant="outline" onClick={() => setTuneOpen(true)}>
               <SlidersHorizontal className="size-4" /> Tune
-            </Button>
-            {s.state === "created" ? (
+            </Button> : null}
+            {activeScanAllowed && s.state === "created" ? (
               <Button size="sm" variant="outline" onClick={() => setCapOpen(true)}>
                 Capabilities
               </Button>
@@ -227,6 +249,11 @@ export default function ScanDetail({ id }: { id: string }) {
         }
       />
 
+      {targetPolicy.data?.target_read_only ? (
+        <p className="mb-3 text-xs text-muted-foreground">
+          Stored scan. Use <a className="underline" href={`#/projects/${s.project_id}`}>Read-only snapshot in this project</a> for a new target read.
+        </p>
+      ) : null}
       {error ? <Alert className="mb-3">{error}</Alert> : null}
       {s.error ? <Alert className="mb-3">{s.error}</Alert> : null}
 
@@ -265,6 +292,8 @@ export default function ScanDetail({ id }: { id: string }) {
 
         <TabsContent value="overview">
           <div className="grid gap-4 lg:grid-cols-2">
+            <TechStackCard tech={tech.data} />
+
             <Card>
               <CardHeader>
                 <CardTitle>Configuration</CardTitle>
@@ -394,11 +423,16 @@ export default function ScanDetail({ id }: { id: string }) {
               ["cors", "CORS", "Origin-reflection checks on cross-origin responses."],
               ["openRedirect", "Open redirect", "Redirect targets that leave the site's own origin."],
               ["graphql", "GraphQL", "Introspection and field-level authorization probes on GraphQL endpoints."],
+              ["csrf", "CSRF", "Cross-site request forgery token and SameSite/origin protection checks on state-changing endpoints."],
+              ["prototypePollution", "Prototype pollution", "Client-side and server-side __proto__/constructor payload probes."],
+              ["cachePoisoning", "Cache poisoning", "Unkeyed header and query parameter reflection checks on cacheable responses."],
+              ["fileUpload", "File upload", "Bounded multipart extension and MIME validation checks on upload endpoints (requires -allow-state-changing)."],
               ["command", "OS command injection", "Opt-in marker probes; confirms two independent executions."],
               ["ssti", "Server-side template injection", "Opt-in arithmetic template probes; confirms two independent evaluations."],
               ["sqli", "SQL injection", "Opt-in quote-breaking and boolean pairs; confirmed by the database's own error signature."],
-              ["nosqli", "NoSQL injection", "Opt-in read-only array/operator probes on GET query parameters; confirmed by a new database error or a control-checked differential."],
+              ["nosqli", "NoSQL injection", "Opt-in checks on GET query parameters. JSON request bodies on write methods require server permission and a scan that includes write-like endpoints."],
               ["xxe", "XML external entity", "Opt-in XML-body probes; confirms in-band entity expansion, and uses your callback when one is set."],
+              ["storedXSS", "Stored XSS", "Opt-in state-changing canary probes verified across subsequent crawled pages."],
             ].map(([key, label, hint]) => (
               <label key={key} className="flex items-start justify-between gap-4 rounded-md border border-border p-3">
                 <span>
@@ -423,6 +457,59 @@ export default function ScanDetail({ id }: { id: string }) {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+function TechStackCard({ tech }: { tech?: ScanTechInventory }) {
+  if (!tech || tech.endpoints_analyzed <= 0) return null;
+
+  const allGroups: Array<{
+    label: string;
+    items: string[];
+    tone: "info" | "violet" | "neutral" | "success" | "warn";
+  }> = [
+    { label: "Languages", items: tech.languages ?? [], tone: "info" },
+    { label: "Frameworks", items: tech.frameworks ?? [], tone: "violet" },
+    { label: "Templates", items: tech.templates ?? [], tone: "neutral" },
+    { label: "Servers", items: tech.servers ?? [], tone: "success" },
+    { label: "WAF", items: tech.waf_vendors ?? [], tone: "warn" },
+  ];
+  const groups = allGroups.filter((g) => g.items.length > 0);
+
+  return (
+    <Card className="lg:col-span-2">
+      <CardHeader className="flex-row items-center justify-between space-y-0">
+        <CardTitle>Tech stack</CardTitle>
+        <span className="text-[11px] text-muted-foreground">
+          {tech.endpoints_analyzed} {tech.endpoints_analyzed === 1 ? "endpoint" : "endpoints"} analyzed
+        </span>
+      </CardHeader>
+      <CardContent>
+        {groups.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            No specific technologies fingerprinted yet.
+          </p>
+        ) : (
+          <div className="space-y-2 text-xs text-foreground">
+            {groups.map((g) => (
+              <Row
+                key={g.label}
+                label={g.label}
+                value={
+                  <span className="flex flex-wrap justify-end gap-1.5">
+                    {g.items.map((name) => (
+                      <Badge key={name} tone={g.tone}>
+                        {name}
+                      </Badge>
+                    ))}
+                  </span>
+                }
+              />
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

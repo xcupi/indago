@@ -28,16 +28,16 @@ func stubModel(t *testing.T, content string) (*httptest.Server, *string) {
 		_, _ = w.Write(out)
 	}))
 	t.Cleanup(srv.Close)
-	t.Setenv("INDAGO_LLM_KEY_OPENAI", "test-key")
-	t.Setenv("INDAGO_LLM_BASE_URL_OPENAI", srv.URL)
-	t.Setenv("INDAGO_LLM_MODEL_OPENAI", "test-model")
+	t.Setenv("INDAGO_LLM_KEY_DEEPSEEK", "test-key")
+	t.Setenv("INDAGO_LLM_BASE_URL_DEEPSEEK", srv.URL)
+	t.Setenv("INDAGO_LLM_MODEL_DEEPSEEK", "test-model")
 	return srv, &prompt
 }
 
 func configureLLM(t *testing.T, a api, body map[string]any) {
 	t.Helper()
 	if _, ok := body["provider"]; !ok {
-		body["provider"] = "openai"
+		body["provider"] = "deepseek"
 	}
 	if _, ok := body["model"]; !ok {
 		body["model"] = "test-model"
@@ -81,7 +81,7 @@ func TestDiagnoseDropsRepeatsAndOutOfScope(t *testing.T) {
 		Advisory bool `json:"advisory"`
 	}
 	a.mustJSON(a.do("POST", "/api/scans/"+string(scanID)+"/ai/diagnose",
-		map[string]any{"finding_id": f.ID, "provider": "openai"}), http.StatusOK, &resp)
+		map[string]any{"finding_id": f.ID, "provider": "deepseek"}), http.StatusOK, &resp)
 
 	if len(resp.Payloads) != 1 {
 		t.Fatalf("payloads = %+v (want only the in-scope, untried one)", resp.Payloads)
@@ -138,7 +138,7 @@ func TestDiagnoseSkipsConfirmedFindingWithoutCallingModel(t *testing.T) {
 		SkipReason string `json:"skip_reason"`
 	}
 	a.mustJSON(a.do("POST", "/api/scans/"+string(scanID)+"/ai/diagnose",
-		map[string]any{"finding_id": f.ID, "provider": "openai"}), http.StatusOK, &resp)
+		map[string]any{"finding_id": f.ID, "provider": "deepseek"}), http.StatusOK, &resp)
 	if !resp.Skipped || !strings.Contains(resp.SkipReason, "already confirmed") {
 		t.Fatalf("resp = %+v", resp)
 	}
@@ -180,7 +180,7 @@ func TestDiagnoseBudgetExhaustedSkips(t *testing.T) {
 		Budget   int    `json:"attempt_budget"`
 	}
 	a.mustJSON(a.do("POST", "/api/scans/"+string(scanID)+"/ai/diagnose",
-		map[string]any{"finding_id": f.ID, "provider": "openai"}), http.StatusOK, &resp)
+		map[string]any{"finding_id": f.ID, "provider": "deepseek"}), http.StatusOK, &resp)
 	if !resp.Skipped || resp.Attempts != 2 || resp.Budget != 2 {
 		t.Fatalf("resp = %+v", resp)
 	}
@@ -197,7 +197,7 @@ func TestDiagnoseRespectsMasterSwitch(t *testing.T) {
 	f, _, _ := seedFinding(t, a, scanID)
 
 	rec := a.do("POST", "/api/scans/"+string(scanID)+"/ai/diagnose",
-		map[string]any{"finding_id": f.ID, "provider": "openai"})
+		map[string]any{"finding_id": f.ID, "provider": "deepseek"})
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}

@@ -3,11 +3,12 @@ import { PageTitle } from "@/components/Layout";
 import { selectedProject, setSelectedProject } from "@/components/Layout";
 import { Badge, SeverityBadge, VerdictBadge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { Empty, Loading } from "@/components/ui/misc";
+import { Empty, LoadError, Loading } from "@/components/ui/misc";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Pagination, usePagination } from "@/components/Pagination";
+import { ReportPreview } from "@/components/ReportFile";
 import { useApi } from "@/lib/api";
 import { navigate, useQuery } from "@/lib/router";
 import type { Finding, Project, Report, Scan } from "@/lib/types";
@@ -161,9 +162,11 @@ export function FindingsPage() {
     <div>
       <PageTitle
         title="Findings"
-        subtitle={`Every finding across scans and projects — ${rows.length} matching, ${confirmed} confirmed.`}
+        subtitle={scans.data && findings.data ? `${rows.length} matching, ${confirmed} confirmed.` : undefined}
       />
-      {scans.loading && !scans.data ? (
+      {scans.error ? (
+        <LoadError resource="scans" error={scans.error} />
+      ) : scans.loading && !scans.data ? (
         <Loading />
       ) : (
         <>
@@ -225,7 +228,9 @@ export function FindingsPage() {
               </Button>
             </CardContent>
           </Card>
-          {findings.loading && !findings.data ? (
+          {findings.error ? (
+            <LoadError resource="findings" error={findings.error} />
+          ) : findings.loading && !findings.data ? (
             <Loading />
           ) : rows.length === 0 ? (
             <Empty>No findings in this selection.</Empty>
@@ -284,6 +289,7 @@ export function FindingsPage() {
 }
 
 export function ReportsPage() {
+  const [previewReport, setPreviewReport] = useState<Report | null>(null);
   const scans = useApi<Scan[]>("/api/scans");
   const reports = useApi<Report[]>("/api/reports");
   const filter = useCollectionFilter(scans.data ?? []);
@@ -300,9 +306,11 @@ export function ReportsPage() {
     <div>
       <PageTitle
         title="Reports"
-        subtitle={`Every generated report — ${rows.length} shown. The scan's evidence stays the source of truth.`}
+        subtitle={scans.data && reports.data ? `${rows.length} shown.` : undefined}
       />
-      {scans.loading && !scans.data ? (
+      {scans.error ? (
+        <LoadError resource="scans" error={scans.error} />
+      ) : scans.loading && !scans.data ? (
         <Loading />
       ) : (
         <>
@@ -314,7 +322,9 @@ export function ReportsPage() {
             projects={filter.projects}
             scans={filter.projectScans}
           />
-          {reports.loading && !reports.data ? (
+          {reports.error ? (
+            <LoadError resource="reports" error={reports.error} />
+          ) : reports.loading && !reports.data ? (
             <Loading />
           ) : rows.length === 0 ? (
             <Empty>No reports in this selection. Generate one from a scan's Reports tab.</Empty>
@@ -356,14 +366,13 @@ export function ReportsPage() {
                           <TableCell className="text-[11px] text-muted-foreground">{projectName}</TableCell>
                           <TableCell className="text-[11px] text-muted-foreground">{formatTime(r.created_at)}</TableCell>
                           <TableCell className="text-right">
-                            <a
-                              href={`/api/reports/${r.id}/content`}
-                              target="_blank"
-                              rel="noreferrer"
+                            <button
+                              type="button"
+                              onClick={() => setPreviewReport(r)}
                               className="text-[11px] text-emerald-700 hover:underline dark:text-emerald-400"
                             >
-                              open
-                            </a>
+                              Open
+                            </button>
                           </TableCell>
                         </TableRow>
                       );
@@ -375,6 +384,9 @@ export function ReportsPage() {
           )}
         </>
       )}
+      {previewReport ? (
+        <ReportPreview key={previewReport.id} report={previewReport} onClose={() => setPreviewReport(null)} />
+      ) : null}
     </div>
   );
 }

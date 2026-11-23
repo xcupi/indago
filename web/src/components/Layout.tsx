@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
-  BarChart3,
   Bug,
   FileText,
   FolderKanban,
@@ -136,10 +135,14 @@ export default function Layout({ route, children }: { route: string[]; children:
 
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-border bg-background px-4 backdrop-blur">
-          <div className="flex items-center gap-1 md:hidden">
-            <BarChart3 className="size-4 text-emerald-700 dark:text-emerald-400" />
-            <span className="text-sm font-semibold">INDAGO</span>
-          </div>
+          <select
+            className="h-8 min-w-0 rounded-md border border-border bg-background px-2 text-xs md:hidden"
+            aria-label="Navigate Indago"
+            value={NAV.find((item) => item.key === active)?.href ?? "#/dashboard"}
+            onChange={(event) => navigate(event.target.value)}
+          >
+            {NAV.map(({ href, label }) => <option key={href} value={href}>{label}</option>)}
+          </select>
           <div className="ml-auto flex items-center gap-2">
             <select
               value={live}
@@ -171,8 +174,8 @@ export default function Layout({ route, children }: { route: string[]; children:
             >
               {theme === "dark" ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
             </Button>
-            <Button variant="outline" size="sm" onClick={() => refreshAll()}>
-              <RefreshCw className="size-3.5" /> Refresh
+            <Button variant="outline" size="sm" aria-label="Refresh" onClick={() => refreshAll()}>
+              <RefreshCw className="size-3.5" /> <span className="hidden md:inline">Refresh</span>
             </Button>
           </div>
         </header>

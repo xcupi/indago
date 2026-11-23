@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/indago/indago/internal/llm"
 )
@@ -58,10 +57,8 @@ func (s *Server) handleGetLLMConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handlePutLLMConfig creates or updates the configuration. An empty api_key
-// keeps the stored key, so the UI never has to round-trip a secret through the
-// browser to change the model. Validation errors are 400s and contain no
-// submitted value; storage errors are 500s with a generic message.
+// handlePutLLMConfig updates and selects a provider profile. A blank api_key
+// keeps that profile's stored key or uses its environment key.
 func (s *Server) handlePutLLMConfig(w http.ResponseWriter, r *http.Request) {
 	if !s.requireLLMStore(w) {
 		return
@@ -86,7 +83,7 @@ func (s *Server) handlePutLLMConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, cfg.Status())
 }
 
-// handleDeleteLLMConfig clears both the stored settings and the stored key.
+// handleDeleteLLMConfig clears all stored profiles and their credentials.
 func (s *Server) handleDeleteLLMConfig(w http.ResponseWriter, r *http.Request) {
 	if !s.requireLLMStore(w) {
 		return
@@ -124,71 +121,20 @@ func (s *Server) handleTestLLM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ?provider= probes that provider instead of the stored one, using the
-	// same resolution a scan/report call would use (settings or env, and the
-	// ChatGPT / Claude OAuth sessions).
-	prober := llm.NewProber(0)
-	var res llm.ProbeResult
-	probeClaudeOAuth := func(prov, model string) (llm.ProbeResult, bool) {
-		if s.claudeLogin == nil || s.claudeStore == nil {
-			return llm.ProbeResult{}, false
-		}
-		if c, err := s.claudeStore.Load(); err != nil || c.AccessToken == "" {
-			return llm.ProbeResult{}, false
-		}
-		if model == "" {
-			model = "claude-sonnet-5-5"
-		}
-		start := time.Now()
-		models, err := s.claudeLogin.ListModels(r.Context())
-		out := llm.ProbeResult{Provider: prov, Model: model, LatencyMS: time.Since(start).Milliseconds()}
-		if err != nil {
-			out.Error = err.Error()
-			return out, true
-		}
-		if len(models) > 0 && out.Model == "" {
-			out.Model = models[0]
-		}
-		out.OK = true
-		return out, true
+	if s.llmRegistry == nil {
+		writeError(w, http.StatusServiceUnavailable, "LLM settings are not available on this server")
+		return
 	}
-
-	if provider != "" {
-		if s.llmRegistry == nil {
-			writeError(w, http.StatusServiceUnavailable, "LLM settings are not available on this server")
-			return
-		}
-		if strings.EqualFold(provider, llm.ProviderClaude) || strings.EqualFold(provider, llm.ProviderAnthropic) {
-			if oauthRes, ok := probeClaudeOAuth(strings.ToLower(provider), ""); ok {
-				res = oauthRes
-			}
-		}
-		if !res.OK && res.Error == "" {
-			cred, err := s.llmRegistry.Resolve(provider, "")
-			if err != nil {
-				writeError(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			if cred.Provider == llm.ProviderChatGPT {
-				res = prober.ProbeChatGPTDir(r.Context(), s.chatgptDir)
-			} else {
-				res = prober.Test(r.Context(), cred.Config())
-			}
-			res.Error = cred.Redact(res.Error)
-		}
-	} else if (cfg.Provider == llm.ProviderClaude || cfg.Provider == llm.ProviderAnthropic) && !cfg.HasKey() {
-		if oauthRes, ok := probeClaudeOAuth(cfg.Provider, cfg.Model); ok {
-			res = oauthRes
-		} else {
-			res = prober.Test(r.Context(), cfg)
-			res.Error = cfg.Redact(res.Error)
-		}
-	} else if cfg.Provider == llm.ProviderChatGPT {
-		res = prober.ProbeChatGPTDir(r.Context(), s.chatgptDir)
-	} else {
-		res = prober.Test(r.Context(), cfg)
-		res.Error = cfg.Redact(res.Error) // defense in depth at the HTTP boundary
+	if provider == "" {
+		provider = cfg.Provider
 	}
+	cred, err := s.llmRegistry.Resolve(provider, "")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	res := llm.NewProber(0).Test(r.Context(), cred.Config())
+	res.Error = cred.Redact(res.Error)
 	if res.OK {
 		s.log.Info("LLM connection test succeeded",
 			"provider", res.Provider, "model", res.Model, "latency_ms", res.LatencyMS)
@@ -216,7 +162,7 @@ func (s *Server) handleListLLMModels(w http.ResponseWriter, r *http.Request) {
 	provider := strings.ToLower(strings.TrimSpace(req.Provider))
 	cfg, err := s.llm.Load()
 	if errors.Is(err, llm.ErrNotConfigured) {
-		// An explicit OAuth provider can be listed even when no default
+		// An explicitly selected API provider can be listed even when no default
 		// provider is saved in Settings. Without one, there is nothing to ask.
 		if provider == "" {
 			writeError(w, http.StatusBadRequest, "LLM provider is not configured")
@@ -230,20 +176,14 @@ func (s *Server) handleListLLMModels(w http.ResponseWriter, r *http.Request) {
 	if provider == "" {
 		provider = cfg.Provider
 	}
-	prober := llm.NewProber(0)
+	if s.llmRegistry == nil {
+		writeError(w, http.StatusServiceUnavailable, "LLM settings are not available on this server")
+		return
+	}
+	cred, err := s.llmRegistry.Resolve(provider, "")
 	var models []string
-	if provider == llm.ProviderChatGPT {
-		models, err = prober.ChatGPTModels(r.Context(), s.chatgptDir)
-	} else {
-		var cred llm.Credential
-		if s.llmRegistry != nil {
-			cred, err = s.llmRegistry.Resolve(provider, "")
-		}
-		if err == nil && (provider == llm.ProviderClaude || provider == llm.ProviderAnthropic) && !cred.HasKey() && s.claudeLogin != nil {
-			models, err = s.claudeLogin.ListModels(r.Context())
-		} else if err == nil {
-			models, err = prober.Models(r.Context(), cred.Config())
-		}
+	if err == nil {
+		models, err = llm.NewProber(0).Models(r.Context(), cred.Config())
 	}
 	if err != nil {
 		msg := cfg.Redact(err.Error())

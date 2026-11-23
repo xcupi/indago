@@ -73,3 +73,26 @@ func TestProjectCollectionsUnknownProject(t *testing.T) {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestRecentConfirmedFindingsAcrossScans(t *testing.T) {
+	a := newAPI(t, nil)
+	older, _ := newScanInNewProject(t, a)
+	newer, _ := newScanInNewProject(t, a)
+	confirmed, _, _ := seedFinding(t, a, older)
+	confirmed.Verdict = domain.VerdictConfirmed
+	if err := a.st.Findings().Update(t.Context(), confirmed); err != nil {
+		t.Fatal(err)
+	}
+	seedFinding(t, a, newer)
+
+	var findings []domain.Finding
+	a.mustJSON(a.do("GET", "/api/findings?verdict=confirmed&limit=1", nil), http.StatusOK, &findings)
+	if len(findings) != 1 || findings[0].ID != confirmed.ID {
+		t.Fatalf("findings = %+v, want the confirmed finding from the older scan", findings)
+	}
+	for _, query := range []string{"verdict=unknown", "limit=0", "limit=101"} {
+		if got := a.do("GET", "/api/findings?"+query, nil).Code; got != http.StatusBadRequest {
+			t.Errorf("%s returned %d, want 400", query, got)
+		}
+	}
+}

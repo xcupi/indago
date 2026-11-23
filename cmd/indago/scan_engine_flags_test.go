@@ -32,9 +32,9 @@ func TestCLIScanCreateWiresWave1EngineFlags(t *testing.T) {
 	target := idFrom(t, out)
 
 	err := run("scan", "create", "-project", project, "-target", target,
-		"-enable-command-injection", "-enable-ssti", "-enable-sqli", "-enable-nosqli",
+		"-enable-command-injection", "-enable-ssti", "-enable-sqli", "-enable-nosqli", "-enable-stored-xss",
 		"-enable-xxe", "-xxe-callback", "https://oast.example.test/hook", "-xxe-poll", "https://oast.example.test/poll",
-		"-skip-ssrf", "-skip-cors", "-skip-security-headers", "-skip-method-tls", "-skip-websocket", "-skip-host-header", "-skip-jwt", "-skip-open-redirect", "-skip-graphql",
+		"-skip-ssrf", "-skip-cors", "-skip-security-headers", "-skip-method-tls", "-skip-websocket", "-skip-csrf", "-skip-prototype-pollution", "-skip-cache-poisoning", "-skip-file-upload", "-skip-host-header", "-skip-jwt", "-skip-open-redirect", "-skip-graphql",
 		"-ssrf-callback", "https://oast.example.test/ssrf", "-ssrf-poll", "https://oast.example.test/ssrf-poll",
 	)
 	if err != nil {
@@ -55,12 +55,17 @@ func TestCLIScanCreateWiresWave1EngineFlags(t *testing.T) {
 		{"enable_ssti", cfg.EnableSSTI},
 		{"enable_sqli", cfg.EnableSQLi},
 		{"enable_nosqli", cfg.EnableNoSQLi},
+		{"enable_stored_xss", cfg.EnableStoredXSS},
 		{"enable_xxe", cfg.EnableXXE},
 		{"skip_ssrf", cfg.SkipSSRF},
 		{"skip_cors", cfg.SkipCORS},
 		{"skip_security_headers", cfg.SkipSecurityHeaders},
 		{"skip_method_tls", cfg.SkipMethodTLS},
 		{"skip_websocket", cfg.SkipWebSocket},
+		{"skip_csrf", cfg.SkipCSRF},
+		{"skip_prototype_pollution", cfg.SkipPrototypePollution},
+		{"skip_cache_poisoning", cfg.SkipCachePoisoning},
+		{"skip_file_upload", cfg.SkipFileUpload},
 		{"skip_host_header", cfg.SkipHostHeader},
 		{"skip_jwt", cfg.SkipJWT},
 		{"skip_open_redirect", cfg.SkipOpenRedirect},
@@ -111,10 +116,10 @@ func TestCLIScanCreateDefaultsLeaveWave1EnginesAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := sc.Config
-	if cfg.SkipSSRF || cfg.SkipCORS || cfg.SkipSecurityHeaders || cfg.SkipMethodTLS || cfg.SkipWebSocket || cfg.SkipHostHeader || cfg.SkipJWT || cfg.SkipOpenRedirect || cfg.SkipGraphQL {
+	if cfg.SkipSSRF || cfg.SkipCORS || cfg.SkipSecurityHeaders || cfg.SkipMethodTLS || cfg.SkipWebSocket || cfg.SkipCSRF || cfg.SkipPrototypePollution || cfg.SkipCachePoisoning || cfg.SkipFileUpload || cfg.SkipHostHeader || cfg.SkipJWT || cfg.SkipOpenRedirect || cfg.SkipGraphQL {
 		t.Errorf("an omitted -skip-* flag must not disable a default engine: %+v", cfg)
 	}
-	if cfg.EnableCommandInjection || cfg.EnableSSTI || cfg.EnableSQLi || cfg.EnableNoSQLi || cfg.EnableXXE {
+	if cfg.EnableCommandInjection || cfg.EnableSSTI || cfg.EnableSQLi || cfg.EnableNoSQLi || cfg.EnableXXE || cfg.EnableStoredXSS {
 		t.Errorf("an omitted -enable-* flag must not opt an engine in: %+v", cfg)
 	}
 	if cfg.SSRFCallbackURL != "" || cfg.SSRFCallbackPollURL != "" || cfg.XXECallbackURL != "" || cfg.XXECallbackPollURL != "" {

@@ -207,6 +207,7 @@ type findingView struct {
 	Evidence          []report.EvidenceView `json:"evidence"`
 	ReviewReason      report.ReviewReason   `json:"review_reason,omitempty"`
 	ReviewReasonLabel string                `json:"review_reason_label,omitempty"`
+	CSRFEvidence      *csrfEvidenceReview   `json:"csrf_evidence_review,omitempty"`
 }
 
 // handleGetFinding returns a finding's full detail view, scoped to the scan
@@ -237,6 +238,7 @@ func (s *Server) handleGetFinding(w http.ResponseWriter, r *http.Request) {
 		Finding: f, ParsedDetail: decodeFindingDetail(f.Detail),
 		Section: rv.Section, Verified: rv.Verified, Attempts: rv.Attempts, Evidence: nonNil(rv.Evidence),
 		ReviewReason: rv.ReviewReason, ReviewReasonLabel: rv.ReviewReasonLabel,
+		CSRFEvidence: s.reviewCSRFEvidence(f, lookup),
 	}
 	if f.EndpointID != "" {
 		if ep, err := s.store.Endpoints().Get(r.Context(), f.EndpointID); err == nil {
@@ -260,6 +262,10 @@ func (s *Server) handleGetFinding(w http.ResponseWriter, r *http.Request) {
 // meant to actually navigate/auto-submit when opened, which the general
 // evidence sandboxing CSP would defeat.
 func (s *Server) handleGetFindingPoC(w http.ResponseWriter, r *http.Request) {
+	if s.ctrl.ReadOnlyTargets() {
+		writeError(w, http.StatusForbidden, "executable target replays are disabled; use stored evidence")
+		return
+	}
 	scanID := domain.ID(r.PathValue("id"))
 	if _, err := s.store.Scans().Get(r.Context(), scanID); err != nil {
 		s.writeLookupError(w, err)
@@ -429,12 +435,16 @@ func (s *Server) handleGetEvidenceContent(w http.ResponseWriter, r *http.Request
 	defer rc.Close()
 
 	setSafeContentHeaders(w)
-	w.Header().Set("Content-Type", viewableMediaType(ev.MediaType))
+	media, extension := viewableMediaType(ev.MediaType), evidenceExt(ev)
+	if s.ctrl.ReadOnlyTargets() && strings.HasPrefix(media, "text/html") {
+		media, extension = "text/plain; charset=utf-8", ".txt"
+	}
+	w.Header().Set("Content-Type", media)
 	disposition := "inline"
 	if r.URL.Query().Has("download") {
 		disposition = "attachment"
 	}
-	w.Header().Set("Content-Disposition", disposition+`; filename="`+string(ev.ID)+evidenceExt(ev)+`"`)
+	w.Header().Set("Content-Disposition", disposition+`; filename="`+string(ev.ID)+extension+`"`)
 	_, _ = io.Copy(w, rc)
 }
 

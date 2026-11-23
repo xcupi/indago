@@ -2,24 +2,27 @@ package web
 
 // Reusable authentication profiles. A profile is one saved browser session
 // (SSO or a normal login) that any number of targets in the project may point
-// at. The session file itself is only ever produced by the interactive login
-// endpoint; this API manages the metadata and target assignments.
+// at. In target read-only mode, the operator supplies an existing local
+// session file from a read-only account.
 
 import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/indago/indago/internal/auth"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/store"
 )
 
 type authProfileReq struct {
-	Name       string `json:"name"`
-	LoginURL   string `json:"login_url"`
-	SuccessURL string `json:"success_url"`
+	Name       string  `json:"name"`
+	LoginURL   string  `json:"login_url"`
+	SuccessURL string  `json:"success_url"`
+	StatePath  *string `json:"state_path"`
 }
 
 func (s *Server) handleListAuthProfiles(w http.ResponseWriter, r *http.Request) {
@@ -52,9 +55,14 @@ func (s *Server) handleCreateAuthProfile(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
+	statePath, valid := importedStatePath(req.StatePath)
+	if !valid {
+		writeError(w, http.StatusBadRequest, "state_path must point to a valid local browser session file")
+		return
+	}
 	now := time.Now()
 	p := &domain.AuthProfile{
-		ID: domain.NewID(), ProjectID: projectID, Name: name,
+		ID: domain.NewID(), ProjectID: projectID, Name: name, StatePath: statePath,
 		LoginURL: strings.TrimSpace(req.LoginURL), SuccessURL: strings.TrimSpace(req.SuccessURL),
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -88,6 +96,14 @@ func (s *Server) handleUpdateAuthProfile(w http.ResponseWriter, r *http.Request)
 		writeJSONBodyError(w, err)
 		return
 	}
+	if req.StatePath != nil {
+		statePath, valid := importedStatePath(req.StatePath)
+		if !valid {
+			writeError(w, http.StatusBadRequest, "state_path must point to a valid local browser session file")
+			return
+		}
+		p.StatePath = statePath
+	}
 	if name := strings.TrimSpace(req.Name); name != "" {
 		p.Name = name
 	}
@@ -99,6 +115,16 @@ func (s *Server) handleUpdateAuthProfile(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
+}
+
+// importedStatePath accepts only a local storage-state file. Invalid input
+// never replaces the saved profile or echoes the file path.
+func importedStatePath(raw *string) (string, bool) {
+	if raw == nil {
+		return "", true
+	}
+	path := filepath.Clean(strings.TrimSpace(*raw))
+	return path, filepath.IsAbs(path) && auth.ValidateStateFile(path) == nil
 }
 
 func (s *Server) handleDeleteAuthProfile(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +143,7 @@ func (s *Server) handleDeleteAuthProfile(w http.ResponseWriter, r *http.Request)
 			_ = s.store.Targets().Update(r.Context(), t)
 		}
 	}
-	if p.StatePath != "" {
+	if !s.ctrl.ReadOnlyTargets() && p.StatePath != "" {
 		_ = os.Remove(p.StatePath)
 	}
 	if err := s.store.AuthProfiles().Delete(r.Context(), p.ID); err != nil {

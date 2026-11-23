@@ -1,38 +1,38 @@
-import { useMemo } from "react";
 import { ArrowUpRight, ScanLine, ShieldAlert, ShieldCheck, Target } from "lucide-react";
 import { PageTitle } from "@/components/Layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SeverityBadge, StateBadge, VerdictBadge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Empty, Loading, Stat } from "@/components/ui/misc";
+import { Empty, LoadError, Loading, Stat } from "@/components/ui/misc";
 import { useApi } from "@/lib/api";
-import type { Finding, Project, Scan, Target as TargetType } from "@/lib/types";
+import type { Finding, Project } from "@/lib/types";
 import { navigate } from "@/lib/router";
-import { formatTime, pct, shortId } from "@/lib/utils";
+import { formatTime, shortId } from "@/lib/utils";
+
+interface ScanOverview {
+  total: number;
+  findings_confirmed: number;
+  findings_rejected: number;
+  states: Record<string, number>;
+  recent: {
+    id: string;
+    name: string;
+    state: string;
+    findings_confirmed: number;
+    endpoints_discovered: number;
+    created_at: string;
+  }[];
+}
+
+const scanStates = ["awaiting_auth", "created", "running", "paused", "canceling", "completed", "failed", "canceled"];
 
 export default function Dashboard() {
   const projects = useApi<Project[]>("/api/projects");
-  const scans = useApi<Scan[]>("/api/scans", [], 5000);
-  const targets = useApi<TargetType[] | null>(null);
-
-  const list = scans.data ?? [];
-  const states = useMemo(() => {
-    const by = new Map<string, number>();
-    for (const s of list) by.set(s.state, (by.get(s.state) ?? 0) + 1);
-    return by;
-  }, [list]);
-
-  const confirmed = list.reduce((n, s) => n + (s.stats?.findings_confirmed ?? 0), 0);
-  const rejected = list.reduce((n, s) => n + (s.stats?.findings_rejected ?? 0), 0);
-
-  // Recent findings come from the most recent scans; the API is per scan, so
-  // fetch a bounded slice of the newest ones.
-  const recent = [...list]
-    .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
-    .slice(0, 3);
-  const findingsByScan = useApi<Finding[]>(
-    recent[0] ? `/api/scans/${recent[0].id}/findings` : null,
-  );
+  const scans = useApi<ScanOverview>("/api/dashboard/scans", [], 5000);
+  const recentFindings = useApi<Finding[]>("/api/findings?verdict=confirmed&limit=8");
+  const overview = scans.data;
+  const recentScans = overview?.recent ?? [];
+  const additionalStates = Object.keys(overview?.states ?? {}).filter((state) => !scanStates.includes(state));
 
   return (
     <div>
@@ -43,14 +43,9 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="Projects" value={projects.data?.length ?? "—"} hint="scoped targets" />
-        <Stat label="Scans" value={list.length} hint={`${states.get("running") ?? 0} running`} />
-        <Stat label="Confirmed findings" value={confirmed} tone="danger" hint="all scans" />
-        <Stat
-          label="Rejected / verified-clean"
-          value={rejected}
-          tone="success"
-          hint={`${pct(rejected, confirmed + rejected)}% of tested points`}
-        />
+        <Stat label="Scans" value={overview?.total ?? "—"} hint={overview ? `${overview.states.running ?? 0} running` : undefined} />
+        <Stat label="Confirmed findings" value={overview?.findings_confirmed ?? "—"} tone="danger" />
+        <Stat label="Rejected findings" value={overview?.findings_rejected ?? "—"} />
       </div>
 
       <div className="mt-4 grid min-w-0 gap-4 lg:grid-cols-3">
@@ -64,9 +59,11 @@ export default function Dashboard() {
             </a>
           </CardHeader>
           <CardContent className="p-0">
-            {scans.loading && !scans.data ? (
+            {scans.error ? (
+              <LoadError resource="scans" error={scans.error} />
+            ) : scans.loading && !scans.data ? (
               <Loading />
-            ) : list.length === 0 ? (
+            ) : recentScans.length === 0 ? (
               <div className="p-4">
                 <Empty>No scans yet. Create a project, add a target, then start a scan.</Empty>
               </div>
@@ -82,29 +79,26 @@ export default function Dashboard() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {[...list]
-                    .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
-                    .slice(0, 8)
-                    .map((s) => (
-                      <TableRow
-                        key={s.id}
-                        className="cursor-pointer"
-                        onClick={() => navigate(`/scans/${s.id}`)}
-                      >
-                        <TableCell>
-                          <div className="mono text-[11px] text-muted-foreground">{shortId(s.id)}</div>
-                          <div className="max-w-[22rem] truncate text-xs text-foreground">
-                            {s.name || s.seed_urls?.[0] || "—"}
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <StateBadge state={s.state} />
-                        </TableCell>
-                        <TableCell className="tabular-nums">{s.stats?.findings_confirmed ?? 0}</TableCell>
-                        <TableCell className="tabular-nums">{s.stats?.endpoints_discovered ?? 0}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground">{formatTime(s.created_at)}</TableCell>
-                      </TableRow>
-                    ))}
+                  {recentScans.map((s) => (
+                    <TableRow
+                      key={s.id}
+                      className="cursor-pointer"
+                      onClick={() => navigate(`/scans/${s.id}`)}
+                    >
+                      <TableCell>
+                        <div className="mono text-[11px] text-muted-foreground">{shortId(s.id)}</div>
+                        <div className="max-w-[22rem] truncate text-xs text-foreground">
+                          {s.name || "—"}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <StateBadge state={s.state} />
+                      </TableCell>
+                      <TableCell className="tabular-nums">{s.findings_confirmed}</TableCell>
+                      <TableCell className="tabular-nums">{s.endpoints_discovered}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{formatTime(s.created_at)}</TableCell>
+                    </TableRow>
+                  ))}
                 </TableBody>
               </Table>
             )}
@@ -114,16 +108,18 @@ export default function Dashboard() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <ShieldAlert className="size-4 text-amber-700 dark:text-amber-400" /> Newest findings
+              <ShieldAlert className="size-4 text-amber-700 dark:text-amber-400" /> Newest confirmed findings
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
-            {findingsByScan.loading ? (
+            {recentFindings.error ? (
+              <LoadError resource="findings" error={recentFindings.error} />
+            ) : recentFindings.loading ? (
               <Loading />
-            ) : (findingsByScan.data ?? []).length === 0 ? (
-              <p className="text-xs text-muted-foreground">No findings on the newest scan.</p>
+            ) : (recentFindings.data ?? []).length === 0 ? (
+              <p className="text-xs text-muted-foreground">No confirmed findings yet.</p>
             ) : (
-              (findingsByScan.data ?? []).slice(0, 8).map((f) => (
+              (recentFindings.data ?? []).map((f) => (
                 <button
                   key={f.id}
                   onClick={() => navigate(`/scans/${f.scan_id}?tab=findings`)}
@@ -149,7 +145,11 @@ export default function Dashboard() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-1.5">
-            {(projects.data ?? []).length === 0 ? (
+            {projects.error ? (
+              <LoadError resource="projects" error={projects.error} />
+            ) : projects.loading ? (
+              <Loading />
+            ) : (projects.data ?? []).length === 0 ? (
               <p className="text-xs text-muted-foreground">No projects yet.</p>
             ) : (
               (projects.data ?? []).slice(0, 6).map((p) => (
@@ -173,16 +173,15 @@ export default function Dashboard() {
             </CardTitle>
           </CardHeader>
           <CardContent className="flex flex-wrap gap-2">
-            {["queued", "running", "paused", "completed", "failed", "canceled"].map((s) => (
+            {[...scanStates, ...additionalStates].map((s) => (
               <div
                 key={s}
                 className="flex items-center gap-2 rounded-md border border-border bg-muted px-2.5 py-1.5"
               >
                 <StateBadge state={s} />
-                <span className="tabular-nums text-xs text-foreground">{states.get(s) ?? 0}</span>
+                <span className="tabular-nums text-xs text-foreground">{overview ? (overview.states[s] ?? 0) : "—"}</span>
               </div>
             ))}
-            {targets.data === null ? null : null}
           </CardContent>
         </Card>
       </div>

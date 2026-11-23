@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/input";
 import { Switch } from "@/components/ui/controls";
 import { StateBadge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Alert, Empty, Loading, Stat } from "@/components/ui/misc";
+import { Alert, Empty, LoadError, Loading, Stat } from "@/components/ui/misc";
 import { api, refreshAll, useApi } from "@/lib/api";
 import type { AuthProfile, Capabilities, Project, Scan, Scope, Target } from "@/lib/types";
 import { navigate } from "@/lib/router";
@@ -34,6 +34,7 @@ function InfoTip({ text }: { text: string }) {
 }
 
 export default function Scans() {
+  const policy = useApi<{ target_read_only: boolean }>("/api/capabilities");
   const targetQuery = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("target") ?? "";
   const [projectId, setProjectId] = useState(selectedProject());
   // The sidebar's project picker is shared context: follow it while this page
@@ -91,11 +92,16 @@ export default function Scans() {
     skipCORS: false,
     skipOpenRedirect: false,
     skipGraphQL: false,
+    skipCSRF: false,
+    skipPrototypePollution: false,
+    skipCachePoisoning: false,
+    skipFileUpload: false,
     enableCommandInjection: false,
     enableSSTI: false,
     enableSQLi: false,
     enableNoSQLi: false,
     enableXXE: false,
+    enableStoredXSS: false,
     allowPrivateOAST: false,
     skipWriteEndpoints: true,
     skipDownloadEndpoints: true,
@@ -207,8 +213,13 @@ export default function Scans() {
   );
   const { page, setPage, pageSize, setPageSize, pages, start: pageStart, rows: pagedScans } =
     usePagination(sortedScans);
-  const selectedIDs = Object.keys(selected).filter((id) => selected[id]);
+  const selectedScans = sortedScans.filter((scan) => selected[scan.id]);
   const allOnPage = pagedScans.length > 0 && pagedScans.every((s) => selected[s.id]);
+
+  useEffect(() => {
+    setSelected({});
+    setPage(1);
+  }, [projectId, setPage]);
 
   function togglePage(on: boolean) {
     setSelected((prev) => {
@@ -318,11 +329,16 @@ export default function Scans() {
         skip_cors: form.skipCORS,
         skip_open_redirect: form.skipOpenRedirect,
         skip_graphql: form.skipGraphQL,
+        skip_csrf: form.skipCSRF,
+        skip_prototype_pollution: form.skipPrototypePollution,
+        skip_cache_poisoning: form.skipCachePoisoning,
+        skip_file_upload: form.skipFileUpload,
         enable_command_injection: form.enableCommandInjection,
         enable_ssti: form.enableSSTI,
         enable_sqli: form.enableSQLi,
         enable_nosqli: form.enableNoSQLi,
         enable_xxe: form.enableXXE,
+        enable_stored_xss: form.enableStoredXSS,
         allow_private_oast: form.allowPrivateOAST,
         skip_write_endpoints: form.skipWriteEndpoints,
         skip_download_endpoints: form.skipDownloadEndpoints,
@@ -392,8 +408,8 @@ export default function Scans() {
     <div>
       <PageTitle
         title="Scans"
-        subtitle="One bounded run against one target scope. Progress and evidence are per scan."
-        actions={
+        subtitle={policy.data?.target_read_only ? "Stored scan history and evidence." : "One bounded run against one target scope. Progress and evidence are per scan."}
+        actions={policy.data?.target_read_only === false ? (
           <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
               <Button size="sm">
@@ -625,6 +641,10 @@ export default function Scans() {
                       ["skipCORS", "CORS"],
                       ["skipOpenRedirect", "Open redirect"],
                       ["skipGraphQL", "GraphQL"],
+                      ["skipCSRF", "CSRF"],
+                      ["skipPrototypePollution", "Prototype pollution"],
+                      ["skipCachePoisoning", "Cache poisoning"],
+                      ["skipFileUpload", "File upload"],
                     ].map(([key, label]) => (
                       <label key={key} className="flex items-center gap-2 text-xs text-foreground">
                         <Switch
@@ -678,10 +698,10 @@ export default function Scans() {
                       onCheckedChange={(v) => setForm({ ...form, enableNoSQLi: v })}
                     />
                     <span>
-                      NoSQL injection (opt-in, read-only)
+                      NoSQL injection (opt-in)
                       <span className="block text-[10px] text-muted-foreground">
-                        Sends array shapes and the selection operators $ne/$gt on GET query parameters; confirmed by a new
-                        document-database error or a control-checked differential. Never runs on state-changing endpoints.
+                        Checks GET query parameters. JSON request bodies on write methods are only tested when the server
+                        allows state-changing requests and this scan includes write-like endpoints.
                       </span>
                     </span>
                   </label>
@@ -694,6 +714,18 @@ export default function Scans() {
                       XML external entity (opt-in)
                       <span className="block text-[10px] text-muted-foreground">
                         Only observed XML request bodies; requires an XML endpoint and a callback.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="mt-2 flex items-start gap-2 border-t border-border pt-2 text-xs text-foreground">
+                    <Switch
+                      checked={form.enableStoredXSS}
+                      onCheckedChange={(v) => setForm({ ...form, enableStoredXSS: v })}
+                    />
+                    <span>
+                      Stored XSS (opt-in)
+                      <span className="block text-[10px] text-muted-foreground">
+                        Submits benign canary payloads to state-changing forms and checks subsequent pages for stored execution.
                       </span>
                     </span>
                   </label>
@@ -822,9 +854,14 @@ export default function Scans() {
                     />
                   </Field>
                 ) : null}
-                <Field label="Proxy pool" hint="One proxy URL per line; round-robin, direct when empty." className="sm:col-span-2">
+                <Field
+                  label="Proxy pool"
+                  hint={caps.data?.browser_enabled ? "Available on HTTP-only servers. Chromium uses the local scope proxy." : "One proxy URL per line; round-robin, direct when empty."}
+                  className="sm:col-span-2"
+                >
                   <Textarea
                     rows={2}
+                    disabled={caps.data?.browser_enabled}
                     placeholder={"http://127.0.0.1:8080\nsocks5://127.0.0.1:1080"}
                     value={form.proxyPool}
                     onChange={(e) => setForm({ ...form, proxyPool: e.target.value })}
@@ -893,16 +930,20 @@ export default function Scans() {
               </div>
             </DialogContent>
           </Dialog>
-        }
+        ) : policy.data?.target_read_only ? (
+          <Button size="sm" variant="outline" onClick={() => navigate(projectId ? `/projects/${projectId}` : "/projects")}>
+            Read-only snapshots
+          </Button>
+        ) : null}
       />
 
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Stat label="Scans" value={filtered.length} />
-        <Stat label="Running" value={running} tone={running ? "warn" : "default"} />
-        <Stat label="Confirmed" value={confirmed} tone="danger" />
+        <Stat label="Scans" value={scans.data ? filtered.length : "—"} />
+        <Stat label="Running" value={scans.data ? running : "—"} tone={running ? "warn" : "default"} />
+        <Stat label="Confirmed" value={scans.data ? confirmed : "—"} tone="danger" />
         <Stat
           label="Rejected"
-          value={filtered.reduce((n, s) => n + (s.stats?.findings_rejected ?? 0), 0)}
+          value={scans.data ? filtered.reduce((n, s) => n + (s.stats?.findings_rejected ?? 0), 0) : "—"}
           tone="success"
         />
       </div>
@@ -919,12 +960,14 @@ export default function Scans() {
             <option key={p.id} value={p.id}>{p.name}</option>
           ))}
         </select>
-        <span>{filtered.length === 1 ? "1 scan" : `${filtered.length} scans`}</span>
+        {scans.data ? <span>{filtered.length === 1 ? "1 scan" : `${filtered.length} scans`}</span> : null}
       </div>
 
       <Card>
         <CardContent className="p-0">
-          {scans.loading && !scans.data ? (
+          {scans.error ? (
+            <div className="p-4"><LoadError resource="scans" error={scans.error} /></div>
+          ) : scans.loading && !scans.data ? (
             <Loading />
           ) : filtered.length === 0 ? (
             <div className="p-4">
@@ -941,18 +984,15 @@ export default function Scans() {
                   />
                   Select all on this page
                 </label>
-                {selectedIDs.length > 0 ? (
+                {selectedScans.length > 0 ? (
                   <>
                     <Button
                       size="sm"
                       variant="destructive"
                       disabled={bulkBusy}
-                      onClick={() => {
-                        const chosen = sortedScans.filter((s) => selected[s.id]);
-                        if (chosen.length > 0) setDeleteTargets(chosen);
-                      }}
+                      onClick={() => setDeleteTargets(selectedScans)}
                     >
-                      <Trash2 className="size-4" /> Delete selected ({selectedIDs.length})
+                      <Trash2 className="size-4" /> Delete selected ({selectedScans.length})
                     </Button>
                     <button
                       type="button"
@@ -970,21 +1010,6 @@ export default function Scans() {
                 {bulkNote ? (
                   <span className="text-[11px] text-emerald-700 dark:text-emerald-400">{bulkNote}</span>
                 ) : null}
-                <label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
-                  Per page
-                  <select
-                    className="h-8 rounded-md border border-border bg-background px-2 text-xs text-foreground"
-                    value={pageSize}
-                    onChange={(e) => {
-                      setPageSize(Number(e.target.value));
-                      setPage(1);
-                    }}
-                  >
-                    <option value={10}>10</option>
-                    <option value={50}>50</option>
-                    <option value={100}>100</option>
-                  </select>
-                </label>
               </div>
               {bulkErr ? (
                 <div className="px-3 pt-2">

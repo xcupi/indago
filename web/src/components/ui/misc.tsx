@@ -1,6 +1,8 @@
 import * as React from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { refreshAll } from "@/lib/api";
+import { Button } from "@/components/ui/button";
 
 export function Alert({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
@@ -19,6 +21,17 @@ export function Alert({ children, className }: { children: React.ReactNode; clas
 
 export function Spinner({ className }: { className?: string }) {
   return <Loader2 className={cn("size-4 animate-spin text-muted-foreground", className)} />;
+}
+
+export function LoadError({ resource, error }: { resource: string; error: string }) {
+  return (
+    <Alert>
+      <p>Could not load {resource}. {error}</p>
+      <Button type="button" variant="outline" size="sm" className="mt-2" onClick={refreshAll}>
+        Retry
+      </Button>
+    </Alert>
+  );
 }
 
 export function Loading({ label = "Loading…" }: { label?: string }) {

@@ -60,10 +60,10 @@ and must be preserved by every change:
      candidates, rather than waiting for the bounded automatic escalation.
      This is appropriate when the bypass itself is the reportable finding
      (e.g. a bug bounty program).
-   - `ScanConfig.ProxyPool` (CLI `-proxy`, repeatable): route outbound
-     traffic — raw HTTP requests AND browser verification alike — through
-     operator-supplied proxy infrastructure, round-robin. Indago never
-     discovers, purchases, or manages proxies itself.
+   - `ScanConfig.ProxyPool` (CLI `-proxy`, repeatable): route raw HTTP
+     requests through operator-supplied proxies on HTTP-only servers.
+     Chromium uses a local, scope-enforcing proxy that cannot chain
+     upstream, so a server with `-browser` rejects an external proxy pool.
    - `ScanConfig.RandomizeTLSFingerprint` (CLI `-randomize-tls-fingerprint`):
      perform the raw HTTP engine's TLS handshake with a randomized
      ClientHello (JA3, via uTLS) instead of Go's own default, which has its

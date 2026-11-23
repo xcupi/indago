@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/indago/indago/internal/browser"
 )
 
 // PDFRenderer converts one self-contained HTML document into PDF bytes.
@@ -22,10 +24,8 @@ type PDFRenderer interface {
 	Render(ctx context.Context, htmlDoc []byte) ([]byte, error)
 }
 
-// ChromiumPDFRenderer shells out to Chrome/Chromium's --print-to-pdf. It is
-// deliberately not the Playwright browser session: report export must work
-// without -browser, and a crash of the print process must never touch the
-// scanning browser.
+// ChromiumPDFRenderer prints in an independent Chromium process, including
+// when the server runs without -browser.
 type ChromiumPDFRenderer struct {
 	// Path is the Chrome/Chromium executable.
 	Path string
@@ -41,9 +41,6 @@ func NewChromiumPDFRenderer(path string, disableSandbox bool) *ChromiumPDFRender
 	return &ChromiumPDFRenderer{Path: path, DisableSandbox: disableSandbox}
 }
 
-// Render writes the document to a private temp dir, prints it to PDF and reads
-// the result back. Every failure is returned with the browser's own stderr so
-// the operator can tell "chromium missing" from "print crashed".
 func (c *ChromiumPDFRenderer) Render(ctx context.Context, htmlDoc []byte) ([]byte, error) {
 	if c == nil || strings.TrimSpace(c.Path) == "" {
 		return nil, errors.New("pdf renderer: no chromium executable configured")
@@ -55,6 +52,15 @@ func (c *ChromiumPDFRenderer) Render(ctx context.Context, htmlDoc []byte) ([]byt
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	pdf, err := browser.PrintPDF(ctx, c.Path, c.DisableSandbox, htmlDoc)
+	if !errors.Is(err, browser.ErrPDFDriverUnavailable) {
+		return pdf, err
+	}
+	// System Chrome can still print without an installed Playwright driver.
+	return c.printToFile(ctx, htmlDoc)
+}
+
+func (c *ChromiumPDFRenderer) printToFile(ctx context.Context, htmlDoc []byte) ([]byte, error) {
 	dir, err := os.MkdirTemp("", "indago-pdf-")
 	if err != nil {
 		return nil, fmt.Errorf("pdf renderer: temp dir: %w", err)

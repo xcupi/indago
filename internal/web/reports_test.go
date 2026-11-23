@@ -6,9 +6,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,6 +70,134 @@ func TestCreateReportAllFindingsEachFormat(t *testing.T) {
 		if d := download.Header().Get("Content-Disposition"); !strings.HasPrefix(d, "attachment") || !strings.Contains(d, tc.ext+`"`) {
 			t.Fatalf("%s: expected attachment %s with ?download, got %q", tc.format, tc.ext, d)
 		}
+	}
+}
+
+func TestCreateReportAISummaryOutcome(t *testing.T) {
+	const key = "fixture-credential-never-expose"
+	const summaryText = "The assessment found no confirmed issues in the selected data."
+	for _, tc := range []struct {
+		name, format, template, response string
+		wantStatus, wantMessage          string
+		credential, enabled, requested   bool
+		upstreamStatus                   int
+		wantTask                         domain.AITaskState
+	}{
+		{
+			name: "added", format: "markdown", template: "pentest",
+			credential: true, enabled: true, requested: true, upstreamStatus: http.StatusOK,
+			response:   `{"choices":[{"message":{"content":"` + summaryText + `"}}]}`,
+			wantStatus: "added", wantMessage: "with an AI summary", wantTask: domain.AISucceeded,
+		},
+		{
+			name: "provider returned an error", format: "markdown", template: "technical",
+			credential: true, enabled: true, requested: true, upstreamStatus: http.StatusBadGateway,
+			response:   `{"error":"upstream diagnostic ` + key + `"}`,
+			wantStatus: "failed", wantMessage: "Test the connection", wantTask: domain.AIFailed,
+		},
+		{
+			name: "provider returned blank prose", format: "html", template: "pentest",
+			credential: true, enabled: true, requested: true, upstreamStatus: http.StatusOK,
+			response:   `{"choices":[{"message":{"content":"   "}}]}`,
+			wantStatus: "failed", wantMessage: "empty summary", wantTask: domain.AIFailed,
+		},
+		{
+			name: "missing key", format: "markdown", template: "pentest",
+			enabled: true, requested: true,
+			wantStatus: "skipped", wantMessage: "Configure an AI provider",
+		},
+		{
+			name: "advisory disabled", format: "markdown", template: "pentest",
+			credential: true, requested: true,
+			wantStatus: "skipped", wantMessage: "Enable AI in Settings",
+		},
+		{
+			name: "machine format", format: "json",
+			credential: true, enabled: true, requested: true,
+			wantStatus: "skipped", wantMessage: "technical or pentest template",
+		},
+		{
+			name: "layout without a summary", format: "markdown", template: "yeswehack",
+			credential: true, enabled: true, requested: true,
+			wantStatus: "skipped", wantMessage: "technical or pentest template",
+		},
+		{
+			name: "no summary requested", format: "markdown", template: "pentest",
+			credential: true, enabled: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if tc.upstreamStatus == 0 {
+					t.Error("a skipped summary should not contact the upstream provider")
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if r.URL.Path != "/chat/completions" || r.Header.Get("Authorization") != "Bearer "+key {
+					t.Error("unexpected request to the mock model")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.upstreamStatus)
+				_, _ = io.WriteString(w, tc.response)
+			}))
+			defer model.Close()
+			t.Setenv("INDAGO_LLM_BASE_URL_OPENROUTER", model.URL)
+			t.Setenv("INDAGO_LLM_MODEL_OPENROUTER", "fixture-model")
+			t.Setenv("INDAGO_LLM_KEY_OPENROUTER", "")
+			if tc.credential {
+				t.Setenv("INDAGO_LLM_KEY_OPENROUTER", key)
+			}
+			a := newAIAPI(t)
+			if !tc.enabled {
+				a.mustJSON(a.do("PUT", "/api/llm/config", map[string]any{
+					"provider": "openrouter", "model": "fixture-model", "base_url": model.URL, "api_key": key, "enabled": false,
+				}), http.StatusOK, nil)
+			}
+			scanID := createTestScan(t, a)
+
+			var result struct {
+				domain.Report
+				Status *struct {
+					Status  string `json:"status"`
+					Message string `json:"message"`
+				} `json:"ai_summary_status"`
+			}
+			created := a.do("POST", "/api/scans/"+string(scanID)+"/reports", map[string]any{
+				"format": tc.format, "template": tc.template, "ai_summary": tc.requested, "ai_provider": "openrouter",
+			})
+			a.mustJSON(created, http.StatusCreated, &result)
+			if result.ID == "" || result.Format != domain.ReportFormat(tc.format) {
+				t.Fatalf("expected existing report fields, got %+v", result.Report)
+			}
+			if tc.wantStatus == "" {
+				if result.Status != nil {
+					t.Fatalf("unexpected AI summary outcome: %+v", result.Status)
+				}
+			} else if result.Status == nil || result.Status.Status != tc.wantStatus || !strings.Contains(result.Status.Message, tc.wantMessage) {
+				t.Fatalf("AI summary outcome = %+v, want %q with %q", result.Status, tc.wantStatus, tc.wantMessage)
+			}
+			content := a.do("GET", "/api/reports/"+string(result.ID)+"/content", nil)
+			a.mustJSON(content, http.StatusOK, nil)
+			if included := strings.Contains(content.Body.String(), summaryText); included != (tc.wantStatus == "added") {
+				t.Fatalf("summary text included = %v, status = %q", included, tc.wantStatus)
+			}
+			if strings.Contains(created.Body.String(), key) || strings.Contains(content.Body.String(), key) {
+				t.Fatal("mock provider credentials leaked into the response or report")
+			}
+			tasks, err := a.st.AITasks().ListByScan(context.Background(), scanID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantTask == "" {
+				if len(tasks) != 0 || calls.Load() != 0 {
+					t.Fatalf("expected no AI task, got %d tasks and %d mock calls", len(tasks), calls.Load())
+				}
+			} else if len(tasks) != 1 || tasks[0].State != tc.wantTask || strings.Contains(tasks[0].Error, key) || calls.Load() != 1 {
+				t.Fatalf("expected one redacted %q task, got %d tasks and %d mock calls", tc.wantTask, len(tasks), calls.Load())
+			}
+		})
 	}
 }
 

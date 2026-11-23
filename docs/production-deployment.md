@@ -396,7 +396,7 @@ browser engine.
 | `INDAGO_CHROMIUM_PATH` | server | Chromium executable when `-chromium` is empty; also PDF export |
 | `INDAGO_AUTH_USER` / `INDAGO_AUTH_PASS` | server | Password-mode login credentials; never persisted or accepted over the API |
 | `INDAGO_AI_API_KEY` | server | Advisory AI key; never a flag, never stored |
-| `INDAGO_LLM_KEY_<PROVIDER>` | server | Per-provider advisory key override |
+| `INDAGO_LLM_KEY_<PROVIDER>` | server, CLI | API key fallback for a provider with no saved key |
 | `INDAGO_SERVER_URL`, `INDAGO_CA_CERT` | CLI | Server URL and extra CA bundle for CLI calls (token: `-api-token` or `INDAGO_API_TOKEN`) |
 | `INDAGO_HEALTH_CA` | container healthcheck | CA bundle used by `deploy/docker/healthcheck.sh` |
 

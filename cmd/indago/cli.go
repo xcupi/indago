@@ -603,7 +603,7 @@ func (c *cli) scanCreate(args []string) error {
 	enableCommandInjection := fs.Bool("enable-command-injection", false, "opt in to the bounded OS command-injection pass: harmless arithmetic markers are sent into likely command sinks and a finding is confirmed only by two independent executions — OFF by default")
 	enableSSTI := fs.Bool("enable-ssti", false, "opt in to the server-side template-injection pass: a bounded template expression marker is evaluated and a finding is confirmed only by the COMPUTED result appearing in the response — OFF by default")
 	enableSQLi := fs.Bool("enable-sqli", false, "opt in to the bounded SQL-injection pass: harmless quote-breaking probes look for a database error signature the baseline did not produce, and true/false boolean pairs must diverge consistently; a finding is confirmed only by two independent signals — OFF by default")
-	enableNoSQLi := fs.Bool("enable-nosqli", false, "opt in to the strictly READ-ONLY NoSQL query-operator pass: GET query parameters are sent array shapes (param[]=...) and the selection operators $ne/$gt, and a finding is confirmed only by a NEW document-database error signature or an operator-versus-benign-control differential (two independent signals); state-changing endpoints are never tested — OFF by default")
+	enableNoSQLi := fs.Bool("enable-nosqli", false, "opt in to NoSQL checks on GET query parameters; JSON request bodies on POST, PUT or PATCH require server permission for state-changing requests and a scan that includes write-like endpoints")
 	enableXXE := fs.Bool("enable-xxe", false, "opt in to the XML external-entity pass, which only runs against OBSERVED XML request bodies; it needs -xxe-callback and -xxe-poll (without them the engine records a clean skip, never a failure) — OFF by default")
 	skipSSRF := fs.Bool("skip-ssrf", false, "omit the SSRF pass (ON by default): URL-like parameters are probed with an operator-supplied OAST canary and confirmed only by a marker-bearing callback, never by a blind internal fetch")
 	skipPathTraversal := fs.Bool("skip-path-traversal", false, "omit the READ-ONLY path-traversal / local file inclusion pass (ON by default): file/page-like parameters and file-shaped endpoints are asked for /etc/passwd or windows\\win.ini, and a finding is confirmed only when the file's own multi-token content comes back over a clean baseline and a nonexistent-path control")
@@ -611,6 +611,11 @@ func (c *cli) scanCreate(args []string) error {
 	skipSecurityHeaders := fs.Bool("skip-security-headers", false, "omit the READ-ONLY HTTP response security-headers and cookie-policy check (ON by default): one GET per origin, reporting missing HSTS/X-Content-Type-Options/CSP/X-Frame-Options, version-revealing Server/X-Powered-By headers and weak Set-Cookie flags (HttpOnly/Secure/SameSite), deduplicated per origin and header/cookie name")
 	skipMethodTLS := fs.Bool("skip-method-tls", false, "omit the READ-ONLY HTTP method & TLS transport-hygiene check (ON by default): one GET baseline plus one OPTIONS and one TRACE probe per origin, reporting a TRACE that echoes the request back and an unauthenticated OPTIONS response advertising PUT/DELETE/PATCH on a non-API page, plus TLS protocol/cipher/certificate hygiene from the scan's own handshake (no write method is ever sent, and a self-signed lab certificate is recorded rather than reported)")
 	skipWebSocket := fs.Bool("skip-websocket", false, "omit the READ-ONLY WebSocket handshake & Origin check (ON by default): discovered ws://, wss:// and WS-shaped paths (/ws, /socket.io, ...) get two bounded HTTP Upgrade handshakes — one carrying an untrusted Origin (reported only when the server answers 101 Switching Protocols: missing Origin validation / cross-site WebSocket hijacking) and one anonymous handshake (reported when an authenticated scan's socket needs no session, or when the socket is plaintext). No WebSocket frame is ever sent")
+	skipCSRF := fs.Bool("skip-csrf", false, "omit the Cross-Site Request Forgery (CSRF) check on state-changing endpoints (ON by default)")
+	skipPrototypePollution := fs.Bool("skip-prototype-pollution", false, "omit the browser-backed client-side prototype pollution check (ON by default; requires -browser)")
+	skipCachePoisoning := fs.Bool("skip-cache-poisoning", false, "omit the READ-ONLY cache-busted unkeyed header cache poisoning check (ON by default)")
+	skipFileUpload := fs.Bool("skip-file-upload", false, "omit the bounded multipart file upload extension/MIME check (ON by default; requires -allow-state-changing)")
+	enableStoredXSS := fs.Bool("enable-stored-xss", false, "opt in to bounded stored XSS probing on state-changing endpoints (requires -allow-state-changing and -browser)")
 	skipHostHeader := fs.Bool("skip-host-header", false, "omit the READ-ONLY host-header injection check (ON by default): one GET baseline plus control GETs carrying a canary X-Forwarded-Host/Host value per origin (cache-busted, never redirected), confirming only when the canary host appears in a Location/Refresh target or an absolute URL in the body that the baseline did not contain")
 	skipJWT := fs.Bool("skip-jwt", false, "omit the READ-ONLY JWT validation & hygiene check (ON by default): if the scan's own session carries a Bearer JWT, its claims/header are inspected (exp, lifetime > 30 days, secret material in the payload, alg=none) and ONE authenticated GET endpoint per origin is compared against an anonymous control and two invalid-token controls (modified signature, alg=none) that the server is expected to reject with 401/403. Token signatures are never stored")
 	skipOpenRedirect := fs.Bool("skip-open-redirect", false, "omit the open-redirect pass (ON by default): a redirect is confirmed only by an actual cross-origin Location — this is the SERVER-side redirect engine")
@@ -621,7 +626,7 @@ func (c *cli) scanCreate(args []string) error {
 	xxeCallback := fs.String("xxe-callback", "", "operator OAST collaborator base URL for the XXE entity, absolute http(s) (required with -enable-xxe for the pass to do anything)")
 	xxePoll := fs.String("xxe-poll", "", "where Indago READS the XXE collaborator's received requests, absolute http(s) (required together with -xxe-callback)")
 	var proxyPool stringList
-	fs.Var(&proxyPool, "proxy", "proxy to route this scan's traffic through — raw HTTP and browser verification alike (repeatable, round-robin; http://host:port, https://host:port, or socks5://host:port, optionally with embedded user:pass@ creds); operator-supplied infrastructure only, off by default (see AGENTS.md §2.3)")
+	fs.Var(&proxyPool, "proxy", "route raw HTTP through an operator-supplied proxy on HTTP-only servers (repeatable, round-robin; HTTP, HTTPS or SOCKS5). Servers with -browser use a local scope proxy and reject external proxy pools")
 	randomizeTLS := fs.Bool("randomize-tls-fingerprint", false, "randomize the raw HTTP engine's TLS ClientHello (JA3) via uTLS instead of Go's own default — OFF by default (see AGENTS.md §2.3); MUTUALLY EXCLUSIVE with -proxy (Go's transport never consults a custom TLS dialer for a proxied connection); has no effect on browser verification, which already uses a real browser's own TLS stack")
 	allowInsecureTLS := fs.Bool("allow-insecure-tls", false, "accept a self-signed or hostname-mismatched HTTPS certificate for THIS scan (raw HTTP engine AND browser contexts), so an authorized lab/staging target can be tested — OFF by default, which keeps strict certificate verification; it never widens scope, and the server logs a WARN when such a scan starts; never use it against a production system (see docs/insecure-tls.md)")
 	quick := fs.Bool("quick", false, "quick scan: test the seeds only, do not follow links (crawl depth 0)")
@@ -629,15 +634,15 @@ func (c *cli) scanCreate(args []string) error {
 	maxPages := fs.Int("max-pages", 0, "cap on pages fetched by the crawler (0 = server default)")
 	maxEndpoints := fs.Int("max-endpoints", 0, "cap on endpoints discovered (0 = server default)")
 	reconLevel := fs.String("recon-level", "off", "wordlist content/parameter discovery: off | safe (paths) | standard (paths+params+extensions) | aggressive (+ extended paths, directory recursion); OFF by default — see docs/recon-wordlists.md")
-	openAPISpecFile := fs.String("openapi-spec-file", "", "OpenAPI 3.x / Swagger 2.0 JSON document on disk whose declared endpoints discovery should register (read here, sent inline; max "+strconv.Itoa(discovery.MaxOpenAPISpecBytes)+" bytes)")
-	openAPISpecURL := fs.String("openapi-spec-url", "", "URL of an OpenAPI 3.x / Swagger 2.0 JSON document for the SERVER to read with one GET through the scan's scope-enforcing engine (must be in scope); alternative to -openapi-spec-file")
+	openAPISpecFile := fs.String("openapi-spec-file", "", "OpenAPI 3.x / Swagger 2.0 document on disk (JSON or YAML) whose declared endpoints discovery should register (read here, sent inline; max "+strconv.Itoa(discovery.MaxOpenAPISpecBytes)+" bytes)")
+	openAPISpecURL := fs.String("openapi-spec-url", "", "URL of an OpenAPI 3.x / Swagger 2.0 document (JSON or YAML) for the SERVER to read with one GET through the scan's scope-enforcing engine (must be in scope); alternative to -openapi-spec-file")
 	var seeds stringList
 	fs.Var(&seeds, "seed", "discovery seed URL (repeatable; default: the target base URL)")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *project == "" || *target == "" {
-		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-openapi-spec-file FILE | -openapi-spec-url URL] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-sqli] [-enable-nosqli] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-path-traversal] [-skip-cors] [-skip-security-headers] [-skip-method-tls] [-skip-websocket] [-skip-host-header] [-skip-jwt] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE] [-allow-insecure-tls]")
+		return errors.New("usage: indago scan create -project ID -target ID [-name N] [-profile P] [-quick|-depth N] [-max-pages N] [-max-endpoints N] [-recon-level off|safe|standard|aggressive] [-openapi-spec-file FILE | -openapi-spec-url URL] [-raw-query-injection[=auto|always]] [-candidate-profile P] [-max-candidates N] [-seed URL]... [-enable-command-injection] [-enable-ssti] [-enable-sqli] [-enable-nosqli] [-enable-stored-xss] [-enable-xxe [-xxe-callback URL -xxe-poll URL]] [-skip-ssrf] [-skip-path-traversal] [-skip-cors] [-skip-security-headers] [-skip-method-tls] [-skip-websocket] [-skip-csrf] [-skip-prototype-pollution] [-skip-cache-poisoning] [-skip-file-upload] [-skip-host-header] [-skip-jwt] [-skip-open-redirect] [-skip-graphql] [-ssrf-callback URL -ssrf-poll URL [-allow-private-oast]] [-stop MODE [-stop-n N]] [-auth existing -auth-state FILE] [-allow-insecure-tls]")
 	}
 	req := map[string]any{
 		"project_id": *project, "target_id": *target, "name": *name,
@@ -717,6 +722,21 @@ func (c *cli) scanCreate(args []string) error {
 	if *skipWebSocket {
 		req["skip_websocket"] = true
 	}
+	if *skipCSRF {
+		req["skip_csrf"] = true
+	}
+	if *skipPrototypePollution {
+		req["skip_prototype_pollution"] = true
+	}
+	if *skipCachePoisoning {
+		req["skip_cache_poisoning"] = true
+	}
+	if *skipFileUpload {
+		req["skip_file_upload"] = true
+	}
+	if *enableStoredXSS {
+		req["enable_stored_xss"] = true
+	}
 	if *skipHostHeader {
 		req["skip_host_header"] = true
 	}
@@ -782,8 +802,12 @@ func (c *cli) scanCreate(args []string) error {
 			return fmt.Errorf("-openapi-spec-file %s is %d bytes, limit is %d",
 				*openAPISpecFile, len(data), discovery.MaxOpenAPISpecBytes)
 		}
-		if !json.Valid(data) {
-			return fmt.Errorf("-openapi-spec-file %s is not valid JSON", *openAPISpecFile)
+		// Same validation the server applies at scan-create time, so a file
+		// that is refused here would have been refused there: JSON and YAML
+		// are both accepted, and a document that is neither a well-formed
+		// spec nor parseable at all fails now instead of mid-scan.
+		if err := discovery.ValidateOpenAPISpec(data); err != nil {
+			return fmt.Errorf("-openapi-spec-file %s is not a usable OpenAPI/Swagger document (JSON or YAML): %w", *openAPISpecFile, err)
 		}
 		req["openapi_spec_json"] = string(data)
 	}
@@ -1630,7 +1654,7 @@ func (c *cli) config(section string, args []string) error {
 	case "set":
 		key := strings.TrimSpace(apiKey)
 		fromFlag := key != ""
-		if key == "" {
+		if key == "" && strings.TrimSpace(os.Getenv(llm.KeyEnvName(provider))) == "" {
 			key = strings.TrimSpace(os.Getenv(llmAPIKeyEnv))
 		}
 		cfg, err := store.Set(llm.SetRequest{
@@ -1641,11 +1665,7 @@ func (c *cli) config(section string, args []string) error {
 		}
 		fmt.Fprintf(c.out, "configured LLM provider %s (model %s)\n", cfg.Provider, cfg.Model)
 		fmt.Fprintf(c.out, "base URL: %s\n", cfg.BaseURL)
-		if cfg.HasKey() {
-			fmt.Fprintf(c.out, "API key:  %s (stored; only the last 4 characters are shown)\n", cfg.MaskedKey())
-		} else {
-			fmt.Fprintln(c.out, "API key:  none (allowed for a local endpoint)")
-		}
+		c.printLLMKey(cfg)
 		if fi, statErr := os.Stat(store.Path()); statErr == nil {
 			fmt.Fprintf(c.out, "config:   %s (mode %04o)\n", store.Path(), fi.Mode().Perm())
 		}
@@ -1666,11 +1686,7 @@ func (c *cli) config(section string, args []string) error {
 		fmt.Fprintf(c.out, "provider: %s\n", cfg.Provider)
 		fmt.Fprintf(c.out, "model:    %s\n", cfg.Model)
 		fmt.Fprintf(c.out, "base URL: %s\n", cfg.BaseURL)
-		if cfg.HasKey() {
-			fmt.Fprintf(c.out, "API key:  %s (set; last 4 characters only)\n", cfg.MaskedKey())
-		} else {
-			fmt.Fprintln(c.out, "API key:  none")
-		}
+		c.printLLMKey(cfg)
 		if fi, statErr := os.Stat(store.Path()); statErr == nil {
 			fmt.Fprintf(c.out, "config:   %s (mode %04o)\n", store.Path(), fi.Mode().Perm())
 		}
@@ -1679,7 +1695,7 @@ func (c *cli) config(section string, args []string) error {
 		if err := store.Clear(); err != nil {
 			return err
 		}
-		fmt.Fprintln(c.out, "LLM provider configuration cleared (config and key file removed)")
+		fmt.Fprintln(c.out, "All stored LLM provider profiles and API keys cleared")
 		return nil
 	case "test":
 		cfg, err := store.Load()
@@ -1689,13 +1705,28 @@ func (c *cli) config(section string, args []string) error {
 		if err != nil {
 			return err
 		}
-		res := llm.NewProber(0).Test(context.Background(), cfg)
+		cred, err := llm.NewRegistry(store).Resolve(cfg.Provider, "")
+		if err != nil {
+			return err
+		}
+		res := llm.NewProber(0).Test(context.Background(), cred.Config())
 		fmt.Fprintf(c.out, "provider: %s\nmodel:    %s\nlatency:  %d ms\n", res.Provider, res.Model, res.LatencyMS)
 		if !res.OK {
-			return fmt.Errorf("connection test failed: %s", cfg.Redact(res.Error))
+			return fmt.Errorf("connection test failed: %s", cred.Redact(res.Error))
 		}
 		fmt.Fprintln(c.out, "result:   OK")
 		return nil
 	}
 	return fmt.Errorf("unknown config llm subcommand %q (set, show, clear, test)", action)
+}
+
+func (c *cli) printLLMKey(cfg llm.Config) {
+	switch {
+	case cfg.HasKey():
+		fmt.Fprintf(c.out, "API key:  %s (stored; last 4 characters only)\n", cfg.MaskedKey())
+	case strings.TrimSpace(os.Getenv(llm.KeyEnvName(cfg.Provider))) != "":
+		fmt.Fprintf(c.out, "API key:  provided by %s\n", llm.KeyEnvName(cfg.Provider))
+	default:
+		fmt.Fprintln(c.out, "API key:  none")
+	}
 }

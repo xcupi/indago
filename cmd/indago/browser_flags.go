@@ -15,5 +15,5 @@ func browserConfigFromFlags(useBrowser, noSandbox bool, chromium string) (browse
 	if noSandbox && !useBrowser {
 		return browser.Config{}, errors.New("-browser-no-sandbox only applies together with -browser")
 	}
-	return browser.Config{Headless: true, ExecutablePath: chromium, DisableSandbox: noSandbox}, nil
+	return browser.Config{Headless: true, ExecutablePath: chromium, DisableSandbox: noSandbox, EnforceScopeEgress: useBrowser}, nil
 }
