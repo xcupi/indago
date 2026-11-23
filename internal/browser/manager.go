@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/indago/indago/internal/ratelimit"
+	"github.com/indago/indago/internal/scopeproxy"
 )
 
 // Manager owns the browser engine lifecycle and a reusable pool of browsers, and
@@ -58,8 +61,11 @@ func NewManager(cfg Config, log *slog.Logger) (*Manager, error) {
 	if exe == "" {
 		exe = os.Getenv("INDAGO_CHROMIUM_PATH")
 	}
-	return newManager(cfg, log, func() (driver, error) { return newPlaywrightDriver(exe, cfg.DisableSandbox) })
+	return newManager(cfg, log, func() (driver, error) { return newPlaywrightDriver(exe, cfg) })
 }
+
+// EnforcesScopeEgress reports whether Chromium requires the local scope proxy.
+func (m *Manager) EnforcesScopeEgress() bool { return m.cfg.EnforceScopeEgress }
 
 // sandboxOptOutHint is appended to a launch failure while the sandbox is on.
 // It names the explicit opt-out but the manager never applies it by itself: a
@@ -129,7 +135,7 @@ func (m *Manager) NewContext(ctx context.Context, opts ContextOptions) (*Context
 	ch, err := callCtxCreate(ctx, func() (contextHandle, error) {
 		m.createMu.Lock()
 		defer m.createMu.Unlock()
-		return b.NewContext(opts.StorageStatePath, opts.ProxyServer, opts.ExtraHeaders, opts.AllowRequest, opts.AllowStateChanging, opts.IgnoreHTTPSErrors)
+		return m.openContext(b, opts)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("browser: new context: %w", err)
@@ -146,6 +152,47 @@ func (m *Manager) NewContext(ctx context.Context, opts ContextOptions) (*Context
 	m.contexts[c] = struct{}{}
 	m.mu.Unlock()
 	return c, nil
+}
+
+type scopedContextHandle struct {
+	contextHandle
+	proxy *scopeproxy.Server
+}
+
+func (c *scopedContextHandle) Close() error {
+	// Stop egress even if closing Chromium blocks or fails.
+	return errors.Join(c.proxy.Close(), c.contextHandle.Close())
+}
+
+func (m *Manager) openContext(b browserHandle, opts ContextOptions) (contextHandle, error) {
+	if !m.EnforcesScopeEgress() {
+		return b.NewContext(opts.StorageStatePath, opts.ProxyServer, opts.ExtraHeaders, opts.AllowRequest, opts.AllowStateChanging, opts.IgnoreHTTPSErrors)
+	}
+	if opts.AllowRequest == nil || opts.AllowAuthority == nil {
+		return nil, errors.New("browser: scoped egress requires both URL and authority checks")
+	}
+	if opts.ProxyServer != "" {
+		return nil, scopeproxy.ErrUpstreamProxyUnsupported
+	}
+	proxy, err := scopeproxy.New(scopeproxy.Config{
+		Policy: scopeproxy.PolicyFunc(func(host string, port int) bool {
+			return opts.AllowAuthority(net.JoinHostPort(host, strconv.Itoa(port)))
+		}),
+		Observer: func(event scopeproxy.Event) {
+			if !event.Allowed {
+				m.log.Debug("browser egress denied", "authority", event.Authority, "reason", event.Reason)
+			}
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	ch, err := b.NewContext(opts.StorageStatePath, proxy.ProxyURL(), opts.ExtraHeaders, opts.AllowRequest, opts.AllowStateChanging, opts.IgnoreHTTPSErrors)
+	if err != nil {
+		_ = proxy.Close()
+		return nil, err
+	}
+	return &scopedContextHandle{contextHandle: ch, proxy: proxy}, nil
 }
 
 // Stats returns a snapshot of pool resources.
@@ -226,6 +273,7 @@ func (m *Manager) Render(ctx context.Context, url string, opts RenderOptions) (*
 	c, err := m.NewContext(ctx, ContextOptions{
 		StorageStatePath: opts.SessionStatePath,
 		AllowRequest:     opts.AllowRequest,
+		AllowAuthority:   opts.AllowAuthority,
 		ExtraHeaders:     extra,
 		// Discovery/UI rendering never opts into state-changing requests: the
 		// browser is loading a page to observe it, not to write to the target.
@@ -305,6 +353,7 @@ func (m *Manager) RenderHashRoutes(ctx context.Context, baseURL string, fragment
 	c, err := m.NewContext(ctx, ContextOptions{
 		StorageStatePath:   opts.SessionStatePath,
 		AllowRequest:       opts.AllowRequest,
+		AllowAuthority:     opts.AllowAuthority,
 		ExtraHeaders:       extra,
 		AllowStateChanging: false,
 		IgnoreHTTPSErrors:  opts.IgnoreHTTPSErrors,
@@ -433,7 +482,11 @@ func (m *Manager) InteractiveLogin(ctx context.Context, opts LoginOptions) (*Log
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", loginHeaders(opts.UserAgent), opts.AllowRequest, true, opts.IgnoreHTTPSErrors) // FRESH context: the operator is about to log in, there's nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed. AllowStateChanging is TRUE here because a login flow is an explicit operator action that must POST its credentials: it is the one deliberate exception to the scan's non-mutating default, and it is decided at this call site, not silently inside the gate.
+	// Login starts fresh. Submitting the login form is an explicit operator action.
+	ch, err := m.openContext(b, ContextOptions{
+		AllowRequest: opts.AllowRequest, AllowAuthority: opts.AllowAuthority,
+		ExtraHeaders: loginHeaders(opts.UserAgent), AllowStateChanging: true, IgnoreHTTPSErrors: opts.IgnoreHTTPSErrors,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}
@@ -574,7 +627,10 @@ func (m *Manager) AutoLogin(ctx context.Context, opts AutoLoginOptions) (*LoginR
 	}
 	defer b.Close()
 
-	ch, err := b.NewContext("", "", loginHeaders(opts.UserAgent), opts.AllowRequest, true, opts.IgnoreHTTPSErrors) // FRESH context: nothing to seed from — opts.StorageStatePath is where the RESULT is saved (SaveStorageState below), never a seed. AllowStateChanging is TRUE for the same reason as InteractiveLogin: an explicit, operator-requested login must POST its form.
+	ch, err := m.openContext(b, ContextOptions{
+		AllowRequest: opts.AllowRequest, AllowAuthority: opts.AllowAuthority,
+		ExtraHeaders: loginHeaders(opts.UserAgent), AllowStateChanging: true, IgnoreHTTPSErrors: opts.IgnoreHTTPSErrors,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("browser: login context: %w", err)
 	}
@@ -1006,24 +1062,66 @@ type jsonPoster interface {
 	GotoJSON(url string, body []byte, contentType, waitUntil string, timeout time.Duration) (status int, finalURL string, err error)
 }
 
+type bodyPoster interface {
+	GotoBody(method, url string, body []byte, contentType, waitUntil string, timeout time.Duration) (status int, finalURL string, err error)
+}
+
+func isValidBodyNavigation(method string, body []byte, contentType string) bool {
+	if len(body) > MaxJSONNavigationBodyBytes {
+		return false
+	}
+	switch {
+	case isJSONRequestContentType(contentType):
+		switch method {
+		case "POST", "PUT", "PATCH", "DELETE":
+			return len(body) > 0 && json.Valid(body)
+		default:
+			return false
+		}
+	case isFormURLEncodedContentType(contentType):
+		switch method {
+		case "POST", "PUT", "PATCH":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
 // NavigateJSON replays a candidate JSON request as a real top-level POST
 // navigation. The concrete browser driver rewrites only that first, scope-gated
 // navigation request; Chromium parses the response as the document, so marker
 // execution is observed by the normal verifier. State-changing policy remains
 // the caller's responsibility.
 func (p *Page) NavigateJSON(ctx context.Context, url string, body []byte, contentType string, opts NavOptions) (*NavResult, error) {
+	return p.NavigateBody(ctx, "POST", url, body, contentType, opts)
+}
+
+// NavigateBody replays a bounded body-carrying request (POST/PUT/PATCH/DELETE
+// with JSON, or POST/PUT/PATCH with application/x-www-form-urlencoded) as a
+// real top-level navigation using the redirect-disabled route.Fetch + document
+// fulfillment pattern.
+func (p *Page) NavigateBody(ctx context.Context, method, url string, body []byte, contentType string, opts NavOptions) (*NavResult, error) {
 	if !p.ctxp.allowStateChanging {
 		return nil, ErrStateChangingBlocked
 	}
-	if len(body) == 0 || len(body) > MaxJSONNavigationBodyBytes || !json.Valid(body) || !isJSONRequestContentType(contentType) {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if !isValidBodyNavigation(method, body, contentType) {
 		return nil, ErrInvalidJSONPostBody
 	}
 	if p.ctxp.allow == nil {
 		return nil, errors.New("browser: JSON POST navigation requires an explicit scope gate")
 	}
-	jp, ok := p.handle.(jsonPoster)
-	if !ok {
-		return nil, ErrJSONPostUnsupported
+	bp, hasBP := p.handle.(bodyPoster)
+	var jp jsonPoster
+	if !hasBP {
+		var hasJP bool
+		jp, hasJP = p.handle.(jsonPoster)
+		if !hasJP || method != "POST" || !isJSONRequestContentType(contentType) {
+			return nil, ErrJSONPostUnsupported
+		}
 	}
 	if err := opts.Limiter.Wait(ctx); err != nil {
 		return nil, err
@@ -1041,11 +1139,20 @@ func (p *Page) NavigateJSON(ctx context.Context, url string, body []byte, conten
 		finalURL string
 	}
 	r, err := callCtx(ctx, func() (nav, error) {
-		s, u, err := jp.GotoJSON(url, append([]byte(nil), body...), contentType, wait, timeout)
+		var (
+			s   int
+			u   string
+			err error
+		)
+		if hasBP {
+			s, u, err = bp.GotoBody(method, url, append([]byte(nil), body...), contentType, wait, timeout)
+		} else {
+			s, u, err = jp.GotoJSON(url, append([]byte(nil), body...), contentType, wait, timeout)
+		}
 		return nav{s, u}, err
 	})
 	if err != nil {
-		return nil, fmt.Errorf("browser: navigate JSON: %w", err)
+		return nil, fmt.Errorf("browser: navigate body: %w", err)
 	}
 	return &NavResult{Status: r.status, FinalURL: r.finalURL}, nil
 }

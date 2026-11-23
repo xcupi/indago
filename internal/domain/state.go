@@ -330,12 +330,32 @@ const (
 	// authenticated scan. No WebSocket frame is ever sent. Findings are
 	// deduplicated per origin and path. See internal/scan/websocket.go.
 	JobWebSocket JobType = "websocket_security"
+	// JobCSRF inspects ONE state-changing endpoint for Cross-Site Request
+	// Forgery protection (anti-CSRF token, SameSite cookie posture, and
+	// cross-origin Origin/Referer validation). See internal/scan/csrf.go.
+	JobCSRF JobType = "csrf"
+	// JobPrototypePollution inspects ONE GET HTML page in Chromium for
+	// client-side Object.prototype pollution via bounded query/hash vectors.
+	// See internal/scan/prototype_pollution.go.
+	JobPrototypePollution JobType = "prototype_pollution"
+	// JobStoredXSS submits a bounded benign marker to ONE state-changing
+	// endpoint and verifies whether it executes on visited HTML pages in
+	// Chromium. See internal/scan/storedxss.go.
+	JobStoredXSS JobType = "stored_xss"
+	// JobCachePoisoning probes ONE origin for unkeyed header cache poisoning
+	// using a unique cache-buster query parameter. See
+	// internal/scan/cache_poisoning.go.
+	JobCachePoisoning JobType = "cache_poisoning"
+	// JobFileUpload inspects ONE upload-shaped endpoint with bounded benign
+	// extension/MIME probes when AllowStateChanging is enabled. See
+	// internal/scan/fileupload.go.
+	JobFileUpload JobType = "file_upload"
 )
 
 // IsValid reports whether the job type is a known value.
 func (t JobType) IsValid() bool {
 	switch t {
-	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders, JobHostHeader, JobJWT, JobNoSQLi, JobMethodTLS, JobWebSocket:
+	case JobDiscovery, JobTest, JobVerify, JobDOMXSS, JobIDOR, JobAccessControl, JobDisclosure, JobCommandInjection, JobSSTI, JobSQLi, JobXXE, JobSSRF, JobCORS, JobOpenRedirect, JobGraphQL, JobPathTraversal, JobSecurityHeaders, JobHostHeader, JobJWT, JobNoSQLi, JobMethodTLS, JobWebSocket, JobCSRF, JobPrototypePollution, JobStoredXSS, JobCachePoisoning, JobFileUpload:
 		return true
 	default:
 		return false

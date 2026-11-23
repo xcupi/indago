@@ -22,6 +22,7 @@ func Run(t *testing.T, f Factory) {
 	t.Run("ProjectCRUD", func(t *testing.T) { testProjectCRUD(t, f) })
 	t.Run("NotFound", func(t *testing.T) { testNotFound(t, f) })
 	t.Run("ScanByProject", func(t *testing.T) { testScanByProject(t, f) })
+	t.Run("ScanOverview", func(t *testing.T) { testScanOverview(t, f) })
 	t.Run("EndpointsParamsInjection", func(t *testing.T) { testDiscoveryChain(t, f) })
 	t.Run("JobStates", func(t *testing.T) { testJobStates(t, f) })
 	t.Run("FindingEvidence", func(t *testing.T) { testFindingEvidence(t, f) })
@@ -227,6 +228,43 @@ func testScanByProject(t *testing.T, f Factory) {
 	}
 	if len(list) != 3 {
 		t.Fatalf("expected 3 scans, got %d", len(list))
+	}
+}
+
+func testScanOverview(t *testing.T, f Factory) {
+	s, done := f(t)
+	defer done()
+	ctx := context.Background()
+
+	empty, err := s.Scans().Overview(ctx, 2)
+	must(t, err)
+	if empty.Total != 0 || empty.States == nil || empty.Recent == nil {
+		t.Fatalf("unexpected empty scan overview: %+v", empty)
+	}
+
+	now := time.Unix(1700000000, 0).UTC()
+	for _, scan := range []*domain.Scan{
+		{ID: "oldest", State: domain.ScanCompleted, CreatedAt: now, Stats: domain.ScanStats{FindingsConfirmed: 11, FindingsRejected: 5}},
+		{ID: "older", State: domain.ScanCreated, CreatedAt: now.Add(100 * time.Millisecond)},
+		{ID: "auth", SeedURLs: []string{"https://example.invalid/seed"}, State: domain.ScanAwaitingAuth, CreatedAt: now.Add(110 * time.Millisecond), Stats: domain.ScanStats{EndpointsDiscovered: 6}},
+		{ID: "latest", Name: "Draft", State: domain.ScanCreated, CreatedAt: now.Add(time.Second), Stats: domain.ScanStats{FindingsConfirmed: 2, FindingsRejected: 1}},
+	} {
+		must(t, s.Scans().Create(ctx, scan))
+	}
+
+	overview, err := s.Scans().Overview(ctx, 2)
+	must(t, err)
+	if overview.Total != 4 || overview.FindingsConfirmed != 13 || overview.FindingsRejected != 6 {
+		t.Fatalf("total counts must include older scans: %+v", overview)
+	}
+	if overview.States[domain.ScanCreated] != 2 || overview.States[domain.ScanAwaitingAuth] != 1 || overview.States[domain.ScanCompleted] != 1 {
+		t.Fatalf("unexpected scan states: %v", overview.States)
+	}
+	rows := overview.Recent
+	if len(rows) != 2 || rows[0].ID != "latest" || rows[1].ID != "auth" ||
+		rows[0].Name != "Draft" || rows[0].FindingsConfirmed != 2 ||
+		rows[1].Name != "https://example.invalid/seed" || rows[1].EndpointsDiscovered != 6 {
+		t.Fatalf("unexpected recent scans: %+v", rows)
 	}
 }
 

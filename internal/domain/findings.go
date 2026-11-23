@@ -15,6 +15,7 @@ type Provenance struct {
 	DetectedAt      time.Time       `json:"detected_at"`
 	VerifiedAt      *time.Time      `json:"verified_at,omitempty"`
 	AIAssisted      bool            `json:"ai_assisted"` // advisory only; never authoritative
+	Assessment      string          `json:"assessment,omitempty"`
 }
 
 // Finding is a candidate or verified vulnerability. A reflection alone yields

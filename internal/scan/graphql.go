@@ -538,7 +538,13 @@ func (e *graphQLExecutor) correlateGraphQL(ctx context.Context, job *domain.Test
 		e.log.Warn("graphql: resolve scan for finding", "scan", job.ScanID, "err", err)
 		return
 	}
-	existing, _ := e.store.Findings().ListByScan(ctx, job.ScanID)
+	e.findingsMu.Lock()
+	defer e.findingsMu.Unlock()
+	existing, err := e.store.Findings().ListByScan(ctx, job.ScanID)
+	if err != nil {
+		e.log.Warn("graphql: load findings", "scan", job.ScanID, "err", err)
+		return
+	}
 	for _, check := range d.Checks {
 		if !check.Confirmed {
 			continue
@@ -569,9 +575,7 @@ func (e *graphQLExecutor) correlateGraphQL(ctx context.Context, job *domain.Test
 		if len(f.EvidenceIDs) == 0 {
 			f.EvidenceIDs = d.EvidenceIDs
 		}
-		e.findingsMu.Lock()
 		err := e.store.Findings().Create(ctx, f)
-		e.findingsMu.Unlock()
 		if err != nil {
 			e.log.Warn("graphql: persist finding", "scan", job.ScanID, "check", check.Name, "err", err)
 			continue
@@ -585,7 +589,8 @@ func graphQLFindingExists(findings []*domain.Finding, endpointID domain.ID, titl
 		if f == nil {
 			continue
 		}
-		if f.EndpointID == endpointID && f.Title == title && f.Verdict == domain.VerdictConfirmed {
+		if f.EndpointID == endpointID && f.Title == title &&
+			(f.Verdict == domain.VerdictConfirmed || f.Provenance.Engine == graphQLEngine) {
 			return true
 		}
 	}

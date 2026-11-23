@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/indago/indago/internal/scopeproxy"
 	pw "github.com/mxschmitt/playwright-go"
 )
 
@@ -31,21 +32,38 @@ func IsTimeout(err error) bool {
 // a browser are gated behind the `browser_integration` build tag.
 
 // newPlaywrightDriver starts a Playwright engine.
-// exe, when non-empty, is the Chromium binary to launch. disableSandbox is the
+// exe, when non-empty, is the Chromium binary to launch. DisableSandbox is the
 // operator's explicit opt-out of Chromium's process sandbox; the zero value
 // keeps it ON.
-func newPlaywrightDriver(exe string, disableSandbox bool) (driver, error) {
+func newPlaywrightDriver(exe string, cfg Config) (driver, error) {
 	p, err := pw.Run()
 	if err != nil {
 		return nil, fmt.Errorf("run playwright (install the driver: go run github.com/mxschmitt/playwright-go/cmd/playwright@v0.6201.1 --version): %w", err)
 	}
-	return &pwDriver{pw: p, exe: exe, disableSandbox: disableSandbox}, nil
+	d := &pwDriver{pw: p, exe: exe, disableSandbox: cfg.DisableSandbox}
+	if cfg.EnforceScopeEgress {
+		// Contexts supply their own allowlists. The browser process itself
+		// has no project scope and must not inherit a direct connection.
+		d.unscopedProxy, err = scopeproxy.New(scopeproxy.Config{
+			Policy: scopeproxy.PolicyFunc(func(string, int) bool { return false }),
+		})
+		if err == nil {
+			d.scopeArgs, err = scopeproxy.ChromiumArgs(d.unscopedProxy.ProxyURL())
+		}
+		if err != nil {
+			_ = d.Stop()
+			return nil, fmt.Errorf("start Chromium scope proxy: %w", err)
+		}
+	}
+	return d, nil
 }
 
 type pwDriver struct {
 	pw             *pw.Playwright
 	exe            string
 	disableSandbox bool
+	scopeArgs      []string
+	unscopedProxy  *scopeproxy.Server
 }
 
 func (d *pwDriver) Launch(headless bool) (browserHandle, error) {
@@ -67,16 +85,25 @@ func (d *pwDriver) Launch(headless bool) (browserHandle, error) {
 	if d.exe != "" {
 		opts.ExecutablePath = pw.String(d.exe)
 	}
+	opts.Args = append(opts.Args, d.scopeArgs...)
 	b, err := d.pw.Chromium.Launch(opts)
 	if err != nil {
 		return nil, err
 	}
-	return &pwBrowser{b: b}, nil
+	return &pwBrowser{b: b, enforceScopeEgress: d.unscopedProxy != nil}, nil
 }
 
-func (d *pwDriver) Stop() error { return d.pw.Stop() }
+func (d *pwDriver) Stop() error {
+	if d.unscopedProxy != nil {
+		return errors.Join(d.pw.Stop(), d.unscopedProxy.Close())
+	}
+	return d.pw.Stop()
+}
 
-type pwBrowser struct{ b pw.Browser }
+type pwBrowser struct {
+	b                  pw.Browser
+	enforceScopeEgress bool
+}
 
 func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeaders map[string]string, allow func(string) bool, allowStateChanging, ignoreHTTPSErrors bool) (contextHandle, error) {
 	opts := pw.BrowserNewContextOptions{}
@@ -97,6 +124,9 @@ func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeader
 	}
 	if proxyServer != "" {
 		opts.Proxy = &pw.Proxy{Server: proxyServer}
+		if b.enforceScopeEgress {
+			opts.Proxy.Bypass = pw.String("<-loopback>")
+		}
 	}
 	if len(extraHeaders) > 0 {
 		// Playwright's ExtraHTTPHeaders does not reliably override the
@@ -156,6 +186,7 @@ func (b *pwBrowser) NewContext(storageStatePath, proxyServer string, extraHeader
 func (b *pwBrowser) Close() error { return b.b.Close() }
 
 type jsonNavigationOverride struct {
+	method      string
 	url         string
 	body        []byte
 	contentType string
@@ -252,7 +283,10 @@ func (c *pwContext) onRoute(route pw.Route) {
 	if _, ok := headers["content-type"]; !ok {
 		headers["content-type"] = override.contentType
 	}
-	method := "POST"
+	method := override.method
+	if method == "" {
+		method = "POST"
+	}
 	maxRedirects := 0
 	timeoutMS := float64(override.timeout.Milliseconds())
 	response, err := route.Fetch(pw.RouteFetchOptions{
@@ -309,24 +343,27 @@ func (c *pwContext) failJSONNavigationOverride(o *jsonNavigationOverride, err er
 	c.mu.Unlock()
 }
 
-func (c *pwContext) setJSONNavigationOverride(rawURL, contentType string, body []byte, timeout time.Duration) (*jsonNavigationOverride, error) {
+func (c *pwContext) setJSONNavigationOverride(method, rawURL, contentType string, body []byte, timeout time.Duration) (*jsonNavigationOverride, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.allow == nil {
 		return nil, errors.New("browser: JSON POST navigation requires an explicit scope gate")
 	}
-	// GotoJSON turns the browser's initial GET into a route.Fetch POST, i.e. a
-	// request that does NOT pass through onRoute's method check. Refuse it here
-	// unless this context was explicitly granted the state-changing opt-in, so
-	// the gate cannot be bypassed by the one driver path that changes methods
-	// inside the route.
+	// GotoBody/GotoJSON turns the browser's initial GET into a route.Fetch
+	// request, i.e. a request that does NOT pass through onRoute's method
+	// check. Refuse it here unless this context was explicitly granted the
+	// state-changing opt-in, so the gate cannot be bypassed by the one driver
+	// path that changes methods inside the route.
 	if !c.allowStateChanging {
 		return nil, ErrStateChangingBlocked
 	}
 	if c.jsonOverride != nil {
-		return nil, errors.New("browser: another JSON POST navigation is already pending")
+		return nil, errors.New("browser: another body navigation is already pending")
 	}
-	o := &jsonNavigationOverride{url: rawURL, contentType: contentType, body: append([]byte(nil), body...), timeout: timeout}
+	if method == "" {
+		method = "POST"
+	}
+	o := &jsonNavigationOverride{method: method, url: rawURL, contentType: contentType, body: append([]byte(nil), body...), timeout: timeout}
 	c.jsonOverride = o
 	return o, nil
 }
@@ -450,14 +487,15 @@ func (p *pwPage) Goto(url, referer, waitUntil string, timeout time.Duration) (in
 	return status, p.p.URL(), nil
 }
 
-// GotoJSON performs one top-level POST navigation after the context route
-// converts the initial GET request into the exact bounded JSON request. The
-// context route continues to run its scope check before applying the override.
-func (p *pwPage) GotoJSON(rawURL string, body []byte, contentType, waitUntil string, timeout time.Duration) (int, string, error) {
+// GotoBody performs one top-level body-carrying navigation after the context
+// route converts the initial GET request into the exact bounded method+body
+// request. The context route continues to run its scope check before applying
+// the override.
+func (p *pwPage) GotoBody(method, rawURL string, body []byte, contentType, waitUntil string, timeout time.Duration) (int, string, error) {
 	if p.ctx == nil {
 		return 0, "", ErrJSONPostUnsupported
 	}
-	override, err := p.ctx.setJSONNavigationOverride(rawURL, contentType, body, timeout)
+	override, err := p.ctx.setJSONNavigationOverride(method, rawURL, contentType, body, timeout)
 	if err != nil {
 		return 0, "", err
 	}
@@ -470,9 +508,16 @@ func (p *pwPage) GotoJSON(rawURL string, body []byte, contentType, waitUntil str
 		return 0, "", routeErr
 	}
 	if !applied {
-		return 0, "", errors.New("browser: JSON POST navigation override was not applied")
+		return 0, "", errors.New("browser: body navigation override was not applied")
 	}
 	return status, finalURL, nil
+}
+
+// GotoJSON performs one top-level POST navigation after the context route
+// converts the initial GET request into the exact bounded JSON request. The
+// context route continues to run its scope check before applying the override.
+func (p *pwPage) GotoJSON(rawURL string, body []byte, contentType, waitUntil string, timeout time.Duration) (int, string, error) {
+	return p.GotoBody("POST", rawURL, body, contentType, waitUntil, timeout)
 }
 
 // CurrentURL reports the URL of the document the page currently has loaded
@@ -678,6 +723,14 @@ func isJSONRequestContentType(raw string) bool {
 	}
 	mediaType = strings.ToLower(mediaType)
 	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+}
+
+func isFormURLEncodedContentType(raw string) bool {
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(mediaType, "application/x-www-form-urlencoded")
 }
 
 func isCapturedRequestBodyContentType(raw string) bool {

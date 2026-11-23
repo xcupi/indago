@@ -565,14 +565,14 @@ func TestVerifyHandleStateChangingGuard(t *testing.T) {
 }
 
 // Even with AllowStateChanging on, the verifier keeps unsupported body methods
-// skipped. POST+JSON is supported by a bounded top-level browser navigation;
-// PUT/PATCH/DELETE remain Pending in this phase.
+// skipped. POST/PUT/PATCH+form and POST/PUT/PATCH/DELETE+JSON are supported;
+// DELETE+form remains unsupported and Pending.
 func TestVerifyHandleUnsupportedBodyMethodSkippedEvenIfAllowed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "ok") }))
 	defer srv.Close()
 	env := newScanEnv(t)
-	ep := env.endpoint(srv.URL+"/submit", domain.MethodPUT)
-	focus := env.param(ep, "q", domain.LocationJSON, "hi")
+	ep := env.endpoint(srv.URL+"/submit", domain.MethodDELETE)
+	focus := env.param(ep, "q", domain.LocationForm, "hi")
 	ip := env.injection(ep, focus)
 	f := env.pendingFinding(ep, ip)
 
@@ -583,7 +583,7 @@ func TestVerifyHandleUnsupportedBodyMethodSkippedEvenIfAllowed(t *testing.T) {
 		t.Fatalf("skipped job must succeed: %v", err)
 	}
 	if fv.callCount() != 0 {
-		t.Fatal("a PUT+JSON target must remain unsupported and never reach the browser verifier")
+		t.Fatal("a DELETE+form target must remain unsupported and never reach the browser verifier")
 	}
 	tc := env.only()
 	if tc.Status != domain.TestCaseSkipped {
@@ -617,6 +617,77 @@ func TestVerifyHandlePostFormReachesVerifier(t *testing.T) {
 		if in.Method != "POST" || in.Location != domain.LocationForm || in.FormValues == nil || !in.AllowStateChanging {
 			t.Fatalf("verification.Input not populated for form POST (or the state-changing opt-in was lost): %+v", in)
 		}
+	}
+}
+
+func TestVerifyExecutorPassesPutPatchDeleteJSONToBrowserVerifier(t *testing.T) {
+	const contentType = "application/vnd.api+json; charset=utf-8"
+	const candidateValue = "<svg onload=mk>"
+	for _, method := range []domain.HTTPMethod{domain.MethodPUT, domain.MethodPATCH, domain.MethodDELETE} {
+		t.Run(string(method), func(t *testing.T) {
+			env := newScanEnv(t)
+			ep := &domain.Endpoint{
+				ID: domain.NewID(), ScanID: env.scanID, URL: "http://example.test/api/item",
+				Method: method, ContentType: contentType, Source: domain.SourceBrowserNetwork, CreatedAt: time.Now(),
+			}
+			if err := env.st.Endpoints().Create(context.Background(), ep); err != nil {
+				t.Fatal(err)
+			}
+			focus := env.param(ep, "q", domain.LocationJSON, `"hi"`)
+			ip := env.injection(ep, focus)
+			f := env.pendingFinding(ep, ip)
+
+			fv := &fakeVerifier{result: confirmedResult(verification.SignalPageError)}
+			vx := env.verifyExec(fv, openScope(), ExecutorConfig{AllowStateChanging: true})
+			cand := detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: candidateValue, Priority: 90, DedupKey: "json-" + string(method)}
+			job := env.verifyJobFor(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, cand, f.ID)
+			if err := vx.Handle(context.Background(), job); err != nil {
+				t.Fatalf("handle %s+JSON: %v", method, err)
+			}
+			if fv.callCount() != 1 {
+				t.Fatalf("verifier called %d times, want 1 for %s+JSON", fv.callCount(), method)
+			}
+			in := fv.calls[0]
+			if in.Method != string(method) || in.Location != domain.LocationJSON || in.ContentType != contentType || !in.AllowStateChanging {
+				t.Fatalf("unexpected verification.Input for %s+JSON: %+v", method, in)
+			}
+			var got map[string]json.RawMessage
+			if err := json.Unmarshal(in.JSONBody, &got); err != nil {
+				t.Fatalf("JSONBody = %q: %v", in.JSONBody, err)
+			}
+			var q string
+			if err := json.Unmarshal(got["q"], &q); err != nil || q != candidateValue {
+				t.Fatalf("JSONBody[q] = %q, want %q", q, candidateValue)
+			}
+		})
+	}
+}
+
+func TestVerifyHandlePutPatchFormReachesVerifier(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "ok") }))
+	defer srv.Close()
+	for _, method := range []domain.HTTPMethod{domain.MethodPUT, domain.MethodPATCH} {
+		t.Run(string(method), func(t *testing.T) {
+			env := newScanEnv(t)
+			ep := env.endpoint(srv.URL+"/submit", method)
+			focus := env.param(ep, "q", domain.LocationForm, "hi")
+			ip := env.injection(ep, focus)
+			f := env.pendingFinding(ep, ip)
+
+			fv := &fakeVerifier{result: confirmedResult(verification.SignalPageError)}
+			vx := env.verifyExec(fv, openScope(), ExecutorConfig{AllowStateChanging: true})
+			job := env.verifyJobFor(domain.JobTarget{EndpointID: ep.ID, InjectionPointID: ip.ID}, basicCandidate(), f.ID)
+			if err := vx.Handle(context.Background(), job); err != nil {
+				t.Fatalf("handle %s+form: %v", method, err)
+			}
+			if fv.callCount() != 1 {
+				t.Fatalf("verifier called %d times, want 1 for %s+form", fv.callCount(), method)
+			}
+			in := fv.calls[0]
+			if in.Method != string(method) || in.Location != domain.LocationForm || in.FormValues == nil || in.ContentType != "application/x-www-form-urlencoded" || !in.AllowStateChanging {
+				t.Fatalf("verification.Input not populated for %s+form: %+v", method, in)
+			}
+		})
 	}
 }
 

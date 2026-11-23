@@ -8,9 +8,12 @@
 package browser_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,6 +21,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -821,5 +825,108 @@ func TestIntegrationNavigateRefererReachesDocumentReferrerRealBrowser(t *testing
 	}
 	if !strings.Contains(html, referer) {
 		t.Fatalf("document.referrer did not reach the sink; rendered HTML: %.300s", html)
+	}
+}
+
+func TestIntegrationNavigateBodyMethodsAndValidation(t *testing.T) {
+	type observedReq struct {
+		method      string
+		contentType string
+		body        string
+	}
+	var mu sync.Mutex
+	var got []observedReq
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		got = append(got, observedReq{
+			method:      r.Method,
+			contentType: r.Header.Get("Content-Type"),
+			body:        string(b),
+		})
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<html><body><p>%s:%s</p></body></html>", r.Method, string(b))
+	}))
+	defer srv.Close()
+
+	m := newManagerOrSkip(t, browser.DefaultConfig())
+	defer m.Close()
+	allowAll := func(string) bool { return true }
+
+	// Without AllowStateChanging, NavigateBody must refuse before hitting the network.
+	roCtx, err := m.NewContext(context.Background(), browser.ContextOptions{AllowRequest: allowAll})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer roCtx.Close()
+	roPage, err := roCtx.NewPage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer roPage.Close()
+	if _, err := roPage.NavigateBody(context.Background(), http.MethodPut, srv.URL+"/ro", []byte(`{"q":"x"}`), "application/json", browser.NavOptions{}); !errors.Is(err, browser.ErrStateChangingBlocked) {
+		t.Fatalf("read-only NavigateBody err = %v, want ErrStateChangingBlocked", err)
+	}
+
+	rwCtx, err := m.NewContext(context.Background(), browser.ContextOptions{AllowRequest: allowAll, AllowStateChanging: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rwCtx.Close()
+
+	cases := []struct {
+		method      string
+		contentType string
+		body        []byte
+	}{
+		{method: http.MethodPut, contentType: "application/json", body: []byte(`{"q":"put-marker"}`)},
+		{method: http.MethodPatch, contentType: "application/merge-patch+json", body: []byte(`{"q":"patch-marker"}`)},
+		{method: http.MethodDelete, contentType: "application/json", body: []byte(`{"q":"del-marker"}`)},
+		{method: http.MethodPut, contentType: "application/x-www-form-urlencoded", body: []byte("q=put-form-marker")},
+		{method: http.MethodPatch, contentType: "application/x-www-form-urlencoded; charset=utf-8", body: []byte("q=patch-form-marker")},
+	}
+	for _, tc := range cases {
+		p, err := rwCtx.NewPage(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		nav, err := p.NavigateBody(context.Background(), tc.method, srv.URL+"/api/item", tc.body, tc.contentType, browser.NavOptions{WaitUntil: browser.WaitLoad})
+		if err != nil {
+			_ = p.Close()
+			t.Fatalf("%s %s NavigateBody: %v", tc.method, tc.contentType, err)
+		}
+		if nav.Status != http.StatusOK {
+			_ = p.Close()
+			t.Fatalf("%s status = %d, want 200", tc.method, nav.Status)
+		}
+		html, err := p.Content(context.Background())
+		_ = p.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(html, tc.method+":"+string(tc.body)) {
+			t.Fatalf("%s rendered HTML = %q, want %q", tc.method, html, tc.method+":"+string(tc.body))
+		}
+	}
+
+	// Oversized (> 128 KiB) and unsupported DELETE+form must be rejected before network.
+	p, err := rwCtx.NewPage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	oversized := append([]byte(`{"q":"`), append(bytes.Repeat([]byte("a"), browser.MaxJSONNavigationBodyBytes), []byte(`"}`)...)...)
+	if _, err := p.NavigateBody(context.Background(), http.MethodPut, srv.URL+"/oversized", oversized, "application/json", browser.NavOptions{}); !errors.Is(err, browser.ErrInvalidJSONPostBody) {
+		t.Fatalf("oversized PUT+JSON err = %v, want ErrInvalidJSONPostBody", err)
+	}
+	if _, err := p.NavigateBody(context.Background(), http.MethodDelete, srv.URL+"/badform", []byte("q=x"), "application/x-www-form-urlencoded", browser.NavOptions{}); !errors.Is(err, browser.ErrInvalidJSONPostBody) {
+		t.Fatalf("DELETE+form err = %v, want ErrInvalidJSONPostBody", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != len(cases) {
+		t.Fatalf("server received %d requests, want %d", len(got), len(cases))
 	}
 }

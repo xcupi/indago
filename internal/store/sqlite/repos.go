@@ -7,6 +7,7 @@ import (
 	"errors"
 	"slices"
 
+	"github.com/indago/indago/internal/assessment"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/store"
 )
@@ -742,6 +743,7 @@ type findingRepo struct{ db *sql.DB }
 const findingCols = `id, scan_id, project_id, vuln_class, verdict, severity, confidence, title, summary, endpoint_id, injection_point_id, parameter_id, location, evidence_ids, provenance, detail, created_at, updated_at`
 
 func (r *findingRepo) Create(ctx context.Context, f *domain.Finding) error {
+	f, _ = assessment.Finding(f)
 	evIDs, _ := jsonEncode(f.EvidenceIDs)
 	prov, _ := jsonEncode(f.Provenance)
 	_, err := r.db.ExecContext(ctx,
@@ -800,6 +802,7 @@ func (r *findingRepo) ListByProject(ctx context.Context, projectID domain.ID) ([
 }
 
 func (r *findingRepo) Update(ctx context.Context, f *domain.Finding) error {
+	f, _ = assessment.Finding(f)
 	evIDs, _ := jsonEncode(f.EvidenceIDs)
 	prov, _ := jsonEncode(f.Provenance)
 	res, err := r.db.ExecContext(ctx,

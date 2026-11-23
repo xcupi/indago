@@ -118,6 +118,18 @@ type execution struct {
 	// securityHeadersPassDone marks the one-time read-only HTTP response
 	// security-headers / cookie-policy pass (one GET per origin).
 	securityHeadersPassDone atomic.Bool
+	// csrfPassDone marks the one-time Cross-Site Request Forgery pass.
+	csrfPassDone atomic.Bool
+	// prototypePollutionPassDone marks the one-time browser-backed
+	// client-side prototype pollution pass.
+	prototypePollutionPassDone atomic.Bool
+	// cachePoisoningPassDone marks the one-time read-only cache-busted
+	// unkeyed header cache poisoning pass.
+	cachePoisoningPassDone atomic.Bool
+	// storedXSSPassDone marks the one-time opt-in stored XSS pass.
+	storedXSSPassDone atomic.Bool
+	// fileUploadPassDone marks the one-time bounded file upload pass.
+	fileUploadPassDone atomic.Bool
 	// methodTLSPassDone marks the one-time read-only HTTP method & TLS
 	// transport-hygiene pass (one bounded OPTIONS/TRACE inspection per origin).
 	methodTLSPassDone atomic.Bool
@@ -157,6 +169,9 @@ func (e *execution) resume() {
 // (unless it already completed) discovery, plus the monitor. The caller holds
 // c.mu and records the returned execution in c.running.
 func (c *Controller) launch(ctx context.Context, sc *domain.Scan, scope domain.Scope, target *domain.Target) (*execution, error) {
+	if c.ReadOnlyTargets() {
+		return nil, ErrTargetReadOnly
+	}
 	runCtx, cancel := context.WithCancel(c.baseCtx)
 
 	// ONE scope-enforcing engine per scan, shared by discovery and the executor:
@@ -830,6 +845,41 @@ func (c *Controller) evaluate(ctx context.Context, ex *execution) (done bool) {
 		ex.webSocketPassDone.Store(true)
 		if !sc.Config.SkipWebSocket {
 			c.enqueueWebSocketProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.csrfPassDone.Load() {
+		ex.csrfPassDone.Store(true)
+		if !sc.Config.SkipCSRF {
+			c.enqueueCSRFProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.prototypePollutionPassDone.Load() {
+		ex.prototypePollutionPassDone.Store(true)
+		if !sc.Config.SkipPrototypePollution {
+			c.enqueuePrototypePollutionProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.cachePoisoningPassDone.Load() {
+		ex.cachePoisoningPassDone.Store(true)
+		if !sc.Config.SkipCachePoisoning {
+			c.enqueueCachePoisoningProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.storedXSSPassDone.Load() {
+		ex.storedXSSPassDone.Store(true)
+		if sc.Config.EnableStoredXSS {
+			c.enqueueStoredXSSProbes(ctx, ex.scanID)
+			passes = true
+		}
+	}
+	if !ex.fileUploadPassDone.Load() {
+		ex.fileUploadPassDone.Store(true)
+		if !sc.Config.SkipFileUpload {
+			c.enqueueFileUploadProbes(ctx, ex.scanID)
 			passes = true
 		}
 	}

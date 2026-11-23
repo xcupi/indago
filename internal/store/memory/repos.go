@@ -1,8 +1,11 @@
 package memory
 
 import (
+	"cmp"
 	"context"
+	"slices"
 
+	"github.com/indago/indago/internal/assessment"
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/store"
 )
@@ -93,6 +96,44 @@ func (r scanRepo) ListByProject(_ context.Context, pid domain.ID) ([]*domain.Sca
 	return r.t.list(func(s *domain.Scan) bool { return s.ProjectID == pid }), nil
 }
 func (r scanRepo) List(_ context.Context) ([]*domain.Scan, error) { return r.t.list(nil), nil }
+func (r scanRepo) Overview(_ context.Context, recentLimit int) (store.ScanOverview, error) {
+	r.t.mu.RLock()
+	defer r.t.mu.RUnlock()
+
+	overview := store.ScanOverview{
+		Total:  len(r.t.items),
+		States: make(map[domain.ScanState]int),
+		Recent: make([]store.ScanOverviewItem, 0),
+	}
+	recentLimit = max(0, recentLimit)
+	for _, s := range r.t.items {
+		overview.States[s.State]++
+		overview.FindingsConfirmed += s.Stats.FindingsConfirmed
+		overview.FindingsRejected += s.Stats.FindingsRejected
+		at, _ := slices.BinarySearchFunc(overview.Recent, s, func(a store.ScanOverviewItem, b *domain.Scan) int {
+			if order := b.CreatedAt.Compare(a.CreatedAt); order != 0 {
+				return order
+			}
+			return cmp.Compare(a.ID, b.ID)
+		})
+		if at >= recentLimit {
+			continue
+		}
+		name := s.Name
+		if name == "" && len(s.SeedURLs) > 0 {
+			name = s.SeedURLs[0]
+		}
+		overview.Recent = slices.Insert(overview.Recent, at, store.ScanOverviewItem{
+			ID: s.ID, Name: name, State: s.State, CreatedAt: s.CreatedAt,
+			FindingsConfirmed: s.Stats.FindingsConfirmed, EndpointsDiscovered: s.Stats.EndpointsDiscovered,
+		})
+		if len(overview.Recent) > recentLimit {
+			overview.Recent = overview.Recent[:recentLimit]
+		}
+	}
+	return overview, nil
+}
+
 func (r scanRepo) Update(_ context.Context, s *domain.Scan) error { return r.t.update(s) }
 func (r scanRepo) Delete(_ context.Context, id domain.ID) error   { return r.t.remove(id) }
 
@@ -192,7 +233,10 @@ func (r testCaseRepo) Delete(_ context.Context, id domain.ID) error        { ret
 
 type findingRepo struct{ t *table[domain.Finding] }
 
-func (r findingRepo) Create(_ context.Context, f *domain.Finding) error { return r.t.create(f) }
+func (r findingRepo) Create(_ context.Context, f *domain.Finding) error {
+	f, _ = assessment.Finding(f)
+	return r.t.create(f)
+}
 func (r findingRepo) Get(_ context.Context, id domain.ID) (*domain.Finding, error) {
 	return r.t.get(id)
 }
@@ -202,8 +246,11 @@ func (r findingRepo) ListByScan(_ context.Context, sid domain.ID) ([]*domain.Fin
 func (r findingRepo) ListByProject(_ context.Context, pid domain.ID) ([]*domain.Finding, error) {
 	return r.t.list(func(f *domain.Finding) bool { return f.ProjectID == pid }), nil
 }
-func (r findingRepo) Update(_ context.Context, f *domain.Finding) error { return r.t.update(f) }
-func (r findingRepo) Delete(_ context.Context, id domain.ID) error      { return r.t.remove(id) }
+func (r findingRepo) Update(_ context.Context, f *domain.Finding) error {
+	f, _ = assessment.Finding(f)
+	return r.t.update(f)
+}
+func (r findingRepo) Delete(_ context.Context, id domain.ID) error { return r.t.remove(id) }
 
 // --- Evidence ---
 

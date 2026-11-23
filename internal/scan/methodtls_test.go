@@ -454,8 +454,8 @@ func TestMethodTLSTraceEchoProducesFindingWithEvidence(t *testing.T) {
 		t.Fatalf("http_methods findings = %d, want 1", len(findings))
 	}
 	f := findings[0]
-	if f.Verdict != domain.VerdictConfirmed || f.Severity != domain.SeverityLow {
-		t.Fatalf("finding = %+v, want confirmed/low", f)
+	if f.Verdict != domain.VerdictInconclusive || f.Severity != domain.SeverityInfo {
+		t.Fatalf("finding = %+v, want inconclusive/info", f)
 	}
 	if fd := mtFindingDetail(t, f); fd.DedupKey != methodTLSDedupKey(methodTLSOrigin(srv.URL+"/app"), mtCategoryMethod, mtKindTraceEnabled) {
 		t.Fatalf("finding dedup key = %q, want the origin-keyed TRACE key", fd.DedupKey)
@@ -876,5 +876,211 @@ func TestEnqueueMethodTLSSkipsStateChangingEndpoints(t *testing.T) {
 	}
 	if len(jobs) != 0 {
 		t.Fatalf("jobs = %d, want 0 for a state-changing-only origin", len(jobs))
+	}
+}
+
+// A server that answers 200 OK HTML to TRACE (without echoing the request line
+// and marker) and only sets CORS Access-Control-Allow-Methods on OPTIONS must
+// not produce false-positive method findings.
+func TestMethodTLSNonEchoing200TraceAndCORSOptionsAreClean(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodOptions:
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET,HEAD,PUT,PATCH,POST,DELETE")
+			w.WriteHeader(http.StatusNoContent)
+		case http.MethodTrace:
+			w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+			_, _ = w.Write([]byte("<html><body>spa fallback</body></html>"))
+		default:
+			w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+			_, _ = w.Write([]byte("<html><body>ok</body></html>"))
+		}
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/", domain.MethodGET)
+	tc := runMethodTLS(t, env, mtEngineFor(t, false), ep, ExecutorConfig{})
+
+	if tc.Status != domain.TestCaseCompleted {
+		t.Fatalf("status = %q (note %q), want completed", tc.Status, tc.Note)
+	}
+	d := mtDetailOf(t, tc)
+	if d.Verdict != domain.VerdictRejected || len(d.Signals) != 0 {
+		t.Fatalf("detail = %+v, want rejected with no signals", d)
+	}
+	if got := scanFindings(t, env); len(got) != 0 {
+		t.Fatalf("findings = %d, want 0", len(got))
+	}
+}
+
+// A TLS 1.1-only origin is refused by Go's TLS 1.2/1.3 client and reported as
+// tls_protocol_unsupported, whereas a mixed TLS 1.1/1.2 origin negotiates
+// TLS 1.2 cleanly without a false-positive legacy finding.
+func TestMethodTLSMixedAndLegacy11Origin(t *testing.T) {
+	newTLSServer := func(minVer, maxVer uint16) *httptest.Server {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("generate key: %v", err)
+		}
+		now := time.Now()
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(3),
+			Subject:      pkix.Name{CommonName: "tls11.example.test"},
+			NotBefore:    now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour),
+			KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+			IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+			DNSNames:    []string{"127.0.0.1", "localhost"},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		if err != nil {
+			t.Fatalf("create certificate: %v", err)
+		}
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(cleanMethodHandler))
+		srv.TLS = &tls.Config{
+			Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+			MinVersion:   minVer,
+			MaxVersion:   maxVer,
+		}
+		srv.StartTLS()
+		t.Cleanup(srv.Close)
+		return srv
+	}
+
+	t.Run("tls11_only", func(t *testing.T) {
+		srv := newTLSServer(tls.VersionTLS11, tls.VersionTLS11)
+		env := newScanEnv(t)
+		ep := env.endpoint(srv.URL+"/", domain.MethodGET)
+		tc := runMethodTLS(t, env, mtEngineFor(t, true), ep, ExecutorConfig{})
+
+		d := mtDetailOf(t, tc)
+		if d.Verdict != domain.VerdictConfirmed {
+			t.Fatalf("verdict = %q, want confirmed", d.Verdict)
+		}
+		findings := mtFindings(t, env, domain.VulnTLSConfig)
+		if len(findings) != 1 || mtFindingDetail(t, findings[0]).Signals[0].Kind != mtKindTLSProtocolRefused {
+			t.Fatalf("findings = %+v, want one %s finding", findings, mtKindTLSProtocolRefused)
+		}
+	})
+
+	t.Run("mixed_tls11_tls12", func(t *testing.T) {
+		srv := newTLSServer(tls.VersionTLS11, tls.VersionTLS12)
+		env := newScanEnv(t)
+		ep := env.endpoint(srv.URL+"/", domain.MethodGET)
+		tc := runMethodTLS(t, env, mtEngineFor(t, true), ep, ExecutorConfig{})
+
+		d := mtDetailOf(t, tc)
+		if d.Verdict != domain.VerdictRejected || d.TLS == nil || d.TLS.Version != tls.VersionTLS12 {
+			t.Fatalf("detail = %+v, want rejected verdict with TLS 1.2 negotiated", d)
+		}
+		if got := scanFindings(t, env); len(got) != 0 {
+			t.Fatalf("findings = %d, want 0", len(got))
+		}
+	})
+}
+
+// Multiple method and TLS signals on one origin produce separate findings per
+// (origin, category, kind) and lower the aggregate test-case confidence when a
+// medium-confidence signal is present.
+func TestMethodTLSMultipleSignalsAcrossCategories(t *testing.T) {
+	now := time.Now()
+	srv := mtSelfSignedServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodOptions:
+			w.Header().Set("Allow", "GET, PUT, OPTIONS")
+			w.WriteHeader(http.StatusNoContent)
+		case http.MethodTrace:
+			w.Header().Set("Content-Type", "message/http")
+			fmt.Fprintf(w, "%s %s %s\r\n", r.Method, r.URL.RequestURI(), r.Proto)
+			for name, values := range r.Header {
+				for _, v := range values {
+					fmt.Fprintf(w, "%s: %s\r\n", name, v)
+				}
+			}
+		default:
+			_, _ = w.Write([]byte("ok"))
+		}
+	}), now.Add(-48*time.Hour), now.Add(-24*time.Hour))
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/admin", domain.MethodGET)
+	tc := runMethodTLS(t, env, mtEngineFor(t, true), ep, ExecutorConfig{})
+
+	d := mtDetailOf(t, tc)
+	if d.Verdict != domain.VerdictConfirmed || d.Confidence != domain.ConfidenceMedium {
+		t.Fatalf("verdict/confidence = %q/%q, want confirmed/medium", d.Verdict, d.Confidence)
+	}
+	if len(d.Signals) != 3 {
+		t.Fatalf("signals = %d, want 3 (OPTIONS write, TRACE echo, expired cert)", len(d.Signals))
+	}
+	if got := mtFindings(t, env, domain.VulnHTTPMethods); len(got) != 2 {
+		t.Fatalf("http_methods findings = %d, want 2", len(got))
+	}
+	if got := mtFindings(t, env, domain.VulnTLSConfig); len(got) != 1 {
+		t.Fatalf("tls_config findings = %d, want 1", len(got))
+	}
+}
+
+// Throttling on the OPTIONS probe aborts before TRACE and marks the test case
+// inconclusive with no findings.
+func TestMethodTLSThrottledProbeIsInconclusive(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/", domain.MethodGET)
+	tc := runMethodTLS(t, env, mtEngineFor(t, false), ep, ExecutorConfig{})
+
+	d := mtDetailOf(t, tc)
+	if !d.Throttled || d.Verdict != domain.VerdictInconclusive {
+		t.Fatalf("detail = %+v, want throttled + inconclusive", d)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("target hits = %d, want 2 (baseline GET + throttled OPTIONS, no TRACE)", got)
+	}
+	if got := scanFindings(t, env); len(got) != 0 {
+		t.Fatalf("findings = %d, want 0", len(got))
+	}
+}
+
+// enqueueMethodTLSProbes bounds the pass to at most maxMethodTLSOrigins.
+func TestEnqueueMethodTLSProbesCapsAtMaxOrigins(t *testing.T) {
+	ctx := context.Background()
+	st, q := memory.New(), queue.NewMemory()
+	now := time.Now()
+	sc := &domain.Scan{ID: domain.NewID(), ProjectID: domain.NewID(), State: domain.ScanCreated, CreatedAt: now, UpdatedAt: now}
+	if err := st.Scans().Create(ctx, sc); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxMethodTLSOrigins+5; i++ {
+		ep := &domain.Endpoint{
+			ID: domain.NewID(), ScanID: sc.ID,
+			URL:    fmt.Sprintf("https://origin-%02d.example.test/", i),
+			Method: domain.MethodGET, Source: domain.SourceCrawler, CreatedAt: now,
+		}
+		if err := st.Endpoints().Create(ctx, ep); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctrl := NewController(st, q, execLog(), "test", Options{})
+	t.Cleanup(ctrl.Shutdown)
+	ctrl.enqueueMethodTLSProbes(ctx, sc.ID)
+
+	jobs, err := q.Jobs(ctx, sc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != maxMethodTLSOrigins {
+		t.Fatalf("jobs = %d, want %d", len(jobs), maxMethodTLSOrigins)
 	}
 }

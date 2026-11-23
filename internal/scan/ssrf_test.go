@@ -721,11 +721,11 @@ func TestSSRFDifferentialConfirmsTwoIndependentCanaries(t *testing.T) {
 		t.Fatalf("findings = %d, want 1", len(run.findings))
 	}
 	f := run.findings[0]
-	if f.VulnClass != ssrfVulnClass || f.Verdict != domain.VerdictConfirmed {
-		t.Fatalf("finding = %+v, want a confirmed ssrf finding", f)
+	if f.VulnClass != ssrfVulnClass || f.Verdict != domain.VerdictInconclusive {
+		t.Fatalf("finding = %+v, want an inconclusive ssrf finding", f)
 	}
-	if f.Confidence != domain.ConfidenceMedium {
-		t.Fatalf("confidence = %q, want medium for a response-differential confirmation", f.Confidence)
+	if f.Confidence != domain.ConfidenceLow {
+		t.Fatalf("confidence = %q, want low for response-only evidence", f.Confidence)
 	}
 	if !strings.Contains(f.Title, "url") {
 		t.Fatalf("title = %q, want the parameter name", f.Title)
@@ -841,8 +841,8 @@ func TestSSRFDifferentialConfirmsNonEchoingServerError(t *testing.T) {
 	if len(findings) != 1 {
 		t.Fatalf("findings = %d, want 1", len(findings))
 	}
-	if f := findings[0]; f.Verdict != domain.VerdictConfirmed || f.Confidence != domain.ConfidenceMedium {
-		t.Fatalf("finding = %+v, want a confirmed medium-confidence ssrf finding", f)
+	if f := findings[0]; f.Verdict != domain.VerdictInconclusive || f.Confidence != domain.ConfidenceLow {
+		t.Fatalf("finding = %+v, want an inconclusive low-confidence ssrf finding", f)
 	}
 }
 

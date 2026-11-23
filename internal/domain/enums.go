@@ -110,6 +110,27 @@ const (
 	// handshake; no WebSocket frame is ever sent. See
 	// internal/scan/websocket.go.
 	VulnWebSocket VulnClass = "websocket_security"
+	// VulnCSRF is a Cross-Site Request Forgery weakness (CWE-352): a
+	// state-changing endpoint or form lacks an anti-CSRF token and SameSite
+	// cookie protection, and accepts cross-origin requests. See
+	// internal/scan/csrf.go.
+	VulnCSRF VulnClass = "csrf"
+	// VulnPrototypePollution is a client-side prototype pollution weakness
+	// (CWE-1321): an attacker-controlled query or hash parameter mutates
+	// Object.prototype in the browser's JavaScript runtime. Confirmed only
+	// when Object.prototype mutation is observed in Chromium. See
+	// internal/scan/prototype_pollution.go.
+	VulnPrototypePollution VulnClass = "prototype_pollution"
+	// VulnCachePoisoning is a web cache poisoning weakness (CWE-444 / CWE-349):
+	// an unkeyed request header (such as X-Forwarded-Host or X-Original-URL)
+	// alters a cacheable response and is subsequently served to a clean GET
+	// request sharing the same cache-buster key. See
+	// internal/scan/cache_poisoning.go.
+	VulnCachePoisoning VulnClass = "cache_poisoning"
+	// VulnFileUpload is an unrestricted file upload weakness (CWE-434): a
+	// multipart upload endpoint accepts dangerous/executable file extensions
+	// or MIME types without rejecting them. See internal/scan/fileupload.go.
+	VulnFileUpload VulnClass = "file_upload"
 )
 
 // AllVulnClasses returns every vulnerability class the domain defines, in a
@@ -123,13 +144,14 @@ func AllVulnClasses() []VulnClass {
 		VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal,
 		VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader, VulnJWT,
 		VulnNoSQLi, VulnHTTPMethods, VulnTLSConfig, VulnWebSocket,
+		VulnCSRF, VulnPrototypePollution, VulnCachePoisoning, VulnFileUpload,
 	}
 }
 
 // IsValid reports whether the vulnerability class is a known value.
 func (v VulnClass) IsValid() bool {
 	switch v {
-	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader, VulnJWT, VulnNoSQLi, VulnHTTPMethods, VulnTLSConfig, VulnWebSocket:
+	case VulnReflectedXSS, VulnStoredXSS, VulnDOMXSS, VulnIDOR, VulnAccessControl, VulnInfoDisclosure, VulnOpenRedirect, VulnCommandInjection, VulnSSTI, VulnSQLi, VulnXXE, VulnSSRF, VulnCORS, VulnGraphQL, VulnPathTraversal, VulnSecurityHeaders, VulnCookiePolicy, VulnHostHeader, VulnJWT, VulnNoSQLi, VulnHTTPMethods, VulnTLSConfig, VulnWebSocket, VulnCSRF, VulnPrototypePollution, VulnCachePoisoning, VulnFileUpload:
 		return true
 	default:
 		return false

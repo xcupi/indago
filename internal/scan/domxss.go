@@ -1860,7 +1860,7 @@ func (e *domXSSExecutor) handleDOMXSSSource(ctx context.Context, job *domain.Tes
 	sessionStatePath := e.sessionStatePathFor(ctx, job.ScanID)
 	proxy := e.nextProxy() // one proxy per job, shared by every per-selector context below
 	newContext := func() (*browser.Context, error) {
-		opts := browser.ContextOptions{AllowRequest: allow, StorageStatePath: sessionStatePath, ProxyServer: proxy, AllowStateChanging: e.allowStateChanging, IgnoreHTTPSErrors: e.ignoreHTTPSErrors}
+		opts := browser.ContextOptions{AllowRequest: allow, AllowAuthority: e.scope.PermitsHost, StorageStatePath: sessionStatePath, ProxyServer: proxy, AllowStateChanging: e.allowStateChanging, IgnoreHTTPSErrors: e.ignoreHTTPSErrors}
 		if e.userAgent != "" {
 			opts.ExtraHeaders = map[string]string{"User-Agent": e.userAgent}
 		}

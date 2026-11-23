@@ -82,8 +82,8 @@ func TestNoSQLiConfirmsErrorBasedInjection(t *testing.T) {
 	runNoSQLiJob(t, nosqliExecutorFor(t, env, ExecutorConfig{}), env, ep, focus, ip)
 
 	findings := findingsByClass(t, env, domain.VulnNoSQLi)
-	if len(findings) != 1 || findings[0].Verdict != domain.VerdictConfirmed {
-		t.Fatalf("findings = %+v, want one confirmed NoSQL injection", findings)
+	if len(findings) != 1 || findings[0].Verdict != domain.VerdictInconclusive {
+		t.Fatalf("findings = %+v, want one inconclusive NoSQL injection", findings)
 	}
 	if !strings.Contains(findings[0].Title, "q") {
 		t.Fatalf("finding title = %q, want the parameter name", findings[0].Title)
@@ -515,6 +515,275 @@ func TestEnqueueNoSQLiProbesRespectsEnableNoSQLi(t *testing.T) {
 				if j.Priority != nosqliPriority || j.Target.EndpointID != ep.ID || j.Target.InjectionPointID != ip.ID {
 					t.Fatalf("job target/priority wrong: %+v", j)
 				}
+			}
+		})
+	}
+}
+
+// --- JSON body operator injection ------------------------------------------
+
+func nosqliJSONEndpoint(t *testing.T, env *scanEnv, rawURL string, method domain.HTTPMethod) *domain.Endpoint {
+	t.Helper()
+	ep := &domain.Endpoint{
+		ID:          domain.NewID(),
+		ScanID:      env.scanID,
+		URL:         rawURL,
+		Method:      method,
+		ContentType: "application/json",
+		Source:      domain.SourceCrawler,
+		CreatedAt:   time.Now(),
+	}
+	if err := env.st.Endpoints().Create(context.Background(), ep); err != nil {
+		t.Fatal(err)
+	}
+	return ep
+}
+
+// JSON body operator injection is gated by AllowStateChanging: when it is off,
+// POST/PUT/PATCH JSON endpoints must be skipped with zero requests sent.
+func TestNoSQLiJSONBodyGatedWithoutAllowStateChanging(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := nosqliJSONEndpoint(t, env, srv.URL+"/api/login", domain.MethodPOST)
+	focus := env.param(ep, "username", domain.LocationJSON, "alice")
+	ip := env.injection(ep, focus)
+
+	runNoSQLiJob(t, nosqliExecutorFor(t, env, ExecutorConfig{AllowStateChanging: false}), env, ep, focus, ip)
+
+	if hits.Load() != 0 {
+		t.Fatalf("server saw %d request(s), want 0 when AllowStateChanging is false", hits.Load())
+	}
+	tc := nosqliCase(t, env)
+	if tc.Status != domain.TestCaseSkipped || !strings.Contains(tc.Note, "AllowStateChanging") {
+		t.Fatalf("test case = %+v, want a skip mentioning AllowStateChanging", tc)
+	}
+	if findings := findingsByClass(t, env, domain.VulnNoSQLi); len(findings) != 0 {
+		t.Fatalf("a gated endpoint must not produce a finding: %+v", findings)
+	}
+}
+
+// SkipWriteEndpoints keeps JSON body operator probing off POST/PUT/PATCH
+// endpoints even when AllowStateChanging is enabled.
+func TestNoSQLiJSONBodySkippedWhenSkipWriteEndpoints(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := env.endpoint(srv.URL+"/api/login", domain.MethodPOST)
+	focus := env.param(ep, "username", domain.LocationJSON, "alice")
+	ip := env.injection(ep, focus)
+
+	runNoSQLiJob(t, nosqliExecutorFor(t, env, ExecutorConfig{AllowStateChanging: true, SkipWriteEndpoints: true}), env, ep, focus, ip)
+
+	if hits.Load() != 0 {
+		t.Fatalf("server saw %d request(s), want 0 when SkipWriteEndpoints is true", hits.Load())
+	}
+	if tc := nosqliCase(t, env); tc.Status != domain.TestCaseSkipped {
+		t.Fatalf("test case = %+v, want skipped", tc)
+	}
+}
+
+// When AllowStateChanging is enabled, a POST JSON endpoint whose query
+// predicate evaluates MongoDB-style operator objects ({"$ne":""}, {"$gt":""},
+// {"$regex":".*"}) confirms differential NoSQL injection while preserving
+// sibling JSON fields.
+func TestNoSQLiJSONBodyConfirmsOperatorDifferential(t *testing.T) {
+	const matched = `{"ok":true,"user":"alice","roles":["admin","editor"],"profile":{"email":"alice@example.test","tier":"enterprise"}}`
+	const denied = `{"ok":false}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+			t.Errorf("Content-Type = %q, want application/json", r.Header.Get("Content-Type"))
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if body["password"] != "secret" {
+			t.Errorf("sibling JSON field password = %v, want secret", body["password"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch v := body["username"].(type) {
+		case string:
+			if v == "alice" {
+				fmt.Fprint(w, matched)
+				return
+			}
+			fmt.Fprint(w, denied)
+		case map[string]any:
+			if _, ok := v["$ne"]; ok {
+				fmt.Fprint(w, matched)
+				return
+			}
+			if _, ok := v["$gt"]; ok {
+				fmt.Fprint(w, matched)
+				return
+			}
+			if _, ok := v["$regex"]; ok {
+				fmt.Fprint(w, matched)
+				return
+			}
+			fmt.Fprint(w, denied)
+		default:
+			// Array shape control: no match.
+			fmt.Fprint(w, denied)
+		}
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := nosqliJSONEndpoint(t, env, srv.URL+"/api/login", domain.MethodPOST)
+	focus := env.param(ep, "username", domain.LocationJSON, "alice")
+	env.param(ep, "password", domain.LocationJSON, "secret")
+	ip := env.injection(ep, focus)
+
+	runNoSQLiJob(t, nosqliExecutorFor(t, env, ExecutorConfig{AllowStateChanging: true}), env, ep, focus, ip)
+
+	findings := findingsByClass(t, env, domain.VulnNoSQLi)
+	if len(findings) != 1 || findings[0].Verdict != domain.VerdictConfirmed {
+		t.Fatalf("findings = %+v, want one confirmed JSON NoSQL injection", findings)
+	}
+	if findings[0].Location != domain.LocationJSON {
+		t.Fatalf("finding location = %q, want json", findings[0].Location)
+	}
+	fd := nosqliFindingDetail(t, findings[0])
+	if fd.ConfirmMethod != "differential" || fd.DifferentialSignals != 2 {
+		t.Fatalf("detail = %+v, want 2 differential signals", fd)
+	}
+	if fd.PoC == nil || fd.PoC.Method != http.MethodPost || fd.PoC.Key != "username" || !strings.Contains(fd.PoC.Body, `"$ne"`) {
+		t.Fatalf("PoC = %+v, want POST JSON operator PoC", fd.PoC)
+	}
+}
+
+// PUT/PATCH JSON endpoints that emit recognized document-database error
+// signatures for array/operator JSON values are confirmed error-based.
+func TestNoSQLiJSONBodyConfirmsErrorBasedInjection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch body["filter"].(type) {
+		case string:
+			fmt.Fprint(w, `{"items":["a","b"]}`)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":"Cast to string failed for value \"[]\" (type array) at path \"filter\""}`)
+		}
+	}))
+	defer srv.Close()
+
+	env := newScanEnv(t)
+	ep := nosqliJSONEndpoint(t, env, srv.URL+"/api/users/search", domain.MethodPATCH)
+	focus := env.param(ep, "filter", domain.LocationJSON, "active")
+	ip := env.injection(ep, focus)
+
+	runNoSQLiJob(t, nosqliExecutorFor(t, env, ExecutorConfig{AllowStateChanging: true}), env, ep, focus, ip)
+
+	findings := findingsByClass(t, env, domain.VulnNoSQLi)
+	if len(findings) != 1 || findings[0].Verdict != domain.VerdictInconclusive {
+		t.Fatalf("findings = %+v, want one inconclusive error-based JSON NoSQLi", findings)
+	}
+	fd := nosqliFindingDetail(t, findings[0])
+	if fd.ConfirmMethod != "error" || fd.ErrorSignals != 2 || fd.IdentifiedProduct != "Mongoose" {
+		t.Fatalf("detail = %+v, want Mongoose error confirmation", fd)
+	}
+	if fd.PoC == nil || fd.PoC.Method != http.MethodPatch {
+		t.Fatalf("PoC = %+v, want PATCH method", fd.PoC)
+	}
+}
+
+func TestNoSQLiJSONBodyProbesAndShapingUnit(t *testing.T) {
+	probes := nosqliJSONOperatorProbes("username")
+	if len(probes) != 3 {
+		t.Fatalf("json operator probes = %d, want 3", len(probes))
+	}
+	for _, p := range probes {
+		if !p.Operator || !json.Valid(p.JSONBody) {
+			t.Fatalf("invalid json operator probe: %+v", p)
+		}
+		for _, banned := range []string{"$set", "$unset", "$inc", "$push", "$rename", "$where", "$function", "$accumulator", "$merge", "$out"} {
+			if strings.Contains(string(p.JSONBody), banned) {
+				t.Fatalf("probe %q uses non-read-only operator %s", p.Name, banned)
+			}
+		}
+	}
+
+	ep := &domain.Endpoint{URL: "http://example.test/api/login", Method: domain.MethodPOST, ContentType: "application/json"}
+	user := &domain.Parameter{ID: "p1", Name: "username", Location: domain.LocationJSON, Example: "alice"}
+	keep := &domain.Parameter{ID: "p2", Name: "remember", Location: domain.LocationJSON, Example: "true", Source: domain.SourceBrowserNetwork}
+	base, err := buildRequest(ep, []*domain.Parameter{user, keep}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shaped, err := nosqliShapeJSONRequest(base, "username", json.RawMessage(`{"$ne":""}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(shaped.Body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["remember"] != true {
+		t.Fatalf("sibling JSON field remember = %v, want true", got["remember"])
+	}
+	op, ok := got["username"].(map[string]any)
+	if !ok || op["$ne"] != "" {
+		t.Fatalf("shaped username = %v, want {\"$ne\":\"\"}", got["username"])
+	}
+}
+
+func TestNoSQLiEnqueueJSONBodyRespectsAllowStateChanging(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		allowStateChanging bool
+		want               int
+	}{
+		{name: "disabled", allowStateChanging: false, want: 0},
+		{name: "enabled", allowStateChanging: true, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newScanEnv(t)
+			env.setScanConfig(func(c *domain.ScanConfig) { c.EnableNoSQLi = true })
+			q := queue.NewMemory()
+			c := &Controller{
+				store: env.st,
+				queue: q,
+				log:   execLog(),
+				opts:  Options{Executor: ExecutorConfig{AllowStateChanging: tc.allowStateChanging}},
+			}
+
+			ep := nosqliJSONEndpoint(t, env, "http://127.0.0.1:1/api/login", domain.MethodPOST)
+			focus := env.param(ep, "username", domain.LocationJSON, "alice")
+			env.injection(ep, focus)
+
+			c.enqueueNoSQLiProbes(context.Background(), env.scanID)
+
+			var jobs []*domain.TestJob
+			for {
+				j, err := q.Lease(context.Background(), "t", env.scanID, []domain.JobType{domain.JobNoSQLi}, time.Minute)
+				if err != nil || j == nil {
+					break
+				}
+				jobs = append(jobs, j)
+			}
+			if len(jobs) != tc.want {
+				t.Fatalf("enqueued %d JSON NoSQLi jobs, want %d", len(jobs), tc.want)
 			}
 		})
 	}

@@ -269,11 +269,11 @@ func TestWebSocketForeignOriginAcceptedProducesFindingWithEvidence(t *testing.T)
 		t.Fatalf("findings = %d, want exactly 1 cross-origin finding", len(findings))
 	}
 	f := findings[0]
-	if f.Verdict != domain.VerdictConfirmed {
-		t.Fatalf("verdict = %q, want confirmed", f.Verdict)
+	if f.Verdict != domain.VerdictInconclusive {
+		t.Fatalf("verdict = %q, want inconclusive", f.Verdict)
 	}
-	if f.Severity != domain.SeverityMedium {
-		t.Fatalf("severity = %q, want medium for an anonymous scan (no session to hijack)", f.Severity)
+	if f.Severity != domain.SeverityInfo {
+		t.Fatalf("severity = %q, want info for a handshake-only observation", f.Severity)
 	}
 	fd := wsFindingDetail(t, f)
 	if len(fd.Signals) != 1 || fd.Signals[0].Kind != wsKindCrossOriginUpgrade {
@@ -309,9 +309,8 @@ func TestWebSocketForeignOriginAcceptedProducesFindingWithEvidence(t *testing.T)
 	}
 }
 
-// A bare 101 — one that does not even echo the RFC 6455 accept value — is
-// still a protocol switch and is still reported, at medium confidence.
-func TestWebSocketBare101IsStillReported(t *testing.T) {
+// A bare 101 does not establish a valid WebSocket handshake.
+func TestWebSocketBare101DoesNotProduceFinding(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hj, ok := w.(http.Hijacker)
 		if !ok {
@@ -336,12 +335,8 @@ func TestWebSocketBare101IsStillReported(t *testing.T) {
 	runWebSocket(t, env, wsEngineFor(t), ep, ExecutorConfig{})
 
 	findings := wsFindings(t, env)
-	if len(findings) != 1 {
-		t.Fatalf("findings = %d, want the bare 101 to be reported", len(findings))
-	}
-	fd := wsFindingDetail(t, findings[0])
-	if fd.Signals[0].Confidence != domain.ConfidenceMedium {
-		t.Fatalf("confidence = %q, want medium when the server did not confirm the WebSocket headers", fd.Signals[0].Confidence)
+	if len(findings) != 0 {
+		t.Fatalf("findings = %d, want none from a bare 101", len(findings))
 	}
 }
 
@@ -473,11 +468,11 @@ func TestWebSocketAuthenticatedScanDetectsAnonymousPlaintextUpgrade(t *testing.T
 		}
 		kinds[fd.Signals[0].Kind] = f.Severity
 	}
-	if kinds[wsKindUnauthenticatedUpgrade] != domain.SeverityHigh {
-		t.Fatalf("kinds = %+v, want a high %s", kinds, wsKindUnauthenticatedUpgrade)
+	if kinds[wsKindUnauthenticatedUpgrade] != domain.SeverityInfo {
+		t.Fatalf("kinds = %+v, want info for %s", kinds, wsKindUnauthenticatedUpgrade)
 	}
-	if kinds[wsKindPlaintextUpgrade] != domain.SeverityMedium {
-		t.Fatalf("kinds = %+v, want a medium %s", kinds, wsKindPlaintextUpgrade)
+	if kinds[wsKindPlaintextUpgrade] != domain.SeverityInfo {
+		t.Fatalf("kinds = %+v, want info for %s", kinds, wsKindPlaintextUpgrade)
 	}
 	if d := wsDetailOf(t, tc); !d.Plaintext || !d.AuthenticatedScan {
 		t.Fatalf("detail plaintext/authenticated = %v/%v, want true/true", d.Plaintext, d.AuthenticatedScan)

@@ -387,8 +387,8 @@ func TestSecurityHeadersMissingHeadersProduceFindingsWithEvidence(t *testing.T) 
 			t.Fatalf("finding detail signals = %+v, want exactly the one signal", fd.Signals)
 		}
 		kinds[fd.Signals[0].Kind] = f
-		if f.Verdict != domain.VerdictConfirmed || f.Confidence != domain.ConfidenceHigh {
-			t.Fatalf("finding %s = %s/%s, want confirmed/high", f.Title, f.Verdict, f.Confidence)
+		if f.Verdict != domain.VerdictInconclusive || f.Confidence != domain.ConfidenceLow {
+			t.Fatalf("finding %s = %s/%s, want inconclusive/low", f.Title, f.Verdict, f.Confidence)
 		}
 		if len(f.EvidenceIDs) < 2 {
 			t.Fatalf("finding %q carries no request/response evidence: %+v", f.Title, f.EvidenceIDs)
@@ -430,8 +430,8 @@ func TestSecurityHeadersWeakCookieFlagsProduceFinding(t *testing.T) {
 		t.Fatalf("cookie findings = %d, want 1 (%+v)", len(cookieFindings), cookieFindings)
 	}
 	f := cookieFindings[0]
-	if f.Verdict != domain.VerdictConfirmed || f.Severity != domain.SeverityMedium {
-		t.Fatalf("finding = %s/%s, want confirmed/medium", f.Verdict, f.Severity)
+	if f.Verdict != domain.VerdictInconclusive || f.Severity != domain.SeverityInfo {
+		t.Fatalf("finding = %s/%s, want inconclusive/info", f.Verdict, f.Severity)
 	}
 	if !strings.Contains(f.Title, "sessionid") {
 		t.Fatalf("finding title %q does not name the cookie", f.Title)

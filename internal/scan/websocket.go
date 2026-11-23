@@ -332,14 +332,11 @@ func webSocketSignals(origin, urlPath string, probes []webSocketProbe, authentic
 
 	switched := false
 	for _, p := range probes {
-		if !p.Switched {
+		if !p.Switched || !p.AcceptValid {
 			continue
 		}
 		switched = true
-		confidence := domain.ConfidenceMedium
-		if p.WebSocket {
-			confidence = domain.ConfidenceHigh
-		}
+		confidence := domain.ConfidenceHigh
 		switch p.Name {
 		case wsProbeCrossOrigin:
 			// A cross-origin 101 without a session to hijack is still a

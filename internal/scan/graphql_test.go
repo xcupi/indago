@@ -143,8 +143,8 @@ func TestGraphQLDetectsIntrospectionBatchingVerboseErrorsAndGETQueries(t *testin
 	}
 	titles := map[string]bool{}
 	for _, f := range findings {
-		if f.Verdict != domain.VerdictConfirmed || f.VulnClass != domain.VulnGraphQL {
-			t.Fatalf("finding %q = %s/%s, want confirmed/information_disclosure", f.Title, f.Verdict, f.VulnClass)
+		if f.Verdict != domain.VerdictInconclusive || f.VulnClass != domain.VulnGraphQL {
+			t.Fatalf("finding %q = %s/%s, want inconclusive/graphql", f.Title, f.Verdict, f.VulnClass)
 		}
 		if f.EndpointID != ep.ID {
 			t.Fatalf("finding %q has endpoint %q, want %q", f.Title, f.EndpointID, ep.ID)

@@ -13,6 +13,7 @@ package store
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/indago/indago/internal/domain"
 )
@@ -93,8 +94,29 @@ type ScanRepo interface {
 	Get(ctx context.Context, id domain.ID) (*domain.Scan, error)
 	ListByProject(ctx context.Context, projectID domain.ID) ([]*domain.Scan, error)
 	List(ctx context.Context) ([]*domain.Scan, error)
+	// Overview aggregates all scans and returns at most recentLimit compact rows.
+	Overview(ctx context.Context, recentLimit int) (ScanOverview, error)
 	Update(ctx context.Context, s *domain.Scan) error
 	Delete(ctx context.Context, id domain.ID) error
+}
+
+// ScanOverview is a snapshot of scan counts and the newest dashboard rows.
+type ScanOverview struct {
+	Total             int                      `json:"total"`
+	FindingsConfirmed int                      `json:"findings_confirmed"`
+	FindingsRejected  int                      `json:"findings_rejected"`
+	States            map[domain.ScanState]int `json:"states"`
+	Recent            []ScanOverviewItem       `json:"recent"`
+}
+
+// ScanOverviewItem contains only fields displayed in the dashboard.
+type ScanOverviewItem struct {
+	ID                  domain.ID        `json:"id"`
+	Name                string           `json:"name"`
+	State               domain.ScanState `json:"state"`
+	FindingsConfirmed   int              `json:"findings_confirmed"`
+	EndpointsDiscovered int              `json:"endpoints_discovered"`
+	CreatedAt           time.Time        `json:"created_at"`
 }
 
 // EndpointRepo persists discovered endpoints.

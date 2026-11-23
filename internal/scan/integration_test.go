@@ -200,6 +200,13 @@ func legacyPipelineCfg(httpWorkers int) *domain.ScanConfig {
 	// websocket_test.go; it is switched off so the fixed job graph below can
 	// never gain a job from a page whose path merely looks like a socket.
 	cfg.SkipWebSocket = true
+	// The CSRF and client-side prototype pollution passes have their own
+	// dedicated unit/integration suites; switched off here so the fixed job
+	// graph below stays exact.
+	cfg.SkipCSRF = true
+	cfg.SkipPrototypePollution = true
+	cfg.SkipCachePoisoning = true
+	cfg.SkipFileUpload = true
 	return cfg
 }
 
@@ -225,6 +232,10 @@ func createScan(t *testing.T, c *scan.Controller, proj, tgt domain.ID, cfg *doma
 		p.SkipSecurityHeaders = cfg.SkipSecurityHeaders
 		p.SkipMethodTLS = cfg.SkipMethodTLS
 		p.SkipWebSocket = cfg.SkipWebSocket
+		p.SkipCSRF = cfg.SkipCSRF
+		p.SkipPrototypePollution = cfg.SkipPrototypePollution
+		p.SkipCachePoisoning = cfg.SkipCachePoisoning
+		p.SkipFileUpload = cfg.SkipFileUpload
 		p.SkipHostHeader = cfg.SkipHostHeader
 		p.SkipJWT = cfg.SkipJWT
 		p.SkipOpenRedirect = cfg.SkipOpenRedirect
@@ -314,6 +325,36 @@ func recordingHandlers() (map[domain.JobType]worker.Handler, func() []string) {
 		// The read-only WebSocket handshake pass queues one job per discovered
 		// socket endpoint; a real worker handles it, so this double must too.
 		domain.JobWebSocket: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
+			mu.Lock()
+			urls = append(urls, j.Target.URL)
+			mu.Unlock()
+			return nil
+		}),
+		domain.JobCSRF: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
+			mu.Lock()
+			urls = append(urls, j.Target.URL)
+			mu.Unlock()
+			return nil
+		}),
+		domain.JobPrototypePollution: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
+			mu.Lock()
+			urls = append(urls, j.Target.URL)
+			mu.Unlock()
+			return nil
+		}),
+		domain.JobCachePoisoning: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
+			mu.Lock()
+			urls = append(urls, j.Target.URL)
+			mu.Unlock()
+			return nil
+		}),
+		domain.JobStoredXSS: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
+			mu.Lock()
+			urls = append(urls, j.Target.URL)
+			mu.Unlock()
+			return nil
+		}),
+		domain.JobFileUpload: worker.HandlerFunc(func(_ context.Context, j *domain.TestJob) error {
 			mu.Lock()
 			urls = append(urls, j.Target.URL)
 			mu.Unlock()

@@ -1017,15 +1017,16 @@ func isSafeMethod(m domain.HTTPMethod) bool {
 }
 
 // canBrowserVerify reports whether method+location has an in-scope browser
-// document replay: ordinary GET/HEAD, POST/form via a real form submission, or
-// POST/JSON via a one-shot top-level navigation request override. Other
-// body-carrying methods remain unsupported and their Findings stay Pending.
+// document replay: ordinary GET/HEAD, POST/PUT/PATCH form-urlencoded, or bounded
+// POST/PUT/PATCH/DELETE JSON.
 func canBrowserVerify(method domain.HTTPMethod, loc domain.ParamLocation) bool {
 	switch method {
 	case domain.MethodGET, domain.MethodHEAD, "":
 		return true
-	case domain.MethodPOST:
+	case domain.MethodPOST, domain.MethodPUT, domain.MethodPATCH:
 		return loc == domain.LocationForm || loc == domain.LocationJSON
+	case domain.MethodDELETE:
+		return loc == domain.LocationJSON
 	default:
 		return false
 	}

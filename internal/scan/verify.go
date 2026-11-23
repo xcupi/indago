@@ -12,8 +12,9 @@ package scan
 //   - Scope is enforced for every verification request via the same
 //     domain.Scope the HTTP engine uses, passed straight through to the browser's
 //     AllowRequest gate.
-//   - Browser document replay supports GET/HEAD, POST/form and bounded POST/JSON;
-//     other body-carrying methods stay unsupported and Pending.
+//   - Browser document replay supports GET/HEAD, POST/PUT/PATCH form, and
+//     bounded POST/PUT/PATCH/DELETE JSON; other body-carrying methods stay
+//     unsupported and Pending.
 //   - No LLM, no new payloads: the candidate's Value is replayed unchanged.
 
 import (
@@ -396,7 +397,7 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 			// HTTP engine uses, threaded into the verifying browser context.
 			IgnoreHTTPSErrors: e.ignoreHTTPSErrors,
 		}
-		if req.Method == "POST" && focus.Location == domain.LocationForm {
+		if (req.Method == "POST" || req.Method == "PUT" || req.Method == "PATCH") && focus.Location == domain.LocationForm {
 			if vals, perr := url.ParseQuery(string(req.Body)); perr == nil {
 				fv := make(map[string]string, len(vals))
 				for k, v := range vals {
@@ -406,8 +407,11 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 				}
 				in.FormValues = fv
 			}
+			if req.ContentType != "" {
+				in.ContentType = req.ContentType
+			}
 		}
-		if req.Method == "POST" && focus.Location == domain.LocationJSON {
+		if (req.Method == "POST" || req.Method == "PUT" || req.Method == "PATCH" || req.Method == "DELETE") && focus.Location == domain.LocationJSON {
 			in.JSONBody = append([]byte(nil), req.Body...)
 			in.ContentType = req.ContentType
 			for name, value := range req.Headers {
@@ -462,7 +466,7 @@ func (e *verifyExecutor) run(ctx context.Context, job *domain.TestJob, tc *domai
 		return verifyResult{outcome: domain.OutcomeError, permanent: true, err: err, note: note}
 	}
 	if !canBrowserVerify(ep.Method, focus.Location) {
-		return verifyResult{skipped: true, note: note + ": browser verification supports GET/HEAD, POST/form, or bounded POST/JSON document replay only in this phase"}
+		return verifyResult{skipped: true, note: note + ": browser verification supports GET/HEAD, POST/PUT/PATCH form, or bounded POST/PUT/PATCH/DELETE JSON document replay only in this phase"}
 	}
 	if reason := wireValueSkipReason(focus.Location, vj.Candidate.Value); reason != "" {
 		return verifyResult{skipped: true, note: note + ": " + reason}

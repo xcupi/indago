@@ -101,8 +101,8 @@ func TestSQLiConfirmsErrorBasedInjection(t *testing.T) {
 	runSQLiJob(t, sqliExecutorFor(t, env, ExecutorConfig{}), env, ep, focus, ip)
 
 	findings := sqliFindings(t, env)
-	if len(findings) != 1 || findings[0].VulnClass != domain.VulnSQLi || findings[0].Verdict != domain.VerdictConfirmed {
-		t.Fatalf("findings = %+v, want one confirmed SQL injection", findings)
+	if len(findings) != 1 || findings[0].VulnClass != domain.VulnSQLi || findings[0].Verdict != domain.VerdictInconclusive {
+		t.Fatalf("findings = %+v, want one inconclusive SQL injection", findings)
 	}
 	if !strings.Contains(findings[0].Title, "q") {
 		t.Fatalf("finding title = %q, want the parameter name", findings[0].Title)
@@ -579,7 +579,7 @@ func TestSQLiExecutorConfirmsHSQLDBErrors(t *testing.T) {
 	runSQLiJob(t, ex, env, ep, focus, ip)
 
 	findings := sqliFindings(t, env)
-	if len(findings) != 1 || findings[0].Verdict != domain.VerdictConfirmed {
+	if len(findings) != 1 || findings[0].Verdict != domain.VerdictInconclusive {
 		tc := sqliCase(t, env)
 		t.Fatalf("status=%s outcome=%s note=%q detail=%q findings=%+v", tc.Status, tc.Outcome, tc.Note, string(tc.Detail), findings)
 	}

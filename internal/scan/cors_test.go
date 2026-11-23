@@ -219,8 +219,8 @@ func TestCORSReflectedOriginWithCredentialsIsConfirmed(t *testing.T) {
 		t.Fatalf("findings = %d, want 1", len(findings))
 	}
 	f := findings[0]
-	if f.Verdict != domain.VerdictConfirmed || f.Severity != domain.SeverityHigh || f.Confidence != domain.ConfidenceHigh {
-		t.Fatalf("finding = %s/%s/%s, want confirmed/high/high", f.Verdict, f.Severity, f.Confidence)
+	if f.Verdict != domain.VerdictInconclusive || f.Severity != domain.SeverityInfo || f.Confidence != domain.ConfidenceLow {
+		t.Fatalf("finding = %s/%s/%s, want inconclusive/info/low", f.Verdict, f.Severity, f.Confidence)
 	}
 	if f.VulnClass != vulnClassCORS {
 		t.Fatalf("finding class = %q", f.VulnClass)
@@ -228,7 +228,7 @@ func TestCORSReflectedOriginWithCredentialsIsConfirmed(t *testing.T) {
 	if !strings.Contains(f.Title, "arbitrary origin") || !strings.Contains(f.Title, "127.0.0.1") {
 		t.Fatalf("title = %q, want the signal and the host", f.Title)
 	}
-	if !strings.Contains(f.Summary, "Access-Control-Allow-Credentials") {
+	if !strings.Contains(f.Summary, "browser access to protected content") {
 		t.Fatalf("summary = %q", f.Summary)
 	}
 	if len(f.EvidenceIDs) == 0 {
@@ -364,7 +364,7 @@ func TestCORSReflectionWithoutCredentialsIsMedium(t *testing.T) {
 		t.Fatalf("severity = %q, want medium (%s)", d.Severity, d.Reason)
 	}
 	findings := scanFindings(t, env)
-	if len(findings) != 1 || findings[0].Severity != domain.SeverityMedium {
+	if len(findings) != 1 || findings[0].Severity != domain.SeverityInfo {
 		t.Fatalf("findings = %+v", findings)
 	}
 }
@@ -532,7 +532,7 @@ func TestCORSURLEndpointWithoutDiscoveryRow(t *testing.T) {
 		t.Fatalf("handle: %v", err)
 	}
 	findings := scanFindings(t, env)
-	if len(findings) != 1 || findings[0].Verdict != domain.VerdictConfirmed {
-		t.Fatalf("findings = %+v, want one confirmed finding for a URL-only job", findings)
+	if len(findings) != 1 || findings[0].Verdict != domain.VerdictInconclusive {
+		t.Fatalf("findings = %+v, want one inconclusive finding for a URL-only job", findings)
 	}
 }

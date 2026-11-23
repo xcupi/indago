@@ -6,6 +6,7 @@ import (
 	"errors"
 	"mime"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -126,16 +127,22 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 	if v.manager == nil {
 		return nil, ErrNotImplemented
 	}
-	method := in.Method
+	method := strings.ToUpper(strings.TrimSpace(in.Method))
 	if method == "" {
 		method = "GET"
 	}
 	isFormPost := method == "POST" && in.Location == domain.LocationForm && in.FormValues != nil
-	isJSONPost := method == "POST" && in.Location == domain.LocationJSON && validJSONPost(in.JSONBody, in.ContentType)
-	if method != "GET" && method != "HEAD" && !isFormPost && !isJSONPost {
+	var formBody []byte
+	isFormBodyReplay := false
+	if (method == "PUT" || method == "PATCH") && in.Location == domain.LocationForm && in.FormValues != nil {
+		formBody = encodeFormValues(in.FormValues)
+		isFormBodyReplay = len(formBody) <= browser.MaxJSONNavigationBodyBytes
+	}
+	isJSONReplay := isJSONReplayMethod(method) && in.Location == domain.LocationJSON && validJSONPost(in.JSONBody, in.ContentType)
+	if method != "GET" && method != "HEAD" && !isFormPost && !isFormBodyReplay && !isJSONReplay {
 		return nil, ErrUnsupportedMethod
 	}
-	if (isFormPost || isJSONPost) && !in.AllowStateChanging {
+	if (isFormPost || isFormBodyReplay || isJSONReplay) && !in.AllowStateChanging {
 		// Never replay a write without the scan's explicit opt-in, even if a
 		// caller reached the verifier directly.
 		return nil, ErrStateChangingNotAllowed
@@ -154,6 +161,7 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 
 	bctx, err := v.manager.NewContext(ctx, browser.ContextOptions{
 		AllowRequest:     allow,
+		AllowAuthority:   in.Scope.PermitsHost,
 		StorageStatePath: in.SessionStatePath,
 		ProxyServer:      in.ProxyServer,
 		ExtraHeaders:     in.ExtraHeaders,
@@ -214,12 +222,26 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 			Timeout:   v.cfg.NavigationTimeout,
 			Limiter:   in.Limiter,
 		})
-	} else if isJSONPost {
-		nav, err = page.NavigateJSON(ctx, in.URL, in.JSONBody, in.ContentType, browser.NavOptions{
+	} else if isFormBodyReplay {
+		nav, err = page.NavigateBody(ctx, method, in.URL, formBody, "application/x-www-form-urlencoded", browser.NavOptions{
 			WaitUntil: browser.WaitLoad,
 			Timeout:   v.cfg.NavigationTimeout,
 			Limiter:   in.Limiter,
 		})
+	} else if isJSONReplay {
+		if method == "POST" {
+			nav, err = page.NavigateJSON(ctx, in.URL, in.JSONBody, in.ContentType, browser.NavOptions{
+				WaitUntil: browser.WaitLoad,
+				Timeout:   v.cfg.NavigationTimeout,
+				Limiter:   in.Limiter,
+			})
+		} else {
+			nav, err = page.NavigateBody(ctx, method, in.URL, in.JSONBody, in.ContentType, browser.NavOptions{
+				WaitUntil: browser.WaitLoad,
+				Timeout:   v.cfg.NavigationTimeout,
+				Limiter:   in.Limiter,
+			})
+		}
 	} else {
 		nav, err = page.Navigate(ctx, in.URL, browser.NavOptions{
 			WaitUntil: browser.WaitLoad,
@@ -399,6 +421,23 @@ func (v *BrowserVerifier) Verify(ctx context.Context, in Input) (*Result, error)
 			BrowserLog: append(append(append([]string(nil), consoleErrs...), pageErrs...), dialogs...),
 		},
 	}, nil
+}
+
+func isJSONReplayMethod(method string) bool {
+	switch method {
+	case "POST", "PUT", "PATCH", "DELETE":
+		return true
+	default:
+		return false
+	}
+}
+
+func encodeFormValues(values map[string]string) []byte {
+	v := url.Values{}
+	for k, val := range values {
+		v.Set(k, val)
+	}
+	return []byte(v.Encode())
 }
 
 func validJSONPost(body []byte, contentType string) bool {

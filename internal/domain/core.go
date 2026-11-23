@@ -350,7 +350,21 @@ type ScanConfig struct {
 	// endpoint (ws://, wss://, or a WS-shaped path such as /ws or /socket.io),
 	// sends a bounded HTTP Upgrade handshake and never a WebSocket frame;
 	// true omits only its jobs.
-	SkipWebSocket       bool   `json:"skip_websocket,omitempty"`
+	SkipWebSocket bool `json:"skip_websocket,omitempty"`
+	// SkipCSRF omits the Cross-Site Request Forgery check on state-changing
+	// endpoints.
+	SkipCSRF bool `json:"skip_csrf,omitempty"`
+	// SkipPrototypePollution omits the browser-backed client-side prototype
+	// pollution check.
+	SkipPrototypePollution bool `json:"skip_prototype_pollution,omitempty"`
+	// SkipCachePoisoning omits the read-only cache-busted unkeyed header
+	// cache poisoning check.
+	SkipCachePoisoning bool `json:"skip_cache_poisoning,omitempty"`
+	// SkipFileUpload omits the bounded file upload extension/MIME check.
+	SkipFileUpload bool `json:"skip_file_upload,omitempty"`
+	// EnableStoredXSS opts into bounded stored XSS probing on state-changing
+	// endpoints (requires AllowStateChanging and -browser).
+	EnableStoredXSS     bool   `json:"enable_stored_xss,omitempty"`
 	SSRFCallbackURL     string `json:"ssrf_callback_url,omitempty"`
 	SSRFCallbackPollURL string `json:"ssrf_callback_poll_url,omitempty"`
 	// AllowPrivateOAST lets THIS scan's SSRF engine use an OAST collaborator
@@ -445,15 +459,15 @@ type ScanConfig struct {
 	ReconLevel string `json:"recon_level,omitempty"`
 
 	// OpenAPISpecJSON / OpenAPISpecURL hand discovery a machine-readable API
-	// description (OpenAPI 3.x or Swagger 2.0, JSON) to register endpoints
-	// from. They are an OPERATOR input, not something the scanner hunts for:
-	// the spec is either supplied inline (the document itself, bounded by
-	// discovery.MaxOpenAPISpecBytes) or fetched with ONE read-only GET through
-	// the scan's own scope-enforcing engine. Every endpoint the document
-	// declares is then registered passively for the ordinary test pipeline —
-	// discovery never sends a request to a declared endpoint on its account,
-	// never fabricates a method the document did not declare, and never
-	// registers a URL outside scope. Both empty (the default) leaves
+	// description (OpenAPI 3.x or Swagger 2.0, JSON or YAML) to register
+	// endpoints from. They are an OPERATOR input, not something the scanner
+	// hunts for: the spec is either supplied inline (the document itself,
+	// bounded by discovery.MaxOpenAPISpecBytes) or fetched with ONE read-only
+	// GET through the scan's own scope-enforcing engine. Every endpoint the
+	// document declares is then registered passively for the ordinary test
+	// pipeline — discovery never sends a request to a declared endpoint on its
+	// account, never fabricates a method the document did not declare, and
+	// never registers a URL outside scope. Both empty (the default) leaves
 	// discovery byte-identical for every existing scan.
 	OpenAPISpecJSON string `json:"openapi_spec_json,omitempty"`
 	OpenAPISpecURL  string `json:"openapi_spec_url,omitempty"`
@@ -494,22 +508,9 @@ type ScanConfig struct {
 	// browser-verification pipeline. See docs/raw-query-injection.md.
 	RawQueryInjection string `json:"raw_query_injection,omitempty"`
 
-	// ProxyPool, when non-empty, routes every outbound request this scan
-	// makes — raw HTTP engine requests AND browser verification navigation
-	// alike — through one of the listed proxies ("http://host:port",
-	// "socks5://host:port", optionally with embedded "user:pass@" creds),
-	// picked round-robin per request/context. Empty (the default) means a
-	// direct connection: no proxy, Indago's real network identity.
-	//
-	// This is entirely operator-supplied infrastructure — Indago never
-	// discovers, purchases, or manages proxies itself, and never silently
-	// rotates through anything the operator did not explicitly list here.
-	// Off by default (AGENTS.md §2.3: aggressive/identity-concealing
-	// behavior is opt-in and operator-configured, never silent). Pairs with
-	// EnableEvasion for an engagement where the target's own anti-automation
-	// defenses (rate limiting, IP-based blocking) are themselves in scope —
-	// it does not widen WHAT may be targeted, only hides WHICH network
-	// identity is doing the targeting.
+	// ProxyPool routes raw HTTP requests round-robin through operator-supplied
+	// proxies on HTTP-only servers. An empty pool uses a direct connection.
+	// Chromium uses a local scope-enforcing proxy and cannot chain upstream.
 	ProxyPool []string `json:"proxy_pool,omitempty"`
 
 	// RandomizeTLSFingerprint: see httpengine.Config.RandomizeTLSFingerprint

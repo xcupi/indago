@@ -847,3 +847,82 @@ func TestIntegrationVerifyContextMethodPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestIntegrationVerifyConfirmsBodyMethodsJSONAndForm(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var val string
+		if strings.Contains(r.Header.Get("Content-Type"), "json") {
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			val = body["q"]
+		} else {
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			val = r.FormValue("q")
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, "<!doctype html><html><body><div>%s:%s</div></body></html>", r.Method, val)
+	}))
+	defer srv.Close()
+
+	mgr := newManagerOrSkip(t)
+	defer mgr.Close()
+	v := verification.NewBrowserVerifier(mgr, verification.BrowserVerifierConfig{})
+
+	m := marker(t)
+	value := "<svg onload=" + m + ">"
+	jsonBody, err := json.Marshal(map[string]string{"q": value})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// State-changing opt-in must be required for PUT/PATCH/DELETE JSON and PUT/PATCH form.
+	if _, err := v.Verify(context.Background(), verification.Input{
+		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: value},
+		Marker:    m, Method: "PUT", URL: srv.URL + "/api/item", Location: domain.LocationJSON,
+		ContentType: "application/json", JSONBody: jsonBody, Scope: openScope(),
+	}); !errors.Is(err, verification.ErrStateChangingNotAllowed) {
+		t.Fatalf("PUT+JSON without AllowStateChanging err = %v, want ErrStateChangingNotAllowed", err)
+	}
+	if _, err := v.Verify(context.Background(), verification.Input{
+		Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: value},
+		Marker:    m, Method: "DELETE", URL: srv.URL + "/api/item", Location: domain.LocationForm,
+		FormValues: map[string]string{"q": value}, Scope: openScope(), AllowStateChanging: true,
+	}); !errors.Is(err, verification.ErrUnsupportedMethod) {
+		t.Fatalf("DELETE+Form err = %v, want ErrUnsupportedMethod", err)
+	}
+
+	for _, method := range []string{"PUT", "PATCH", "DELETE"} {
+		res, err := v.Verify(context.Background(), verification.Input{
+			Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: value},
+			Marker:    m, Method: method, URL: srv.URL + "/api/item", Location: domain.LocationJSON,
+			ContentType: "application/json", JSONBody: jsonBody, Scope: openScope(), AllowStateChanging: true,
+		})
+		if err != nil {
+			t.Fatalf("%s+JSON verify: %v", method, err)
+		}
+		if res.Verdict != domain.VerdictConfirmed {
+			t.Fatalf("%s+JSON verdict = %s, want confirmed; report=%+v", method, res.Verdict, res.Report)
+		}
+	}
+
+	for _, method := range []string{"PUT", "PATCH"} {
+		res, err := v.Verify(context.Background(), verification.Input{
+			Candidate: detection.Candidate{Source: detection.SourceBuiltin, Category: detection.CatHTMLText, Value: value},
+			Marker:    m, Method: method, URL: srv.URL + "/api/form", Location: domain.LocationForm,
+			ContentType: "application/x-www-form-urlencoded", FormValues: map[string]string{"q": value},
+			Scope: openScope(), AllowStateChanging: true,
+		})
+		if err != nil {
+			t.Fatalf("%s+Form verify: %v", method, err)
+		}
+		if res.Verdict != domain.VerdictConfirmed {
+			t.Fatalf("%s+Form verdict = %s, want confirmed; report=%+v", method, res.Verdict, res.Report)
+		}
+	}
+}

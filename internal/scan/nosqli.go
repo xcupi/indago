@@ -2,21 +2,24 @@ package scan
 
 // NoSQL query-operator injection engine (CWE-943).
 //
-// One JobNoSQLi is enqueued per eligible injection point. Only a GET-style,
-// non-state-changing endpoint is ever tested, and only through its QUERY
-// parameters: the engine copies the request that discovery already made and
-// changes the shape of ONE parameter. Nothing here is an exploit:
+// One JobNoSQLi is enqueued per eligible injection point. By default (when
+// AllowStateChanging is false), only GET-style, non-state-changing endpoints
+// are tested through their QUERY parameters. When AllowStateChanging is enabled
+// (and SkipWriteEndpoints is off), body-carrying JSON endpoints (POST/PUT/PATCH
+// with JSON parameters and JSON or unspecified content-type) are also tested
+// via JSON body operator injection. Nothing here is an exploit:
 //
 //   - no update/delete operator ($set, $unset, $inc, $push, $rename, ...) is
 //     ever sent, and no JavaScript execution operator ($where, $function,
 //     mapReduce) is ever sent;
-//   - the only operators used are SELECTION operators ($ne, $gt), which can
-//     only make the server's existing read query match more or fewer
-//     documents;
-//   - the array shapes ("param[]=value") only change the parameter's TYPE,
-//     which is what a framework such as Express/Mongoose hands to the driver;
-//   - the endpoint must not be write-like, and the state-changing opt-in does
-//     NOT relax that: this pass is read-only by construction.
+//   - the only operators used are SELECTION operators ($ne, $gt, and $regex for
+//     JSON bodies), which can only make the server's existing query match more
+//     or fewer documents;
+//   - the array shapes ("param[]=value" in query, `["value"]` / `[]` in JSON)
+//     only change the parameter's TYPE, which is what a framework such as
+//     Express/Mongoose hands to the driver;
+//   - query-parameter checks remain strictly GET-only and non-write-like even
+//     when AllowStateChanging is set.
 //
 // Two deterministic signals are used, and a verdict is CONFIRMED only with two
 // independent signals (exactly like the SQL engine):
@@ -146,6 +149,7 @@ type nosqliPoC struct {
 	URL     string `json:"url"`
 	Payload string `json:"payload"`
 	Key     string `json:"key"`
+	Body    string `json:"body,omitempty"`
 }
 
 type nosqliDetail struct {
@@ -237,25 +241,38 @@ func nosqlNewErrorSignature(body []byte, suppressed map[string]bool) (nosqlError
 	return nosqlErrorSignature{}, false
 }
 
-// nosqliProbe is one request shape for one parameter. Key is the query-string
-// key written to the wire (the brackets are percent-encoded by the request
-// builder); Value is its value.
+// nosqliProbe is one request shape for one parameter. For query parameters,
+// Key is the query-string key written to the wire (brackets are percent-encoded
+// by the request builder) and Value is its value. For JSON body parameters,
+// JSONBody carries the raw JSON value replacing the focused field.
 type nosqliProbe struct {
 	Name     string
 	Key      string
 	Value    string
+	JSONBody json.RawMessage
 	Kind     string
 	Operator bool
 }
 
-// nosqliOperatorProbes is the bounded read-only operator set. Both operators
-// only SELECT: $ne matches documents whose field differs from the value, $gt
-// matches documents whose field sorts after the empty string. Neither can
-// modify a document.
+// nosqliOperatorProbes is the bounded read-only operator set for query
+// parameters. Both operators only SELECT: $ne matches documents whose field
+// differs from the value, $gt matches documents whose field sorts after the
+// empty string. Neither can modify a document.
 func nosqliOperatorProbes(paramName, absent string) []nosqliProbe {
 	return []nosqliProbe{
 		{Name: "operator-ne", Key: paramName + "[$ne]", Value: absent, Kind: "operator-ne", Operator: true},
 		{Name: "operator-gt", Key: paramName + "[$gt]", Value: "", Kind: "operator-gt", Operator: true},
+	}
+}
+
+// nosqliJSONOperatorProbes is the bounded read-only selection operator set
+// for JSON body parameters. All operators only SELECT ($ne, $gt, $regex) and
+// never modify documents or execute server-side JavaScript.
+func nosqliJSONOperatorProbes(paramName string) []nosqliProbe {
+	return []nosqliProbe{
+		{Name: "json-operator-ne", Key: paramName, Value: `{"$ne":""}`, JSONBody: json.RawMessage(`{"$ne":""}`), Kind: "operator-ne", Operator: true},
+		{Name: "json-operator-gt", Key: paramName, Value: `{"$gt":""}`, JSONBody: json.RawMessage(`{"$gt":""}`), Kind: "operator-gt", Operator: true},
+		{Name: "json-operator-regex", Key: paramName, Value: `{"$regex":".*"}`, JSONBody: json.RawMessage(`{"$regex":".*"}`), Kind: "operator-regex", Operator: true},
 	}
 }
 
@@ -267,6 +284,59 @@ func nosqliArrayProbes(paramName, absent string) []nosqliProbe {
 		{Name: "array-absent", Key: paramName + "[]", Value: absent, Kind: "array"},
 		{Name: "array-empty", Key: paramName + "[]", Value: "", Kind: "array-empty"},
 	}
+}
+
+// nosqliJSONArrayProbes is the bounded array-shape set for JSON body
+// parameters, changing the focused field's type from scalar to JSON array.
+func nosqliJSONArrayProbes(paramName, absent string) []nosqliProbe {
+	rawAbsent, _ := json.Marshal([]string{absent})
+	return []nosqliProbe{
+		{Name: "json-array-absent", Key: paramName, Value: string(rawAbsent), JSONBody: rawAbsent, Kind: "array"},
+		{Name: "json-array-empty", Key: paramName, Value: "[]", JSONBody: json.RawMessage("[]"), Kind: "array-empty"},
+	}
+}
+
+// nosqliShapeJSONRequest rewrites ONE JSON body parameter of base into rawValue,
+// preserving all other JSON fields and headers.
+func nosqliShapeJSONRequest(base *httpengine.Request, paramName string, rawValue json.RawMessage) (*httpengine.Request, error) {
+	if base == nil {
+		return nil, fmt.Errorf("nil base request")
+	}
+	if !json.Valid(rawValue) {
+		return nil, fmt.Errorf("invalid JSON probe value for %q", paramName)
+	}
+	bodyMap := map[string]json.RawMessage{}
+	if len(base.Body) > 0 {
+		if err := json.Unmarshal(base.Body, &bodyMap); err != nil {
+			return nil, fmt.Errorf("unmarshal base JSON body: %w", err)
+		}
+	}
+	if varName, ok := strings.CutPrefix(paramName, "variables."); ok && varName != "" {
+		varsMap := map[string]json.RawMessage{}
+		if rawVars, exists := bodyMap["variables"]; exists && len(rawVars) > 0 {
+			if err := json.Unmarshal(rawVars, &varsMap); err != nil {
+				return nil, fmt.Errorf("unmarshal base JSON variables: %w", err)
+			}
+		}
+		varsMap[varName] = rawValue
+		encodedVars, err := json.Marshal(varsMap)
+		if err != nil {
+			return nil, err
+		}
+		bodyMap["variables"] = encodedVars
+	} else {
+		bodyMap[paramName] = rawValue
+	}
+	encoded, err := json.Marshal(bodyMap)
+	if err != nil {
+		return nil, err
+	}
+	req := *base
+	req.Body = encoded
+	if req.ContentType == "" {
+		req.ContentType = "application/json"
+	}
+	return &req, nil
 }
 
 // nosqliShapeRequest rewrites ONE query parameter of base into an explicit
@@ -300,26 +370,66 @@ func nosqliShapeRequest(base *httpengine.Request, paramName, key, value string) 
 	return &req, nil
 }
 
-// nosqliEligibleLocation reports whether this engine may test the location.
-// Only query parameters are in scope: a header/cookie/path/body operator would
-// need a different request shape, and this pass is deliberately GET-only.
-func nosqliEligibleLocation(loc domain.ParamLocation) bool {
-	return loc == domain.LocationQuery
-}
-
-// nosqliSafeEndpoint reports whether the endpoint may be touched at all. It is
-// stricter than the other payload engines on purpose: the state-changing
-// opt-in does NOT widen it, because a NoSQL check is only ever a read.
-func nosqliSafeEndpoint(ep *domain.Endpoint, params []*domain.Parameter) bool {
-	if ep == nil {
-		return false
-	}
-	switch ep.Method {
-	case domain.MethodGET, "":
+// nosqliIsJSONBodyMethod reports whether m is a body-carrying method supported
+// for JSON body operator injection.
+func nosqliIsJSONBodyMethod(m domain.HTTPMethod) bool {
+	switch m {
+	case domain.MethodPOST, domain.MethodPUT, domain.MethodPATCH:
+		return true
 	default:
 		return false
 	}
-	return !isWriteLikeEndpoint(ep, params)
+}
+
+// nosqliHasJSONContentType reports whether the endpoint's content-type is JSON
+// or unspecified (buildRequest defaults unspecified JSON-param requests to
+// application/json).
+func nosqliHasJSONContentType(ep *domain.Endpoint) bool {
+	if ep == nil || strings.TrimSpace(ep.ContentType) == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(ep.ContentType), "json")
+}
+
+// nosqliTargetEligible reports whether an endpoint + parameter location pair is
+// eligible for NoSQL operator injection under the current state-changing policy.
+//
+//   - LocationQuery: strictly GET-only and non-write-like, even when
+//     AllowStateChanging is enabled.
+//   - LocationJSON: requires POST/PUT/PATCH with JSON (or unspecified)
+//     content-type, AllowStateChanging enabled, and SkipWriteEndpoints disabled.
+func nosqliTargetEligible(ep *domain.Endpoint, params []*domain.Parameter, loc domain.ParamLocation, allowStateChanging, skipWriteEndpoints bool) (bool, string) {
+	if ep == nil {
+		return false, "missing endpoint"
+	}
+	switch loc {
+	case domain.LocationQuery:
+		switch ep.Method {
+		case domain.MethodGET, "":
+		default:
+			return false, "state-changing endpoint skipped by policy"
+		}
+		if isWriteLikeEndpoint(ep, params) {
+			return false, "state-changing endpoint skipped by policy"
+		}
+		return true, ""
+	case domain.LocationJSON:
+		if !nosqliIsJSONBodyMethod(ep.Method) {
+			return false, "parameter location is not a GET query parameter"
+		}
+		if !nosqliHasJSONContentType(ep) {
+			return false, "endpoint content-type is not JSON"
+		}
+		if !allowStateChanging {
+			return false, "state-changing endpoint skipped by policy (AllowStateChanging is off)"
+		}
+		if skipWriteEndpoints {
+			return false, "write-like endpoint skipped by policy"
+		}
+		return true, ""
+	default:
+		return false, "parameter location is not eligible for NoSQL injection"
+	}
 }
 
 func (e *nosqliExecutor) Handle(ctx context.Context, job *domain.TestJob) error {
@@ -331,11 +441,11 @@ func (e *nosqliExecutor) Handle(ctx context.Context, job *domain.TestJob) error 
 	if focus == nil {
 		return e.finishNoSQLiUnavailable(ctx, job, started, ep, "no focused parameter")
 	}
-	if !nosqliEligibleLocation(focus.Location) || isDynamicTokenName(focus.Name) {
-		return e.finishNoSQLiUnavailable(ctx, job, started, ep, "parameter location is not a GET query parameter")
+	if isDynamicTokenName(focus.Name) {
+		return e.finishNoSQLiUnavailable(ctx, job, started, ep, "dynamic token parameter skipped")
 	}
-	if !nosqliSafeEndpoint(ep, params) {
-		return e.finishNoSQLiUnavailable(ctx, job, started, ep, "state-changing endpoint skipped by policy")
+	if ok, reason := nosqliTargetEligible(ep, params, focus.Location, e.cfg.AllowStateChanging, e.cfg.SkipWriteEndpoints); !ok {
+		return e.finishNoSQLiUnavailable(ctx, job, started, ep, reason)
 	}
 	if e.cfg.SkipDownloadEndpoints && isDownloadLikeEndpoint(ep) {
 		return e.finishNoSQLiUnavailable(ctx, job, started, ep, "download endpoint skipped by policy")
@@ -501,15 +611,21 @@ func (p *nosqliProber) sendPlain(ctx context.Context, value, role string) (*http
 	return resp, outcome
 }
 
-// sendShape sends the focused parameter in an explicit bracket/operator shape.
-func (p *nosqliProber) sendShape(ctx context.Context, key, value, role string) (*httpengine.Response, domain.TestOutcome) {
+// sendShape sends the focused parameter in an explicit bracket/operator shape
+// (query-string for LocationQuery, or JSON value replacement for LocationJSON).
+func (p *nosqliProber) sendShape(ctx context.Context, probe nosqliProbe, role string) (*httpengine.Response, domain.TestOutcome) {
 	p.sent++
 	p.params = fillEmptyCommandParams(p.e.refreshParams(ctx, p.ep, p.params, p.focus), p.focus)
 	baseReq, err := buildRequest(p.ep, p.params, nil)
 	if err != nil {
 		return nil, domain.OutcomeError
 	}
-	req, err := nosqliShapeRequest(baseReq, p.focus.Name, key, value)
+	var req *httpengine.Request
+	if len(probe.JSONBody) > 0 {
+		req, err = nosqliShapeJSONRequest(baseReq, p.focus.Name, probe.JSONBody)
+	} else {
+		req, err = nosqliShapeRequest(baseReq, p.focus.Name, probe.Key, probe.Value)
+	}
 	if err != nil {
 		return nil, domain.OutcomeError
 	}
@@ -559,15 +675,19 @@ func (p *nosqliProber) runPlainControl(ctx context.Context, absent string) bool 
 // runArrayProbes sends the two array shapes and returns the array control
 // response (the nonexistent value in array form). The empty-array shape is the
 // second independent error probe; the array control is the reference that
-// keeps bracket syntax from being mistaken for an operator effect.
+// keeps bracket/type syntax from being mistaken for an operator effect.
 func (p *nosqliProber) runArrayProbes(ctx context.Context, absent string) *httpengine.Response {
+	probes := nosqliArrayProbes(p.focus.Name, absent)
+	if p.focus.Location == domain.LocationJSON {
+		probes = nosqliJSONArrayProbes(p.focus.Name, absent)
+	}
 	var shapeControl *httpengine.Response
-	for _, probe := range nosqliArrayProbes(p.focus.Name, absent) {
+	for _, probe := range probes {
 		if !p.budgetLeft() {
 			break
 		}
 		attempt := nosqliAttempt{Payload: probe.Value, Kind: probe.Kind, Role: "probe", Key: probe.Key}
-		resp, outcome := p.sendShape(ctx, probe.Key, probe.Value, "nosqli array probe "+probe.Name)
+		resp, outcome := p.sendShape(ctx, probe, "nosqli array probe "+probe.Name)
 		if resp != nil {
 			attempt.Status = resp.Status
 			attempt.BodyLength = len(resp.Body)
@@ -610,12 +730,16 @@ func (p *nosqliProber) runOperators(ctx context.Context, absent string, shapeCon
 		// match would prove nothing about operator semantics.
 		return
 	}
-	for _, probe := range nosqliOperatorProbes(p.focus.Name, absent) {
+	probes := nosqliOperatorProbes(p.focus.Name, absent)
+	if p.focus.Location == domain.LocationJSON {
+		probes = nosqliJSONOperatorProbes(p.focus.Name)
+	}
+	for _, probe := range probes {
 		if !p.budgetLeft() || p.d.DifferentialSignals >= 2 {
 			return
 		}
 		attempt := nosqliAttempt{Payload: probe.Value, Kind: probe.Kind, Role: "probe", Key: probe.Key}
-		resp, outcome := p.sendShape(ctx, probe.Key, probe.Value, "nosqli operator probe "+probe.Name)
+		resp, outcome := p.sendShape(ctx, probe, "nosqli operator probe "+probe.Name)
 		if resp != nil {
 			attempt.Status = resp.Status
 			attempt.BodyLength = len(resp.Body)
@@ -682,6 +806,9 @@ func (p *nosqliProber) capturePoC(resp *httpengine.Response, probe nosqliProbe) 
 			poc.Method = resp.Request.Method
 		}
 		poc.URL = resp.Request.URL
+		if len(resp.Request.Body) > 0 {
+			poc.Body = string(resp.Request.Body)
+		}
 	}
 	if poc.URL == "" {
 		poc.URL = p.ep.URL
@@ -776,10 +903,11 @@ func (e *nosqliExecutor) correlateNoSQLi(ctx context.Context, job *domain.TestJo
 	}
 }
 
-// enqueueNoSQLiProbes queues one bounded job per eligible GET query-parameter
-// injection point. The enqueue is deliberately stricter than the other
-// payload engines: non-GET and write-like endpoints are never queued, even
-// when the scan allows state-changing requests.
+// enqueueNoSQLiProbes queues one bounded job per eligible injection point.
+// By default (AllowStateChanging false), only GET query-parameter injection
+// points on non-write-like endpoints are queued. When AllowStateChanging is
+// enabled (and SkipWriteEndpoints is off), POST/PUT/PATCH JSON body
+// parameters are also queued.
 func (c *Controller) enqueueNoSQLiProbes(ctx context.Context, scanID domain.ID) {
 	sc, err := c.store.Scans().Get(ctx, scanID)
 	if err != nil || !sc.Config.EnableNoSQLi {
@@ -789,9 +917,10 @@ func (c *Controller) enqueueNoSQLiProbes(ctx context.Context, scanID domain.ID) 
 	if err != nil {
 		return
 	}
+	allowStateChanging := c.opts.Executor.AllowStateChanging
 	queued := 0
 	for _, ip := range ips {
-		if ip == nil || !nosqliEligibleLocation(ip.Location) {
+		if ip == nil {
 			continue
 		}
 		ep, err := c.store.Endpoints().Get(ctx, ip.EndpointID)
@@ -802,7 +931,7 @@ func (c *Controller) enqueueNoSQLiProbes(ctx context.Context, scanID domain.ID) 
 		if err != nil {
 			continue
 		}
-		if !nosqliSafeEndpoint(ep, params) {
+		if ok, _ := nosqliTargetEligible(ep, params, ip.Location, allowStateChanging, sc.Config.SkipWriteEndpoints); !ok {
 			continue
 		}
 		if sc.Config.SkipDownloadEndpoints && isDownloadLikeEndpoint(ep) {

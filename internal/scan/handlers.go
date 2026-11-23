@@ -158,6 +158,11 @@ func (c *Controller) defaultHandlers(sc *domain.Scan, eng httpengine.Engine, sco
 	h[domain.JobJWT] = newJWTExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobOpenRedirect] = newOpenRedirectExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	h[domain.JobGraphQL] = newGraphQLExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	h[domain.JobCSRF] = newCSRFExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	h[domain.JobPrototypePollution] = newPrototypePollutionExecutor(c.store, c.browserManager(), c.opts.Evidence, 0, c.log, findingsMu)
+	h[domain.JobCachePoisoning] = newCachePoisoningExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
+	h[domain.JobStoredXSS] = newStoredXSSExecutor(c.store, eng, c.browserManager(), c.opts.Evidence, execCfg, c.log, findingsMu)
+	h[domain.JobFileUpload] = newFileUploadExecutor(c.store, eng, c.opts.Evidence, execCfg, c.log, findingsMu)
 	return h
 }
 
@@ -220,26 +225,31 @@ func phase0Handlers(log *slog.Logger) map[domain.JobType]worker.Handler {
 		})
 	}
 	return map[domain.JobType]worker.Handler{
-		domain.JobDiscovery:        noop(domain.JobDiscovery),
-		domain.JobTest:             noop(domain.JobTest),
-		domain.JobVerify:           noop(domain.JobVerify),
-		domain.JobDOMXSS:           noop(domain.JobDOMXSS),
-		domain.JobIDOR:             noop(domain.JobIDOR),
-		domain.JobAccessControl:    noop(domain.JobAccessControl),
-		domain.JobCommandInjection: noop(domain.JobCommandInjection),
-		domain.JobSSTI:             noop(domain.JobSSTI),
-		domain.JobSQLi:             noop(domain.JobSQLi),
-		domain.JobNoSQLi:           noop(domain.JobNoSQLi),
-		domain.JobXXE:              noop(domain.JobXXE),
-		domain.JobSSRF:             noop(domain.JobSSRF),
-		domain.JobPathTraversal:    noop(domain.JobPathTraversal),
-		domain.JobCORS:             noop(domain.JobCORS),
-		domain.JobSecurityHeaders:  noop(domain.JobSecurityHeaders),
-		domain.JobMethodTLS:        noop(domain.JobMethodTLS),
-		domain.JobWebSocket:        noop(domain.JobWebSocket),
-		domain.JobHostHeader:       noop(domain.JobHostHeader),
-		domain.JobJWT:              noop(domain.JobJWT),
-		domain.JobOpenRedirect:     noop(domain.JobOpenRedirect),
-		domain.JobGraphQL:          noop(domain.JobGraphQL),
+		domain.JobDiscovery:          noop(domain.JobDiscovery),
+		domain.JobTest:               noop(domain.JobTest),
+		domain.JobVerify:             noop(domain.JobVerify),
+		domain.JobDOMXSS:             noop(domain.JobDOMXSS),
+		domain.JobIDOR:               noop(domain.JobIDOR),
+		domain.JobAccessControl:      noop(domain.JobAccessControl),
+		domain.JobCommandInjection:   noop(domain.JobCommandInjection),
+		domain.JobSSTI:               noop(domain.JobSSTI),
+		domain.JobSQLi:               noop(domain.JobSQLi),
+		domain.JobNoSQLi:             noop(domain.JobNoSQLi),
+		domain.JobXXE:                noop(domain.JobXXE),
+		domain.JobSSRF:               noop(domain.JobSSRF),
+		domain.JobPathTraversal:      noop(domain.JobPathTraversal),
+		domain.JobCORS:               noop(domain.JobCORS),
+		domain.JobSecurityHeaders:    noop(domain.JobSecurityHeaders),
+		domain.JobMethodTLS:          noop(domain.JobMethodTLS),
+		domain.JobWebSocket:          noop(domain.JobWebSocket),
+		domain.JobHostHeader:         noop(domain.JobHostHeader),
+		domain.JobJWT:                noop(domain.JobJWT),
+		domain.JobOpenRedirect:       noop(domain.JobOpenRedirect),
+		domain.JobGraphQL:            noop(domain.JobGraphQL),
+		domain.JobCSRF:               noop(domain.JobCSRF),
+		domain.JobPrototypePollution: noop(domain.JobPrototypePollution),
+		domain.JobCachePoisoning:     noop(domain.JobCachePoisoning),
+		domain.JobStoredXSS:          noop(domain.JobStoredXSS),
+		domain.JobFileUpload:         noop(domain.JobFileUpload),
 	}
 }

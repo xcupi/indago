@@ -39,6 +39,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -462,10 +463,12 @@ func (e *xxeExecutor) pollForCallback(ctx context.Context, marker string) bool {
 		tries = xxePollTries
 	}
 	for i := 0; i < tries; i++ {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-time.After(time.Second):
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(time.Second):
+			}
 		}
 		pollReq, err := http.NewRequestWithContext(ctx, http.MethodGet, e.poll, nil)
 		if err != nil {
@@ -475,10 +478,9 @@ func (e *xxeExecutor) pollForCallback(ctx context.Context, marker string) bool {
 		if err != nil {
 			continue
 		}
-		body := make([]byte, 1<<20)
-		n, _ := pollResp.Body.Read(body)
+		body, _ := io.ReadAll(io.LimitReader(pollResp.Body, 1<<20))
 		pollResp.Body.Close()
-		if strings.Contains(string(body[:n]), marker) {
+		if strings.Contains(string(body), marker) {
 			return true
 		}
 	}

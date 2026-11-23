@@ -80,6 +80,11 @@ func (d *DB) applyMigration(ctx context.Context, name, body string) error {
 	if _, err := tx.ExecContext(ctx, body); err != nil {
 		return err
 	}
+	if name == "0018_review_automated_verdicts.sql" {
+		if err := reviewAutomatedVerdicts(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (name) VALUES (?)`, name); err != nil {
 		return err
 	}

@@ -105,6 +105,7 @@ func (m *Manager) renderThroughProxy(ctx context.Context, url string, opts Rende
 	c, err := m.NewContext(ctx, ContextOptions{
 		StorageStatePath: opts.SessionStatePath,
 		AllowRequest:     opts.AllowRequest,
+		AllowAuthority:   opts.AllowAuthority,
 		ExtraHeaders:     extra,
 		ProxyServer:      proxy,
 		// Discovery rendering never opts into state-changing requests: the

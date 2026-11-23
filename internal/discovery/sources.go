@@ -603,6 +603,7 @@ func (n *networkSource) Run(ctx context.Context, in Input, sink Sink) error {
 			WaitUntil:         browser.WaitLoad,
 			ObservationWindow: 750 * time.Millisecond,
 			AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
+			AllowAuthority:    in.Scope.PermitsHost,
 			SessionStatePath:  in.SessionStatePath,
 			UserAgent:         n.cfg.HuntingUserAgent,
 			// Operator opt-in for a lab/staging self-signed HTTPS target; false
@@ -966,6 +967,7 @@ func (n *networkSource) harvestRouteAPIs(ctx context.Context, in Input, sink Sin
 			WaitUntil:         browser.WaitLoad,
 			ObservationWindow: 100 * time.Millisecond,
 			AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
+			AllowAuthority:    in.Scope.PermitsHost,
 			SessionStatePath:  in.SessionStatePath,
 			UserAgent:         n.cfg.HuntingUserAgent,
 		})
@@ -1317,6 +1319,7 @@ func (n *networkSource) renderSPARoutesWithBudget(ctx context.Context, in Input,
 		WaitUntil:         browser.WaitLoad,
 		ObservationWindow: 750 * time.Millisecond,
 		AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },
+		AllowAuthority:    in.Scope.PermitsHost,
 		SessionStatePath:  in.SessionStatePath,
 		UserAgent:         n.cfg.HuntingUserAgent,
 		// Operator opt-in for a lab/staging self-signed HTTPS target.

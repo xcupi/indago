@@ -121,19 +121,19 @@ func TestConservativeScanRunsGraphQLEngineOnWellKnownPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list findings: %v", err)
 	}
-	confirmed := false
+	observed := false
 	for _, f := range findings {
-		if f != nil && f.VulnClass == domain.VulnGraphQL && f.Verdict == domain.VerdictConfirmed {
-			confirmed = true
+		if f != nil && f.VulnClass == domain.VulnGraphQL && f.Verdict == domain.VerdictInconclusive {
+			observed = true
 			break
 		}
 	}
-	if !confirmed {
+	if !observed {
 		var got []string
 		for _, f := range findings {
 			got = append(got, string(f.VulnClass)+"/"+string(f.Verdict))
 		}
-		t.Fatalf("no confirmed GraphQL finding from the discovered endpoint; findings: %v", got)
+		t.Fatalf("no GraphQL feature observation from the discovered endpoint; findings: %v", got)
 	}
 
 	mu.Lock()

@@ -24,7 +24,6 @@ package scan
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -71,7 +70,8 @@ var (
 	// session material AuthExisting cannot use (at creation, or when Start/
 	// Resume re-establishes the session and finds it gone or changed). It is
 	// operator-fixable input, never an internal failure.
-	ErrAuth = errors.New("scan: authentication")
+	ErrAuth           = errors.New("scan: authentication")
+	ErrTargetReadOnly = errors.New("target policy allows only approved read snapshots; active scans and target login are disabled")
 	// ErrWAFPreflight reports that the preflight request was blocked by
 	// backpressure, a CAPTCHA/challenge, or a WAF-identified 403/406. The scan
 	// is paused before discovery or payload work; retry after the target's
@@ -84,6 +84,9 @@ var errSkipWrite = errors.New("scan: skip write")
 
 // Options configures a Controller. Zero values get sane defaults.
 type Options struct {
+	// ReadOnlyTargets keeps all active scan and login execution paths closed.
+	ReadOnlyTargets bool
+
 	// Worker pool timing.
 	LeaseDuration time.Duration
 	Heartbeat     time.Duration
@@ -252,6 +255,8 @@ func NewController(st store.Store, q queue.Queue, log *slog.Logger, version stri
 	return c
 }
 
+func (c *Controller) ReadOnlyTargets() bool { return c != nil && c.opts.ReadOnlyTargets }
+
 // reapExpiredLeases periodically reclaims jobs whose lease expired without
 // ever reaching a terminal state — the queue-level safety net for a worker
 // that stops heartbeating but never fails or completes the job (a hung
@@ -335,11 +340,12 @@ type CreateScanParams struct {
 	ReconLevel string
 
 	// OpenAPISpecJSON / OpenAPISpecURL register the endpoints an operator-
-	// supplied OpenAPI 3.x / Swagger 2.0 JSON document declares — see
-	// domain.ScanConfig.OpenAPISpecJSON. The URL must be absolute http(s) and
-	// inside the scan's scope (validated here, fail closed); the inline
-	// document is bounded by discovery.MaxOpenAPISpecBytes. Either may be
-	// empty, and both empty adds nothing to discovery.
+	// supplied OpenAPI 3.x / Swagger 2.0 document declares (JSON or YAML) —
+	// see domain.ScanConfig.OpenAPISpecJSON. The URL must be absolute http(s)
+	// and inside the scan's scope (validated here, fail closed); the inline
+	// document is bounded by discovery.MaxOpenAPISpecBytes and must parse as a
+	// spec in either dialect. Either may be empty, and both empty adds nothing
+	// to discovery.
 	OpenAPISpecJSON string
 	OpenAPISpecURL  string
 
@@ -355,8 +361,7 @@ type CreateScanParams struct {
 	// "auto" probes GET endpoints with no named query parameters; "always"
 	// also probes endpoints that have them.
 	RawQueryInjection string
-	// ProxyPool — see domain.ScanConfig.ProxyPool. Empty (the default) means a
-	// direct connection for both raw HTTP traffic and browser verification.
+	// ProxyPool overrides raw HTTP routing on servers without Chromium.
 	ProxyPool []string
 	// RandomizeTLSFingerprint — see domain.ScanConfig.RandomizeTLSFingerprint.
 	// Off by default; mutually exclusive with ProxyPool (validated below).
@@ -447,7 +452,22 @@ type CreateScanParams struct {
 	SkipMethodTLS bool
 	// SkipWebSocket omits the read-only WebSocket handshake & Origin
 	// inspection. See domain.ScanConfig.SkipWebSocket.
-	SkipWebSocket       bool
+	SkipWebSocket bool
+	// SkipCSRF omits the Cross-Site Request Forgery check. See
+	// domain.ScanConfig.SkipCSRF.
+	SkipCSRF bool
+	// SkipPrototypePollution omits the browser-backed client-side prototype
+	// pollution check. See domain.ScanConfig.SkipPrototypePollution.
+	SkipPrototypePollution bool
+	// SkipCachePoisoning omits the read-only cache-busted unkeyed header
+	// check. See domain.ScanConfig.SkipCachePoisoning.
+	SkipCachePoisoning bool
+	// SkipFileUpload omits the bounded multipart file upload check. See
+	// domain.ScanConfig.SkipFileUpload.
+	SkipFileUpload bool
+	// EnableStoredXSS opts into bounded stored XSS probing. See
+	// domain.ScanConfig.EnableStoredXSS.
+	EnableStoredXSS     bool
 	SSRFCallbackURL     string
 	SSRFCallbackPollURL string
 	// AllowPrivateOAST opts this scan into using an OAST collaborator on a
@@ -607,6 +627,9 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	if err := validateProxyPool(cfg.ProxyPool); err != nil {
 		return nil, err
 	}
+	if err := c.validateBrowserProxyPolicy(cfg.ProxyPool); err != nil {
+		return nil, err
+	}
 	cfg.RandomizeTLSFingerprint = p.RandomizeTLSFingerprint
 	if cfg.RandomizeTLSFingerprint && len(cfg.ProxyPool) > 0 {
 		return nil, fmt.Errorf("%w: randomize_tls_fingerprint and proxy_pool cannot both be set — "+
@@ -659,6 +682,11 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	cfg.SkipSecurityHeaders = p.SkipSecurityHeaders
 	cfg.SkipMethodTLS = p.SkipMethodTLS
 	cfg.SkipWebSocket = p.SkipWebSocket
+	cfg.SkipCSRF = p.SkipCSRF
+	cfg.SkipPrototypePollution = p.SkipPrototypePollution
+	cfg.SkipCachePoisoning = p.SkipCachePoisoning
+	cfg.SkipFileUpload = p.SkipFileUpload
+	cfg.EnableStoredXSS = p.EnableStoredXSS
 	cfg.SkipHostHeader = p.SkipHostHeader
 	cfg.SkipJWT = p.SkipJWT
 	cfg.SkipCORS = p.SkipCORS
@@ -707,9 +735,14 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 
 	// OpenAPI/Swagger import. The document is an operator input, so it is
 	// carried as-is and validated now instead of failing mid-discovery:
-	//   - the inline document must be valid JSON and within the byte bound the
-	//     discovery source enforces (fail fast, never truncate: half a spec
-	//     would understate the surfaces the scan was told about);
+	//   - the inline document must be within the byte bound the discovery
+	//     source enforces (fail fast, never truncate: half a spec would
+	//     understate the surfaces the scan was told about), and must be a
+	//     well-formed OpenAPI 3.x / Swagger 2.0 document in EITHER dialect —
+	//     JSON or YAML, since /openapi.yaml is as common as /openapi.json and
+	//     discovery already parses both. The check is discovery's own parser,
+	//     so create-time validation cannot accept something the source would
+	//     then reject (or the reverse);
 	//   - a spec URL must be absolute http(s) and inside the scan's scope,
 	//     because discovery will fetch it through the scan's own engine.
 	// An empty pair is the default and adds nothing. A value already present in
@@ -723,12 +756,15 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 	}
 	cfg.OpenAPISpecJSON = strings.TrimSpace(cfg.OpenAPISpecJSON)
 	cfg.OpenAPISpecURL = strings.TrimSpace(cfg.OpenAPISpecURL)
-	if cfg.OpenAPISpecJSON != "" && !json.Valid([]byte(cfg.OpenAPISpecJSON)) {
-		return nil, fmt.Errorf("%w: openapi_spec_json is not valid JSON", ErrBadConfig)
-	}
 	if len(cfg.OpenAPISpecJSON) > discovery.MaxOpenAPISpecBytes {
 		return nil, fmt.Errorf("%w: openapi_spec_json is %d bytes, limit is %d",
 			ErrBadConfig, len(cfg.OpenAPISpecJSON), discovery.MaxOpenAPISpecBytes)
+	}
+	if cfg.OpenAPISpecJSON != "" {
+		if err := discovery.ValidateOpenAPISpec([]byte(cfg.OpenAPISpecJSON)); err != nil {
+			return nil, fmt.Errorf("%w: openapi_spec_json is not a usable OpenAPI/Swagger document (JSON or YAML): %v",
+				ErrBadConfig, err)
+		}
 	}
 	if cfg.OpenAPISpecURL != "" {
 		u, err := url.Parse(cfg.OpenAPISpecURL)
@@ -802,6 +838,9 @@ func (c *Controller) CreateScan(ctx context.Context, p CreateScanParams) (*domai
 // Start establishes the session and begins a Created scan: the worker pool and
 // discovery start together.
 func (c *Controller) Start(ctx context.Context, scanID domain.ID) error {
+	if c.ReadOnlyTargets() {
+		return ErrTargetReadOnly
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -814,6 +853,9 @@ func (c *Controller) Start(ctx context.Context, scanID domain.ID) error {
 	}
 	if sc.State != domain.ScanCreated {
 		return fmt.Errorf("%w: can only start a created scan (state=%s)", ErrBadState, sc.State)
+	}
+	if err := c.validateBrowserProxyPolicy(sc.Config.ProxyPool); err != nil {
+		return err
 	}
 	// A project may be edited after its scan was queued (the bounty import
 	// creates a scan immediately). Pick up the latest hunting identity at
@@ -928,6 +970,9 @@ func (c *Controller) pauseForBlock(scanID domain.ID, reason string) {
 // execution that is only finalizing a completion (see finish) counts as no live
 // execution: it is dropped and rebuilt rather than resumed.
 func (c *Controller) Resume(ctx context.Context, scanID domain.ID) error {
+	if c.ReadOnlyTargets() {
+		return ErrTargetReadOnly
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -967,6 +1012,9 @@ func (c *Controller) Resume(ctx context.Context, scanID domain.ID) error {
 	}
 	if sc.State != domain.ScanPaused && sc.State != domain.ScanAwaitingAuth {
 		return ErrNotRunning
+	}
+	if err := c.validateBrowserProxyPolicy(sc.Config.ProxyPool); err != nil {
+		return err
 	}
 	scope, err := c.loadScope(ctx, sc.ProjectID)
 	if err != nil {
@@ -1160,6 +1208,9 @@ func (c *Controller) Shutdown() {
 // canceled, the same contract web.LoginFunc's standalone /api/auth/login
 // endpoint already has). Returns the state path to persist on the Session.
 func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p CreateScanParams, scope domain.Scope, userAgent string) (string, error) {
+	if c.ReadOnlyTargets() && mode != domain.AuthAnonymous && mode != domain.AuthExisting {
+		return "", ErrTargetReadOnly
+	}
 	statePath := strings.TrimSpace(p.AuthStatePath)
 	loginURL := strings.TrimSpace(p.LoginURL)
 	successURL := strings.TrimSpace(p.SuccessURL)
@@ -1210,7 +1261,7 @@ func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p Cr
 		if err != nil {
 			return "", fmt.Errorf("%w: build session state path: %w", ErrAuth, err)
 		}
-		res, err := mgr.InteractiveLogin(ctx, browser.LoginOptions{AllowRequest: allow, LoginURL: loginURL, SuccessURLGlob: successURL, StorageStatePath: path, UserAgent: userAgent, IgnoreHTTPSErrors: p.AllowInsecureTLS})
+		res, err := mgr.InteractiveLogin(ctx, browser.LoginOptions{AllowRequest: allow, AllowAuthority: scope.PermitsHost, LoginURL: loginURL, SuccessURLGlob: successURL, StorageStatePath: path, UserAgent: userAgent, IgnoreHTTPSErrors: p.AllowInsecureTLS})
 		if err != nil {
 			return "", fmt.Errorf("%w: interactive login: %w", ErrAuth, err)
 		}
@@ -1245,8 +1296,9 @@ func (c *Controller) resolveAuth(ctx context.Context, mode domain.AuthMode, p Cr
 			return "", fmt.Errorf("%w: build session state path: %w", ErrAuth, err)
 		}
 		res, err := mgr.AutoLogin(ctx, browser.AutoLoginOptions{
-			AllowRequest: allow,
-			LoginURL:     loginURL, Username: user, Password: pass, SuccessURLGlob: successURL, StorageStatePath: path,
+			AllowRequest:   allow,
+			AllowAuthority: scope.PermitsHost,
+			LoginURL:       loginURL, Username: user, Password: pass, SuccessURLGlob: successURL, StorageStatePath: path,
 			UsernameSelector: p.LoginUsernameSelector, PasswordSelector: p.LoginPasswordSelector, SubmitSelector: p.LoginSubmitSelector,
 			// The same explicit lab/staging TLS opt-in the scan itself carries:
 			// a self-signed login page must be reachable before any session can
@@ -1299,6 +1351,13 @@ func validateCrawlExtent(cfg domain.ScanConfig) error {
 		return fmt.Errorf("%w: max_pages must be between 0 and %d", ErrBadConfig, maxCrawlPages)
 	case cfg.MaxEndpoints < 0 || cfg.MaxEndpoints > maxCrawlEndpoints:
 		return fmt.Errorf("%w: max_endpoints must be between 0 and %d", ErrBadConfig, maxCrawlEndpoints)
+	}
+	return nil
+}
+
+func (c *Controller) validateBrowserProxyPolicy(pool []string) error {
+	if mgr := c.browserManager(); len(pool) > 0 && mgr != nil && mgr.EnforcesScopeEgress() {
+		return fmt.Errorf("%w: proxy_pool cannot be used with scoped Chromium; clear the proxy pool or use an HTTP-only server", ErrBadConfig)
 	}
 	return nil
 }
@@ -1604,8 +1663,8 @@ func (c *Controller) poolConfig(sc *domain.Scan) worker.Config {
 		ScanID: sc.ID,
 		Groups: []worker.GroupSpec{
 			{Name: GroupDiscovery, Types: []domain.JobType{domain.JobDiscovery}, Size: sc.Config.DiscoveryConcurrency},
-			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR, domain.JobAccessControl, domain.JobDisclosure, domain.JobCommandInjection, domain.JobSSTI, domain.JobSQLi, domain.JobNoSQLi, domain.JobXXE, domain.JobSSRF, domain.JobPathTraversal, domain.JobCORS, domain.JobSecurityHeaders, domain.JobMethodTLS, domain.JobWebSocket, domain.JobHostHeader, domain.JobJWT, domain.JobOpenRedirect, domain.JobGraphQL}, Size: sc.Config.HTTPConcurrency},
-			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify, domain.JobDOMXSS}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
+			{Name: GroupHTTP, Types: []domain.JobType{domain.JobTest, domain.JobIDOR, domain.JobAccessControl, domain.JobDisclosure, domain.JobCommandInjection, domain.JobSSTI, domain.JobSQLi, domain.JobNoSQLi, domain.JobXXE, domain.JobSSRF, domain.JobPathTraversal, domain.JobCORS, domain.JobSecurityHeaders, domain.JobMethodTLS, domain.JobWebSocket, domain.JobHostHeader, domain.JobJWT, domain.JobOpenRedirect, domain.JobGraphQL, domain.JobCSRF, domain.JobCachePoisoning, domain.JobFileUpload}, Size: sc.Config.HTTPConcurrency},
+			{Name: GroupBrowser, Types: []domain.JobType{domain.JobVerify, domain.JobDOMXSS, domain.JobPrototypePollution, domain.JobStoredXSS}, Size: minBrowserWorkers(sc.Config.BrowserConcurrency)},
 		},
 		LeaseDuration: c.opts.LeaseDuration,
 		Heartbeat:     c.opts.Heartbeat,

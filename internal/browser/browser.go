@@ -79,6 +79,9 @@ type Config struct {
 	// operator-chosen reduction of isolation, never a default and never an
 	// automatic fallback. See docs/browser-sandbox.md.
 	DisableSandbox bool
+	// EnforceScopeEgress requires both the URL and authority gates in every
+	// context and routes Chromium HTTP(S) via the local scope proxy.
+	EnforceScopeEgress bool
 }
 
 // DefaultConfig returns conservative defaults.
@@ -132,9 +135,9 @@ type ConsoleMessage struct {
 type ContextOptions struct {
 	// AllowRequest, when non-nil, is the scope gate for every http(s) request the
 	// browser would make (page loads, subresources, XHR/fetch, redirect hops).
-	// Disallowed requests are ABORTED before they leave the browser — no traffic
-	// reaches the host — and are recorded as blocked rather than as network
-	// observations. nil allows everything (the caller then owns scope).
+	// Disallowed requests are aborted and recorded as blocked. The authority
+	// gate separately prevents Chromium from preconnecting. Without enforced
+	// scoped egress, nil leaves URL scoping up to the caller.
 	// Scoped contexts also block service workers and close WebSockets. Context
 	// routing rejects requests without an approved managed page (including a
 	// popup's first request with no frame yet) BEFORE network dispatch. Only
@@ -145,6 +148,9 @@ type ContextOptions struct {
 	// exist until context close; this is not an OS-wide network firewall.
 	// These restrictions intentionally change application behavior.
 	AllowRequest func(url string) bool
+	// AllowAuthority is the scope check for a host:port before DNS/TCP.
+	// The URL gate still checks the request scheme, path and method.
+	AllowAuthority func(hostPort string) bool
 	// StorageStatePath, when set, seeds the context with previously saved session
 	// material (cookies + localStorage), yielding a persistent authenticated
 	// context.
@@ -153,10 +159,8 @@ type ContextOptions struct {
 	// loads, subresources, XHR/fetch) through the given proxy
 	// ("http://host:port", "socks5://host:port", optionally with embedded
 	// credentials). "" (the default) uses no proxy — a direct connection.
-	// Indago never picks or supplies a proxy itself; this is operator-provided
-	// infrastructure (AGENTS.md's "evade target-side identity/rate defenses
-	// only via infrastructure the operator explicitly supplies and opts into,
-	// never infrastructure Indago invents or manages itself").
+	// This is operator-provided infrastructure. EnforceScopeEgress refuses
+	// this option because the local scope proxy cannot chain upstream.
 	ProxyServer string
 	// ExtraHeaders, when set, are merged into every request this context
 	// makes (page navigation + subresources), on top of the browser's own
@@ -223,6 +227,7 @@ type ScreenshotOptions struct {
 type LoginOptions struct {
 	// AllowRequest is mandatory: use the project's Scope.Permits for all login traffic.
 	AllowRequest     func(string) bool
+	AllowAuthority   func(string) bool
 	LoginURL         string // page to open for the operator to log in
 	SuccessURLGlob   string // navigation to this URL glob signals success
 	StorageStatePath string // where to save the authenticated session
@@ -252,10 +257,11 @@ type LoginResult struct {
 // an XSS candidate to execute (see AGENTS.md §2.2).
 type AutoLoginOptions struct {
 	// AllowRequest is mandatory: use the project's Scope.Permits for all login traffic.
-	AllowRequest func(string) bool
-	LoginURL     string
-	Username     string
-	Password     string
+	AllowRequest   func(string) bool
+	AllowAuthority func(string) bool
+	LoginURL       string
+	Username       string
+	Password       string
 	// UsernameSelector/PasswordSelector/SubmitSelector are CSS selectors
 	// that override the built-in heuristic (see autoLoginScript) for a
 	// login form it can't guess correctly. Empty uses the heuristic.
@@ -289,6 +295,8 @@ type PoolStats struct {
 type RenderOptions struct {
 	// AllowRequest is the scope gate; see ContextOptions.AllowRequest.
 	AllowRequest func(url string) bool
+	// AllowAuthority is the connection gate; see ContextOptions.AllowAuthority.
+	AllowAuthority func(hostPort string) bool
 	// SessionStatePath points at stored session material to reuse the scan's
 	// authenticated session.
 	SessionStatePath string

@@ -12,6 +12,7 @@ package scan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,6 +21,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -228,9 +230,12 @@ func TestOASTWiringOperatorOverrideWins(t *testing.T) {
 // operator's callback with the built-in poll API would point the engine at a
 // listener that never receives that service's hits.
 func TestOASTWiringHalfConfiguredPairIsNotMixed(t *testing.T) {
-	mgr := oastTestManager(t, nil)
+	mgr := oastTestManager(t, func(c *oast.Config) { c.PublicBaseURL = "https://oast.example.test" })
 	env := newScanEnv(t)
-	cfg := domain.ScanConfig{XXECallbackURL: "https://operator.example/xxe"}
+	cfg := domain.ScanConfig{
+		XXECallbackURL:  "https://operator.example/xxe",
+		SSRFCallbackURL: "https://operator.example/ssrf",
+	}
 	h := oastTestHandlers(t, env, mgr, cfg, ExecutorConfig{})
 
 	xxe := h[domain.JobXXE].(*xxeExecutor)
@@ -239,6 +244,13 @@ func TestOASTWiringHalfConfiguredPairIsNotMixed(t *testing.T) {
 	}
 	if xxe.poll != "" {
 		t.Fatalf("xxe poll = %q, want it left empty rather than mixed with the built-in poll API", xxe.poll)
+	}
+	ssrf := h[domain.JobSSRF].(*ssrfExecutor)
+	if ssrf.callbackURL != cfg.SSRFCallbackURL {
+		t.Fatalf("ssrf callback = %q, want the operator's", ssrf.callbackURL)
+	}
+	if ssrf.callbackPollURL != "" {
+		t.Fatalf("ssrf poll = %q, want it left empty rather than mixed with the built-in poll API", ssrf.callbackPollURL)
 	}
 }
 
@@ -520,4 +532,121 @@ func TestOASTWiringXXEOperatorBodyIsRegistered(t *testing.T) {
 			t.Fatalf("queued job target = %q, want %q", job.Target.URL, xmlURL)
 		}
 	})
+}
+
+type failingOASTCollaborator struct {
+	base string
+	poll string
+	err  error
+}
+
+func (f failingOASTCollaborator) BaseURL() string          { return f.base }
+func (f failingOASTCollaborator) PollURL() (string, error) { return f.poll, f.err }
+func (f failingOASTCollaborator) ListenAddr() string       { return "" }
+
+func TestOASTWiringUnavailableCollaboratorIsSafe(t *testing.T) {
+	if got := deriveOASTWiring(failingOASTCollaborator{base: "", poll: "http://127.0.0.1:1/poll"}, execLog(), false); got != nil {
+		t.Fatalf("empty base URL produced wiring %+v, want nil", got)
+	}
+	if got := deriveOASTWiring(failingOASTCollaborator{base: "https://oast.example.test", err: errors.New("poll down")}, execLog(), false); got != nil {
+		t.Fatalf("poll error produced wiring %+v, want nil", got)
+	}
+}
+
+func TestOASTWiringPrivateLabWiresSSRFHandler(t *testing.T) {
+	collab := fakeOASTCollaborator{
+		base:   "http://192.168.103.1:8751",
+		poll:   "http://127.0.0.1:8752/oast/interactions",
+		listen: "192.168.103.1:8751",
+	}
+	env := newScanEnv(t)
+
+	hNoOpt := oastTestHandlers(t, env, collab, domain.ScanConfig{}, ExecutorConfig{AllowPrivateOAST: false})
+	if ssrf := hNoOpt[domain.JobSSRF].(*ssrfExecutor); ssrf.callbackURL != "" || ssrf.callbackPollURL != "" {
+		t.Fatalf("ssrf callbacks without opt-in = (%q, %q), want empty", ssrf.callbackURL, ssrf.callbackPollURL)
+	}
+
+	hOpt := oastTestHandlers(t, env, collab, domain.ScanConfig{}, ExecutorConfig{AllowPrivateOAST: true})
+	ssrf := hOpt[domain.JobSSRF].(*ssrfExecutor)
+	if ssrf.callbackURL != collab.base || ssrf.callbackPollURL != collab.poll {
+		t.Fatalf("ssrf callbacks with opt-in = (%q, %q), want (%q, %q)", ssrf.callbackURL, ssrf.callbackPollURL, collab.base, collab.poll)
+	}
+}
+
+func TestOASTWiringOperatorOverrideEndToEnd(t *testing.T) {
+	mgr := oastTestManager(t, func(c *oast.Config) { c.PublicBaseURL = "https://builtin.example.test" })
+
+	var mu sync.Mutex
+	var xxeHits, ssrfHits []string
+	operatorCollab := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.URL.Path == "/xxe/poll":
+			_ = json.NewEncoder(w).Encode(xxeHits)
+		case r.URL.Path == "/ssrf/poll":
+			_ = json.NewEncoder(w).Encode(ssrfHits)
+		case strings.HasPrefix(r.URL.Path, "/xxe/"):
+			xxeHits = append(xxeHits, r.URL.Path)
+			w.WriteHeader(http.StatusOK)
+		case strings.HasPrefix(r.URL.Path, "/ssrf/"):
+			ssrfHits = append(ssrfHits, r.URL.Path)
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer operatorCollab.Close()
+
+	// Note: operatorCollab is on 127.0.0.1, which SSRF refuses as a canary host
+	// for safety, so for SSRF we verify XXE end-to-end against operatorCollab
+	// and verify SSRF's wired URLs point to the operator override rather than mgr.
+	systemURL := regexp.MustCompile(`SYSTEM "([^"]+)"`)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if m := systemURL.FindStringSubmatch(string(body)); m != nil {
+			if resp, err := http.Get(m[1]); err == nil {
+				resp.Body.Close()
+			}
+		}
+		fmt.Fprint(w, "<result>ok</result>")
+	}))
+	defer target.Close()
+
+	env := newScanEnv(t)
+	ep := &domain.Endpoint{ID: domain.NewID(), ScanID: env.scanID, URL: target.URL + "/stock",
+		Method: domain.MethodPOST, Source: domain.SourceBrowserNetwork, ContentType: "application/xml",
+		RequestBody: `<stockCheck><productId>1</productId></stockCheck>`, CreatedAt: time.Now()}
+	if err := env.st.Endpoints().Create(context.Background(), ep); err != nil {
+		t.Fatal(err)
+	}
+	cfg := domain.ScanConfig{
+		XXECallbackURL:      operatorCollab.URL + "/xxe",
+		XXECallbackPollURL:  operatorCollab.URL + "/xxe/poll",
+		SSRFCallbackURL:     "https://operator.example.test/ssrf",
+		SSRFCallbackPollURL: operatorCollab.URL + "/ssrf/poll",
+	}
+	h := oastTestHandlers(t, env, mgr, cfg, ExecutorConfig{AllowStateChanging: true})
+
+	if ssrf := h[domain.JobSSRF].(*ssrfExecutor); ssrf.callbackURL != cfg.SSRFCallbackURL || ssrf.callbackPollURL != cfg.SSRFCallbackPollURL {
+		t.Fatalf("ssrf callbacks = (%q, %q), want operator override (%q, %q)",
+			ssrf.callbackURL, ssrf.callbackPollURL, cfg.SSRFCallbackURL, cfg.SSRFCallbackPollURL)
+	}
+
+	job := &domain.TestJob{ID: domain.NewID(), ScanID: env.scanID, Type: domain.JobXXE,
+		Target: domain.JobTarget{EndpointID: ep.ID, URL: ep.URL}, Attempts: 1, MaxAttempts: 1}
+	if err := h[domain.JobXXE].Handle(context.Background(), job); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if f := oastFinding(t, env, domain.VulnXXE); f.Verdict != domain.VerdictConfirmed {
+		t.Fatalf("finding verdict = %q, want confirmed", f.Verdict)
+	}
+	if hits := mgr.Interactions(); len(hits) != 0 {
+		t.Fatalf("built-in manager recorded %d interactions (%+v), want 0 when operator override is set", len(hits), hits)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(xxeHits) != 1 {
+		t.Fatalf("operator collaborator XXE hits = %d (%+v), want 1", len(xxeHits), xxeHits)
+	}
 }

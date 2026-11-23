@@ -158,7 +158,11 @@ func runRawQueryScan(t *testing.T, site *rawQuerySite, mode discovery.RawQueryMo
 		SkipMethodTLS: true,
 		// The WebSocket pass probes discovered socket-shaped endpoints; this
 		// fixture has none and its request arithmetic is one engine's.
-		SkipWebSocket: true,
+		SkipWebSocket:          true,
+		SkipCSRF:               true,
+		SkipPrototypePollution: true,
+		SkipCachePoisoning:     true,
+		SkipFileUpload:         true,
 	}
 	opts := scan.Options{}
 	if withBrowser {

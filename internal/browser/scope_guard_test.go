@@ -235,8 +235,7 @@ func TestScopeGateGuardCatchesTheRealCallersWhenTheGateIsRemoved(t *testing.T) {
 		{"internal/verification/browser.go", "AllowRequest:     allow,"},
 		{"internal/scan/domxss.go", "AllowRequest: allow, "},
 		{"internal/discovery/sources.go", "AllowRequest:      func(u string) bool { return in.Scope.Permits(u).Allowed },"},
-		{"internal/scan/controller.go", "AllowRequest: allow, LoginURL"},
-		{"cmd/indago/main.go", "AllowRequest:     p.AllowRequest,"},
+		{"internal/scan/controller.go", "AllowRequest: allow, AllowAuthority"},
 	}
 	for _, c := range cases {
 		src, err := os.ReadFile(filepath.Join(root, c.file))

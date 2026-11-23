@@ -480,6 +480,312 @@ func TestOpenAPINoSpecIsANoOp(t *testing.T) {
 	}
 }
 
+// OpenAPI 3.x YAML documents are normalized into the same model: relative
+// servers, path/query parameters, numeric response keys, and local $refs
+// under components.schemas all work identically to JSON.
+func TestOpenAPIV3YAMLImportsPathsQueryAndJSONBody(t *testing.T) {
+	const spec = `
+openapi: "3.0.3"
+info:
+  title: t
+  version: "1"
+servers:
+  - url: /api/v1
+paths:
+  /users/{userId}:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: integer
+          example: 42
+    get:
+      parameters:
+        - name: expand
+          in: query
+          schema:
+            type: string
+            enum:
+              - profile
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+      responses:
+        200:
+          description: ok
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewUser"
+      responses:
+        201:
+          description: created
+components:
+  schemas:
+    NewUser:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          example: ada
+        age:
+          type: integer
+        admin:
+          type: boolean
+        tags:
+          type: array
+          items:
+            type: string
+`
+
+	src := discovery.NewOpenAPISource(nil)
+	sink := runOpenAPISpec(t, src, discovery.Input{
+		SeedURLs:        []string{"http://app.example.test/"},
+		Scope:           domain.Scope{IncludeHosts: []string{"app.example.test"}},
+		OpenAPISpecJSON: spec,
+	})
+
+	eps := specEndpoints(sink)
+	if _, ok := eps["GET http://app.example.test/api/v1/users/42?expand=profile&page=1"]; !ok {
+		t.Fatalf("YAML GET endpoint not registered as expected; got %v", sink.endpointURLs())
+	}
+	post, ok := eps["POST http://app.example.test/api/v1/users/42"]
+	if !ok {
+		t.Fatalf("YAML POST endpoint not registered; got %v", sink.endpointURLs())
+	}
+	if post.ContentType != "application/json" {
+		t.Fatalf("content type = %q, want application/json", post.ContentType)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(post.RequestBody), &body); err != nil {
+		t.Fatalf("JSON body skeleton from YAML is not valid JSON (%q): %v", post.RequestBody, err)
+	}
+	if body["name"] != "ada" || body["age"] != float64(0) || body["admin"] != false {
+		t.Fatalf("body from YAML $ref unexpected: %v", body)
+	}
+	if tags, ok := body["tags"].([]any); !ok || len(tags) != 0 {
+		t.Fatalf("array property skeleton = %v, want []", body["tags"])
+	}
+	params := specParamsFor(sink, domain.MethodPOST, post.URL)
+	if len(params) != 4 {
+		t.Fatalf("POST parameters = %v, want 4 body properties", params)
+	}
+	if params["name"].Example != `"ada"` {
+		t.Fatalf("name example = %s, want \"ada\"", params["name"].Example)
+	}
+}
+
+// Swagger 2.0 YAML documents resolve host/basePath/schemes and local
+// #/definitions refs identically to JSON.
+func TestSwaggerV2YAMLImportsBasePathDefinitionsAndQueryParams(t *testing.T) {
+	const spec = `
+swagger: "2.0"
+info:
+  title: t
+  version: "1"
+host: api.example.test
+basePath: /v2
+schemes:
+  - http
+paths:
+  /orders:
+    post:
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/Order"
+        - name: dryRun
+          in: query
+          type: boolean
+          default: false
+    get:
+      parameters:
+        - name: limit
+          in: query
+          type: integer
+          default: 10
+definitions:
+  Order:
+    type: object
+    properties:
+      id:
+        type: integer
+      note:
+        type: string
+        example: hi
+`
+
+	src := discovery.NewOpenAPISource(nil)
+	sink := runOpenAPISpec(t, src, discovery.Input{
+		SeedURLs:        []string{"http://api.example.test/"},
+		Scope:           domain.Scope{IncludeHosts: []string{"api.example.test"}},
+		OpenAPISpecJSON: spec,
+	})
+
+	eps := specEndpoints(sink)
+	if _, ok := eps["GET http://api.example.test/v2/orders?limit=10"]; !ok {
+		t.Fatalf("swagger YAML GET not registered; got %v", sink.endpointURLs())
+	}
+	post, ok := eps["POST http://api.example.test/v2/orders?dryRun=false"]
+	if !ok {
+		t.Fatalf("swagger YAML POST not registered; got %v", sink.endpointURLs())
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(post.RequestBody), &body); err != nil {
+		t.Fatalf("definitions ref from YAML did not produce JSON (%q): %v", post.RequestBody, err)
+	}
+	if body["note"] != "hi" {
+		t.Fatalf("body did not resolve #/definitions/Order: %v", body)
+	}
+	params := specParamsFor(sink, domain.MethodPOST, post.URL)
+	if len(params) != 2 {
+		t.Fatalf("POST parameters = %v, want 2 body properties", params)
+	}
+}
+
+// Malformed YAML and valid YAML that is not an OpenAPI/Swagger spec are both
+// rejected with an error and register no endpoints.
+func TestOpenAPIInvalidYAMLIsAnError(t *testing.T) {
+	src := discovery.NewOpenAPISource(nil)
+	sink := &recordingSink{}
+	err := src.Run(context.Background(), discovery.Input{
+		SeedURLs:        []string{"http://app.example.test/"},
+		Scope:           domain.Scope{IncludeHosts: []string{"app.example.test"}},
+		OpenAPISpecJSON: "openapi: \"3.0.0\"\npaths:\n  /bad: [unclosed",
+	}, sink)
+	if err == nil {
+		t.Fatal("invalid YAML was accepted")
+	}
+	if !strings.Contains(err.Error(), "parse document") {
+		t.Fatalf("error does not name the parse failure: %v", err)
+	}
+	if len(sink.eps) != 0 {
+		t.Fatalf("invalid YAML registered %d endpoints", len(sink.eps))
+	}
+
+	err = src.Run(context.Background(), discovery.Input{
+		SeedURLs:        []string{"http://app.example.test/"},
+		Scope:           domain.Scope{IncludeHosts: []string{"app.example.test"}},
+		OpenAPISpecJSON: "hello: world\n",
+	}, &recordingSink{})
+	if err == nil {
+		t.Fatal("a non-OpenAPI YAML document was accepted")
+	}
+}
+
+// A YAML document served over HTTP is fetched and parsed exactly like a JSON
+// one: the fetch path is format-agnostic, and a declared endpoint is still
+// only registered, never requested.
+func TestOpenAPIYAMLFetchedFromURLIsImported(t *testing.T) {
+	var specHits, endpointHits atomic.Int64
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
+		specHits.Add(1)
+		w.Header().Set("Content-Type", "application/yaml")
+		fmt.Fprint(w, `
+swagger: "2.0"
+info:
+  title: t
+  version: "1"
+basePath: /v2
+schemes:
+  - http
+paths:
+  /widgets:
+    get:
+      parameters:
+        - name: limit
+          in: query
+          type: integer
+          default: 5
+`)
+	})
+	mux.HandleFunc("/v2/widgets", func(w http.ResponseWriter, r *http.Request) {
+		endpointHits.Add(1)
+	})
+
+	info, err := discovery.Normalize(srv.URL)
+	if err != nil {
+		t.Fatalf("normalize test server url: %v", err)
+	}
+	eng := &countingEngine{inner: httpengine.NewDefault()}
+	src := discovery.NewOpenAPISource(eng)
+	sink := runOpenAPISpec(t, src, discovery.Input{
+		SeedURLs:       []string{srv.URL},
+		Scope:          domain.Scope{IncludeHosts: []string{info.Host}},
+		OpenAPISpecURL: srv.URL + "/openapi.yaml",
+	})
+
+	if got := specHits.Load(); got != 1 {
+		t.Fatalf("YAML spec fetched %d times, want exactly 1", got)
+	}
+	if got := endpointHits.Load(); got != 0 {
+		t.Fatalf("%d requests were sent to a declared endpoint; discovery must only register it", got)
+	}
+	want := srv.URL + "/v2/widgets?limit=5"
+	if _, ok := specEndpoints(sink)[string(domain.MethodGET)+" "+want]; !ok {
+		t.Fatalf("YAML spec from url did not register %s; got %v", want, sink.endpointURLs())
+	}
+}
+
+// YAML-only document features are honoured: an anchor/merge key shares one
+// parameter shape, and a quoted scalar stays a string instead of being
+// re-interpreted as a number.
+func TestOpenAPIYAMLAnchorsAndMergeKeysAreImported(t *testing.T) {
+	const spec = `
+openapi: "3.0.3"
+info:
+  title: t
+  version: "1"
+servers:
+  - url: http://app.example.test
+paths:
+  /search:
+    get:
+      parameters:
+        - &paging
+          name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - <<: *paging
+          name: size
+        - name: code
+          in: query
+          schema:
+            type: string
+            example: "0042"
+      responses:
+        200:
+          description: ok
+`
+
+	src := discovery.NewOpenAPISource(nil)
+	sink := runOpenAPISpec(t, src, discovery.Input{
+		SeedURLs:        []string{"http://app.example.test/"},
+		Scope:           domain.Scope{IncludeHosts: []string{"app.example.test"}},
+		OpenAPISpecJSON: spec,
+	})
+
+	want := "GET http://app.example.test/search?code=0042&page=1&size=1"
+	if _, ok := specEndpoints(sink)[want]; !ok {
+		t.Fatalf("merged/multi-document YAML parameters not imported as %s; got %v", want, sink.endpointURLs())
+	}
+}
+
 // engineFunc adapts a function to httpengine.Engine.
 type engineFunc func(context.Context, *httpengine.Request) (*httpengine.Response, error)
 

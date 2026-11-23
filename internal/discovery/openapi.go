@@ -1,9 +1,11 @@
 package discovery
 
 // Specification-driven discovery: an operator hands Indago a machine-readable
-// API description — the JSON document a target publishes at /openapi.json or
-// /swagger.json, or one saved to disk — and every endpoint it declares becomes
-// a discovery candidate.
+// API description — the OpenAPI 3.x / Swagger 2.0 document a target publishes
+// at /openapi.json, /openapi.yaml or /swagger.json, or one saved to disk — and
+// every endpoint it declares becomes a discovery candidate. Both JSON and YAML
+// documents are accepted; YAML is normalized into the same JSON-shaped model,
+// so one parser serves both dialects.
 //
 // This is the one discovery input that yields a COMPLETE endpoint inventory
 // rather than a sample of it, which matters because a JSON API has no pages a
@@ -33,6 +35,7 @@ import (
 
 	"github.com/indago/indago/internal/domain"
 	"github.com/indago/indago/internal/httpengine"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -68,9 +71,10 @@ type openAPISource struct {
 }
 
 // NewOpenAPISource registers the endpoints declared by an operator-supplied
-// OpenAPI 3.x or Swagger 2.0 JSON document. With neither Input.OpenAPISpecJSON
-// nor Input.OpenAPISpecURL set it does nothing at all — no request, no
-// registration — so every scan that supplies no spec is unaffected.
+// OpenAPI 3.x or Swagger 2.0 document, in JSON or YAML. With neither
+// Input.OpenAPISpecJSON nor Input.OpenAPISpecURL set it does nothing at all —
+// no request, no registration — so every scan that supplies no spec is
+// unaffected.
 func NewOpenAPISource(engine httpengine.Engine) Source { return &openAPISource{engine: engine} }
 
 func (s *openAPISource) Name() domain.DiscoverySource { return domain.SourceOpenAPI }
@@ -332,12 +336,12 @@ var specMethods = []struct {
 // scan's first seed when the document was supplied inline — and is what a
 // relative `servers` URL or a missing Swagger host resolves against.
 func buildOpenAPIEndpoints(doc []byte, refURL *url.URL, scope domain.Scope) ([]openAPIEndpoint, error) {
-	var spec openAPIDocument
-	if err := json.Unmarshal(doc, &spec); err != nil {
-		return nil, fmt.Errorf("openapi: parse document: %w", err)
+	spec, err := parseOpenAPIDocument(doc)
+	if err != nil {
+		return nil, err
 	}
-	if spec.OpenAPI == "" && spec.Swagger == "" && len(spec.Paths) == 0 {
-		return nil, fmt.Errorf("openapi: document declares neither an openapi/swagger version nor any paths")
+	if err := specUsable(spec); err != nil {
+		return nil, err
 	}
 	base := specBaseURL(&spec, refURL)
 	if base == nil {
@@ -395,6 +399,84 @@ func buildOpenAPIEndpoints(doc []byte, refURL *url.URL, scope domain.Scope) ([]o
 		}
 	}
 	return out, nil
+}
+
+// parseOpenAPIDocument decodes a JSON or YAML OpenAPI/Swagger document into
+// openAPIDocument. YAML inputs are normalized into JSON-compatible values so
+// downstream json.RawMessage fields and $ref resolution work identically.
+func parseOpenAPIDocument(doc []byte) (openAPIDocument, error) {
+	var spec openAPIDocument
+	if err := json.Unmarshal(doc, &spec); err == nil {
+		return spec, nil
+	}
+
+	var raw any
+	if err := yaml.Unmarshal(doc, &raw); err != nil {
+		return openAPIDocument{}, fmt.Errorf("openapi: parse document: %w", err)
+	}
+	normalized, err := json.Marshal(yamlToJSONCompatible(raw))
+	if err != nil {
+		return openAPIDocument{}, fmt.Errorf("openapi: parse document: %w", err)
+	}
+	if err := json.Unmarshal(normalized, &spec); err != nil {
+		return openAPIDocument{}, fmt.Errorf("openapi: parse document: %w", err)
+	}
+	return spec, nil
+}
+
+// ValidateOpenAPISpec reports whether doc is a document this source can use:
+// well-formed JSON or YAML that declares an OpenAPI 3.x / Swagger 2.0 version
+// or at least one path. It is the create-time gate the scan controller applies
+// to an operator-supplied inline spec, and it deliberately runs the SAME parse
+// and the same usability test NewOpenAPISource runs, so the two cannot drift:
+// a document accepted here is one discovery will read, and a document refused
+// here is one discovery would have failed on mid-scan. It performs no I/O and
+// no scope check, and registers nothing.
+func ValidateOpenAPISpec(doc []byte) error {
+	spec, err := parseOpenAPIDocument(doc)
+	if err != nil {
+		return err
+	}
+	return specUsable(spec)
+}
+
+// specUsable rejects a document that parsed but describes no API: neither
+// dialect's version field and no paths at all. A YAML file of unrelated keys
+// parses cleanly, and accepting it would look like a successful import while
+// registering nothing.
+func specUsable(spec openAPIDocument) error {
+	if spec.OpenAPI == "" && spec.Swagger == "" && len(spec.Paths) == 0 {
+		return fmt.Errorf("openapi: document declares neither an openapi/swagger version nor any paths")
+	}
+	return nil
+}
+
+// yamlToJSONCompatible recursively converts map[any]any (which yaml.v3
+// produces for non-string keys such as numeric HTTP status codes) into
+// map[string]any so encoding/json can marshal the document.
+func yamlToJSONCompatible(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			out[k] = yamlToJSONCompatible(val)
+		}
+		return out
+	case map[any]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			out[fmt.Sprint(k)] = yamlToJSONCompatible(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = yamlToJSONCompatible(val)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // specBaseURL resolves the document's declared base. OpenAPI 3 names it in
