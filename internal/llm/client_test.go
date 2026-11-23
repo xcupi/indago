@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -208,6 +209,80 @@ func TestModelsListsAndDeduplicates(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("Models made %d requests, want exactly 1", got)
+	}
+}
+
+func TestModelsReadsOpenRouterCatalogWithLargeMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+testKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		io.WriteString(w, `{"data":[{"id":"fixture/first","description":"`)
+		io.WriteString(w, strings.Repeat("x", maxResponseBytes))
+		io.WriteString(w, `"},{"id":"fixture/last"}]}`)
+	}))
+	defer srv.Close()
+
+	cfg := testConfig(srv.URL)
+	cfg.Provider = ProviderOpenRouter
+	models, err := NewProber(0).Models(context.Background(), cfg)
+	if err != nil || len(models) != 2 || models[0] != "fixture/first" || models[1] != "fixture/last" {
+		t.Fatalf("models = %v, error = %v", models, err)
+	}
+}
+
+func TestModelsFiltersCatalogForTextChat(t *testing.T) {
+	const catalog = `{"data":[
+		{"id":"fixture/audio","architecture":{"input_modalities":["text"],"output_modalities":["audio"]}},
+		{"id":"fixture/transcribe","input_modalities":["audio"],"output_modalities":["text"]},
+		{"id":"fixture/images", "output_modalities":["image"]},
+		{"id":"fixture/responses-only","endpoints":["/api/v1/responses"]},
+		{"id":"fixture/chat","endpoints":["/api/v1/chat/completions","/api/v1/responses"]},
+		{"id":"fixture/multimodal","architecture":{"input_modalities":["image","text"],"output_modalities":["text","audio"]}},
+		{"id":"fixture/unknown","architecture":"legacy provider label"},
+		{"name":"Display only without a wire ID"}
+	]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/models" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		io.WriteString(w, catalog)
+	}))
+	defer srv.Close()
+
+	cfg := testConfig(srv.URL)
+	cfg.Provider = ProviderOpenRouter
+	models, err := NewProber(0).Models(context.Background(), cfg)
+	if err != nil || !slices.Equal(models, []string{"fixture/chat", "fixture/multimodal", "fixture/unknown"}) {
+		t.Fatalf("models = %v, error = %v", models, err)
+	}
+}
+
+func TestCatalogModelRecognizesSpecializedFirstPartyIDs(t *testing.T) {
+	for _, tc := range []struct {
+		provider string
+		model    string
+		text     bool
+	}{
+		{ProviderGoogle, "gemini-3.5-flash-lite", true},
+		{ProviderGoogle, "models/gemini-embedding-2", false},
+		{ProviderGoogle, "gemini-3.1-flash-image", false},
+		{ProviderGoogle, "gemini-3.8-flash-tts", false},
+		{ProviderGoogle, "gemini-3.6-live-preview", false},
+		{ProviderGoogle, "lyria-3.5", false},
+		{ProviderOpenAI, "gpt-4o-mini", true},
+		{ProviderOpenAI, "gpt-6.2-astra", true},
+		{ProviderOpenAI, "ft:gpt-4o:org:image-captioning", true},
+		{ProviderOpenAI, "text-embedding-3-small", false},
+		{ProviderOpenAI, "gpt-image-2", false},
+		{ProviderOpenAI, "gpt-realtime", false},
+		{ProviderOpenAI, "gpt-4o-transcribe", false},
+		{ProviderCustom, "image-description-chat-model", true},
+	} {
+		if got := (catalogModel{}).acceptsText(tc.provider, tc.model); got != tc.text {
+			t.Errorf("%s/%s accepts text = %v, want %v", tc.provider, tc.model, got, tc.text)
+		}
 	}
 }
 

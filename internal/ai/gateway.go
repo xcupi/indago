@@ -83,8 +83,9 @@ var _ Gateway = Disabled{}
 
 // enabledGateway wraps a Provider and enforces the advisory invariant.
 type enabledGateway struct {
-	provider Provider
-	model    string
+	provider   Provider
+	model      string
+	reportOnly bool
 }
 
 // Enabled implements Gateway.
@@ -92,6 +93,9 @@ func (g *enabledGateway) Enabled() bool { return true }
 
 // Advise implements Gateway, stamping every response as advisory.
 func (g *enabledGateway) Advise(ctx context.Context, req Request) (*Response, error) {
+	if g.reportOnly && req.Kind != domain.AIDraftReport {
+		return nil, errors.New("this provider is available for executive report summaries")
+	}
 	resp, err := g.provider.Complete(ctx, req)
 	if err != nil {
 		return nil, err
@@ -117,13 +121,6 @@ type Settings struct {
 	Model    string
 	BaseURL  string
 	APIKey   string
-	// OAuthToken is a Claude subscription access token (PKCE flow). When set,
-	// Anthropic is called with Bearer + beta headers instead of x-api-key.
-	OAuthToken string
-	// CredentialsDir is where the chatgpt provider keeps Indago's own OAuth
-	// session (<data>/chatgpt). Empty falls back to the borrowed Hermes
-	// session only.
-	CredentialsDir string
 }
 
 // New returns a gateway from settings. When disabled (or provider empty) it
@@ -136,5 +133,15 @@ func New(s Settings) (Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &enabledGateway{provider: p, model: s.Model}, nil
+	return &enabledGateway{provider: p, model: s.Model, reportOnly: ReportOnlyProvider(p.Name())}, nil
+}
+
+// ReportOnlyProvider reports whether a provider is limited to executive summaries.
+func ReportOnlyProvider(provider string) bool {
+	switch provider {
+	case ProviderOpenAI, ProviderAnthropic, ProviderClaude, ProviderOpenRouter, ProviderGoogle:
+		return true
+	default:
+		return false
+	}
 }

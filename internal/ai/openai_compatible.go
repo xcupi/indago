@@ -21,14 +21,13 @@ type openAICompatProvider struct {
 	model   string
 }
 
-// openAIResponseTokenCeiling is the output ceiling sent with every
-// OpenAI-compatible call (reasoning tokens included). 8192 is the common
-// maximum for these endpoints; a larger value is rejected by some gateways.
+// openAIResponseTokenCeiling bounds an OpenAI API response, including reasoning tokens.
 const openAIResponseTokenCeiling = 8192
 
 type openAIChatRequest struct {
-	Model    string              `json:"model"`
-	Messages []openAIChatMessage `json:"messages"`
+	Model               string              `json:"model"`
+	Messages            []openAIChatMessage `json:"messages"`
+	MaxCompletionTokens int                 `json:"max_completion_tokens,omitempty"`
 	// Stream is explicit: some OpenAI-compatible gateways default to SSE when
 	// the field is absent, and a streamed body is not a chat completion.
 	Stream bool `json:"stream"`
@@ -76,6 +75,9 @@ func (p *openAICompatProvider) Complete(ctx context.Context, req Request) (*Resp
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userContent(req)},
 		},
+	}
+	if p.name == ProviderOpenAI {
+		body.MaxCompletionTokens = openAIResponseTokenCeiling
 	}
 	var out openAIChatResponse
 	url := strings.TrimRight(p.baseURL, "/") + "/chat/completions"

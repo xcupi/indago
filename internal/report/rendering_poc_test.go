@@ -122,7 +122,7 @@ func TestJSONReportCarriesCWEAndCVSSBaseline(t *testing.T) {
 func TestUnclassifiedClassRendersNoClassification(t *testing.T) {
 	data := pocData(nil)
 	data.Findings = []*domain.Finding{{
-		ID: "f-x", ScanID: "scan1", VulnClass: domain.VulnClass("prototype_pollution"),
+		ID: "f-x", ScanID: "scan1", VulnClass: domain.VulnClass("custom_unclassified_class"),
 		Verdict: domain.VerdictConfirmed, Severity: domain.SeverityHigh, Title: "Unknown class finding",
 		CreatedAt: t0,
 	}}

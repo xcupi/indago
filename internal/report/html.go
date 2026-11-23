@@ -405,7 +405,7 @@ const htmlTemplateSrc = `<!doctype html>
     {{if .DetectedAt}}<li><strong>Detected:</strong> {{.DetectedAt}}</li>{{end}}
     {{if .VerifiedAt}}<li><strong>{{.VerifiedAtLabel}}:</strong> {{.VerifiedAt}}</li>{{end}}
     {{if .Summary}}<li><strong>Notes:</strong> {{.Summary}}</li>{{end}}
-    {{if .ReviewReason}}<li><strong>Why this needs manual review (not a clean negative):</strong> {{.ReviewReason}}</li>{{end}}
+    {{if .ReviewReason}}<li><strong>Evidence review:</strong> {{.ReviewReason}}</li>{{end}}
   </ul>
   {{if .CurlPoC}}<p><strong>Reproducible curl PoC</strong>{{if .CurlPoCNote}} <span class="note">({{.CurlPoCNote}})</span>{{end}}:</p>
   <pre class="poc">{{.CurlPoC}}</pre>{{end}}

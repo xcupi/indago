@@ -32,8 +32,15 @@ func (MarkdownGenerator) Format() domain.ReportFormat { return domain.ReportMark
 // map-keyed breakdown is rendered in sorted key order, so the same Data always
 // produces byte-identical Markdown.
 func (MarkdownGenerator) Generate(w io.Writer, data Data) error {
-	if data.Template == TemplateYesWeHack {
+	switch data.Template {
+	case TemplateYesWeHack:
 		return writeYesWeHackMarkdown(w, data)
+	case TemplateHackerOne:
+		return writeHackerOneMarkdown(w, data)
+	case TemplateBugcrowd:
+		return writeBugcrowdMarkdown(w, data)
+	case TemplateIntigriti:
+		return writeIntigritiMarkdown(w, data)
 	}
 	if data.Template != TemplateTechnical {
 		var b strings.Builder
@@ -198,7 +205,7 @@ func writeFinding(b *strings.Builder, n int, f *domain.Finding, v FindingView) {
 		fmt.Fprintf(b, "- **Notes:** %s\n", f.Summary)
 	}
 	if v.ReviewReasonLabel != "" {
-		fmt.Fprintf(b, "- **Why this needs manual review (not a clean negative):** %s\n", v.ReviewReasonLabel)
+		fmt.Fprintf(b, "- **Evidence review:** %s\n", v.ReviewReasonLabel)
 		if v.ReviewReason == ReviewInteractionOnly {
 			b.WriteString("- **How to check it yourself:** for a recognized declared mechanism Indago already dispatched one bounded activation and saw no marker signal. Open the Tested URL for the attempt(s) below only if you need to exercise a page-specific or unsupported action manually.\n")
 		}

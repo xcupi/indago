@@ -1,25 +1,10 @@
 package llm
 
-// Provider registry: resolve the credential and endpoint for any supported
-// provider, whether it comes from the Settings screen (one stored provider) or
-// from the environment (one key per provider).
-//
-// The env path exists so an operator can offer more than one provider to a
-// scan or a report without putting several secrets in a file the API can read:
-//
-//	INDAGO_LLM_KEY_DEEPSEEK=...      INDAGO_LLM_KEY_OPENAI=...
-//	INDAGO_LLM_MODEL_OPENAI=gpt-4o-mini   INDAGO_LLM_BASE_URL_CUSTOM=...
-//
-// A stored configuration always wins for its own provider; env only fills the
-// providers the store does not cover.
-
 import (
 	"errors"
 	"fmt"
 	"os"
 	"strings"
-
-	"github.com/indago/indago/internal/chatgpt"
 )
 
 // ErrNoCredential means the provider is known but no key is available for it.
@@ -33,6 +18,7 @@ type Credential struct {
 	BaseURL  string
 
 	apiKey string
+	source string
 }
 
 // HasKey reports whether a key is available. It reveals only presence.
@@ -41,6 +27,11 @@ func (c Credential) HasKey() bool { return c.apiKey != "" }
 // APIKey returns the key so an outbound client can be constructed. It exists
 // only for that purpose: never log, serialize or return this value.
 func (c Credential) APIKey() string { return c.apiKey }
+
+// Config returns the resolved settings for a connection or catalog probe.
+func (c Credential) Config() Config {
+	return Config{Provider: c.Provider, Model: c.Model, BaseURL: c.BaseURL, apiKey: c.apiKey}
+}
 
 // Redact scrubs this credential's key from s.
 func (c Credential) Redact(s string) string { return Redact(s, c.apiKey) }
@@ -61,31 +52,27 @@ type Availability struct {
 	Provider   string `json:"provider"`
 	Label      string `json:"label"`
 	Configured bool   `json:"configured"`
+	ReportOnly bool   `json:"report_only,omitempty"`
 	Model      string `json:"model,omitempty"`
 	BaseURL    string `json:"base_url,omitempty"`
 	KeyHint    string `json:"key_hint,omitempty"`
-	// Source is "settings" when the stored configuration supplies this
-	// provider, "environment" when only env vars do, "" when neither.
+	Saved      bool   `json:"saved,omitempty"`
+	// Source identifies where the effective credential came from.
 	Source string `json:"source"`
 }
 
 // Registry resolves provider credentials from the stored configuration plus
 // the environment. It performs no I/O beyond reading local files/env.
 type Registry struct {
-	store      *Store
-	chatgptDir string
+	store *Store
 }
 
 // NewRegistry wraps a store. A nil store is allowed: only env-provided
 // providers resolve then.
 func NewRegistry(st *Store) *Registry { return &Registry{store: st} }
 
-// SetChatGPTCredDir points the chatgpt provider at Indago's own OAuth store.
-func (r *Registry) SetChatGPTCredDir(dir string) {
-	if r != nil {
-		r.chatgptDir = dir
-	}
-}
+// KeyEnvName returns the environment variable for a provider credential.
+func KeyEnvName(provider string) string { return envName(strings.TrimSpace(provider), "KEY") }
 
 func envName(provider, suffix string) string {
 	p := strings.ToUpper(provider)
@@ -101,113 +88,85 @@ func envName(provider, suffix string) string {
 	return "INDAGO_LLM_" + suffix + "_" + b.String()
 }
 
-// Resolve returns the credential for provider (default: the stored provider,
-// else DefaultProvider) with an optional model override. It returns
-// ErrNoCredential when a hosted provider has no key anywhere.
-func (r *Registry) Resolve(provider, model string) (Credential, error) {
-	var stored Config
+func providerEnvironment(provider string) Config {
+	return Config{
+		Model:   strings.TrimSpace(os.Getenv(envName(provider, "MODEL"))),
+		BaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv(envName(provider, "BASE_URL"))), "/"),
+		apiKey:  strings.TrimSpace(os.Getenv(KeyEnvName(provider))),
+	}
+}
+
+func (r *Registry) snapshot() (diskConfig, map[string]Config, error) {
 	if r != nil && r.store != nil {
-		if c, err := r.store.Load(); err == nil {
-			stored = c
-		} else if !errors.Is(err, ErrNotConfigured) {
-			return Credential{}, err
+		d, profiles, err := r.store.snapshot()
+		if !errors.Is(err, ErrNotConfigured) {
+			return d, profiles, err
 		}
 	}
+	return diskConfig{}, nil, nil
+}
 
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider == "" {
-		provider = stored.Provider
+// Resolve uses the selected provider, or the stored default when omitted.
+// An explicit model overrides the saved and environment model.
+func (r *Registry) Resolve(provider, model string) (Credential, error) {
+	d, profiles, err := r.snapshot()
+	if err != nil {
+		return Credential{}, err
 	}
-	if provider == "" {
-		provider = DefaultProvider
-	}
+	provider = firstConfiguredValue(strings.ToLower(strings.TrimSpace(provider)), d.Provider, DefaultProvider)
+	return resolveProvider(provider, model, profiles[provider])
+}
 
-	// ChatGPT is OAuth: the session comes from the Hermes auth store, never
-	// from the settings key file or an env key.
-	if provider == ProviderChatGPT {
-		dir := ""
-		if r != nil {
-			dir = r.chatgptDir
-		}
-		cred, err := chatgpt.LoadPreferred(dir)
-		if err != nil {
-			return Credential{}, fmt.Errorf("%w: %v", ErrNoCredential, err)
-		}
-		if cred.Expired() && !cred.Owned {
-			return Credential{}, fmt.Errorf("%w: ChatGPT OAuth session expired — log in from Indago Settings", ErrNoCredential)
-		}
-		m := strings.TrimSpace(os.Getenv(envName(provider, "MODEL")))
-		// A model picked in Settings is part of the provider configuration,
-		// even though ChatGPT's credential itself comes from OAuth.
-		if m == "" && stored.Configured() && stored.Provider == provider {
-			m = strings.TrimSpace(stored.Model)
-		}
-		if strings.TrimSpace(model) != "" {
-			m = strings.TrimSpace(model)
-		}
-		return Credential{Provider: provider, Model: m, BaseURL: cred.BaseURL, apiKey: cred.AccessToken}, nil
-	}
-
+func resolveProvider(provider, model string, stored Config) (Credential, error) {
 	def, ok := LookupProvider(provider)
 	if !ok {
-		return Credential{}, fmt.Errorf("%w: %q", ErrInvalid, provider)
+		return Credential{}, invalid("unknown provider")
 	}
-
-	cred := Credential{Provider: provider, Model: def.DefaultModel, BaseURL: def.DefaultBaseURL}
-	if stored.Configured() && stored.Provider == provider {
-		cred.Model = stored.Model
-		cred.BaseURL = stored.BaseURL
-		cred.apiKey = stored.apiKey
+	env := providerEnvironment(provider)
+	cred := Credential{
+		Provider: def.ID,
+		Model:    firstConfiguredValue(strings.TrimSpace(model), stored.Model, env.Model, def.DefaultModel),
+		BaseURL:  firstConfiguredValue(stored.BaseURL, env.BaseURL, def.DefaultBaseURL),
+		apiKey:   firstConfiguredValue(stored.apiKey, env.apiKey),
 	}
-	if v := strings.TrimSpace(os.Getenv(envName(provider, "MODEL"))); v != "" {
-		cred.Model = v
-	}
-	if v := strings.TrimSpace(os.Getenv(envName(provider, "BASE_URL"))); v != "" {
-		cred.BaseURL = v
-	}
-	if v := strings.TrimSpace(os.Getenv(envName(provider, "KEY"))); v != "" {
-		cred.apiKey = v
-	}
-	if strings.TrimSpace(model) != "" {
-		cred.Model = strings.TrimSpace(model)
+	if stored.HasKey() || (env.apiKey == "" && stored.Configured()) {
+		cred.source = "settings"
+	} else if env.apiKey != "" || env.BaseURL != "" {
+		cred.source = "environment"
 	}
 	if cred.BaseURL == "" {
-		return Credential{}, fmt.Errorf("%w: provider %q needs a base_url", ErrInvalid, provider)
+		return cred, invalid("provider %q needs a base_url", def.ID)
 	}
-	if def.RequiresKey && cred.apiKey == "" {
-		return Credential{}, fmt.Errorf("%w %q: set INDAGO_LLM_KEY_%s or save it in Settings",
-			ErrNoCredential, provider, strings.ToUpper(strings.ReplaceAll(provider, "-", "_")))
+	if validateBaseURL(cred.BaseURL) != nil {
+		return cred, invalid("provider %q has an invalid base_url", def.ID)
+	}
+	if def.RequiresKey && !cred.HasKey() {
+		return cred, fmt.Errorf("%w %q: set %s or save it in Settings", ErrNoCredential, def.ID, KeyEnvName(def.ID))
+	}
+	if !validKey(cred.apiKey) {
+		return cred, invalid("provider %q has an invalid API key", def.ID)
 	}
 	return cred, nil
 }
 
-// List reports every supported provider with its availability.
-func (r *Registry) List() []Availability {
-	out := make([]Availability, 0, len(providerList))
-	for _, p := range Providers() {
-		cred, err := r.Resolve(p.ID, "")
-		av := Availability{Provider: p.ID, Label: p.Label}
-		if err == nil {
-			av.Configured = true
-			av.Model = cred.Model
-			av.BaseURL = cred.BaseURL
-			av.KeyHint = maskKey(cred.apiKey)
-			av.Source = "environment"
-			if p.ID == ProviderChatGPT {
-				av.Source = "hermes"
-				if r != nil && r.chatgptDir != "" {
-					if _, e := chatgpt.NewStore(r.chatgptDir).Load(); e == nil {
-						av.Source = "indago"
-					}
-				}
-			}
-			if r != nil && r.store != nil {
-				if stored, e := r.store.Load(); e == nil && stored.Provider == p.ID {
-					av.Source = "settings"
-				}
-			}
+// List reports provider availability and the default selection from one
+// snapshot. Model and endpoint metadata are useful even for a saved profile
+// whose environment key is temporarily unavailable.
+func (r *Registry) List() ([]Availability, string, error) {
+	d, profiles, err := r.snapshot()
+	if err != nil {
+		return nil, "", err
+	}
+	definitions := Providers()
+	out := make([]Availability, 0, len(definitions))
+	for _, p := range definitions {
+		profile := profiles[p.ID]
+		cred, err := resolveProvider(p.ID, "", profile)
+		av := Availability{
+			Provider: p.ID, Label: p.Label, Configured: err == nil, Saved: profile.Configured(),
+			Model: cred.Model, BaseURL: cred.BaseURL, Source: cred.source, KeyHint: profile.MaskedKey(),
 		}
 		out = append(out, av)
 	}
-	return out
+	return out, d.Provider, nil
 }

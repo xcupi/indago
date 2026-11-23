@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -44,7 +45,33 @@ func TestClaudeIsAListedProvider(t *testing.T) {
 	if !ok {
 		t.Fatal("claude is not a known provider")
 	}
-	if def.Label != "Claude (Anthropic)" || def.RequiresKey || def.DefaultBaseURL == "" {
+	if def.Label != "Claude (Anthropic API)" || !def.RequiresKey || def.DefaultBaseURL == "" {
 		t.Fatalf("definition = %+v", def)
+	}
+}
+
+func TestClaudeAPIKeyProbeUsesMessages(t *testing.T) {
+	const model = "fixture-claude-model"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("x-api-key") != "fixture-api-key" || r.Header.Get("anthropic-version") == "" || r.Header.Get("Authorization") != "" {
+			t.Error("invalid Anthropic API-key headers")
+		}
+		var req chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Model != model || req.MaxTokens != 1 {
+			t.Errorf("unexpected connection test request: %+v, %v", req, err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"content":[{"type":"text","text":"OK"}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := Config{Provider: ProviderClaude, Model: model, BaseURL: srv.URL + "/v1", apiKey: "fixture-api-key"}
+	if result := NewProber(0).Test(context.Background(), cfg); !result.OK {
+		t.Fatalf("Claude API key probe failed: %+v", result)
 	}
 }

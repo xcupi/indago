@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -76,7 +77,7 @@ func TestStoreSeparatesSecretAndSetsRestrictiveModes(t *testing.T) {
 	if got := fi.Mode().Perm(); got != 0o600 {
 		t.Errorf("config file mode = %04o, want 0600", got)
 	}
-	ki, err := os.Stat(s.KeyPath())
+	ki, err := os.Stat(savedKeyPath(t, s, ProviderDeepSeek))
 	if err != nil {
 		t.Fatalf("stat key file: %v", err)
 	}
@@ -92,7 +93,7 @@ func TestStoreSeparatesSecretAndSetsRestrictiveModes(t *testing.T) {
 	if strings.Contains(string(raw), testKey) {
 		t.Fatalf("config.json contains the literal API key:\n%s", raw)
 	}
-	keyRaw, err := os.ReadFile(s.KeyPath())
+	keyRaw, err := os.ReadFile(savedKeyPath(t, s, ProviderDeepSeek))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +143,7 @@ func TestStoreTightensExistingPermissions(t *testing.T) {
 	if got := mustPerm(t, s.Path()); got != 0o600 {
 		t.Errorf("config file mode after save = %04o, want 0600", got)
 	}
-	if got := mustPerm(t, s.KeyPath()); got != 0o600 {
+	if got := mustPerm(t, savedKeyPath(t, s, ProviderCustom)); got != 0o600 {
 		t.Errorf("key file mode after save = %04o, want 0600", got)
 	}
 }
@@ -240,9 +241,7 @@ func TestStoreCustomWithoutKeyIsAllowed(t *testing.T) {
 	if cfg.BaseURL != "http://127.0.0.1:11434/v1" {
 		t.Fatalf("base url = %q, want the trailing slash trimmed", cfg.BaseURL)
 	}
-	if _, err := os.Stat(s.KeyPath()); !os.IsNotExist(err) {
-		t.Fatalf("a key file exists for a keyless configuration: %v", err)
-	}
+	assertNoCredentialFiles(t, s)
 }
 
 func TestStoreClearIsIdempotentAndRemovesTheSecret(t *testing.T) {
@@ -256,10 +255,9 @@ func TestStoreClearIsIdempotentAndRemovesTheSecret(t *testing.T) {
 	if _, err := s.Load(); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("Load after Clear = %v, want ErrNotConfigured", err)
 	}
-	for _, p := range []string{s.Path(), s.KeyPath()} {
-		if _, err := os.Stat(p); !os.IsNotExist(err) {
-			t.Errorf("%s still exists after Clear", p)
-		}
+	assertNoCredentialFiles(t, s)
+	if _, err := os.Stat(s.Path()); !os.IsNotExist(err) {
+		t.Errorf("config still exists after Clear: %v", err)
 	}
 	if err := s.Clear(); err != nil {
 		t.Fatalf("second Clear: %v", err)
@@ -301,25 +299,184 @@ func TestMaskKeyNeverRevealsAShortKey(t *testing.T) {
 	}
 }
 
-func TestChatGPTModelSelectionDoesNotCarryAnotherProvidersKey(t *testing.T) {
-	s := NewStore(filepath.Join(t.TempDir(), "llm"))
-	if _, err := s.Set(SetRequest{
-		Provider: ProviderCustom, Model: "custom-model",
-		BaseURL: "https://example.com/v1", APIKey: "custom-secret",
-	}); err != nil {
+func TestLegacyChatGPTOAuthConfigRequiresNewOpenAIKey(t *testing.T) {
+	s := NewStore(t.TempDir())
+	const previous = `{"version":1,"provider":"chatgpt","model":"oauth-model","base_url":"https://chatgpt.com/backend-api/codex","max_attempts":7,"enabled":false}`
+	if err := os.WriteFile(s.Path(), []byte(previous), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := s.Set(SetRequest{Provider: ProviderChatGPT, Model: "gpt-5.6-sol"})
+	if err := os.WriteFile(filepath.Join(s.Dir(), keyFileName), []byte("legacy-credential"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := s.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != ProviderChatGPT || cfg.Model != "gpt-5.6-sol" {
-		t.Fatalf("chatgpt config = %+v", cfg)
+	if cfg.Provider != ProviderOpenAI || cfg.BaseURL != "https://api.openai.com/v1" ||
+		cfg.HasKey() || cfg.Model == "oauth-model" || cfg.AIEnabled() || cfg.AttemptBudget() != 7 {
+		t.Fatalf("unexpected migrated configuration: %+v", cfg)
 	}
-	if cfg.BaseURL != "https://chatgpt.com/backend-api/codex" {
-		t.Fatalf("chatgpt base = %q, want its default", cfg.BaseURL)
+	raw, err := os.ReadFile(s.Path())
+	if err != nil || string(raw) != previous {
+		t.Fatal("reading legacy settings must not change the stored configuration")
 	}
-	if cfg.HasKey() {
-		t.Fatal("switching providers carried the previous provider's key")
+	if _, err := s.Set(SetRequest{Provider: ProviderOpenAI, Model: "fixture-api-model"}); err == nil {
+		t.Fatal("saving the migrated provider must require a new API key")
 	}
+	if _, err := s.Set(SetRequest{Provider: ProviderOpenAI, Model: "fixture-api-model", APIKey: "new-api-key"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func savedKeyPath(t *testing.T, s *Store, provider string) string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(s.Dir(), keyPrefix(provider)+"*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("expected one saved key for %s, files=%v, error=%v", provider, matches, err)
+	}
+	return matches[0]
+}
+
+func assertNoCredentialFiles(t *testing.T, s *Store) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(s.Dir(), "api_key*"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("expected no saved key files, files=%v, error=%v", matches, err)
+	}
+}
+
+func TestStoreProfilesSurviveSwitchAndV1Migration(t *testing.T) {
+	s := NewStore(t.TempDir())
+	legacy := `{"version":1,"provider":"deepseek","model":"legacy-model","base_url":"https://legacy.example/v1","max_attempts":8,"enabled":false}`
+	if err := os.WriteFile(s.Path(), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.Dir(), keyFileName), []byte(testKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := s.Load()
+	if err != nil || cfg.Model != "legacy-model" || cfg.apiKey != testKey || cfg.AIEnabled() {
+		t.Fatalf("legacy config=%+v, error=%v", cfg, err)
+	}
+	secondKey := "fixture-second-key-0002"
+	if _, err := s.Set(SetRequest{Provider: ProviderGoogle, APIKey: secondKey}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(s.Dir(), keyFileName)); !os.IsNotExist(err) {
+		t.Fatalf("legacy key still present after migration: %v", err)
+	}
+	registry := NewRegistry(NewStore(s.Dir()))
+	first, err := registry.Resolve(ProviderDeepSeek, "")
+	if err != nil || first.APIKey() != testKey || first.Model != "legacy-model" || first.BaseURL != "https://legacy.example/v1" {
+		t.Fatalf("migrated credential=%+v, error=%v", first, err)
+	}
+	cfg, err = s.Set(SetRequest{Provider: ProviderDeepSeek})
+	if err != nil || cfg.apiKey != testKey || cfg.Model != "legacy-model" || cfg.BaseURL != "https://legacy.example/v1" || cfg.AIEnabled() || cfg.AttemptBudget() != 8 {
+		t.Fatalf("selected config=%+v, error=%v", cfg, err)
+	}
+	second, err := registry.Resolve(ProviderGoogle, "")
+	if err != nil || second.APIKey() != secondKey {
+		t.Fatalf("second credential=%+v, error=%v", second, err)
+	}
+	if err := s.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	assertNoCredentialFiles(t, s)
+}
+
+func TestStoreInterruptedKeyWriteDoesNotChangeSelection(t *testing.T) {
+	s := NewStore(t.TempDir())
+	if _, err := s.Set(SetRequest{Provider: ProviderOpenRouter, APIKey: testKey, Model: "fixture/original"}); err != nil {
+		t.Fatal(err)
+	}
+	// Crash-equivalent state: a new key was staged and the manifest was not replaced.
+	pending, err := s.writeKey(ProviderOpenRouter, "fixture-uncommitted-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := NewStore(s.Dir()).Load()
+	if err != nil || cfg.apiKey != testKey || cfg.Model != "fixture/original" {
+		t.Fatalf("reloaded config=%+v, error=%v", cfg, err)
+	}
+	if _, err := s.Set(SetRequest{Provider: ProviderOpenRouter, Model: "fixture/updated"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(s.Dir(), pending)); !os.IsNotExist(err) {
+		t.Fatalf("unreferenced credential survived collection: %v", err)
+	}
+}
+
+func TestStoreRejectsCrossProviderKeyReference(t *testing.T) {
+	s := NewStore(t.TempDir())
+	if _, err := s.Set(SetRequest{Provider: ProviderGoogle, APIKey: testKey}); err != nil {
+		t.Fatal(err)
+	}
+	googleKey := filepath.Base(savedKeyPath(t, s, ProviderGoogle))
+	disk := diskConfig{Version: configVersion, Provider: ProviderOpenRouter, Profiles: map[string]diskProfile{
+		ProviderOpenRouter: {Model: "fixture/text", BaseURL: "https://example.test/v1", KeyFile: googleKey},
+	}}
+	raw, err := json.Marshal(disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.Path(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Load(); err == nil {
+		t.Fatal("loaded key belonging to a different provider")
+	}
+}
+
+func TestStoreConcurrentSavesKeepBothProfiles(t *testing.T) {
+	dir := t.TempDir()
+	var wg sync.WaitGroup
+	requests := []SetRequest{
+		{Provider: ProviderOpenRouter, APIKey: testKey},
+		{Provider: ProviderGoogle, APIKey: "fixture-concurrent-key"},
+	}
+	for _, req := range requests {
+		wg.Go(func() {
+			if _, err := NewStore(dir).Set(req); err != nil {
+				t.Errorf("save %s: %v", req.Provider, err)
+			}
+		})
+	}
+	wg.Wait()
+	registry := NewRegistry(NewStore(dir))
+	for _, req := range requests {
+		cred, err := registry.Resolve(req.Provider, "")
+		if err != nil || cred.APIKey() != req.APIKey {
+			t.Errorf("credential for %s: %v, error=%v", req.Provider, cred, err)
+		}
+	}
+}
+
+func TestStoreUsesEnvironmentCredentialWithoutPersistingIt(t *testing.T) {
+	t.Setenv(KeyEnvName(ProviderClaude), testKey)
+	t.Setenv("INDAGO_LLM_MODEL_CLAUDE", "env-fallback-model")
+	t.Setenv("INDAGO_LLM_BASE_URL_CLAUDE", "https://env.example/v1/")
+	s := NewStore(t.TempDir())
+	cfg, err := s.Set(SetRequest{Provider: ProviderClaude, Model: "operator-model"})
+	if err != nil || cfg.HasKey() || cfg.Model != "operator-model" {
+		t.Fatalf("saved config=%+v, error=%v", cfg, err)
+	}
+	assertNoCredentialFiles(t, s)
+	r := NewRegistry(s)
+	cred, err := r.Resolve("", "")
+	if err != nil || cred.APIKey() != testKey || cred.Model != "operator-model" || cred.BaseURL != "https://env.example/v1" {
+		t.Fatalf("resolved credential=%+v, error=%v", cred, err)
+	}
+	av, selected, err := r.List()
+	if err != nil || selected != ProviderClaude {
+		t.Fatalf("availability=%v, selected=%q, error=%v", av, selected, err)
+	}
+	for _, p := range av {
+		if p.Provider == selected {
+			if !p.Configured || !p.Saved || p.Source != "environment" || p.KeyHint != "" {
+				t.Fatalf("availability=%+v", p)
+			}
+			return
+		}
+	}
+	t.Fatal("saved provider not listed")
 }

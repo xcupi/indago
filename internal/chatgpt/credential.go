@@ -24,6 +24,10 @@ var ErrNoCredential = errors.New("chatgpt: no OAuth credential")
 // DefaultBaseURL is the Codex backend the OAuth session is valid for.
 const DefaultBaseURL = "https://chatgpt.com/backend-api/codex"
 
+// ClientVersion is the Codex protocol version used in ChatGPT OAuth
+// requests. The backend returns a version-specific model catalog.
+const ClientVersion = "0.167.0"
+
 // Credential is one usable OAuth session.
 type Credential struct {
 	AccessToken  string

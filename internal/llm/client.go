@@ -20,13 +20,16 @@ const (
 	// one-token prompt promptly is not usable for an assessment either.
 	DefaultTimeout = 10 * time.Second
 
-	// maxProbeTokens is the token cap for the probe. Enough for a provider to
-	// accept the request; not enough to bill or stream a real completion.
+	// maxProbeTokens limits generated tokens during an explicit probe.
 	maxProbeTokens = 1
 
 	// maxResponseBytes caps how much of an upstream body is buffered. A
 	// provider error page is never worth more than this.
 	maxResponseBytes = 1 << 20
+
+	// OpenRouter includes metadata for each model, making its catalog larger
+	// than the completion and model-list responses from other providers.
+	maxOpenRouterCatalogBytes = 8 << 20
 
 	probePrompt    = "Reply with OK."
 	probeUserAgent = "indago-llm-probe"
@@ -74,6 +77,10 @@ func (p *Prober) Test(ctx context.Context, cfg Config) ProbeResult {
 		return res
 	}
 
+	if def, ok := LookupProvider(cfg.Provider); ok && def.RequiresKey && !cfg.HasKey() {
+		res.Error = "API key is required"
+		return res
+	}
 	start := time.Now()
 	err := p.chat(ctx, cfg)
 	res.LatencyMS = time.Since(start).Milliseconds()
@@ -89,17 +96,26 @@ func (p *Prober) chat(ctx context.Context, cfg Config) error {
 	ctx, cancel := context.WithTimeout(ctx, p.timeout())
 	defer cancel()
 
-	payload, err := json.Marshal(chatRequest{
+	request := chatRequest{
 		Model:     cfg.Model,
 		Messages:  []chatMessage{{Role: "user", Content: probePrompt}},
 		MaxTokens: maxProbeTokens,
 		Stream:    false,
-	})
+	}
+	if cfg.Provider == ProviderOpenAI {
+		request.MaxTokens = 0
+		request.MaxCompletionTokens = maxProbeTokens
+	}
+	payload, err := json.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("encode request: %w", err)
 	}
 
-	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
+	path := "/chat/completions"
+	if cfg.Provider == ProviderClaude || cfg.Provider == ProviderAnthropic {
+		path = "/messages"
+	}
+	endpoint := strings.TrimRight(cfg.BaseURL, "/") + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
@@ -160,56 +176,61 @@ func (p *Prober) Models(ctx context.Context, cfg Config) ([]string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	limit := int64(maxResponseBytes)
+	if cfg.Provider == ProviderOpenRouter && resp.StatusCode == http.StatusOK {
+		limit = maxOpenRouterCatalogBytes
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %s", RedactAndTrim(err.Error(), cfg.apiKey))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("provider returned %s: %s", resp.Status, RedactAndTrim(string(body), cfg.apiKey))
 	}
+	if int64(len(body)) > limit {
+		return nil, errors.New("provider model catalog exceeded the response size limit")
+	}
 
 	// OpenAI-compatible: {"data":[{"id":"..."}]}. Ollama's native shape is
 	// {"models":[{"name":"..."}]}; accept both rather than guessing the
 	// backend from its base URL.
+	if msg := apiErrorMessage(body); msg != "" {
+		return nil, fmt.Errorf("provider error: %s", RedactAndTrim(msg, cfg.apiKey))
+	}
 	var out struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-		Models []struct {
-			Name string `json:"name"`
-		} `json:"models"`
+		Data   []catalogModel `json:"data"`
+		Models []catalogModel `json:"models"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, errors.New("provider returned an unreadable model list")
 	}
 	seen := make(map[string]bool)
 	var ids []string
-	add := func(id string) {
-		id = strings.TrimSpace(id)
-		if id == "" || seen[id] {
-			return
+	for _, model := range out.Models {
+		model.ID = model.Name
+		out.Data = append(out.Data, model)
+	}
+	for _, model := range out.Data {
+		id := strings.TrimSpace(model.ID)
+		if id == "" || seen[id] || !model.acceptsText(cfg.Provider, id) {
+			continue
 		}
 		seen[id] = true
 		ids = append(ids, id)
 	}
-	for _, m := range out.Data {
-		add(m.ID)
-	}
-	for _, m := range out.Models {
-		add(m.Name)
-	}
 	if len(ids) == 0 {
-		return nil, errors.New("provider returned no model list")
+		return nil, errors.New("provider returned no text models")
 	}
 	sort.Strings(ids)
 	return ids, nil
 }
 
 type chatRequest struct {
-	Model     string        `json:"model"`
-	Messages  []chatMessage `json:"messages"`
-	MaxTokens int           `json:"max_tokens"`
-	Stream    bool          `json:"stream"`
+	Model               string        `json:"model"`
+	Messages            []chatMessage `json:"messages"`
+	MaxTokens           int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
+	Stream              bool          `json:"stream"`
 }
 
 type chatMessage struct {
@@ -217,8 +238,7 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
-// setHeaders applies the provider's auth convention. The Authorization header
-// is the only place the key is written; it is never logged.
+// setHeaders applies the provider's API-key authentication headers.
 func setHeaders(req *http.Request, cfg Config) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -226,7 +246,7 @@ func setHeaders(req *http.Request, cfg Config) {
 	if cfg.apiKey != "" {
 		// Anthropic authenticates with x-api-key and requires a version
 		// header; the OpenAI-compatible providers use Bearer.
-		if cfg.Provider == "claude" || cfg.Provider == "anthropic" {
+		if cfg.Provider == ProviderClaude || cfg.Provider == ProviderAnthropic {
 			req.Header.Set("x-api-key", cfg.apiKey)
 			req.Header.Set("anthropic-version", "2023-06-01")
 		} else {

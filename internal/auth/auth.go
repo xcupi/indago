@@ -207,6 +207,13 @@ func readStateFile(path string) (stateFile, error) {
 	if !filepath.IsAbs(path) {
 		return stateFile{}, fmt.Errorf("%w: state path %q must be absolute", ErrInvalidState, path)
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return stateFile{}, fmt.Errorf("%w: %v", ErrInvalidState, err)
+	}
+	if !info.Mode().IsRegular() {
+		return stateFile{}, fmt.Errorf("%w: %s is not a regular file", ErrInvalidState, path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return stateFile{}, fmt.Errorf("%w: %v", ErrInvalidState, err)

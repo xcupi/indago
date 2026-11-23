@@ -291,10 +291,7 @@ func decodeDetail(b []byte) detailShape {
 	return d
 }
 
-// ReviewReason explains why a Rejected finding was placed in needs-review
-// instead of diagnostics — a distinction "rejected" alone cannot make: a
-// rejected VERDICT always means "no execution signal was observed", but that
-// covers two operator-meaningfully-different situations this type separates.
+// ReviewReason identifies a limitation of the recorded evidence or verdict.
 type ReviewReason string
 
 const (
@@ -325,12 +322,15 @@ const (
 	// 429/503 at some time during testing (sticky). It stays a block
 	// diagnostic, yet the bounded fallback is NOT escalated here, so it must
 	// not borrow the 403 wording that promises the pass.
-	ReviewThrottledPoint ReviewReason = "throttled_point"
+	ReviewThrottledPoint           ReviewReason = "throttled_point"
+	ReviewBrowserArtifactsWithheld ReviewReason = "browser_artifacts_withheld"
 )
 
 // Label is the human-readable explanation of a ReviewReason.
 func (r ReviewReason) Label() string {
 	switch r {
+	case ReviewBrowserArtifactsWithheld:
+		return "Indago recorded a browser verdict. Raw browser artifacts were withheld for privacy, so the saved record has limited evidence for independent review."
 	case ReviewInteractionOnly:
 		return "a candidate reflected unescaped and needs an action beyond page load; for a recognized declared mechanism the verifier dispatches one declared activation, and no marker signal was observed. Unsupported or page-specific actions may still need manual review, so this is not ruled out"
 	case ReviewAllCandidatesFiltered:
@@ -443,6 +443,10 @@ func newFindingView(f *domain.Finding, evidence map[domain.ID]*domain.Evidence, 
 	if reason, ok := findingReviewReason(f.Verdict, d); ok {
 		v.ReviewReason = reason
 		v.ReviewReasonLabel = reason.Label()
+	}
+	if f.Verdict == domain.VerdictConfirmed && browserArtifactsWithheld(f, evidence) {
+		v.ReviewReason = ReviewBrowserArtifactsWithheld
+		v.ReviewReasonLabel = v.ReviewReason.Label()
 	}
 
 	for _, c := range d.Candidates {

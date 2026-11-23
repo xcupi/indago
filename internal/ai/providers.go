@@ -2,7 +2,6 @@ package ai
 
 import (
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -11,6 +10,7 @@ const (
 	ProviderOpenAI     = "openai"
 	ProviderAnthropic  = "anthropic"
 	ProviderOpenRouter = "openrouter"
+	ProviderGoogle     = "google"
 	ProviderOllama     = "ollama"
 	ProviderVLLM       = "vllm"
 	// ProviderDeepSeek speaks the OpenAI Chat Completions shape at its own
@@ -19,9 +19,6 @@ const (
 	// ProviderCustom is any OpenAI-compatible endpoint (a gateway, a proxy)
 	// whose base URL the operator supplies.
 	ProviderCustom = "custom"
-	// ProviderChatGPT uses the ChatGPT/Codex OAuth session (no API key) and
-	// the Responses API at chatgpt.com/backend-api/codex.
-	ProviderChatGPT = "chatgpt"
 	// ProviderClaude is Anthropic's Claude through the Messages API. It is the
 	// same wire protocol as ProviderAnthropic; the separate id exists because
 	// users pick "Claude", and the model names are the claude-* family.
@@ -30,7 +27,7 @@ const (
 
 // Providers lists the recognized provider identifiers.
 func Providers() []string {
-	return []string{ProviderOpenAI, ProviderAnthropic, ProviderClaude, ProviderOpenRouter, ProviderOllama, ProviderVLLM, ProviderDeepSeek, ProviderCustom, ProviderChatGPT}
+	return []string{ProviderOpenAI, ProviderAnthropic, ProviderClaude, ProviderOpenRouter, ProviderGoogle, ProviderOllama, ProviderVLLM, ProviderDeepSeek, ProviderCustom}
 }
 
 // defaultBaseURL returns the conventional base URL for a provider when the
@@ -46,6 +43,8 @@ func defaultBaseURL(name string) string {
 		return "https://api.anthropic.com/v1"
 	case ProviderOpenRouter:
 		return "https://openrouter.ai/api/v1"
+	case ProviderGoogle:
+		return "https://generativelanguage.googleapis.com/v1beta/openai"
 	case ProviderOllama:
 		return "http://127.0.0.1:11434/v1"
 	case ProviderVLLM:
@@ -55,8 +54,6 @@ func defaultBaseURL(name string) string {
 	case ProviderCustom:
 		// No default: the operator must say where the gateway is.
 		return ""
-	case ProviderChatGPT:
-		return "https://chatgpt.com/backend-api/codex"
 	default:
 		return ""
 	}
@@ -68,7 +65,7 @@ func defaultBaseURL(name string) string {
 // for those would make the common local-dev case impossible to configure.
 func requiresAPIKey(name string) bool {
 	switch name {
-	case ProviderOpenAI, ProviderAnthropic, ProviderClaude, ProviderOpenRouter, ProviderDeepSeek:
+	case ProviderOpenAI, ProviderAnthropic, ProviderClaude, ProviderOpenRouter, ProviderGoogle, ProviderDeepSeek:
 		return true
 	default:
 		return false
@@ -76,16 +73,15 @@ func requiresAPIKey(name string) bool {
 }
 
 // NewProvider constructs a real provider from settings: an
-// openAICompatProvider for OpenAI/OpenRouter/Ollama/vLLM (all four speak the
-// same Chat Completions API shape), or anthropicProvider for Anthropic
+// openAICompatProvider for Chat Completions or anthropicProvider for Anthropic
 // (its own, differently-shaped Messages API). An unrecognized provider, or
 // a hosted provider missing its required API key, is a config error — the
 // gateway must fail closed at construction time, not on the first advisory
 // call deep inside a scan.
 func NewProvider(s Settings) (Provider, error) {
 	name := strings.ToLower(strings.TrimSpace(s.Provider))
-	if requiresAPIKey(name) && strings.TrimSpace(s.APIKey) == "" && strings.TrimSpace(s.OAuthToken) == "" {
-		return nil, fmt.Errorf("ai: provider %q requires an API key or an OAuth session", name)
+	if requiresAPIKey(name) && strings.TrimSpace(s.APIKey) == "" {
+		return nil, fmt.Errorf("ai: provider %q requires an API key", name)
 	}
 	baseURL := strings.TrimSpace(s.BaseURL)
 	if baseURL == "" {
@@ -93,14 +89,10 @@ func NewProvider(s Settings) (Provider, error) {
 	}
 	model := strings.TrimSpace(s.Model)
 	switch name {
-	case ProviderOpenAI, ProviderOpenRouter, ProviderOllama, ProviderVLLM, ProviderDeepSeek, ProviderCustom:
+	case ProviderOpenAI, ProviderOpenRouter, ProviderGoogle, ProviderOllama, ProviderVLLM, ProviderDeepSeek, ProviderCustom:
 		return &openAICompatProvider{name: name, baseURL: baseURL, apiKey: s.APIKey, model: model}, nil
 	case ProviderAnthropic, ProviderClaude:
-		return &anthropicProvider{baseURL: baseURL, apiKey: strings.TrimSpace(s.APIKey), oauth: strings.TrimSpace(s.OAuthToken), model: model}, nil
-	case ProviderChatGPT:
-		// No API key: the OAuth session is read from Indago's store, falling
-		// back to the borrowed Hermes session.
-		return &chatgptProvider{credPath: os.Getenv("INDAGO_CHATGPT_AUTH"), credDir: s.CredentialsDir, model: model}, nil
+		return &anthropicProvider{baseURL: baseURL, apiKey: strings.TrimSpace(s.APIKey), model: model}, nil
 	default:
 		return nil, fmt.Errorf("ai: unknown provider %q", s.Provider)
 	}

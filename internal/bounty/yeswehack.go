@@ -36,17 +36,21 @@ var ErrNotFound = errors.New("bounty: resource not found")
 
 // Program is one program row from the list endpoint.
 type Program struct {
-	Slug        string `json:"slug"`
-	Title       string `json:"title"`
-	Type        string `json:"type"` // bug-bounty | vdp | pentest
-	Status      string `json:"status"`
-	Bounty      bool   `json:"bounty"`
-	Public      bool   `json:"public"`
-	VDP         bool   `json:"vdp"`
-	ScopesCount int    `json:"scopes_count"`
-	RewardMin   int    `json:"bounty_reward_min"`
-	RewardMax   int    `json:"bounty_reward_max"`
-	Reports     int    `json:"reports_count"`
+	Slug        string       `json:"slug"`
+	Title       string       `json:"title"`
+	Type        string       `json:"type"` // bug-bounty | vdp | pentest
+	Status      string       `json:"status"`
+	Bounty      bool         `json:"bounty"`
+	Public      bool         `json:"public"`
+	VDP         bool         `json:"vdp"`
+	ScopesCount int          `json:"scopes_count"`
+	RewardMin   int          `json:"bounty_reward_min"`
+	RewardMax   int          `json:"bounty_reward_max"`
+	Reports     int          `json:"reports_count"`
+	Provider    string       `json:"provider,omitempty"`
+	URL         string       `json:"url,omitempty"`
+	Rules       string       `json:"rules,omitempty"`
+	Scopes      []ScopeAsset `json:"scopes,omitempty"`
 }
 
 // ProgramDetail carries the rules, which is where the platform states its

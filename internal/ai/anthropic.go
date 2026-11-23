@@ -16,31 +16,9 @@ const anthropicDefaultVersion = "2023-06-01"
 // it is optional); this default suits report-drafting-length prose.
 const anthropicDefaultMaxTokens = 16384
 
-// anthropicProvider talks to Anthropic's own Messages API
-// (POST {baseURL}/messages), which is shaped differently from the OpenAI
-// Chat Completions API: auth via x-api-key (not Authorization: Bearer), a
-// required anthropic-version header, a top-level system field instead of a
-// system-role message, and a content BLOCK list in the response rather than
-// a single string.
-// claudeOAuthBeta mirrors the beta flags Claude Code sends with an OAuth
-// token. All four are required: a bare Bearer with only the OAuth betas is
-// answered with HTTP 429 rate_limit_error "Error".
-const claudeOAuthBeta = "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,claude-code-20250219,oauth-2025-04-20"
-
-// claudeOAuthUserAgent identifies the request as Claude Code. Anthropic
-// rejects OAuth inference whose UA is not `claude-code/<version> (external,
-// cli)`; the version must stay close to the current release.
-const claudeOAuthUserAgent = "claude-code/2.1.74 (external, cli)"
-
-// claudeOAuthSystemPrefix is part of the client identity, not a prompt
-// preference: OAuth requests without it are routed to the metered lane and
-// rejected with 429.
-const claudeOAuthSystemPrefix = "You are Claude Code, Anthropic's official CLI for Claude."
-
 type anthropicProvider struct {
 	baseURL string
 	apiKey  string
-	oauth   string
 	model   string
 }
 
@@ -78,36 +56,16 @@ func (p *anthropicProvider) Complete(ctx context.Context, req Request) (*Respons
 	if p.model == "" {
 		return nil, fmt.Errorf("ai: %s: no model configured", ProviderAnthropic)
 	}
-	if p.apiKey == "" && p.oauth == "" {
-		return nil, fmt.Errorf("ai: %s: no API key or OAuth session configured", ProviderAnthropic)
+	if p.apiKey == "" {
+		return nil, fmt.Errorf("ai: %s: no API key configured", ProviderAnthropic)
 	}
-	headers := map[string]string{"anthropic-version": anthropicDefaultVersion}
-	if p.oauth != "" {
-		// Claude subscription tokens are Bearer tokens that also require the
-		// OAuth beta flags; sending x-api-key instead is rejected.
-		headers["Authorization"] = "Bearer " + p.oauth
-		headers["anthropic-beta"] = claudeOAuthBeta
-		headers["x-app"] = "cli"
-		headers["User-Agent"] = claudeOAuthUserAgent
-	} else {
-		headers["x-api-key"] = p.apiKey
-	}
-	// OAuth requires the Claude Code identity as the WHOLE system prompt: a
-	// long third-party system message is classified as another client and
-	// answered with 429. The advisory framing therefore travels in the user
-	// message on this route.
-	system := systemPrompt
-	user := userContent(req)
-	if p.oauth != "" {
-		system = claudeOAuthSystemPrefix
-		user = systemPrompt + "\n\n" + user
-	}
+	headers := map[string]string{"anthropic-version": anthropicDefaultVersion, "x-api-key": p.apiKey}
 	body := anthropicRequest{
 		Model:     p.model,
 		MaxTokens: anthropicDefaultMaxTokens,
-		System:    system,
+		System:    systemPrompt,
 		Messages: []anthropicMessage{
-			{Role: "user", Content: user},
+			{Role: "user", Content: userContent(req)},
 		},
 	}
 	var out anthropicResponse

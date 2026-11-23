@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/indago/indago/internal/ai"
@@ -42,14 +43,14 @@ func TestEnabledGatewayCallsRealOpenAICompatProvider(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	g, err := ai.New(ai.Settings{Enabled: true, Provider: ai.ProviderOllama, Model: "llama3", BaseURL: srv.URL, APIKey: "local-key"})
+	g, err := ai.New(ai.Settings{Enabled: true, Provider: ai.ProviderOpenAI, Model: "llama3", BaseURL: srv.URL, APIKey: "local-key"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !g.Enabled() {
 		t.Fatal("gateway should be enabled")
 	}
-	resp, err := g.Advise(context.Background(), ai.Request{Kind: domain.AISuggestPayloads, Prompt: "suggest payloads", Context: map[string]any{"param": "q"}})
+	resp, err := g.Advise(context.Background(), ai.Request{Kind: domain.AIDraftReport, Prompt: "draft an executive summary", Context: map[string]any{"param": "q"}})
 	if err != nil {
 		t.Fatalf("advise: %v", err)
 	}
@@ -59,8 +60,8 @@ func TestEnabledGatewayCallsRealOpenAICompatProvider(t *testing.T) {
 	if resp.Text != "looks fine, low risk" {
 		t.Fatalf("unexpected text: %q", resp.Text)
 	}
-	if resp.Provider != ai.ProviderOllama {
-		t.Fatalf("provider = %q, want %q", resp.Provider, ai.ProviderOllama)
+	if resp.Provider != ai.ProviderOpenAI {
+		t.Fatalf("provider = %q, want %q", resp.Provider, ai.ProviderOpenAI)
 	}
 	if gotPath != "/chat/completions" {
 		t.Fatalf("path = %q, want /chat/completions", gotPath)
@@ -68,9 +69,41 @@ func TestEnabledGatewayCallsRealOpenAICompatProvider(t *testing.T) {
 	if gotAuth != "Bearer local-key" {
 		t.Fatalf("auth header = %q", gotAuth)
 	}
+	if gotBody["max_completion_tokens"] != float64(8192) || gotBody["max_tokens"] != nil {
+		t.Fatal("expected a bounded OpenAI API completion")
+	}
 	msgs, _ := gotBody["messages"].([]any)
 	if len(msgs) != 2 {
 		t.Fatalf("expected system+user messages, got %d", len(msgs))
+	}
+}
+
+func TestEnabledGatewayDraftsReportWithOpenRouterAndGoogle(t *testing.T) {
+	for _, provider := range []string{ai.ProviderOpenRouter, ai.ProviderGoogle} {
+		t.Run(provider, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				if r.Header.Get("Authorization") != "Bearer fixture-key" {
+					t.Error("expected the provider API key as a bearer token")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"choices":[{"message":{"content":"The assessment found no confirmed issues."}}],"usage":{"total_tokens":14}}`))
+			}))
+			defer srv.Close()
+			gateway, err := ai.New(ai.Settings{Enabled: true, Provider: provider, Model: "fixture-model", BaseURL: srv.URL + "/v1", APIKey: "fixture-key"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := gateway.Advise(context.Background(), ai.Request{Kind: domain.AIDraftReport, Prompt: "Summarize an assessment with no confirmed issues."})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.Provider != provider || !resp.Advisory || resp.Text != "The assessment found no confirmed issues." || resp.Usage.TotalTokens != 14 {
+				t.Fatalf("unexpected summary: %+v", resp)
+			}
+		})
 	}
 }
 
@@ -109,7 +142,7 @@ func TestEnabledGatewayCallsRealAnthropicProvider(t *testing.T) {
 // closed at construction time with no key, rather than fail confusingly on
 // the first real call deep inside a scan.
 func TestHostedProvidersRequireAPIKey(t *testing.T) {
-	for _, p := range []string{ai.ProviderOpenAI, ai.ProviderAnthropic, ai.ProviderOpenRouter} {
+	for _, p := range []string{ai.ProviderOpenAI, ai.ProviderAnthropic, ai.ProviderOpenRouter, ai.ProviderGoogle} {
 		if _, err := ai.New(ai.Settings{Enabled: true, Provider: p, Model: "x"}); err == nil {
 			t.Fatalf("provider %s: expected error with no API key", p)
 		}
@@ -130,5 +163,29 @@ func TestLocalProvidersDoNotRequireAPIKey(t *testing.T) {
 func TestUnknownProviderErrors(t *testing.T) {
 	if _, err := ai.New(ai.Settings{Enabled: true, Provider: "skynet"}); err == nil {
 		t.Fatal("expected error for unknown provider")
+	}
+}
+
+func TestReportOnlyProvidersDoNotCallNetworkForOtherTasks(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	for _, p := range []string{ai.ProviderOpenAI, ai.ProviderAnthropic, ai.ProviderClaude, ai.ProviderOpenRouter, ai.ProviderGoogle} {
+		t.Run(p, func(t *testing.T) {
+			gateway, err := ai.New(ai.Settings{Enabled: true, Provider: p, Model: "fixture-model", BaseURL: server.URL, APIKey: "fixture-key"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := gateway.Advise(context.Background(), ai.Request{Kind: domain.AITriage}); err == nil {
+				t.Fatal("expected the gateway to reject this task")
+			}
+		})
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("expected no outgoing requests, got %d", got)
 	}
 }

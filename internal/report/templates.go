@@ -48,13 +48,22 @@ const (
 	// sections and its form fields as metadata. Markdown is its native
 	// format; HTML/PDF fall back to the pentest document.
 	TemplateYesWeHack Template = "yeswehack"
+	// TemplateHackerOne is the HackerOne platform submission layout (Markdown
+	// native; HTML/PDF fall back to the pentest document).
+	TemplateHackerOne Template = "hackerone"
+	// TemplateBugcrowd is the Bugcrowd platform submission layout (Markdown
+	// native; HTML/PDF fall back to the pentest document).
+	TemplateBugcrowd Template = "bugcrowd"
+	// TemplateIntigriti is the Intigriti platform submission layout (Markdown
+	// native; HTML/PDF fall back to the pentest document).
+	TemplateIntigriti Template = "intigriti"
 )
 
 // IsValid reports whether the template is known. The empty value is the
 // technical layout, so an older caller that never sets it keeps working.
 func (t Template) IsValid() bool {
 	switch t {
-	case TemplateTechnical, TemplatePentest, TemplateBugBounty, TemplateYesWeHack:
+	case TemplateTechnical, TemplatePentest, TemplateBugBounty, TemplateYesWeHack, TemplateHackerOne, TemplateBugcrowd, TemplateIntigriti:
 		return true
 	}
 	return false
@@ -321,6 +330,49 @@ var classIntelByClass = map[domain.VulnClass]classIntel{
 			"HTTP application requires, keep an authorization check on every message, and serve the endpoint over " +
 			"wss:// only.",
 		References: []string{"https://cwe.mitre.org/data/definitions/1385.html", "https://cwe.mitre.org/data/definitions/346.html", "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/11-Client-side_Testing/10-Testing_WebSockets"},
+	},
+	domain.VulnCSRF: {
+		CWE:  "CWE-352",
+		Name: "Cross-Site Request Forgery (CSRF)",
+		Impact: "A state-changing endpoint that relies on ambient session cookies without a per-session or per-request " +
+			"anti-CSRF token, strict SameSite cookie attribute, or Origin/Referer verification lets an attacker-controlled " +
+			"page trigger unintended state changes in the victim's authenticated session.",
+		Remediation: "Require an unpredictable, session-bound anti-CSRF token (synchronizer token or double-submit with " +
+			"__Host- cookie) on all state-changing requests, set SameSite=Lax or SameSite=Strict on session cookies, " +
+			"and validate the Origin/Referer header on state-changing endpoints.",
+		References: []string{"https://cwe.mitre.org/data/definitions/352.html", "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html"},
+	},
+	domain.VulnPrototypePollution: {
+		CWE:  "CWE-1321",
+		Name: "Client-side Prototype Pollution",
+		Impact: "Client-side JavaScript merges attacker-controlled query or URL fragment keys into plain objects " +
+			"without filtering __proto__, constructor, or prototype, allowing properties on Object.prototype to be " +
+			"polluted and potentially chained into DOM XSS or application logic bypass.",
+		Remediation: "Use Object.create(null) or Map for key-value lookups, reject or strip __proto__, constructor, " +
+			"and prototype keys during recursive merge/query parsing, and consider Object.freeze(Object.prototype) " +
+			"where compatible.",
+		References: []string{"https://cwe.mitre.org/data/definitions/1321.html", "https://portswigger.net/web-security/prototype-pollution"},
+	},
+	domain.VulnCachePoisoning: {
+		CWE:  "CWE-349",
+		Name: "Web Cache Poisoning",
+		Impact: "An unkeyed request header (such as X-Forwarded-Host or X-Original-URL) alters the cached response " +
+			"and is served to subsequent users requesting the same cache key, enabling stored XSS, open redirect, or " +
+			"resource hijacking at the cache layer.",
+		Remediation: "Ignore unkeyed forwarding headers unless explicitly required from a trusted reverse proxy, or " +
+			"include any header that influences response generation in the cache Vary key.",
+		References: []string{"https://cwe.mitre.org/data/definitions/349.html", "https://portswigger.net/web-security/web-cache-poisoning"},
+	},
+	domain.VulnFileUpload: {
+		CWE:  "CWE-434",
+		Name: "Unrestricted File Upload",
+		Impact: "An upload endpoint that accepts dangerous file extensions, double extensions, or active MIME types " +
+			"(such as .php, .jsp, .html, or .svg) without server-side allow-list validation can lead to stored XSS " +
+			"or remote code execution if uploaded files are served from the application origin.",
+		Remediation: "Enforce a strict server-side extension and magic-byte allow-list, rename uploaded files to " +
+			"random identifiers without user-supplied extensions, and serve user uploads from a separate sandboxed " +
+			"domain with Content-Disposition: attachment.",
+		References: []string{"https://cwe.mitre.org/data/definitions/434.html", "https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html"},
 	},
 }
 

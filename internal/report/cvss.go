@@ -328,26 +328,30 @@ const (
 
 // CWE names are the official MITRE titles.
 var (
-	cweXSS              = CWE{79, "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"}
-	cweCommandInjection = CWE{78, "Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"}
-	cweXXE              = CWE{611, "Improper Restriction of XML External Entity Reference"}
-	cweSSRF             = CWE{918, "Server-Side Request Forgery (SSRF)"}
-	cweIDOR             = CWE{639, "Authorization Bypass Through User-Controlled Key"}
-	cweAccessControl    = CWE{862, "Missing Authorization"}
-	cweOpenRedirect     = CWE{601, "URL Redirection to Untrusted Site ('Open Redirect')"}
-	cwePathTraversal    = CWE{22, "Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"}
-	cweDisclosure       = CWE{200, "Exposure of Sensitive Information to an Unauthorized Actor"}
-	cweCORS             = CWE{942, "Permissive Cross-domain Policy with Untrusted Domains"}
-	cweSSTI             = CWE{1336, "Improper Neutralization of Special Elements Used in a Template Engine"}
-	cweSQLi             = CWE{89, "Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"}
-	cweNoSQLi           = CWE{943, "Improper Neutralization of Special Elements in Data Query Logic"}
-	cweSecurityHeaders  = CWE{693, "Protection Mechanism Failure"}
-	cweCookiePolicy     = CWE{614, "Sensitive Cookie in HTTPS Session Without 'Secure' Attribute"}
-	cweHostHeader       = CWE{644, "Improper Neutralization of HTTP Headers for Scripting Syntax"}
-	cweJWT              = CWE{347, "Improper Verification of Cryptographic Signature"}
-	cweHTTPMethods      = CWE{749, "Exposed Dangerous Method or Function"}
-	cweTLSConfig        = CWE{326, "Inadequate Encryption Strength"}
-	cweWebSocket        = CWE{1385, "Missing Origin Validation in WebSockets"}
+	cweXSS                = CWE{79, "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"}
+	cweCommandInjection   = CWE{78, "Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"}
+	cweXXE                = CWE{611, "Improper Restriction of XML External Entity Reference"}
+	cweSSRF               = CWE{918, "Server-Side Request Forgery (SSRF)"}
+	cweIDOR               = CWE{639, "Authorization Bypass Through User-Controlled Key"}
+	cweAccessControl      = CWE{862, "Missing Authorization"}
+	cweOpenRedirect       = CWE{601, "URL Redirection to Untrusted Site ('Open Redirect')"}
+	cwePathTraversal      = CWE{22, "Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"}
+	cweDisclosure         = CWE{200, "Exposure of Sensitive Information to an Unauthorized Actor"}
+	cweCORS               = CWE{942, "Permissive Cross-domain Policy with Untrusted Domains"}
+	cweSSTI               = CWE{1336, "Improper Neutralization of Special Elements Used in a Template Engine"}
+	cweSQLi               = CWE{89, "Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"}
+	cweNoSQLi             = CWE{943, "Improper Neutralization of Special Elements in Data Query Logic"}
+	cweSecurityHeaders    = CWE{693, "Protection Mechanism Failure"}
+	cweCookiePolicy       = CWE{614, "Sensitive Cookie in HTTPS Session Without 'Secure' Attribute"}
+	cweHostHeader         = CWE{644, "Improper Neutralization of HTTP Headers for Scripting Syntax"}
+	cweJWT                = CWE{347, "Improper Verification of Cryptographic Signature"}
+	cweHTTPMethods        = CWE{749, "Exposed Dangerous Method or Function"}
+	cweTLSConfig          = CWE{326, "Inadequate Encryption Strength"}
+	cweWebSocket          = CWE{1385, "Missing Origin Validation in WebSockets"}
+	cweCSRF               = CWE{352, "Cross-Site Request Forgery (CSRF)"}
+	cwePrototypePollution = CWE{1321, "Improperly Controlled Modification of Object Prototype Attributes ('Prototype Pollution')"}
+	cweCachePoisoning     = CWE{349, "Acceptance of Extraneous Untrusted Data With Trusted Data"}
+	cweFileUpload         = CWE{434, "Unrestricted Upload of File with Dangerous Type"}
 )
 
 // classTable is the deterministic mapping. Order is documentation order and is
@@ -436,6 +440,25 @@ var classTable = []Classification{
 	// because what the socket accepts depends on the application. The victim
 	// must visit the attacker's page, so interaction is required.
 	{Class: domain.VulnWebSocket, CWE: cweWebSocket, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:L/A:N"), Note: ClassificationNote},
+
+	// Cross-Site Request Forgery lets an attacker-controlled page submit a
+	// state-changing request as the victim because the server relies solely on
+	// ambient credentials without an anti-CSRF token or SameSite/Origin guard.
+	{Class: domain.VulnCSRF, CWE: cweCSRF, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:N"), Note: ClassificationNote},
+
+	// Client-side prototype pollution allows an attacker-controlled query or
+	// fragment parameter to mutate Object.prototype in the victim's browser,
+	// affecting downstream script execution and potentially escalating to DOM XSS.
+	{Class: domain.VulnPrototypePollution, CWE: cwePrototypePollution, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"), Note: ClassificationNote},
+
+	// Web cache poisoning stores an attacker-influenced response keyed without
+	// the unkeyed header and serves it to subsequent clean requests.
+	{Class: domain.VulnCachePoisoning, CWE: cweCachePoisoning, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"), Note: ClassificationNote},
+
+	// Unrestricted upload of dangerous file types lets an attacker store
+	// active content or server-side scripts that can execute in the target
+	// origin or server runtime.
+	{Class: domain.VulnFileUpload, CWE: cweFileUpload, CVSS: mustCVSS31("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"), Note: ClassificationNote},
 
 	// SSRF reaches internal services the attacker cannot address directly, so
 	// the security scope changes (S:C).

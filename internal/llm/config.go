@@ -11,23 +11,17 @@
 //
 //   - The API key is an unexported field of Config. encoding/json cannot
 //     serialize it, and code outside this package cannot read it at all.
-//   - The non-secret settings live in <dir>/config.json; the key lives in a
-//     separate <dir>/api_key file. Both are mode 0600 inside a 0700 directory.
-//     A config file can therefore be copied or attached to a bug report
-//     without carrying the credential with it.
+//   - The non-secret settings live in <dir>/config.json, with credentials
+//     stored in separate files. Files are mode 0600 inside a 0700 directory.
 //   - Every error and log string derived from an upstream response passes
 //     through Redact (redact.go) before it leaves this package.
 package llm
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 )
 
 // Recognized provider identifiers.
@@ -36,11 +30,11 @@ const (
 	ProviderOpenAI     = "openai"
 	ProviderAnthropic  = "anthropic"
 	ProviderOpenRouter = "openrouter"
+	ProviderGoogle     = "google"
 	ProviderOllama     = "ollama"
 	ProviderVLLM       = "vllm"
 	ProviderCustom     = "custom"
-	// ProviderChatGPT is the OAuth (Codex) provider: no API key, the session
-	// comes from the Hermes auth store.
+	// ProviderChatGPT identifies legacy settings on disk.
 	ProviderChatGPT = "chatgpt"
 	// ProviderClaude is Anthropic's Claude (Messages API). It is the same
 	// protocol as the anthropic id; the separate name is what users pick.
@@ -48,12 +42,6 @@ const (
 
 	// DefaultProvider is the provider a fresh configuration starts from.
 	DefaultProvider = ProviderDeepSeek
-)
-
-const (
-	configFileName = "config.json"
-	keyFileName    = "api_key"
-	configVersion  = 1
 )
 
 var (
@@ -65,10 +53,8 @@ var (
 	ErrInvalid = errors.New("llm: invalid configuration")
 )
 
-// Provider describes a supported backend. The three providers are fixed
-// because they are three distinct endpoint/auth conventions; model names are
-// NOT enumerated here (a hardcoded model list goes stale immediately), only a
-// per-provider default that the operator can override with free text.
+// Provider describes a supported backend and its optional default model.
+// The provider supplies its full model catalog at runtime.
 type Provider struct {
 	ID             string `json:"id"`
 	Label          string `json:"label"`
@@ -77,9 +63,8 @@ type Provider struct {
 	RequiresKey    bool   `json:"requires_key"`
 	// Default marks the provider the UI starts from when nothing is configured.
 	Default bool `json:"default,omitempty"`
-	// Hidden keeps a provider resolvable for existing configs/tests but out of
-	// the operator-facing provider pickers. The current UI intentionally exposes
-	// only DeepSeek, Claude, Custom, and ChatGPT.
+	// Hidden keeps a provider resolvable for existing configs but excludes it
+	// from the operator-facing provider list.
 	Hidden bool `json:"-"`
 }
 
@@ -94,12 +79,10 @@ var providerList = []Provider{
 	},
 	{
 		ID:             ProviderClaude,
-		Label:          "Claude (Anthropic)",
+		Label:          "Claude (Anthropic API)",
 		DefaultBaseURL: "https://api.anthropic.com/v1",
 		DefaultModel:   "claude-sonnet-5-5",
-		// An OAuth session is a valid credential, so a key is not required to
-		// save the provider; the gateway falls back to it.
-		RequiresKey: false,
+		RequiresKey:    true,
 	},
 	{
 		// Same Messages API as Claude; the id stays separate because the
@@ -107,13 +90,6 @@ var providerList = []Provider{
 		ID:             ProviderAnthropic,
 		Label:          "Anthropic (Messages API)",
 		DefaultBaseURL: "https://api.anthropic.com/v1",
-		RequiresKey:    true,
-		Hidden:         true,
-	},
-	{
-		ID:             ProviderOpenRouter,
-		Label:          "OpenRouter",
-		DefaultBaseURL: "https://openrouter.ai/api/v1",
 		RequiresKey:    true,
 		Hidden:         true,
 	},
@@ -137,7 +113,20 @@ var providerList = []Provider{
 		DefaultBaseURL: "https://api.openai.com/v1",
 		DefaultModel:   "gpt-4o-mini",
 		RequiresKey:    true,
-		Hidden:         true,
+	},
+	{
+		ID:             ProviderOpenRouter,
+		Label:          "OpenRouter",
+		DefaultBaseURL: "https://openrouter.ai/api/v1",
+		DefaultModel:   "openai/gpt-4o-mini",
+		RequiresKey:    true,
+	},
+	{
+		ID:             ProviderGoogle,
+		Label:          "Google AI (Gemini)",
+		DefaultBaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		DefaultModel:   "gemini-3.5-flash-lite",
+		RequiresKey:    true,
 	},
 	{
 		// Any OpenAI-compatible endpoint: local vLLM/Ollama, OpenRouter, a
@@ -146,15 +135,6 @@ var providerList = []Provider{
 		ID:          ProviderCustom,
 		Label:       "Custom (OpenAI-compatible)",
 		RequiresKey: false,
-	},
-	{
-		// ChatGPT through the Codex OAuth session (no API key). The model is
-		// discovered from the account's own model list at call time.
-		ID:             ProviderChatGPT,
-		Label:          "ChatGPT (OAuth)",
-		DefaultBaseURL: "https://chatgpt.com/backend-api/codex",
-		DefaultModel:   "gpt-6-astra",
-		RequiresKey:    false,
 	},
 }
 
@@ -299,9 +279,8 @@ func maskKey(k string) string {
 	return "****" + k[len(k)-4:]
 }
 
-// SetRequest is a configuration update. APIKey is empty on update to mean
-// "keep the stored key"; there is deliberately no way to clear only the key
-// (DELETE /api/llm/config clears the whole configuration).
+// SetRequest updates and selects a provider profile. A blank key keeps that
+// profile's credential or uses its environment key at runtime.
 type SetRequest struct {
 	// Enabled toggles advisory calls; nil keeps the current value.
 	Enabled *bool `json:"enabled,omitempty"`
@@ -315,15 +294,16 @@ type SetRequest struct {
 
 // normalize validates and fills a SetRequest. It never includes any submitted
 // value in an error: a secret pasted into the wrong field must not be echoed.
-func normalize(req SetRequest, existingKey string, existingAttempts int, existingEnabled *bool) (Config, error) {
+func normalize(req SetRequest, existing Config, existingAttempts int, existingEnabled *bool) (Config, error) {
 	def, ok := LookupProvider(req.Provider)
 	if !ok {
 		return Config{}, invalid("unknown provider; valid providers are %s", providerIDs())
 	}
 
+	env := providerEnvironment(def.ID)
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
-		model = def.DefaultModel
+		model = firstConfiguredValue(existing.Model, env.Model, def.DefaultModel)
 	}
 	if model == "" {
 		return Config{}, invalid("model is required for the custom provider")
@@ -331,7 +311,7 @@ func normalize(req SetRequest, existingKey string, existingAttempts int, existin
 
 	base := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
 	if base == "" {
-		base = def.DefaultBaseURL
+		base = firstConfiguredValue(existing.BaseURL, env.BaseURL, def.DefaultBaseURL)
 	}
 	if base == "" {
 		return Config{}, invalid("base_url is required for the custom provider")
@@ -340,21 +320,12 @@ func normalize(req SetRequest, existingKey string, existingAttempts int, existin
 		return Config{}, err
 	}
 
-	key := strings.TrimSpace(req.APIKey)
-	if key == "" {
-		key = existingKey
+	key := firstConfiguredValue(strings.TrimSpace(req.APIKey), existing.apiKey)
+	effectiveKey := firstConfiguredValue(key, env.apiKey)
+	if !validKey(effectiveKey) {
+		return Config{}, invalid("api key contains whitespace or control characters")
 	}
-	if key != "" {
-		for _, r := range key {
-			// A key is a single header token: any whitespace or control
-			// character would either be silently stripped by the HTTP layer or
-			// produce an opaque provider error, so reject it here.
-			if r <= 0x20 || r == 0x7f {
-				return Config{}, invalid("api key contains whitespace or control characters")
-			}
-		}
-	}
-	if def.RequiresKey && key == "" {
+	if def.RequiresKey && effectiveKey == "" {
 		return Config{}, invalid("%s requires an API key", def.ID)
 	}
 
@@ -402,208 +373,21 @@ func validateBaseURL(base string) error {
 	return nil
 }
 
-// diskConfig is the exact on-disk shape of config.json. It has no API key
-// field at all: the secret lives in the separate api_key file, so this file
-// can never accidentally persist one.
-type diskConfig struct {
-	Version  int    `json:"version"`
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	BaseURL  string `json:"base_url"`
-	// MaxAttempts and Enabled are operator policy, not secrets, so they live
-	// in the config file next to the provider choice.
-	MaxAttempts int   `json:"max_attempts,omitempty"`
-	Enabled     *bool `json:"enabled,omitempty"`
-}
-
-// Store reads and writes one LLM configuration under a dedicated directory.
-// It performs no network I/O.
-//
-// On disk:
-//
-//	<dir>/               mode 0700
-//	<dir>/config.json    mode 0600   provider, model, base_url (no key)
-//	<dir>/api_key        mode 0600   the API key, plain text, owner-only
-//
-// The key is intentionally not encrypted: there is no unattended secret with
-// which to encrypt it, and obfuscation would only hide the real control, which
-// is filesystem ownership (0600/0700). The API never returns it.
-type Store struct {
-	dir string
-	mu  sync.Mutex
-}
-
-// NewStore returns a store rooted at dir. The directory is created on the
-// first successful save.
-func NewStore(dir string) *Store { return &Store{dir: dir} }
-
-// Dir is the configuration directory.
-func (s *Store) Dir() string { return s.dir }
-
-// Path is the non-secret config.json path.
-func (s *Store) Path() string { return filepath.Join(s.dir, configFileName) }
-
-// KeyPath is the secret file path.
-func (s *Store) KeyPath() string { return filepath.Join(s.dir, keyFileName) }
-
-// Load reads the stored configuration. A missing file is ErrNotConfigured,
-// not a failure.
-func (s *Store) Load() (Config, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.loadLocked()
-}
-
-func (s *Store) loadLocked() (Config, error) {
-	b, err := os.ReadFile(s.Path())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return Config{}, ErrNotConfigured
-		}
-		return Config{}, fmt.Errorf("llm: read config %s: %w", s.Path(), err)
-	}
-	var d diskConfig
-	if err := json.Unmarshal(b, &d); err != nil {
-		return Config{}, fmt.Errorf("llm: parse config %s: %w", s.Path(), err)
-	}
-	if d.Version > configVersion {
-		return Config{}, fmt.Errorf("llm: config %s has unsupported version %d", s.Path(), d.Version)
-	}
-	if d.Provider == "" {
-		return Config{}, ErrNotConfigured
-	}
-	key, err := s.readKeyLocked()
-	if err != nil {
-		return Config{}, err
-	}
-	return Config{Provider: d.Provider, Model: d.Model, BaseURL: d.BaseURL,
-		MaxAttempts: d.MaxAttempts, Enabled: d.Enabled, apiKey: key}, nil
-}
-
-func (s *Store) readKeyLocked() (string, error) {
-	b, err := os.ReadFile(s.KeyPath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("llm: read API key file %s: %w", s.KeyPath(), err)
-	}
-	return strings.TrimSpace(string(b)), nil
-}
-
-// Set validates req against any stored configuration and persists the result.
-// An empty req.APIKey keeps the stored key.
-func (s *Store) Set(req SetRequest) (Config, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	cur, err := s.loadLocked()
-	if err != nil && !errors.Is(err, ErrNotConfigured) {
-		// A config we cannot read (permissions, corruption) must not be
-		// silently overwritten — and its key, if any, must not be lost.
-		return Config{}, err
-	}
-	// A key belongs to the provider it was saved for. Switching to another
-	// provider must not carry the old secret along, where it could be sent to
-	// a different endpoint or silently become the new provider's key.
-	existingKey := cur.apiKey
-	if !strings.EqualFold(cur.Provider, req.Provider) {
-		existingKey = ""
-	}
-	cfg, err := normalize(req, existingKey, cur.AttemptBudget(), cur.Enabled)
-	if err != nil {
-		return Config{}, err
-	}
-	if err := s.saveLocked(cfg); err != nil {
-		return Config{}, err
-	}
-	return cfg, nil
-}
-
-func (s *Store) saveLocked(cfg Config) error {
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
-		return fmt.Errorf("llm: create config directory: %w", err)
-	}
-	// MkdirAll keeps an existing directory's mode, so tighten it explicitly:
-	// a directory created by an older version or by hand must not stay open.
-	if err := os.Chmod(s.dir, 0o700); err != nil {
-		return fmt.Errorf("llm: secure config directory: %w", err)
-	}
-
-	// Secret first: if writing it fails, the previous config is untouched.
-	if cfg.apiKey == "" {
-		if err := os.Remove(s.KeyPath()); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("llm: remove API key file: %w", err)
-		}
-	} else if err := writeFile0600(s.KeyPath(), []byte(cfg.apiKey)); err != nil {
-		return err
-	}
-
-	b, err := json.MarshalIndent(diskConfig{
-		Version:     configVersion,
-		Provider:    cfg.Provider,
-		Model:       cfg.Model,
-		BaseURL:     cfg.BaseURL,
-		MaxAttempts: cfg.MaxAttempts,
-		Enabled:     cfg.Enabled,
-	}, "", "  ")
-	if err != nil {
-		return fmt.Errorf("llm: encode config: %w", err)
-	}
-	b = append(b, '\n')
-	return writeFile0600(s.Path(), b)
-}
-
-// writeFile0600 writes b atomically with owner-only permissions. The
-// temporary file is created inside the (0700) destination directory, so no
-// other user can open it while it is being written.
-func writeFile0600(path string, b []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
-	if err != nil {
-		return fmt.Errorf("llm: create temporary file: %w", err)
-	}
-	name := tmp.Name()
-	discard := func() { _ = os.Remove(name) }
-
-	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
-		discard()
-		return fmt.Errorf("llm: write %s: %w", filepath.Base(path), err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		discard()
-		return fmt.Errorf("llm: sync %s: %w", filepath.Base(path), err)
-	}
-	if err := tmp.Close(); err != nil {
-		discard()
-		return fmt.Errorf("llm: close %s: %w", filepath.Base(path), err)
-	}
-	// os.CreateTemp already uses 0600; this also covers a filesystem or umask
-	// that surprised us, and rename would otherwise replace the old file's
-	// mode with the temp file's.
-	if err := os.Chmod(name, 0o600); err != nil {
-		discard()
-		return fmt.Errorf("llm: set mode on %s: %w", filepath.Base(path), err)
-	}
-	if err := os.Rename(name, path); err != nil {
-		discard()
-		return fmt.Errorf("llm: replace %s: %w", filepath.Base(path), err)
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("llm: set mode on %s: %w", filepath.Base(path), err)
-	}
-	return nil
-}
-
-// Clear removes the stored configuration and key. It is idempotent.
-func (s *Store) Clear() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, p := range []string{s.KeyPath(), s.Path()} {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("llm: remove %s: %w", filepath.Base(p), err)
+// validKey rejects characters that HTTP header parsers would strip or refuse.
+func validKey(key string) bool {
+	for _, r := range key {
+		if r <= 0x20 || r == 0x7f {
+			return false
 		}
 	}
-	return nil
+	return true
+}
+
+func firstConfiguredValue(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
